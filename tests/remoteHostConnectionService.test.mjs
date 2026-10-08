@@ -76,6 +76,11 @@ function fakePorts(overrides = {}) {
 				disposed: 0,
 				disconnects: [],
 				state: "disconnected",
+				// 真实 manager 用 getState 暴露机器状态（含 latch）；服务层的就绪判定与 latch 替换依赖它。
+				latched: false,
+				getState(hostId) {
+					return { hostId, generation: 1, state: manager.state, attempts: 0, latched: manager.latched };
+				},
 				async connect(hostId) {
 					manager.connected.push(hostId);
 					manager.state = "ready";

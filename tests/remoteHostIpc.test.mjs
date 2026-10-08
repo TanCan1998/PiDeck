@@ -790,274 +790,6 @@ test("diagnosis findings are re-validated before reaching the renderer", async (
 });
 
 /**
- * 远端工作区读取（Phase 3 第一段）。
- *
- * 关键边界：远端路径**不经过 ProjectStore**，因此 `Project` 上看不到它；已确认的 root 由主进程持有，
- * 渲染层只能给**相对路径**——不能自己命名边界。
- */
-function workspaceHandlers(options = {}) {
-	const calls = { resolve: [], list: [], read: [], sent: [], setRoot: [], connects: [] };
-	const handlers = new Map();
-	const { registerRemoteHostIpc } = loadTsCommonJs("src/main/ipc/remoteHostIpc.ts", {
-		stubs: {
-			electron: { ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) } },
-			"../remote/RemoteBrowseRoot": {
-				async resolveRemoteBrowseRoot(input) {
-					calls.resolve.push(input);
-					if (options.resolveFails) throw new Error("REMOTE_BROWSE_ROOT_NOT_A_DIRECTORY");
-					return { canonicalPath: "/srv/real-project" };
-				},
-			},
-			"../remote/RemoteWorkspaceReader": {
-				createRemoteWorkspaceReader: ({ port }) => ({
-					async list(hostId, path) {
-						calls.list.push({ hostId, path, portHasRequest: typeof port.request === "function" });
-						if (options.listFails) throw new Error("REMOTE_WORKSPACE_LIST_TOO_LARGE");
-						return {
-							entries: [
-								{ name: "src", kind: "directory" },
-								{ name: "readme.md", kind: "file", bytes: 12 },
-							],
-						};
-					},
-					async readFile(hostId, path) {
-						calls.read.push({ hostId, path });
-						if (options.readFails) throw new Error("REMOTE_WORKSPACE_READ_FAILED");
-						return { content: Buffer.from("hello"), bytes: 5, mtimeMs: 1 };
-					},
-				}),
-			},
-			"../remote/RemoteHostStore": {
-				RemoteHostStore: {
-					async open() {
-						return { getSnapshot: () => ({ status: "ready", revision: 1, profiles: [] }), getProfile: () => ({ id: HOST_ID, label: "serve" }) };
-					},
-				},
-			},
-			"../remote/SshHostPinStore": {
-				SshHostPinStore: class {
-					dispose() {}
-				},
-			},
-		},
-	});
-	// 连接服务替身：暴露 client（解析 root 需要）与 request/cancel（reader 的传输端口）。
-	registerRemoteHostIpc({
-		enabled: options.enabled ?? true,
-		userDataDir: "/tmp/ignored",
-		list: async () => ({ snapshot: { status: "ready", profiles: [] }, findings: [] }),
-		service: () => ({
-			client: { sshPath: "/usr/bin/ssh", scpPath: "/usr/bin/scp", env: {}, run: async () => ({ exitCode: 0, stdout: "" }) },
-			async request() {},
-			async cancel() {},
-			async connect(hostId) {
-				calls.connects = calls.connects ?? [];
-				calls.connects.push(hostId);
-				return { ok: true, hostId, state: { hostId, generation: 1, state: "ready", attempts: 0, latched: false } };
-			},
-			async disconnect() {},
-			setWorkspaceRoot(hostId, root) {
-				calls.setRoot = calls.setRoot ?? [];
-				calls.setRoot.push({ hostId, root });
-			},
-			getWorkspaceRoot: () => undefined,
-			listDiagnostics: () => [],
-			async dispose() {},
-		}),
-	});
-	const sender = { id: 42, isDestroyed: () => false, send: (channel, payload) => calls.sent.push({ channel, payload }) };
-	return { handlers, calls, sender };
-}
-
-/** 走完整个确认流程，让主进程持有一个已确认的 root。 */
-async function confirmRoot(harness, path = "/srv/link-project") {
-	await harness.handlers.get("remote:workspace-resolve-root")({ sender: harness.sender }, HOST_ID, path);
-	const requestId = harness.calls.sent.at(-1).payload.requestId;
-	await harness.handlers.get("remote:workspace-answer-root")({ sender: harness.sender }, requestId, "approve");
-	return requestId;
-}
-
-test("resolving a root probes the host, then asks the user to confirm the canonical path", async () => {
-	const harness = workspaceHandlers();
-	const result = await harness.handlers.get("remote:workspace-resolve-root")({ sender: harness.sender }, HOST_ID, "/srv/link-project");
-	assert.deepEqual(JSON.parse(JSON.stringify(result)), { ok: true, canonicalPath: "/srv/real-project" });
-	assert.equal(harness.calls.resolve.length, 1, "the host is probed with the path the user typed");
-	assert.equal(harness.calls.resolve[0].userPath, "/srv/link-project");
-	// 确认展示的是**canonical** 路径：用户确认的必须是真正会被 confinement 的那个目录。
-	const pushed = harness.calls.sent.at(-1);
-	assert.equal(pushed.channel, "remote:workspace-root-confirm");
-	assert.equal(pushed.payload.requestedPath, "/srv/link-project");
-	assert.equal(pushed.payload.canonicalPath, "/srv/real-project");
-});
-
-test("nothing is readable until the user confirms a root", async () => {
-	const harness = workspaceHandlers();
-	// 未确认：任何读取都必须被拒，而不是回落到某个隐含 root。
-	for (const channel of ["remote:workspace-list", "remote:workspace-read"]) {
-		const result = await harness.handlers.get(channel)({}, HOST_ID, "src");
-		assert.equal(result.ok, false, `${channel} must refuse before a root is confirmed`);
-		assert.equal(result.code, "REMOTE_WORKSPACE_ROOT_NOT_CONFIRMED");
-	}
-	assert.equal(harness.calls.list.length + harness.calls.read.length, 0);
-});
-
-test("denying a root confirmation leaves nothing readable", async () => {
-	const harness = workspaceHandlers();
-	await harness.handlers.get("remote:workspace-resolve-root")({ sender: harness.sender }, HOST_ID, "/srv/link-project");
-	const requestId = harness.calls.sent.at(-1).payload.requestId;
-	const denied = await harness.handlers.get("remote:workspace-answer-root")({ sender: harness.sender }, requestId, "deny");
-	assert.deepEqual(JSON.parse(JSON.stringify(denied)), { ok: true, confirmed: false });
-	const after = await harness.handlers.get("remote:workspace-list")({}, HOST_ID, "");
-	assert.equal(after.ok, false);
-	assert.equal(after.code, "REMOTE_WORKSPACE_ROOT_NOT_CONFIRMED");
-});
-
-test("a confirmed root makes the relative listing readable", async () => {
-	const harness = workspaceHandlers();
-	await confirmRoot(harness);
-	const root = await harness.handlers.get("remote:workspace-get-root")({});
-	assert.deepEqual(JSON.parse(JSON.stringify(root)), { ok: true, canonicalPath: "/srv/real-project" });
-	// 只返回界面要渲染的字段。
-	const listed = await harness.handlers.get("remote:workspace-list")({}, HOST_ID, "");
-	assert.deepEqual(JSON.parse(JSON.stringify(listed)), {
-		ok: true,
-		entries: [
-			{ name: "src", kind: "directory" },
-			{ name: "readme.md", kind: "file", bytes: 12 },
-		],
-	});
-	assert.equal(harness.calls.list[0].path, ".", "the root is the reader's own spelling of it, not the empty string the UI uses");
-	assert.equal(harness.calls.list[0].portHasRequest, true, "the reader must be given the service as its transport port");
-	// 真机回归：reader 拒绝空路径（readRequestPath 要求非空），根必须翻成它自己的写法，
-	// 否则真实主机上 fs.list 直接 PROTOCOL_INVALID —— 这正是第一次真机跑出来的结果。
-	assert.equal(harness.calls.list[0].path, ".", "the root must be translated to the reader spelling");
-});
-
-test("a renderer cannot widen the boundary with an absolute or traversing path", async () => {
-	// 这是本段的核心边界：渲染层只能命名 root **之内**的位置。
-	const harness = workspaceHandlers();
-	await confirmRoot(harness);
-	for (const bad of ["/etc/passwd", "../outside", "src/../../etc", "a//b", "./x", "a\\b", "x\u0000y", 5, null]) {
-		const listed = await harness.handlers.get("remote:workspace-list")({}, HOST_ID, bad);
-		assert.equal(listed.ok, false, `${JSON.stringify(bad)} must be refused for list`);
-		assert.equal(listed.code, "REMOTE_WORKSPACE_PATH_INVALID");
-		const read = await harness.handlers.get("remote:workspace-read")({}, HOST_ID, bad);
-		assert.equal(read.ok, false, `${JSON.stringify(bad)} must be refused for read`);
-	}
-	assert.equal(harness.calls.list.length + harness.calls.read.length, 0, "nothing may reach the reader");
-});
-
-test("an empty path lists the root but can never be read as a file", async () => {
-	const harness = workspaceHandlers();
-	await confirmRoot(harness);
-	const listed = await harness.handlers.get("remote:workspace-list")({}, HOST_ID, "");
-	assert.equal(listed.ok, true);
-	const read = await harness.handlers.get("remote:workspace-read")({}, HOST_ID, "");
-	assert.equal(read.ok, false);
-	assert.equal(read.code, "REMOTE_WORKSPACE_PATH_INVALID");
-});
-
-test("reads return base64 and the reader's own size", async () => {
-	const harness = workspaceHandlers();
-	await confirmRoot(harness);
-	const read = await harness.handlers.get("remote:workspace-read")({}, HOST_ID, "readme.md");
-	assert.deepEqual(JSON.parse(JSON.stringify(read)), { ok: true, contentBase64: Buffer.from("hello").toString("base64"), bytes: 5, mtimeMs: 1 });
-});
-
-test("a confirmed root belongs to one host", async () => {
-	// root 是对某台主机的边界；另一台主机必须重走确认，不能借用。
-	const harness = workspaceHandlers();
-	await confirmRoot(harness);
-	const other = "0e0f18ba-6f0e-4bd8-9f6c-1c8f6f2a7d31";
-	const listed = await harness.handlers.get("remote:workspace-list")({}, other, "");
-	assert.equal(listed.ok, false);
-	assert.equal(listed.code, "REMOTE_WORKSPACE_ROOT_NOT_CONFIRMED");
-});
-
-test("a root confirmation cannot be answered by another window", async () => {
-	const harness = workspaceHandlers();
-	await harness.handlers.get("remote:workspace-resolve-root")({ sender: harness.sender }, HOST_ID, "/srv/x");
-	const requestId = harness.calls.sent.at(-1).payload.requestId;
-	const other = { id: 99, isDestroyed: () => false, send: () => undefined };
-	const result = await harness.handlers.get("remote:workspace-answer-root")({ sender: other }, requestId, "approve");
-	assert.equal(result.ok, false);
-	// 外窗口的批准不能生效。
-	const listed = await harness.handlers.get("remote:workspace-list")({}, HOST_ID, "");
-	assert.equal(listed.ok, false);
-});
-
-test("reader failures surface as stable codes", async () => {
-	const harness = workspaceHandlers({ listFails: true, readFails: true });
-	await confirmRoot(harness);
-	assert.equal((await harness.handlers.get("remote:workspace-list")({}, HOST_ID, "")).code, "REMOTE_WORKSPACE_LIST_TOO_LARGE");
-	assert.equal((await harness.handlers.get("remote:workspace-read")({}, HOST_ID, "a")).code, "REMOTE_WORKSPACE_READ_FAILED");
-});
-
-test("a root that cannot be resolved never becomes confirmable", async () => {
-	const harness = workspaceHandlers({ resolveFails: true });
-	const result = await harness.handlers.get("remote:workspace-resolve-root")({ sender: harness.sender }, HOST_ID, "/srv/file-not-dir");
-	assert.equal(result.ok, false);
-	assert.equal(result.code, "REMOTE_BROWSE_ROOT_NOT_A_DIRECTORY");
-	assert.equal(harness.calls.sent.length, 0, "nothing is offered for confirmation");
-});
-
-test("every workspace channel honours the feature gate", async () => {
-	// 门禁关闭时，连「有没有 root」都不该能被问到。
-	const harness = workspaceHandlers({ enabled: false });
-	for (const [channel, args] of [
-		["remote:workspace-resolve-root", [{ sender: harness.sender }, HOST_ID, "/srv"]],
-		["remote:workspace-answer-root", [{ sender: harness.sender }, "req", "approve"]],
-		["remote:workspace-get-root", []],
-		["remote:workspace-list", [{}, HOST_ID, ""]],
-		["remote:workspace-read", [{}, HOST_ID, "a"]],
-	]) {
-		const result = await harness.handlers.get(channel)(...args);
-		assert.equal(result.ok, false, `${channel} must be gated`);
-		assert.equal(result.code, "REMOTE_FEATURE_DISABLED");
-	}
-	assert.equal(harness.calls.resolve.length, 0, "a gated build must not probe the host");
-	assert.equal(harness.calls.sent.length, 0);
-});
-
-test("denying a new root also clears the previously confirmed one", async () => {
-	// 危险形态：已确认 A（读取可用）→ 请求切到 B → 用户拒绝 B。
-	// 若此时仍保留 A，界面显示的是 B 而实际读的是 A —— 用户以为自己在看一个他没确认过的边界。
-	// 采取 fail-closed：拒绝即清空，用户想要 A 就再确认一次。
-	const harness = workspaceHandlers();
-	await confirmRoot(harness, "/srv/root-a");
-	assert.equal((await harness.handlers.get("remote:workspace-list")({}, HOST_ID, "")).ok, true, "A is usable once confirmed");
-
-	await harness.handlers.get("remote:workspace-resolve-root")({ sender: harness.sender }, HOST_ID, "/srv/root-b");
-	const requestId = harness.calls.sent.at(-1).payload.requestId;
-	const denied = await harness.handlers.get("remote:workspace-answer-root")({ sender: harness.sender }, requestId, "deny");
-	assert.deepEqual(JSON.parse(JSON.stringify(denied)), { ok: true, confirmed: false });
-
-	const after = await harness.handlers.get("remote:workspace-list")({}, HOST_ID, "");
-	assert.equal(after.ok, false, "the old root must not survive a denial");
-	assert.equal(after.code, "REMOTE_WORKSPACE_ROOT_NOT_CONFIRMED");
-	assert.equal((await harness.handlers.get("remote:workspace-get-root")({})).ok, false);
-});
-
-test("a confirmed root is handed to the connection and the session is re-established", async () => {
-	// 实跑回归（2026-09）：确认了 root，列目录却回 PATH_OUTSIDE_ROOT。原因是 root 不是「读时的过滤器」，
-	// 而是 helper 启动时的 `--root`——当时那条会话是 host-only 启动的，什么路径都服务不了。
-	// 所以确认必须同时做两件事：把 root 交给连接，并用它重建会话。
-	const harness = workspaceHandlers();
-	await confirmRoot(harness, "/srv/real-project");
-	assert.deepEqual(harness.calls.setRoot, [{ hostId: HOST_ID, root: "/srv/real-project" }], "the root must reach the connection");
-	assert.deepEqual(harness.calls.connects, [HOST_ID], "and the session must be re-established with it");
-});
-
-test("a denied root is never handed to the connection", async () => {
-	const harness = workspaceHandlers();
-	await harness.handlers.get("remote:workspace-resolve-root")({ sender: harness.sender }, HOST_ID, "/srv/x");
-	const requestId = harness.calls.sent.at(-1).payload.requestId;
-	await harness.handlers.get("remote:workspace-answer-root")({ sender: harness.sender }, requestId, "deny");
-	assert.equal(harness.calls.setRoot.length, 0, "a denied root must not reconfigure the session");
-	assert.equal(harness.calls.connects.length, 0);
-});
-
-/**
  * 远端项目登记与按 projectId 的只读浏览（Phase 3 第二段）。
  *
  * 关键边界：
@@ -1077,7 +809,10 @@ function projectHandlers(options = {}) {
 			"../remote/RemoteBrowseRoot": {
 				async resolveRemoteBrowseRoot(input) {
 					calls.resolve.push(input);
+					// 第 1 次是 offer 时解析用户输入的路径；第 2 次起是 approve 时的复核。
 					if (options.resolveFails) throw new Error("REMOTE_BROWSE_ROOT_NOT_A_DIRECTORY");
+					if (options.recheckFails === true && calls.resolve.length > 1) throw new Error("REMOTE_BROWSE_ROOT_NOT_A_DIRECTORY");
+					if (typeof options.resolveCanonical === "function") return { canonicalPath: options.resolveCanonical(input, calls.resolve.length) };
 					return { canonicalPath: options.canonicalPath ?? "/srv/real-project" };
 				},
 			},
@@ -1133,7 +868,20 @@ function projectHandlers(options = {}) {
 				if (root === undefined) roots.delete(hostId);
 				else roots.set(hostId, root);
 			},
-			getWorkspaceRoot: (hostId) => roots.get(hostId),
+			/**
+			 * 生产实现把「切根 + 建立会话 + 整次读取」收在这个边界里。本文件只验 IPC 边界的校验与适配，
+			 * 所以替身只保留这里要断言的可观测行为（同 root 不重建、切 root 记一次 setRoot/connect）；
+			 * 真实的串行与恢复语义由 tests/remoteProjectReadConcurrency.test.mjs 打穿真实 service 验证。
+			 */
+			async withProjectSession(hostId, root, task) {
+				if (options.connectFails) return { ok: false, code: "SSH_CONNECTION_FAILED" };
+				if (roots.get(hostId) !== root) {
+					calls.setRoot.push({ hostId, root });
+					roots.set(hostId, root);
+					calls.connects.push(hostId);
+				}
+				return { ok: true, value: await task({ hostId, request: async () => ({}), cancel: async () => ({ cancelled: true }) }) };
+			},
 			listDiagnostics: () => [],
 			async dispose() {},
 		}),
@@ -1180,6 +928,29 @@ test("approving an enrollment writes the durable record with the main-held canon
 	const { answer } = await confirmEnroll(harness, "/srv/link-project");
 	assert.deepEqual(JSON.parse(JSON.stringify(answer)), { ok: true, enrolled: true, projectId: "project-remote-9" });
 	assert.deepEqual(JSON.parse(JSON.stringify(harness.calls.enroll)), [{ hostId: HOST_ID, canonicalRemotePath: "/srv/real-project" }], "the store gets the canonical value, never the typed one");
+	// 确认是一次复核而不仅是落库：复核的是「用户看到的 canonical 值」本身，而不是他当初敲的路径。
+	assert.equal(harness.calls.resolve.length, 2, "approval re-probes the root it is about to persist");
+	assert.equal(harness.calls.resolve[1].userPath, "/srv/real-project", "and it re-probes the confirmed canonical value");
+});
+
+test("a root that moved during the confirmation window is refused instead of enrolled", async () => {
+	// 确认弹框是真实时间窗口：其间 /srv/real-project 可能被删掉，或路径上的 symlink 被改指。
+	// 只写「用户看到过的那个字符串」不够——那个字符串此刻必须仍解析成它自己。
+	const harness = projectHandlers({
+		resolveCanonical: (_input, index) => (index === 1 ? "/srv/real-project" : "/srv/other-project"),
+	});
+	const { answer } = await confirmEnroll(harness, "/srv/link-project");
+	assert.equal(answer.ok, false);
+	assert.equal(answer.code, "REMOTE_PROJECT_ROOT_CHANGED");
+	assert.equal(harness.calls.enroll, undefined, "a moved boundary must persist nothing");
+});
+
+test("a root that disappeared during the confirmation window is refused instead of enrolled", async () => {
+	const harness = projectHandlers({ canonicalPath: "/srv/real-project", recheckFails: true });
+	const { answer } = await confirmEnroll(harness, "/srv/link-project");
+	assert.equal(answer.ok, false);
+	assert.equal(answer.code, "REMOTE_BROWSE_ROOT_NOT_A_DIRECTORY");
+	assert.equal(harness.calls.enroll, undefined, "an unresolvable boundary must persist nothing");
 });
 
 test("denying an enrollment persists nothing", async () => {

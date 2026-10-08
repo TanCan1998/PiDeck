@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { lstat, open, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { isSessionLocator } from "../sessions/SessionCatalog";
+import { readProjectLocator } from "../../shared/projectLocation";
 import { HOST_ID } from "./RemoteHostStoreCodec";
 import { HOST_REFERENCE_SOURCES, RemoteHostReferenceRegistry, type RemoteHostReferenceScan, type RemoteHostReferenceSource } from "./RemoteHostReferenceRegistry";
 
@@ -93,24 +94,40 @@ async function scanPersistedSessions(filePath: string): Promise<RemoteHostRefere
  * This source only became real once `ProjectStore` could hold an ssh locator; before that it declared
  * `canHoldHostReferences: false` and was skipped. Now it must be scanned for real — a source that is
  * skipped while it can hold references would let `retire` hard-delete a host still referenced by a
- * remote project. Any structurally suspicious record (missing/invalid ssh fields, a local record
- * carrying hostId, an unknown schema) makes the whole source incomplete rather than silently ignored.
+ * remote project.
+ *
+ * The accepted set is exactly the one `projectStoreCodec` loads: both sides call the shared
+ * `readProjectLocator`, so "codec accepts, scanner throws" can no longer happen for the same record.
+ * Everything else — a v2 record without a locator, an ssh locator outside the host id / canonical
+ * remote path domain, a local locator carrying a hostId, an unknown schema — makes the whole source
+ * incomplete instead of being read as "no reference". Over-reporting only blocks `retire`;
+ * under-reporting deletes a host that is still referenced.
+ *
+ * The v1 array is scanned too: the store still reads it (and migrates it to v2), so a v1 file must
+ * not mark this source incomplete. Legacy entries express their location as `path` and carry no
+ * locator (the codec reads them as local and drops any locator field), so they cannot name a host;
+ * an entry without a usable path is exactly the malformed record the store would refuse.
  */
 async function scanPersistedProjects(filePath: string): Promise<RemoteHostReferenceScan> {
 	const text = await readReferenceFile(filePath);
 	if (text === undefined) return { referencedHostIds: new Set(), hits: [], complete: true, unavailable: [] };
 	const snapshot: unknown = JSON.parse(text);
-	if (!isRecord(snapshot) || snapshot.schemaVersion !== 2 || !Array.isArray(snapshot.projects)) throw new Error("REMOTE_HOST_REFERENCE_SCAN_INVALID");
 	const referencedHostIds = new Set<string>();
 	const hits: { source: RemoteHostReferenceSource; recordId: string }[] = [];
+	if (Array.isArray(snapshot)) {
+		for (const entry of snapshot) {
+			if (!isRecord(entry) || typeof entry.id !== "string" || entry.id.length === 0 || typeof entry.path !== "string" || entry.path.trim().length === 0) throw new Error("REMOTE_HOST_REFERENCE_SCAN_INVALID");
+		}
+		return { referencedHostIds, hits, complete: true, unavailable: [] };
+	}
+	if (!isRecord(snapshot) || snapshot.schemaVersion !== 2 || !Array.isArray(snapshot.projects)) throw new Error("REMOTE_HOST_REFERENCE_SCAN_INVALID");
 	for (const entry of snapshot.projects) {
 		if (!isRecord(entry) || typeof entry.id !== "string" || entry.id.length === 0) throw new Error("REMOTE_HOST_REFERENCE_SCAN_INVALID");
-		const locator = entry.locator;
-		if (locator === undefined) continue; // v2 envelope requires locator; a missing one is a malformed record
-		if (!isRecord(locator)) throw new Error("REMOTE_HOST_REFERENCE_SCAN_INVALID");
-		if (locator.kind === "local") continue;
-		if (locator.kind !== "ssh") throw new Error("REMOTE_HOST_REFERENCE_SCAN_INVALID");
-		if (typeof locator.hostId !== "string" || !HOST_ID.test(locator.hostId)) throw new Error("REMOTE_HOST_REFERENCE_SCAN_INVALID");
+		// A v2 envelope always carries a locator, including for local records; a missing or refused one
+		// is a malformed record, never "this project references nothing".
+		const locator = readProjectLocator(entry.locator);
+		if (locator === undefined) throw new Error("REMOTE_HOST_REFERENCE_SCAN_INVALID");
+		if (locator.kind !== "ssh") continue;
 		referencedHostIds.add(locator.hostId);
 		hits.push({ source: "projects", recordId: entry.id });
 	}

@@ -150,6 +150,29 @@ test("addRemote rejects a malformed target before writing anything", async () =>
 	});
 });
 
+// 写入侧与 codec / 引用扫描共用 shared 的 `readSshProjectLocator`：拒绝必须发生在写盘之前，
+// 否则一次登记就写出加载时被整份拒绝的 projects.json（needs-repair，本地项目一起不可用）。
+test("addRemote refuses an ssh target outside the host id / canonical remote path domain", async () => {
+	await withUserData(async (userData, filePath) => {
+		const store = createStore(userData);
+		await store.load();
+		const before = await readFile(filePath, "utf8");
+		for (const target of [
+			{ hostId: "host-a", canonicalRemotePath: "/srv/app" },
+			{ hostId: `${HOST_A} `, canonicalRemotePath: "/srv/app" },
+			{ hostId: "01234567-89AB-4DEF-8123-456789ABCDEF", canonicalRemotePath: "/srv/app" },
+			{ hostId: HOST_A, canonicalRemotePath: "relative/path" },
+			{ hostId: HOST_A, canonicalRemotePath: "/srv/app/" },
+			{ hostId: HOST_A, canonicalRemotePath: "/srv/../etc" },
+			{ hostId: HOST_A, canonicalRemotePath: `/${"a".repeat(4096)}` },
+		]) {
+			await assert.rejects(store.addRemote(target), /REMOTE_PROJECT_TARGET_INVALID/, JSON.stringify(target));
+		}
+		assert.equal(store.list().filter((project) => project.locator?.kind === "ssh").length, 0);
+		assert.equal(await readFile(filePath, "utf8"), before, "拒绝必须发生在写盘之前");
+	});
+});
+
 test("a project store whose primary holds an ssh locator but is otherwise corrupt fails closed", async () => {
 	await withUserData(async (userData, filePath) => {
 		await writeFile(filePath, JSON.stringify({ schemaVersion: 2, revision: 4, projects: [{ id: "p-1", name: "app", lastOpenedAt: 1, locator: { kind: "ssh", hostId: HOST_A, remotePath: "relative" } }] }), "utf8");

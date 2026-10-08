@@ -6,6 +6,7 @@ import type { Project, WorktreeEntry } from "../../../../shared/types";
 import type { SidebarController } from "../../hooks/useSidebarController";
 import { t } from "../../i18n";
 import type { SidebarActions } from "./SidebarContent";
+import { AddProjectMenu } from "./AddProjectMenu";
 import { ActiveSessionsTree } from "./ActiveSessionsTree";
 import { SessionTree } from "./SessionTree";
 import { WorktreeTree } from "./WorktreeTree";
@@ -329,10 +330,8 @@ export function ProjectTree(props: {
 					<div className="flex items-center justify-between px-1 pb-1">
 						<span className="text-caption font-medium text-muted-foreground">{t("app.sidebarProjects")}</span>
 						<div className="flex items-center gap-0.5">
-							{/* 添加项目是最常用入口，外露为显式「+」按钮 */}
-							<Button type="button" variant="ghost" size="icon-xs" className="grid size-6 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground" aria-label={t("app.addProject")} title={t("app.addProject")} onClick={() => void props.actions.projects.add()}>
-								<Plus className="size-3.5" aria-hidden="true" />
-							</Button>
+							{/* 添加项目是最常用入口，外露为显式「+」菜单：本地目录行为不变，另加远端（SSH）登记入口。 */}
+							<AddProjectMenu onAddLocal={() => void props.actions.projects.add()} />
 							{/* 全部折叠/展开：批量收起所有工作区项目，批量展开/折叠入口外露（与聊天折叠同策略） */}
 							<Button
 								type="button"
@@ -387,10 +386,7 @@ export function ProjectTree(props: {
 						<FolderPlus className="mx-auto mb-2 size-5 text-muted-foreground" aria-hidden="true" />
 						<div className="text-body font-medium text-foreground">{t("sidebar.emptyProjectsTitle")}</div>
 						<p className="mt-1 text-caption text-muted-foreground">{t("sidebar.emptyProjectsDesc")}</p>
-						<Button type="button" variant="secondary" size="sm" className="mt-3" title={t("app.addProject")} aria-label={t("app.addProject")} onClick={() => void props.actions.projects.add()}>
-							<FolderPlus className="size-3.5" aria-hidden="true" />
-							{t("app.addProject")}
-						</Button>
+						<AddProjectMenu onAddLocal={() => void props.actions.projects.add()} labeled />
 					</div>
 				</div>
 			)}

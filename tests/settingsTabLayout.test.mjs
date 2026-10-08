@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
@@ -66,13 +66,7 @@ test("连接面板引用的每个 i18n key 都在两份词典里存在", () => {
 	// 而这两个面板的文案量最大（添加/指纹确认），所以单独守一道。
 	const zh = readFileSync("src/renderer/src/i18n/rendererCopy.zh-CN.ts", "utf8");
 	const en = readFileSync("src/renderer/src/i18n/rendererCopy.en-US.ts", "utf8");
-	const panels = [
-		"src/renderer/src/components/app/settings/ConnectionsTab.tsx",
-		"src/renderer/src/components/app/settings/AddHostDialog.tsx",
-		"src/renderer/src/components/app/settings/FingerprintConfirmDialog.tsx",
-		"src/renderer/src/components/app/settings/RepairPanel.tsx",
-		"src/renderer/src/components/app/settings/RemoteWorkspacePanel.tsx",
-	];
+	const panels = ["src/renderer/src/components/app/settings/ConnectionsTab.tsx", "src/renderer/src/components/app/settings/AddHostDialog.tsx", "src/renderer/src/components/app/settings/FingerprintConfirmDialog.tsx", "src/renderer/src/components/app/settings/RepairPanel.tsx"];
 	const keys = new Set();
 	for (const file of panels) for (const match of readFileSync(file, "utf8").matchAll(/(?<![A-Za-z0-9_$])t\("([^"]+)"\)/g)) keys.add(match[1]);
 	assert.ok(keys.size > 20, "expected the connection panels to reference a substantial set of keys");
@@ -94,16 +88,47 @@ test("修复面板只提供会执行的动作，并把只读/人工动作显示�
 	assert.match(panel, /return unsubscribe;/);
 });
 
-test("远端工作区面板要求先连接，并且不把失败说成空目录", () => {
-	// 实跑发现：解析路径走的是普通 pinned ssh 命令（未连接也能成功），而列目录必须有 helper 会话。
-	// 面板若先给输入框，用户会先解析成功、再在列目录时撞 SSH_HOST_NOT_READY——前提必须先可见。
-	const panel = readFileSync("src/renderer/src/components/app/settings/RemoteWorkspacePanel.tsx", "utf8");
-	assert.match(panel, /connected: boolean/, "the panel must be told whether the host is connected");
-	assert.match(panel, /!props\.connected && root === null/, "a disconnected host must be told to connect before the path input appears");
-	// 「列出成功但为空」与「列出失败」是两件不同的事，不能同时显示。
-	assert.match(panel, /const \[listed, setListed\] = useState\(false\)/);
-	assert.match(panel, /listed && entries\.length === 0/, "the empty message may only follow a successful listing");
-	assert.match(panel, /setListed\(false\);/, "a failed listing must not claim to have listed");
-	// 未连接要给一句能照做的话，而不是只扔一个稳定码。
-	assert.match(panel, /SSH_HOST_NOT_READY" \? t\("settings\.connections\.workspace\.notConnected"\)/);
+test("远端工作区的临时设置页面板已删除：设置页只管理设备", () => {
+	// 交接文档 §3 B：设置页只管主机添加/信任/连接/诊断/修复；临时只读浏览面板与其旧 IPC 一并移除。
+	assert.equal(existsSync("src/renderer/src/components/app/settings/RemoteWorkspacePanel.tsx"), false, "RemoteWorkspacePanel 必须删除");
+	const connections = readFileSync("src/renderer/src/components/app/settings/ConnectionsTab.tsx", "utf8");
+	assert.doesNotMatch(connections, /RemoteWorkspacePanel/);
+	// 旧浏览入口的通道名/订阅也不得残留在设置面板里（旧 IPC 由集成负责人删除）。
+	assert.doesNotMatch(connections, /listWorkspace|readWorkspaceFile|onWorkspaceRootConfirm|resolveWorkspaceRoot/);
+});
+
+test("侧栏「+」提供本地与远端两个真实入口，登记弹框全应用只挂一处", () => {
+	const projectTree = readFileSync("src/renderer/src/components/sidebar/ProjectTree.tsx", "utf8");
+	const menu = readFileSync("src/renderer/src/components/sidebar/AddProjectMenu.tsx", "utf8");
+	const app = readFileSync("src/renderer/src/App.tsx", "utf8");
+	const hook = readFileSync("src/renderer/src/hooks/useRemoteProjectEnroll.ts", "utf8");
+	// 侧栏两处「添加项目」（分组标题栏 + 空态）共用同一个菜单组件，本地行为保持不变。
+	assert.equal([...projectTree.matchAll(/<AddProjectMenu /g)].length, 2);
+	assert.match(projectTree, /onAddLocal=\{\(\) => void props\.actions\.projects\.add\(\)\}/);
+	// 菜单两项必须指向不同行为：本地目录选择 vs 远端登记；不能都调同一个命令。
+	assert.equal([...menu.matchAll(/<DropdownMenuItem /g)].length, 2);
+	assert.match(menu, /onSelect=\{\(\) => props\.onAddLocal\(\)\}/);
+	assert.match(menu, /onSelect=\{\(\) => setRemoteOpen\(true\)\}/);
+	assert.match(menu, /remoteEnrollDialogOpenAtom/);
+	// 登记弹框只能挂一处（App 装配层），侧栏只写开关 atom。
+	assert.equal([...app.matchAll(/<RemoteProjectEnrollDialog/g)].length, 1);
+	// 登记成功后必须显式刷新项目清单再选中返回的 projectId，且不创建本地会话。
+	assert.match(app, /onEnrolled=\{\(projectId\) => \{[\s\S]{0,240}?refreshProjects\(\)[\s\S]{0,120}?selectProjectCommand\(projectId\)/);
+	// 确认推送必须订阅且退订（窗口销毁后不得继续回答确认）。
+	assert.match(hook, /desktopApi\.remoteHosts\.onProjectEnrollConfirm/);
+	assert.match(hook, /return unsubscribe;/);
+});
+
+test("远端登记入口的每个 i18n key 都在两份词典里存在", () => {
+	const zh = readFileSync("src/renderer/src/i18n/rendererCopy.zh-CN.ts", "utf8");
+	const en = readFileSync("src/renderer/src/i18n/rendererCopy.en-US.ts", "utf8");
+	const files = ["src/renderer/src/components/sidebar/AddProjectMenu.tsx", "src/renderer/src/components/sidebar/RemoteProjectEnrollDialog.tsx", "src/renderer/src/components/session/ProjectEmptyState.tsx"];
+	const keys = new Set();
+	// 带参数的 t("key", { code }) 也要收集，否则拼错的模板 key 不会被发现。
+	for (const file of files) for (const match of readFileSync(file, "utf8").matchAll(/(?<![A-Za-z0-9_$])t\("([^"]+)"/g)) keys.add(match[1]);
+	assert.ok(keys.size > 20, "expected the remote entry surfaces to reference a substantial set of keys");
+	for (const key of keys) {
+		assert.ok(zh.includes('"' + key + '":'), "缺中文文案 " + key);
+		assert.ok(en.includes('"' + key + '":'), "缺英文文案 " + key);
+	}
 });

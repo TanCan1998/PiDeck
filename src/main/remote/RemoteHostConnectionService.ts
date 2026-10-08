@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { RemoteHostStore } from "./RemoteHostStore";
+import { createRemoteHostOperationLock } from "./RemoteHostOperationLock";
 import { bootstrapPinnedHost, resolveRemoteNodeExecutable } from "./RemoteBootstrapSession";
 import { createSshConnectionManager, type SshConnectionManager, type SshHelperSession } from "./SshConnectionManager";
 import { createSshProcessLauncher } from "./SshProcessLauncher";
@@ -57,6 +58,24 @@ export type RemoteHostConnectionServiceOptions = {
 
 /** Redacted outcome of one connect request: stable codes only, never pins or paths. */
 export type RemoteHostConnectResult = { ok: true; hostId: string; state: ConnectionMachineState } | { ok: false; hostId: string; code: string };
+
+/**
+ * One helper session held for the whole duration of a read-only operation.
+ *
+ * `request`/`cancel` are already bound to the manager this session was established on, so the caller never
+ * names a host or a manager: it cannot accidentally address a session that replaced this one mid-read.
+ */
+export type RemoteProjectSession = {
+	readonly hostId: string;
+	request(method: string, params?: unknown, options?: { timeoutMs?: number; onRequestId?: (requestId: string) => void }): Promise<unknown>;
+	cancel(requestId: string, options?: { timeoutMs?: number }): Promise<unknown>;
+};
+
+/**
+ * States in which the host is already working on its own connection: an attempt is in flight or the manager
+ * is healing itself. A read must report them rather than rebuild — a rebuild would race that attempt.
+ */
+const TRANSIENT_SESSION_STATES: ReadonlySet<string> = new Set(["connecting", "probing", "bootstrapping", "reconnecting", "degraded", "needs-attention"]);
 
 /**
  * Which generation number a connect attempt receives. The manager fences attempts by its own
@@ -121,6 +140,19 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 	 * without it, which is why this lives here rather than only in the IPC layer that asked for it.
 	 */
 	const workspaceRoots = new Map<string, string>();
+	/**
+	 * Serializes every operation that needs a stable helper session on one host: a root switch, a whole
+	 * listing or file read, an explicit connect, an explicit disconnect. One helper session exists per host
+	 * and its `--root` is fixed for its lifetime, so operations of two projects on the same host must never
+	 * interleave. Keyed per host, so different hosts still work in parallel.
+	 */
+	const operationLock = createRemoteHostOperationLock();
+	/**
+	 * Hosts the user explicitly disconnected. A background read must not undo that decision by quietly
+	 * reconnecting, so the intent is remembered here instead of being re-derived from the root string
+	 * (the root string matching proves nothing about whether a live session exists).
+	 */
+	const explicitlyDisconnected = new Set<string>();
 	let disposed = false;
 	let disposing: Promise<void> | undefined;
 
@@ -135,6 +167,11 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 		const created: HostEntry = { generation: 0 };
 		hosts.set(hostId, created);
 		return created;
+	}
+
+	/** Build the per-host connection manager over one verified helper session. */
+	function managerFor(held: HeldBootstrap): SshConnectionManager {
+		return ports.createManager({ userDataDir: options.userDataDir, client: options.client, launcher, helperSession: held.session, ...(options.onStateChange === undefined ? {} : { onStateChange: options.onStateChange }) });
 	}
 
 	/** Drop every resource of one host. The manager owns its attempts, so it is disposed first. */
@@ -187,15 +224,22 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 		return held;
 	}
 
-	async function connect(hostId: string): Promise<RemoteHostConnectResult> {
+	async function connectLocked(hostId: string): Promise<RemoteHostConnectResult> {
 		if (disposed) return { ok: false, hostId, code: "REMOTE_CONNECTION_SERVICE_DISPOSED" };
 		if (!HOST_ID.test(hostId)) return { ok: false, hostId, code: "REMOTE_CONNECTION_HOST_ID_INVALID" };
 		const entry = entryFor(hostId);
+		// An explicit connect is the user re-asserting this host, so later background reads may use it again.
+		explicitlyDisconnected.delete(hostId);
 		entry.generation += 1;
 		try {
+			// A machine latched by an explicit disconnect can never be revived — the reducer drops every later
+			// begin-attempt — so a latched manager is replaced instead of being reported as a live session.
+			// Without this, the user's own "connect" after a disconnect succeeded on paper while the session
+			// stayed dead, and every read kept failing with SSH_CONNECTION_NOT_READY.
+			if (entry.manager !== undefined && entry.manager.getState(hostId).latched === true) discard(entry);
 			const held = await ensureHeld(entry, hostId);
 			if (disposed) return { ok: false, hostId, code: "REMOTE_CONNECTION_SERVICE_DISPOSED" };
-			const manager = entry.manager ?? ports.createManager({ userDataDir: options.userDataDir, client: options.client, launcher, helperSession: held.session, ...(options.onStateChange === undefined ? {} : { onStateChange: options.onStateChange }) });
+			const manager = entry.manager ?? managerFor(held);
 			entry.manager = manager;
 			const state = await manager.connect(hostId);
 			return { ok: true, hostId, state };
@@ -204,6 +248,63 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 			discard(entry);
 			return { ok: false, hostId, code: diagnosticCodeFromError(error) };
 		}
+	}
+
+	/**
+	 * Establish (or revive) the ready session a project read needs, with the host's root applied.
+	 *
+	 * Split out of `withProjectSession` so that all of it runs *inside* the caller's lock, and so a thrown
+	 * establish error can be translated into its own stable code instead of being flattened by the caller
+	 * into a generic read failure. The returned session is bound to the manager it was established on.
+	 */
+	async function establishProjectSession(hostId: string, root: string): Promise<{ ok: true; session: RemoteProjectSession } | { ok: false; code: string }> {
+		const entry = entryFor(hostId);
+		if ((workspaceRoots.get(hostId) ?? options.root) !== root) {
+			// A different root means a different helper session: the running one was started with the old
+			// `--root` (possibly none), so nothing about it can be reused.
+			workspaceRoots.set(hostId, root);
+			discard(entry);
+		}
+		let manager = entry.manager;
+		if (manager !== undefined) {
+			const current = manager.getState(hostId);
+			if (current.latched === true) {
+				// Latched is terminal for that machine; a fresh manager is the only way back.
+				discard(entry);
+				manager = undefined;
+			} else if (TRANSIENT_SESSION_STATES.has(current.state)) {
+				// An attempt is already in flight, or the manager is healing itself: rebuilding here would fight
+				// it, so report the state's own code and let its owner finish.
+				return { ok: false, code: current.lastCode ?? "SSH_HOST_NOT_READY" };
+			} else if (current.state !== "ready") {
+				// disconnected/offline: the verified helper location is still valid, so revive in place instead
+				// of paying for node discovery and another upload.
+				const revived = await manager.connect(hostId);
+				if (revived.state !== "ready") return { ok: false, code: revived.lastCode ?? "SSH_HOST_NOT_READY" };
+			}
+		}
+		if (manager === undefined) {
+			const held = await ensureHeld(entry, hostId);
+			manager = managerFor(held);
+			entry.manager = manager;
+			const connected = await manager.connect(hostId);
+			if (connected.state !== "ready") return { ok: false, code: connected.lastCode ?? "SSH_HOST_NOT_READY" };
+		}
+		const bound = manager;
+		return {
+			ok: true,
+			session: {
+				hostId,
+				request(method, params, options) {
+					if (hosts.get(hostId)?.manager !== bound) return Promise.reject(new Error("SSH_HOST_NOT_READY"));
+					return bound.request(hostId, method, params, options);
+				},
+				cancel(requestId, options) {
+					if (hosts.get(hostId)?.manager !== bound) return Promise.reject(new Error("SSH_HOST_NOT_READY"));
+					return bound.cancel(hostId, requestId, options);
+				},
+			},
+		};
 	}
 
 	return {
@@ -218,7 +319,9 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 		/** Bootstrap-then-connect one host. Every failure is a stable code, never a thrown message. */
 		async connect(hostId: string): Promise<RemoteHostConnectResult> {
 			const entry = entryFor(hostId);
-			const run = connect(hostId);
+			// Queued behind any read of this host: tearing the session down under a read is the defect this
+			// batch removes, and an explicit connect would do exactly that.
+			const run = operationLock.run(hostId, () => connectLocked(hostId));
 			entry.inFlight = run;
 			try {
 				return await run;
@@ -239,15 +342,23 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 			const entry = hosts.get(hostId);
 			if (entry !== undefined) discard(entry);
 		},
-		/** The root this host's sessions are currently established with, if any. */
-		getWorkspaceRoot(hostId: string): string | undefined {
-			return workspaceRoots.get(hostId) ?? options.root;
-		},
-		/** Release the live session of one host without forgetting its verified bootstrap. */
+		// 刻意不提供 getWorkspaceRoot()：它只能回答「配置里记着的 root」，永远证明不了 live helper 是否
+		// ready。上一版正是用它的字符串相等当作「会话可用」的判据，于是同 root 的失败重试永远跳过重连。
+		// 需要 root + 就绪判定时走 withProjectSession（或 IPC 的 projectReadTarget），不要在读路径上再问一次配置值。
+		/**
+		 * Release the live session of one host without forgetting its verified bootstrap.
+		 *
+		 * The user's decision is recorded here, not re-derived later: a background read of the same root must
+		 * report "disconnected" instead of quietly reconnecting and undoing what the user asked for. Only an
+		 * explicit `connect` clears it again.
+		 */
 		async disconnect(hostId: string, reason: "abort" | "shutdown"): Promise<void> {
-			const entry = hosts.get(hostId);
-			const manager = entry?.manager;
-			if (manager !== undefined) await manager.disconnect(hostId, reason).catch(() => undefined);
+			await operationLock.run(hostId, async () => {
+				if (HOST_ID.test(hostId)) explicitlyDisconnected.add(hostId);
+				const entry = hosts.get(hostId);
+				const manager = entry?.manager;
+				if (manager !== undefined) await manager.disconnect(hostId, reason).catch(() => undefined);
+			});
 		},
 		listDiagnostics(hostId?: string) {
 			if (hostId !== undefined) return hosts.get(hostId)?.manager?.listDiagnostics(hostId) ?? [];
@@ -256,10 +367,14 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 		/**
 		 * Send one helper request on a ready host.
 		 *
-		 * Forwarded rather than reimplemented so the workspace reader can treat this service as its transport
-		 * port: the reader then owns the method-level contract (which `fs.*` calls exist, how chunks are
-		 * reassembled, what the read ceiling is) and the service keeps owning the session. The manager
-		 * already refuses anything but a ready host with a live protocol client.
+		 * **Not for project reads.** This resolves the host's *current* manager at call time, so a root switch
+		 * between two calls of one operation would serve them from different sessions — the exact defect this
+		 * batch removed. Read-only project surfaces must go through `withProjectSession`, which holds the
+		 * host's operation lock for the whole operation and pins the session to one manager.
+		 *
+		 * Kept because it is the documented narrow transport-port shape (the reader owns the method-level
+		 * contract; the service owns the session) and it is what main-only callers use for one-off pinned
+		 * commands. The manager already refuses anything but a ready host with a live protocol client.
 		 */
 		request(hostId: string, method: string, params?: unknown, options?: { timeoutMs?: number; onRequestId?: (requestId: string) => void }): Promise<unknown> {
 			const manager = hosts.get(hostId)?.manager;
@@ -271,6 +386,43 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 			const manager = hosts.get(hostId)?.manager;
 			if (manager === undefined) return Promise.reject(new Error("SSH_HOST_NOT_READY"));
 			return manager.cancel(hostId, requestId, options);
+		},
+		/**
+		 * Run one whole read-only operation against a host confined to `root`, with the session pinned.
+		 *
+		 * This is the single per-host boundary the whole batch exists for: switching the root, establishing the
+		 * session and every frame of the operation that follows happen while holding the host's operation lock,
+		 * so another project's switch queues behind instead of tearing the session down mid-read. The previous
+		 * shape serialized only the switch and left the multi-chunk read outside the boundary.
+		 *
+		 * Beyond exclusion, the session handed to the task is *bound* to the manager it was established on: if
+		 * anything ever replaces or discards that manager, the next frame fails closed with SSH_HOST_NOT_READY
+		 * instead of being served by a session confined to a different root. Exclusion alone would leave that
+		 * failure mode reachable the moment a future caller mutates the session outside the lock, and silently
+		 * returning another project's file is the exact outcome worth a guard.
+		 *
+		 * Setup failures settle as `{ ok: false, code }`; a failure of the operation itself rejects so the
+		 * caller keeps the reader's own stable codes.
+		 */
+		async withProjectSession<T>(hostId: string, root: string, task: (session: RemoteProjectSession) => Promise<T>): Promise<{ ok: true; value: T } | { ok: false; code: string }> {
+			if (disposed) return { ok: false, code: "REMOTE_CONNECTION_SERVICE_DISPOSED" };
+			if (!HOST_ID.test(hostId) || typeof root !== "string" || root.length === 0) return { ok: false, code: "SSH_HOST_NOT_READY" };
+			return operationLock.run(hostId, async () => {
+				// The user's explicit disconnect outranks a background read: report it rather than reconnecting.
+				if (explicitlyDisconnected.has(hostId)) return { ok: false, code: "SSH_HOST_DISCONNECTED" };
+				let session: RemoteProjectSession;
+				try {
+					const established = await establishProjectSession(hostId, root);
+					if (!established.ok) return established;
+					session = established.session;
+				} catch (error) {
+					// Establishing can fail in ways only the connection layer can name (a failed bootstrap, a
+					// disposed manager). Relaying its own stable code keeps the UI's hint truthful; a thrown
+					// surprise would otherwise be flattened into a generic read failure by the caller.
+					return { ok: false, code: diagnosticCodeFromError(error) };
+				}
+				return { ok: true, value: await task(session) };
+			});
 		},
 		/**
 		 * Stop every host. Waits for in-flight connects so a bootstrap that is still uploading cannot

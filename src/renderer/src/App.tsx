@@ -129,6 +129,7 @@ import { fileTreeNodeDisplayPath, fileTreeNodeKey, findDirectoryNodeByPath, find
 import { SessionTabsBar, type SessionTabsBarProps, type SessionToolAction } from "./components/session/SessionTabsBar";
 import { SessionPaneServicesProvider, type SessionFileOpenContext } from "./components/session/SessionPaneServices";
 import { ProjectEmptyState } from "./components/session/ProjectEmptyState";
+import { RemoteProjectEnrollDialog } from "./components/sidebar/RemoteProjectEnrollDialog";
 import { FileLinkBaseProvider } from "./components/session/FileLinkBase";
 import { useSessionWorkspaceChrome } from "./hooks/useSessionWorkspaceChrome";
 import { useQuickTask } from "./hooks/useQuickTask";
@@ -4239,6 +4240,14 @@ export function App() {
 						/>
 					</EnvironmentOverlay>
 					<SettingsFeatureRoot settings={settings} piUpdate={piUpdate} webServiceChanging={webServiceChanging} onRestartWebService={restartWebService} appInfo={appInfo} onChange={updateSettings} projects={projects} projectId={activeProject?.id} projectKind={activeProject?.kind} projectName={activeProject?.name} />
+					{/* 远端项目登记：全应用唯一挂载点（侧栏「+」/空态只写开关 atom）。成功后先刷新清单再选中新项目，不创建本地会话。 */}
+					<RemoteProjectEnrollDialog
+						onEnrolled={(projectId) => {
+							void refreshProjects()
+								.then(() => selectProjectCommand(projectId))
+								.catch(() => undefined);
+						}}
+					/>
 					{/*
 					 * 问题反馈弹窗的「新建会话分析」依赖 App 级会话创建能力（createSessionDraftWithTab），
 					 * 在装配层组合：useOverlayActions 只持开关状态，会话创建与预填在此处注入。

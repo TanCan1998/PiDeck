@@ -336,9 +336,12 @@ test("Projects section header provides batch collapse and refresh-all actions", 
 	assert.match(projectTree, /anyWorkspaceExpanded/);
 	assert.match(projectTree, /title=\{anyWorkspaceExpanded \? t\("app\.projectCollapseAll"\) : t\("app\.projectExpandAll"\)\}/);
 	assert.match(projectTree, /<ChevronsDownUp size=\{14\} aria-hidden="true" \/>/);
-	// 显式「+ 添加项目」按钮外露（最常用入口）
-	assert.match(projectTree, /aria-label=\{t\("app\.addProject"\)\}/);
+	// 显式「+ 添加项目」按钮外露（最常用入口）：本地/远端两个真实入口收进同一个菜单触发器，
+	// 触发器仍带「添加项目」的 aria-label（已抽到 AddProjectMenu），侧栏仍经 action port 回调本地添加。
+	assert.match(projectTree, /<AddProjectMenu onAddLocal=\{\(\) => void props\.actions\.projects\.add\(\)\} \/>/);
 	assert.match(projectTree, /void props\.actions\.projects\.add\(\)/);
+	const addProjectMenu = readFileSync("src/renderer/src/components/sidebar/AddProjectMenu.tsx", "utf8");
+	assert.match(addProjectMenu, /aria-label=\{t\("app\.addProject"\)\}/);
 	// 目录存在性重扫是低频维护动作：放入 ⋯ 菜单，并经窄 action port 回到 App/hook。
 	assert.match(projectTree, /<DropdownMenuItem onSelect=\{\(\) => void props\.actions\.projects\.refreshAll\(\)\}>/);
 	assert.match(projectTree, /t\("app\.projectRefreshAll"\)/);

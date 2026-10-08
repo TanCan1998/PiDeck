@@ -4,7 +4,6 @@ import { t } from "../../../i18n";
 import { Button } from "../../ui-shadcn/button";
 import { AddHostDialog } from "./AddHostDialog";
 import { FingerprintConfirmDialog } from "./FingerprintConfirmDialog";
-import { RemoteWorkspacePanel } from "./RemoteWorkspacePanel";
 import { RepairPanel } from "./RepairPanel";
 import { SettingsSection } from "./SettingsStorageTab";
 import type { RemoteHostConnectionState, RemoteHostDiagnosticEntry, RemoteHostListItem, RemoteHostPinRequest } from "../../../../../shared/types/remoteHost";
@@ -138,8 +137,6 @@ export function ConnectionsTab() {
 										{host.verified ? null : <span className="text-label text-muted-foreground">{t("settings.connections.unverifiedTag")}</span>}
 									</div>
 								</div>
-								{/* 远端工作区（只读）：只给已验证的主机，未验证的连接必然失败。 */}
-								{host.verified ? <RemoteWorkspacePanel hostId={host.id} label={host.label} connected={connected} onRequestConnect={() => void toggle(host.id, true)} /> : null}
 								{/* 诊断只在有内容且非空时展示：连上时它通常只有几行阶段记录。 */}
 								{(diagnostics[host.id] ?? []).length > 0 ? (
 									<details className="text-label text-muted-foreground">

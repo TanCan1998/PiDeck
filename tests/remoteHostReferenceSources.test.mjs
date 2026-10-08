@@ -163,6 +163,12 @@ test("a malformed or corrupt projects store is incomplete, never an empty refere
 	for (const snapshot of [
 		{ schemaVersion: 1, revision: 1, projects: [] },
 		{ schemaVersion: 2, revision: 1, projects: [remoteProject("p-1", "not-a-host-id")] },
+		// v2 信封要求每条记录都带 locator（本地记录也有）；缺字段是畸形记录，不是"没有引用"。
+		{ schemaVersion: 2, revision: 1, projects: [{ id: "p-1", name: "p", lastOpenedAt: 1 }] },
+		// hostId 合法但 remotePath 不是 canonical 远端目录：codec 会拒绝整份 store，扫描必须同样判死。
+		{ schemaVersion: 2, revision: 1, projects: [remoteProject("p-1", HOST_ID, "relative/path")] },
+		// 本地 locator 携带 hostId：一条不在 ssh 分支里的主机引用，不能当成本地项目跳过。
+		{ schemaVersion: 2, revision: 1, projects: [{ id: "p-1", name: "p", lastOpenedAt: 1, locator: { kind: "local", environment: "native", localPath: "/tmp/p", hostId: HOST_ID } }] },
 		{ schemaVersion: 2, revision: 1, projects: [{ id: "p-1", name: "p", lastOpenedAt: 1, locator: { kind: "future", hostId: HOST_ID } }] },
 		{ schemaVersion: 2, revision: 1, projects: [{}] },
 	]) {
@@ -176,6 +182,29 @@ test("a malformed or corrupt projects store is incomplete, never an empty refere
 	assert.equal(scan.complete, false);
 	assert.deepEqual(Array.from(scan.unavailable), ["projects"]);
 	await assert.rejects(registryFor(paths).asStoreReferences().referencedHostIds(), /REMOTE_HOST_REFERENCE_SCAN_INCOMPLETE/);
+});
+
+// 旧 v1 数组仍是 ProjectStore 的可用读取路径（load 会把它迁移成 v2），所以扫描不能把
+// 整源判死 —— 否则一个还没被应用改写的文件会让 retire 永久不可用。v1 记录以 path 表达位置，
+// 没有 locator，因此结构上不可能命名任何主机。
+test("a legacy v1 project array stays scan-complete and contributes no host reference", async (t) => {
+	const paths = await registryPaths(t);
+	const raw = JSON.stringify([{ id: "legacy-1", name: "legacy", path: "C:\\work\\legacy", lastOpenedAt: 1, environment: "windows" }]);
+	await writeFile(paths.projectsPath, raw);
+	const scan = await registryFor(paths).scan();
+	assert.equal(scan.complete, true);
+	assert.deepEqual(Array.from(scan.referencedHostIds), []);
+	assert.equal(await readFile(paths.projectsPath, "utf8"), raw, "扫描是纯读");
+});
+
+test("a legacy v1 entry without a usable local path is incomplete", async (t) => {
+	const paths = await registryPaths(t);
+	for (const entry of [{}, { id: "legacy-1", name: "legacy", lastOpenedAt: 1 }, { id: "legacy-1", path: "   " }]) {
+		await writeFile(paths.projectsPath, JSON.stringify([entry]));
+		const scan = await registryFor(paths).scan();
+		assert.equal(scan.complete, false, `${JSON.stringify(entry)} must not certify an empty set`);
+		assert.deepEqual(Array.from(scan.unavailable), ["projects"]);
+	}
 });
 
 test("a projects backup without its primary is incomplete", async (t) => {

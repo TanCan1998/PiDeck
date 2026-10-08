@@ -1,6 +1,6 @@
 import type { Project, ProjectLocator, ProjectMetadata } from "../../shared/types/project";
 import { projectLocatorFromLegacy, projectLocatorToLegacyFields } from "../../shared/locationAdapters";
-import { isRemoteProject } from "../../shared/projectLocation";
+import { isRemoteProject, readProjectLocator as readSharedProjectLocator } from "../../shared/projectLocation";
 
 export type ProjectStoreV2Entry = ProjectMetadata & {
 	kind?: "chat";
@@ -123,39 +123,29 @@ function readProjectMetadata(value: Record<string, unknown>): ParsedProjectMetad
 	};
 }
 
-/** 远端路径上限与 `RemoteBrowseRoot` 的 `--root` 上限保持一致（4096）。 */
-const MAX_REMOTE_PATH = 4096;
-const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
-
 /**
- * 校验 ssh locator：`hostId` 非空有界、`remotePath` 必须是绝对 POSIX 路径且无穿越/控制字节。
+ * locator 的读取判据不在本文件：唯一出处是 shared 的 `readProjectLocator`，与写入侧
+ * （`ProjectStore.addRemote`）和引用扫描（`RemoteHostReferenceSources`）同一个纯函数。
  *
- * 这条校验与写入侧同源（canonical browse root 只产出这种值），所以放行集不会意外变窄；
- * 而任何不满足的记录在加载时被拒 ⇒ 整份 store 进 `needs-repair`，绝不把可疑远端路径
+ * 历史事故形状：写入侧只查非空、codec 却更严格，于是一次登记就能写出加载时被整份拒绝的
+ * `projects.json`（`needs-repair`，所有项目一起不可用）。三处共用一个判据后，这种
+ * 「写进去、读不出来」的形状不再存在。任何不满足的记录仍在加载时被拒，绝不把可疑远端路径
  * 交给下游当授权根。
+ *
+ * 保留 `readSshLocator` 这个薄投影而不是让 `readV2Project` 直接调 shared，是因为
+ * `tests/remoteHostCrossStoreContract.test.mjs` 按「文件:函数名」登记解码持久化 hostId 的引用源
+ * 归属：解码点必须留在被审计的文件里，否则这份审计会静默失去覆盖。
  */
 function readSshLocator(value: Record<string, unknown>): ProjectLocator | undefined {
-	if (typeof value.hostId !== "string" || !value.hostId || value.hostId.length > 256 || CONTROL_CHARS.test(value.hostId)) return undefined;
-	if (typeof value.remotePath !== "string" || value.remotePath.length === 0 || value.remotePath.length > MAX_REMOTE_PATH || CONTROL_CHARS.test(value.remotePath)) return undefined;
-	if (!value.remotePath.startsWith("/") || value.remotePath === "/" || value.remotePath.endsWith("/")) return undefined;
-	const segments = value.remotePath.slice(1).split("/");
-	if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) return undefined;
-	return { kind: "ssh", hostId: value.hostId, remotePath: value.remotePath };
+	const parsed = readSharedProjectLocator(value);
+	if (!parsed || parsed.kind !== "ssh") return undefined;
+	return { kind: "ssh", hostId: parsed.hostId, remotePath: parsed.remotePath };
 }
 
+/** 本地分支（含「本地 locator 不得携带 hostId」）与 ssh 分支都回到 shared 的同一判据。 */
 function readProjectLocator(value: unknown): ProjectLocator | undefined {
-	if (!isRecord(value)) return undefined;
-	if (value.kind === "local" && (value.environment === "native" || value.environment === "wsl") && typeof value.localPath === "string" && value.localPath.trim()) {
-		if (value.wslDistro !== undefined && typeof value.wslDistro !== "string") return undefined;
-		return {
-			kind: "local",
-			environment: value.environment,
-			localPath: value.localPath,
-			...(typeof value.wslDistro === "string" ? { wslDistro: value.wslDistro } : {}),
-		};
-	}
-	if (value.kind === "ssh") return readSshLocator(value);
-	return undefined;
+	if (!isRecord(value) || value.kind !== "ssh") return readSharedProjectLocator(value);
+	return readSshLocator(value);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -6,7 +6,7 @@
  * 才发现传进来一个远端字符串。这两个助手是窄化的唯一出处：本地分支返回带 `path` 的类型，
  * 远端分支由调用方显式处理（拒绝 / 路由到远端服务），不允许用 `!` 或 `as` 绕过。
  */
-import type { LocalProject, Project, RemoteProject } from "./types/project";
+import type { LocalProject, Project, ProjectLocator, RemoteProject } from "./types/project";
 
 /** 本机（含 WSL）项目：拥有 `path`，可交给 `node:fs`/Git/终端等本机实现。 */
 export function isLocalProject(project: Project): project is LocalProject {
@@ -27,4 +27,81 @@ export function isRemoteProject(project: Project): project is RemoteProject {
  */
 export function localProjectPath(project: Project): string | undefined {
 	return isLocalProject(project) ? project.path : undefined;
+}
+
+/**
+ * ssh 项目 locator 的唯一判据（写入侧、codec 读取、主机引用扫描三处共用）。
+ *
+ * 值域裁定的依据（跨 store 一致性）：
+ * - `hostId` 是 `RemoteHostStore` 的 profile 主键。该 store 用 `randomUUID()` 生成 id，其 codec
+ *   （以及 pin / bootstrap / 连接诊断 / rebind 等每一个 hostId 消费者）只接受这个 UUID 形状，
+ *   登记 IPC 也在发起确认前先用同一正则校验。所以**非 UUID 的 hostId 永远不可能命中任何主机**：
+ *   它既不是一份合法远端项目，也不能被当成「某个主机的引用」。写入侧拒绝它、读取侧拒绝它、
+ *   扫描侧也拒绝它，是同一件事的三处表述 —— 不是把扫描放宽成「任何非空字符串」。
+ * - `remotePath` 与 `RemoteBrowseRoot.readCanonicalBrowseRoot` 同域（绝对 POSIX、非根、无尾斜杠、
+ *   无空/`.`/`..` 段、≤4096、无控制字节），因为写入侧唯一来源就是那里确认过的 canonical 值，
+ *   放行集不会比它更窄，既有合法项目不会被拒。
+ *
+ * shared 是纯契约层：这里只做字符串校验，不依赖任何运行时模块。
+ */
+export const PROJECT_HOST_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/** 远端路径长度上界，与 `RemoteBrowseRoot` 交给 helper 的 `--root` 上界保持一致（4096）。 */
+export const MAX_PROJECT_REMOTE_PATH = 4096;
+
+const PROJECT_PATH_CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+
+/** 远端项目 locator 的窄化形状（`ProjectLocator` 的 ssh 分支）。 */
+export type SshProjectLocator = Extract<ProjectLocator, { kind: "ssh" }>;
+
+/** canonical 远端目录：绝对 POSIX、非根、无尾斜杠、无空/`.`/`..` 段、有界、无控制字节。 */
+export function readCanonicalRemoteProjectPath(value: unknown): string | undefined {
+	if (typeof value !== "string" || value.length === 0 || value.length > MAX_PROJECT_REMOTE_PATH) return undefined;
+	if (PROJECT_PATH_CONTROL_CHARS.test(value)) return undefined;
+	if (!value.startsWith("/") || value === "/" || value.endsWith("/")) return undefined;
+	const segments = value.slice(1).split("/");
+	if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) return undefined;
+	return value;
+}
+
+/**
+ * 校验一条 ssh 项目 locator（`{ kind: "ssh", hostId, remotePath }`），非法返回 undefined。
+ * 写入、读取、扫描共用这一个判据；调用方不得各自再加一套更宽或更窄的规则（那正是
+ * 「写入可通过、加载被整份拒绝」的来源）。
+ */
+export function readSshProjectLocator(value: unknown): SshProjectLocator | undefined {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	const record = value as Record<string, unknown>;
+	if (record.kind !== "ssh") return undefined;
+	if (typeof record.hostId !== "string" || !PROJECT_HOST_ID_PATTERN.test(record.hostId)) return undefined;
+	const remotePath = readCanonicalRemoteProjectPath(record.remotePath);
+	if (remotePath === undefined) return undefined;
+	return { kind: "ssh", hostId: record.hostId, remotePath };
+}
+
+/**
+ * 校验持久化 locator（local / ssh 两支），非法返回 undefined。codec 读取与引用扫描共用，
+ * 保证「codec 能加载的记录」与「扫描能解释的记录」是同一个集合。
+ *
+ * local 分支额外拒绝 `hostId`：本地 locator 不该携带主机引用。若放行，扫描会把一条指向某主机的
+ * 主机引用读成「本地项目 ⇒ 没有引用」，退役流程据此硬删仍被引用的主机 —— 这正是本函数存在的
+ * 唯一理由之一。
+ */
+export function readProjectLocator(value: unknown): ProjectLocator | undefined {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	const record = value as Record<string, unknown>;
+	if (record.kind === "local") {
+		if (record.hostId !== undefined) return undefined;
+		if (record.environment !== "native" && record.environment !== "wsl") return undefined;
+		if (typeof record.localPath !== "string" || !record.localPath.trim()) return undefined;
+		if (record.wslDistro !== undefined && typeof record.wslDistro !== "string") return undefined;
+		return {
+			kind: "local",
+			environment: record.environment,
+			localPath: record.localPath,
+			...(typeof record.wslDistro === "string" ? { wslDistro: record.wslDistro } : {}),
+		};
+	}
+	if (record.kind === "ssh") return readSshProjectLocator(record);
+	return undefined;
 }

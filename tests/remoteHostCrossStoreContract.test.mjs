@@ -19,6 +19,10 @@ const COVERED_HOST_ID_FIELDS = new Map([
 	["src/shared/types/project.ts:ProjectLocator", "projects"],
 	["src/shared/types/session.ts:SessionLocator", "sessions"],
 	["src/main/projects/projectStoreCodec.ts:readSshLocator", "projects"],
+	// locator 的唯一判据（写入 / codec 读取 / 引用扫描三处共用）。ProjectStore 落盘与
+	// RemoteHostReferenceSources 扫描都经由它，所以持久化引用的真正来源在这里；
+	// 漏掉这个文件会让「谁在引用某台主机」的审计凭空少一层。
+	["src/shared/projectLocation.ts:readSshProjectLocator", "projects"],
 	["src/main/sessions/SessionCatalog.ts:hostRebindTargetLocator", "sessions"],
 	["src/shared/types/remoteHost.ts:RemoteHostConnectResult", "runtime"],
 	["src/shared/types/remoteHost.ts:RemoteHostDisconnectResult", "runtime"],
@@ -32,8 +36,6 @@ const COVERED_HOST_ID_FIELDS = new Map([
 	["src/shared/types/remoteHost.ts:RemoteHostStateChange", "runtime"],
 	// 修复确认请求只是告知界面「要修哪台主机」，不持久化引用。
 	["src/shared/types/remoteHost.ts:RemoteHostRepairRequest", "runtime"],
-	// 浏览根确认请求：告知界面「要浏览哪台主机的哪个目录」，不持久化引用。
-	["src/shared/types/remoteHost.ts:RemoteWorkspaceRootRequest", "runtime"],
 	// 项目登记确认请求/结果：告知界面「把哪台主机的哪个目录登记为项目」，hostId 只是回显，
 	// 真正持久化的引用写在 ProjectStore 的 ssh locator（由 projects 源扫描）。
 	["src/shared/types/remoteHost.ts:RemoteProjectEnrollRequest", "runtime"],
@@ -43,7 +45,7 @@ const COVERED_HOST_ID_FIELDS = new Map([
 const TYPE_FILES = readdirSync("src/shared/types")
 	.filter((name) => name.endsWith(".ts"))
 	.map((name) => `src/shared/types/${name}`);
-const CODEC_FILES = ["src/main/projects/projectStoreCodec.ts", "src/main/sessions/SessionCatalog.ts"];
+const CODEC_FILES = ["src/main/projects/projectStoreCodec.ts", "src/main/sessions/SessionCatalog.ts", "src/shared/projectLocation.ts"];
 
 function hostIdFields(filePath, content = readFileSync(filePath, "utf8")) {
 	const source = ts.createSourceFile(filePath, content, ts.ScriptTarget.Latest, true);

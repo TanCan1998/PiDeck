@@ -4,7 +4,7 @@ import { basename, join, normalize, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { LocalProject, Project } from "../../shared/types";
 import { projectLocatorFromLegacy } from "../../shared/locationAdapters";
-import { isLocalProject, isRemoteProject } from "../../shared/projectLocation";
+import { isLocalProject, isRemoteProject, readSshProjectLocator, type SshProjectLocator } from "../../shared/projectLocation";
 import { normalizeSelectedWslProjectPath, parseWslUncPath, WslPathError, type WslEnvironment } from "../wsl/WslPaths";
 import { getAppLogger } from "../logging/sharedLogger";
 import { assertHostRebindRecordIds, canonicalHostLocatorJson, type HostRebindRecordPatch, type HostRebindRecordResult, type HostRebindRecordSnapshot, type HostRebindStorePort } from "../remote/HostRebindJournal";
@@ -14,7 +14,7 @@ import { loadProjectStore, writeProjectStoreSnapshot } from "./projectStorePersi
 const CHAT_PROJECT_ID = "builtin-chat";
 const CHAT_PROJECT_NAME = "Chat";
 
-/** 端口边界只允许稳定码（设计 §4.4）：与 projectStoreCodec.ts:81 的 ssh 读拒绝同码。 */
+/** 端口边界只允许稳定码（设计 §4.4）：与 codec / shared locator 判据的 ssh 读拒绝同码。 */
 const PROJECT_STORE_NEEDS_REPAIR = "PROJECT_STORE_NEEDS_REPAIR";
 const REBIND_UNKNOWN_OUTCOME = "REMOTE_HOST_REBIND_UNKNOWN_OUTCOME";
 
@@ -29,16 +29,15 @@ function remoteProjectKey(hostId: string, remotePath: string): string {
 	return `${hostId}\u0000${remotePath}`;
 }
 
-type SshLocatorShape = { kind: "ssh"; hostId: string; remotePath: string };
-
-/** 解析规范 JSON 形式的 ssh locator；非 ssh 或缺字段都返回 undefined（fail closed）。 */
-function parseSshLocator(canonical: string): SshLocatorShape | undefined {
+/**
+ * 解析规范 JSON 形式的 ssh locator；非 ssh、字段缺失或值域非法都返回 undefined（fail closed）。
+ *
+ * `readSshProjectLocator` 是写入 / codec / 引用扫描共用的唯一判据（shared 纯契约层），
+ * 所以 rebind 补丁的 before/after 也落在同一值域内：判不出来就是 `changed`，绝不写盘。
+ */
+function parseSshLocator(canonical: string): SshProjectLocator | undefined {
 	try {
-		const value: unknown = JSON.parse(canonical);
-		if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-		const record = value as Record<string, unknown>;
-		if (record.kind !== "ssh" || typeof record.hostId !== "string" || typeof record.remotePath !== "string") return undefined;
-		return { kind: "ssh", hostId: record.hostId, remotePath: record.remotePath };
+		return readSshProjectLocator(JSON.parse(canonical));
 	} catch {
 		return undefined;
 	}
@@ -278,10 +277,14 @@ export class ProjectStore implements HostRebindStorePort {
 	 */
 	async addRemote(input: { hostId: string; canonicalRemotePath: string; name?: string }): Promise<Project> {
 		this.assertWritable();
-		if (typeof input?.hostId !== "string" || !input.hostId || typeof input.canonicalRemotePath !== "string" || !input.canonicalRemotePath) {
+		// 写入侧即用与 codec / 引用扫描同一个纯判据（shared `readSshProjectLocator`）：非法 locator
+		// 绝不能先写盘、再等加载时被 codec 拒掉 —— 那会让整份 projects.json 进 needs-repair，
+		// 连带同一文件里的合法本地项目一起不可用。
+		const locator = readSshProjectLocator({ kind: "ssh", hostId: input?.hostId, remotePath: input?.canonicalRemotePath });
+		if (!locator) {
 			throw new Error("REMOTE_PROJECT_TARGET_INVALID");
 		}
-		const key = remoteProjectKey(input.hostId, input.canonicalRemotePath);
+		const key = remoteProjectKey(locator.hostId, locator.remotePath);
 		const existing = this.projects.find((project) => isRemoteProject(project) && remoteProjectKey(project.locator.hostId, project.locator.remotePath) === key);
 		if (existing) {
 			existing.lastOpenedAt = Date.now();
@@ -290,8 +293,8 @@ export class ProjectStore implements HostRebindStorePort {
 		}
 		const project: Project = {
 			id: randomUUID(),
-			name: input.name && input.name.trim() ? input.name.trim() : basename(input.canonicalRemotePath) || input.canonicalRemotePath,
-			locator: { kind: "ssh", hostId: input.hostId, remotePath: input.canonicalRemotePath },
+			name: input.name && input.name.trim() ? input.name.trim() : basename(locator.remotePath) || locator.remotePath,
+			locator,
 			lastOpenedAt: Date.now(),
 			sortOrder: this.nextSortOrder(),
 		};

@@ -156,18 +156,6 @@ export type RemoteWorkspacePathKind = "file" | "directory" | "other";
 
 export type RemoteWorkspaceEntry = { name: string; kind: RemoteWorkspacePathKind; bytes?: number };
 
-/** 列目录结果；超出 helper 的条目上限时**拒绝**而不是截断。 */
-export type RemoteWorkspaceListResult = { ok: true; entries: RemoteWorkspaceEntry[] } | { ok: false; code: string };
-
-/** 读文件结果；`content` 是 base64（跨 IPC 传输二进制）。 */
-export type RemoteWorkspaceReadResult = { ok: true; contentBase64: string; bytes: number; mtimeMs: number } | { ok: false; code: string };
-
-/** 已确认的浏览根：canonical 路径由主进程持有，界面只显示它。 */
-export type RemoteWorkspaceRootResult = { ok: true; canonicalPath: string } | { ok: false; code: string };
-
-/** 浏览根确认请求：主进程 → 渲染层推送（与指纹确认同一套 broker 规矩）。 */
-export type RemoteWorkspaceRootRequest = { requestId: string; expiresAt: number; hostId: string; label: string; requestedPath: string; canonicalPath: string };
-
 /**
  * 远端项目登记（Phase 3 第二段）。
  *
@@ -189,9 +177,9 @@ export type RemoteProjectEnrollAnswerResult = { ok: true; enrolled: boolean; pro
 /**
  * 按 projectId 的只读远端浏览（Phase 3 第二段）。
  *
- * 与 `remoteWorkspace*`（按 hostId + 临时确认 root）的区别：这里的根来自 `ProjectStore` 中该项目
- * 持有的 canonical `remotePath`，因此可以跨重启恢复。渲染层只给 `projectId` 与**相对路径**，
- * 由 main 解析 host/root；绝对路径与 `..` 在触达 reader 前被拒。
+ * 与已删除的 `remoteWorkspace*`（按 hostId + 临时确认 root 的浏览）的区别：这里的根来自
+ * `ProjectStore` 中该项目持有的 canonical `remotePath`，因此可以跨重启恢复。渲染层只给
+ * `projectId` 与**相对路径**，由 main 解析 host/root；绝对路径与 `..` 在触达 reader 前被拒。
  */
 export type RemoteProjectListResult = { ok: true; entries: RemoteWorkspaceEntry[] } | { ok: false; code: string };
 
