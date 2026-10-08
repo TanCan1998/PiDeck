@@ -268,6 +268,8 @@ const api = {
 		listProject: (projectId: string, path: string) => ipcRenderer.invoke(ipcChannels.remoteProjectList, projectId, path) as Promise<import("../shared/types/remoteHost").RemoteProjectListResult>,
 		/** 按 projectId 读文件（相对路径）；内容为 base64。 */
 		readProjectFile: (projectId: string, path: string) => ipcRenderer.invoke(ipcChannels.remoteProjectRead, projectId, path) as Promise<import("../shared/types/remoteHost").RemoteProjectReadResult>,
+		/** 项目内文件名搜索（不含内容搜索）；`path` 传空串表示项目根。 */
+		searchProject: (projectId: string, path: string, query: string) => ipcRenderer.invoke(ipcChannels.remoteProjectSearch, projectId, path, query) as Promise<import("../shared/types/remoteHost").RemoteProjectSearchResult>,
 	},
 	projects: {
 		list: () => ipcRenderer.invoke(ipcChannels.projectsList) as Promise<Project[]>,

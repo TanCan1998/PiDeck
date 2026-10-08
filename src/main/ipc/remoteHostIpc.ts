@@ -26,10 +26,13 @@ import type {
 	RemoteProjectEnrollResult,
 	RemoteProjectListResult,
 	RemoteProjectReadResult,
+	RemoteProjectSearchResult,
 } from "../../shared/types/remoteHost";
 import type { RemoteHostCatalogView } from "../remote/RemoteHostCatalogView";
 import { RemoteHostRepair, type HostRepairAction } from "../remote/RemoteHostRepair";
 import { createRemoteWorkspaceReader, type RemoteWorkspacePort } from "../remote/RemoteWorkspaceReader";
+import { createRemoteSearchReader, REMOTE_SEARCH_READER_CODES } from "../remote/RemoteSearchReader";
+import { REMOTE_HELPER_MAX_SEARCH_QUERY_LENGTH } from "../remote/RemoteHelperContract";
 import { resolveRemoteBrowseRoot } from "../remote/RemoteBrowseRoot";
 import { PendingConfirmationBroker } from "../security/PendingConfirmationBroker";
 import type { RemoteHostConnectionService, RemoteProjectSession } from "../remote/RemoteHostConnectionService";
@@ -675,6 +678,43 @@ export function registerRemoteHostIpc(input: {
 			if (!outcome.ok) return { ok: false, code: outcome.code };
 			const file = outcome.value;
 			return { ok: true, contentBase64: Buffer.from(file.content).toString("base64"), bytes: file.bytes, mtimeMs: file.mtimeMs };
+		} catch (error) {
+			return { ok: false, code: codeOf(error, "REMOTE_PROJECT_READ_FAILED") };
+		}
+	});
+
+	/**
+	 * 项目内**文件名**搜索（不含内容搜索）。
+	 *
+	 * 与 listProject/readProjectFile 同构：解析 locator → host/root，整次搜索都在 withProjectSession 的受控
+	 * 边界内完成，因此一次搜索不会横跨两个 root。query 来自渲染层，在这里（IPC 边界）先按契约校验一次，
+	 * reader 内部还会再校验一次；非法 query 一个帧都不发出去。
+	 *
+	 * `truncated` 必须如实透传：它表示遍历在某一项上限处收束，界面据此显示「结果已截断」，而不是把一屏
+	 * 结果伪装成完整答案。
+	 */
+	ipcMain.handle(ipcChannels.remoteProjectSearch, async (_event, projectIdValue: unknown, pathValue: unknown, queryValue: unknown): Promise<RemoteProjectSearchResult> => {
+		if (!input.enabled) return { ok: false, code: "REMOTE_FEATURE_DISABLED" };
+		const relative = readRelativePath(pathValue);
+		if (relative === undefined) return { ok: false, code: "REMOTE_PROJECT_PATH_INVALID" };
+		// 渲染层来的值一律不可信：长度与控制字节在这里就拒，绝不把非法 query 发到远端。
+		if (typeof queryValue !== "string" || queryValue.length === 0 || queryValue.length > REMOTE_HELPER_MAX_SEARCH_QUERY_LENGTH || /[\u0000-\u001f\u007f]/.test(queryValue)) return { ok: false, code: REMOTE_SEARCH_READER_CODES.queryInvalid };
+		const target = await projectReadTarget(projectIdValue);
+		if ("code" in target) return { ok: false, code: target.code };
+		try {
+			const outcome = await target.service.withProjectSession(target.hostId, target.remotePath, async (session) => {
+				const reader = createRemoteSearchReader({ port: sessionPort(session, target.hostId) });
+				return reader.search(target.hostId, readerPath(relative), queryValue);
+			});
+			if (!outcome.ok) return { ok: false, code: outcome.code };
+			const result = outcome.value;
+			// 只把界面要用的字段接过去；远端多余字段在 reader 里已被拒，这里再显式重建一次。
+			return {
+				ok: true,
+				entries: result.entries.map((entry) => ({ path: entry.path, name: entry.name, kind: entry.kind, ...(entry.bytes === undefined ? {} : { bytes: entry.bytes }) })),
+				scanned: result.scanned,
+				truncated: result.truncated,
+			};
 		} catch (error) {
 			return { ok: false, code: codeOf(error, "REMOTE_PROJECT_READ_FAILED") };
 		}

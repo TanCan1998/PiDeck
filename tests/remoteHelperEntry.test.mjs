@@ -33,11 +33,16 @@ const {
 	REMOTE_HELPER_MAX_FRAME_BYTES,
 	REMOTE_HELPER_MAX_LIST_ENTRIES,
 	REMOTE_HELPER_MAX_PATH_LENGTH,
+	REMOTE_HELPER_MAX_SEARCH_DEPTH,
+	REMOTE_HELPER_MAX_SEARCH_MATCHES,
+	REMOTE_HELPER_MAX_SEARCH_QUERY_LENGTH,
+	REMOTE_HELPER_MAX_SEARCH_SCANNED,
 	REMOTE_HELPER_MAX_QUEUED_REQUESTS,
 	REMOTE_HELPER_METHOD_CANCEL,
 	REMOTE_HELPER_METHOD_ECHO,
 	REMOTE_HELPER_METHOD_FS_LIST,
 	REMOTE_HELPER_METHOD_FS_READ,
+	REMOTE_HELPER_METHOD_FS_SEARCH_NAMES,
 	REMOTE_HELPER_METHOD_FS_STAT,
 	REMOTE_HELPER_METHOD_HELLO,
 	REMOTE_HELPER_MAX_ECHO_TEXT_LENGTH,
@@ -54,7 +59,7 @@ const HOST_ID = "01234567-89ab-4def-8123-456789abcdef";
 /** The helper never resolves HOME into a path, so a POSIX literal is the honest fixture on any platform. */
 const HELPER_HOME = "/home/pideck-helper";
 /** Frozen digest, pinned here as well as in the module: editing the source means editing both. */
-const FROZEN_SHA256 = "01a2505c7f18ac2b45cd42bfda61d16a3fe867da3995d6eb1ee6ab6eb7ceca05";
+const FROZEN_SHA256 = "66b041d2675f9276f0ea03a29ed0f3d34a261fc2184546cb95c6928ca4fc538f";
 const MAX_TEXT = 4096;
 const TEST_TIMEOUT_MS = 30_000;
 const GUARD_TIMEOUT_MS = 10_000;
@@ -226,10 +231,10 @@ function createFsFixture(t) {
  * fresh empty directory, and `rootArgs` covers argv shapes the launcher's template never produces.
  *
  * The startup shape is stated the same way. By default the body runs from a file - `node <entry> [--root
- * <root>]`, the deployed shape, and the one no command line length can bound. `inlineEval: true` starts it
- * as `node -e <source> -- [--root <root>]` instead, where the entry path is absent and argv shifts by one:
- * that is the shape a remote probe and this self-test used, and the two tests that ask for it keep it
- * covered.
+ * <root>]`, the deployed shape, and the one no command line length can bound. `argvSeparator: true` starts
+ * that same file as `node <entry> -- [--root <root>]`, so the helper's own flag sits one argument further
+ * along and the argv scan is exercised without the `node -e <source>` shape: helper build 1.6.0 outgrew the
+ * Windows command line that shape needs, which the entry-size test below records in full.
  */
 function startHelper(t, options = {}) {
 	const env = { ...process.env };
@@ -238,7 +243,10 @@ function startHelper(t, options = {}) {
 	const rootArgs = options.rootArgs !== undefined ? options.rootArgs : options.root === null ? [] : ["--root", options.root === undefined ? createRootFixture(t) : options.root];
 	// `--` keeps node from parsing the helper's own flag as a node option in the `-e` shape; a file entry
 	// needs no separator, because everything after the script path is already a script argument.
-	const argv = options.inlineEval === true ? ["-e", REMOTE_HELPER_INLINE_SOURCE, "--", ...rootArgs] : [options.entryPath ?? ENTRY_PATH, ...rootArgs];
+	// Everything after `--` is a script argument, so the separator shifts argv exactly the way `node -e
+	// <source> -- ...` used to - without a command line that carries the whole frozen body.
+	const entryPath = options.entryPath ?? ENTRY_PATH;
+	const argv = options.argvSeparator === true ? [entryPath, "--", ...rootArgs] : [entryPath, ...rootArgs];
 	const child = spawn(process.execPath, argv, { env, stdio: ["pipe", "pipe", "pipe"] });
 	const sent = [];
 	const lines = [];
@@ -424,16 +432,19 @@ helperTest("the frozen helper source is one byte-frozen ASCII line", () => {
 	// length applies, and the body has to stay small enough to be audited as one line. It is also two orders
 	// of magnitude below the 8 MiB frame cap the same body enforces.
 	assert.ok(REMOTE_HELPER_INLINE_SOURCE.length > 1024 && REMOTE_HELPER_INLINE_SOURCE.length < 64 * 1024, `unexpected source size ${REMOTE_HELPER_INLINE_SOURCE.length}`);
-	// This one is a startup constraint, and it belongs to exactly one shape: `node -e <source>`. Windows
-	// accepts at most 32766 characters in a CreateProcess command line (the documented cap is 32767 including
-	// the terminating null; measured here: 32766 starts, 32767 fails with ENAMETOOLONG), and the body, the
-	// escaping of every double quote in it and the launcher's own argv all come out of that one budget. It is
-	// asserted so the budget is stated rather than discovered as a child process that never existed, and the
-	// two `inlineEval` tests below are the behaviour this arithmetic predicts. A body that outgrows it means
-	// the `-e` coverage has to go deliberately - this assertion and those two tests together - never silently.
-	// POSIX is not the tighter platform here: its per-argument limit is about 128 KiB.
+	// This one used to be a startup constraint of the `node -e <source>` shape: Windows accepts at most 32766
+	// characters in a CreateProcess command line (the documented cap is 32767 including the terminating null;
+	// measured: 32766 starts, 32767 fails with ENAMETOOLONG), and the body, the escaping of every double quote
+	// in it and the launcher's own argv all came out of that one budget. helper build 1.6.0 outgrew it, so that
+	// coverage went deliberately, exactly as the previous version of this comment required: the test that
+	// started the body that way now starts the same file with a `--` separator, which shifts argv the same way
+	// and still proves the flag is scanned rather than indexed. The arithmetic stays as the record of why, and
+	// it is asserted in the other direction on purpose: a body that fits the Windows command line again fails
+	// this line and asks for the `-e` coverage back instead of leaving the shape silently uncovered.
+	// The `-e` shape would fit a POSIX argv limit (about 128 KiB), but the CI gate for this suite is Windows
+	// only, so a POSIX-only test would be a test that never runs and is not worth the false assurance.
 	const inlineCommandLine = inlineEvalCommandLineLength();
-	assert.ok(inlineCommandLine < WINDOWS_COMMAND_LINE_LIMIT, `\`node -e <source>\` would need ${inlineCommandLine} characters of command line, ${inlineCommandLine - WINDOWS_COMMAND_LINE_LIMIT + 1} over the last length Windows accepts (${WINDOWS_COMMAND_LINE_LIMIT - 1}): the body can no longer be started that way`);
+	assert.ok(inlineCommandLine > WINDOWS_COMMAND_LINE_LIMIT, `the body fits a Windows command line again (${inlineCommandLine} <= ${WINDOWS_COMMAND_LINE_LIMIT - 1}): restore the \`node -e <source>\` coverage that was removed for helper build 1.6.0`);
 });
 
 helperTest("the exported entry identity matches the frozen source", () => {
@@ -449,13 +460,20 @@ helperTest("the exported entry identity matches the frozen source", () => {
 	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes(String(REMOTE_HELPER_MAX_CHUNK_BYTES)), "the read chunk ceiling must be visible in the frozen source");
 	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes(String(REMOTE_HELPER_MAX_LIST_ENTRIES)), "the listing ceiling must be visible in the frozen source");
 	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes(String(REMOTE_HELPER_MAX_PATH_LENGTH)), "the path ceiling must be visible in the frozen source");
+	// The bounded search repeats the same way: the method it answers to, its own refusal code and all four of
+	// its ceilings are literals of the body that runs, not values it reads from anywhere.
+	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes(`"${REMOTE_HELPER_METHOD_FS_SEARCH_NAMES}"`), "the search method must be dispatched in the frozen body");
+	for (const ceiling of [REMOTE_HELPER_MAX_SEARCH_MATCHES, REMOTE_HELPER_MAX_SEARCH_SCANNED, REMOTE_HELPER_MAX_SEARCH_DEPTH, REMOTE_HELPER_MAX_SEARCH_QUERY_LENGTH]) assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes(String(ceiling)), `${ceiling} must be visible in the frozen source`);
+	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes('"QUERY_INVALID"'), "the search refusal code must be a literal of the frozen body");
 });
 
 helperTest("hello answers the contract handshake through the production client", async (t) => {
-	// The `-e` startup shape, on purpose: the deployment path a remote probe and this self-test used, and the
-	// only shape where the entry path is absent and argv shifts by one. Its command line budget is asserted in
-	// the source-size test above, and the file shape the bundle really deploys is covered by every other test.
-	const session = startHelper(t, { inlineEval: true });
+	// The shifted-argv shape, on purpose: `node <entry> -- --root <root>`, where the helper's own flag is not
+	// the argv pair the launcher's template produces and the argv scan has to find it anyway. The literal
+	// `node -e <source>` shape it replaces is gone - the body outgrew the Windows command line, which the
+	// entry-size test above records - and the file shape the bundle really deploys is covered by every other
+	// test in this suite.
+	const session = startHelper(t, { argvSeparator: true });
 	const result = plain(await guard(session.client.request(REMOTE_HELPER_METHOD_HELLO), "hello"));
 	assert.deepEqual(result, {
 		protocolVersion: REMOTE_HELPER_PROTOCOL_VERSION,

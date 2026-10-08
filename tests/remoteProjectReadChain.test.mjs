@@ -100,6 +100,8 @@ function fakeManagerPorts(remote) {
 		resolveNode: async () => ({ nodePath: "/usr/bin/node", version: "v24.11.0", probed: 1 }),
 		createSentinel: () => "sentinel-00000000",
 		createNonce: () => "nonce-000000000001",
+		// 会话建立时的边界复核（lead F3）：默认回显请求路径，避免替身去打真实 SSH。
+		verifyRoot: async ({ userPath }) => ({ canonicalPath: userPath }),
 		createManager: (input) => {
 			const root = input.helperSession.root;
 			const manager = {

@@ -34,6 +34,8 @@ export const ipcChannels = {
 	remoteProjectList: "remote:project-list",
 	/** 按 projectId 读文件（相对路径）。 */
 	remoteProjectRead: "remote:project-read",
+	/** 按 projectId 在项目内做**文件名**搜索（不含内容搜索）；query 在 main 边界重新校验。 */
+	remoteProjectSearch: "remote:project-search",
 	projectsList: "projects:list",
 	projectsAdd: "projects:add",
 	// 文件夹右键菜单直达：按路径添加项目（渲染层确认后调用；projectsAdd 走系统目录选择框）

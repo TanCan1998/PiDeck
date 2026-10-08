@@ -16,9 +16,9 @@ import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
  * the *chain* is wired, and that is the only thing this file asserts:
  *
  *   hello handshake -> private upload snapshot -> finalize frames -> real child process -> fs.stat/fs.list/fs.read
- *   -> RemoteWorkspaceReader
+ *   (and fs.searchNames, exercised straight through the port) -> RemoteWorkspaceReader
  *
- * Every layer is the production one: the frozen helper body (REMOTE_HELPER_INLINE_SOURCE, build 1.4.0)
+ * Every layer is the production one: the frozen helper body (REMOTE_HELPER_INLINE_SOURCE, build 1.6.0)
  * runs as a real child process with a real `--root`, stdout is fed line by line into the real
  * RemoteControlClient, and the real RemoteWorkspaceReader speaks through a port that is nothing but that
  * client. No stub answers a frame anywhere.
@@ -41,9 +41,12 @@ const {
 	REMOTE_HELPER_CAPABILITIES,
 	REMOTE_HELPER_ERROR_CODES,
 	REMOTE_HELPER_MAX_CHUNK_BYTES,
+	REMOTE_HELPER_MAX_SEARCH_MATCHES,
+	REMOTE_HELPER_MAX_SEARCH_QUERY_LENGTH,
 	REMOTE_HELPER_METHOD_CANCEL,
 	REMOTE_HELPER_METHOD_FS_LIST,
 	REMOTE_HELPER_METHOD_FS_READ,
+	REMOTE_HELPER_METHOD_FS_SEARCH_NAMES,
 	REMOTE_HELPER_METHOD_FS_STAT,
 	REMOTE_HELPER_METHOD_HELLO,
 	REMOTE_HELPER_PROTOCOL_VERSION,
@@ -406,7 +409,7 @@ seamTest("the frozen helper's hello frame is the handshake the connection layer 
 	assert.equal(hello.nodeVersion, process.versions.node, "the helper runs on the node this suite started it with");
 	assert.equal(Number.isSafeInteger(hello.pid), true);
 	// The three filesystem methods the reader needs must be advertised under their contract names.
-	for (const method of [REMOTE_HELPER_METHOD_FS_STAT, REMOTE_HELPER_METHOD_FS_LIST, REMOTE_HELPER_METHOD_FS_READ]) assert.ok(hello.capabilities.includes(method), `${method} must be advertised`);
+	for (const method of [REMOTE_HELPER_METHOD_FS_STAT, REMOTE_HELPER_METHOD_FS_LIST, REMOTE_HELPER_METHOD_FS_READ, REMOTE_HELPER_METHOD_FS_SEARCH_NAMES]) assert.ok(hello.capabilities.includes(method), `${method} must be advertised`);
 	assert.deepEqual(Object.keys(hello).sort(), ["arch", "capabilities", "helperVersion", "home", "nodeVersion", "pid", "platform", "protocolVersion", "root"]);
 	// The root is part of the handshake because the connection layer compares it against the root it asked
 	// for: it is the only evidence that the confinement boundary is the directory the caller named.
@@ -718,4 +721,105 @@ seamTest("an aborted call withdraws the very request the client minted", async (
 	assert.equal(codes.includes(REMOTE_WORKSPACE_DIAGNOSTIC_CODES.cancelFailed), false);
 	for (const entry of helper.readerDiagnostics) assert.equal(entry.hostId, HOST_ID);
 	assert.deepEqual(helper.wireCodes(), [], "a withdrawal is not a refusal of the call's work");
+});
+
+/**
+ * A real search tree for fs.searchNames: matches of both cases, a directory whose own name takes part, a
+ * wide directory that only exists to reach the match ceiling, and three links - to a directory inside the
+ * root, to a file inside it, and out of it - each of which must be described as itself and never entered.
+ */
+function createSearchFixture(t) {
+	const base = mkdtempSync(join(tmpdir(), "pideck-e2e-search-"));
+	const root = join(base, "root");
+	const outside = join(base, "outside");
+	mkdirSync(join(root, "nested-report-dir"), { recursive: true });
+	mkdirSync(join(root, "bulk"), { recursive: true });
+	mkdirSync(outside, { recursive: true });
+	writeFileSync(join(root, "Alpha-report.txt"), "alpha report\n");
+	writeFileSync(join(root, "beta-report.TXT"), "beta report\n");
+	writeFileSync(join(root, "notes.md"), "notes\n");
+	writeFileSync(join(root, "nested-report-dir", "deep-report.txt"), "deep report\n");
+	for (let index = 0; index < 600; index += 1) writeFileSync(join(root, "bulk", "bulk-" + String(index).padStart(3, "0") + ".txt"), "");
+	writeFileSync(join(outside, "secret-report.txt"), DECOY);
+	symlinkSync(join(root, "nested-report-dir"), join(root, "report-dir-link"), process.platform === "win32" ? "junction" : "dir");
+	symlinkSync(join(root, "Alpha-report.txt"), join(root, "report-file-link"), process.platform === "win32" ? "file" : undefined);
+	symlinkSync(outside, join(root, "report-outside-link"), process.platform === "win32" ? "junction" : "dir");
+	t.after(() => rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
+	return { base, root, outside };
+}
+
+seamTest("fs.searchNames walks a real tree within its ceilings and its containment rules", async (t) => {
+	const fixture = createSearchFixture(t);
+	const helper = startHelper(t, fixture.root);
+	const search = (params) => guard(helper.port.request(HOST_ID, REMOTE_HELPER_METHOD_FS_SEARCH_NAMES, params, {}), "fs.searchNames " + JSON.stringify(params));
+
+	// Real matches, computed from the disk here: the query name in both cases, the directory that carries
+	// it, the file inside that directory, and the three links as the entries they are.
+	const answer = plain(await search({ path: ".", query: "report" }));
+	assert.deepEqual(Object.keys(answer).sort(), ["entries", "scanned", "truncated"]);
+	assert.deepEqual(
+		answer.entries.map((entry) => ({ path: entry.path, name: entry.name, kind: entry.kind, bytes: entry.bytes })),
+		[
+			{ path: "Alpha-report.txt", name: "Alpha-report.txt", kind: "file", bytes: lstatSync(join(fixture.root, "Alpha-report.txt")).size },
+			{ path: "beta-report.TXT", name: "beta-report.TXT", kind: "file", bytes: lstatSync(join(fixture.root, "beta-report.TXT")).size },
+			{ path: "nested-report-dir", name: "nested-report-dir", kind: "directory", bytes: undefined },
+			{ path: "nested-report-dir/deep-report.txt", name: "deep-report.txt", kind: "file", bytes: lstatSync(join(fixture.root, "nested-report-dir", "deep-report.txt")).size },
+			{ path: "report-dir-link", name: "report-dir-link", kind: "other", bytes: undefined },
+			{ path: "report-file-link", name: "report-file-link", kind: "other", bytes: undefined },
+			{ path: "report-outside-link", name: "report-outside-link", kind: "other", bytes: undefined },
+		],
+	);
+	assert.equal(answer.truncated, false);
+	// Nothing was cut short: the root's eight entries, the nested directory's one and the wide directory's
+	// 600 are all visited, and the two links are the only entries that are not entered.
+	assert.equal(answer.scanned, 609);
+	assert.equal(
+		answer.entries.some((entry) => entry.path.startsWith("report-dir-link/") || entry.path.startsWith("report-outside-link/")),
+		false,
+		"a link is an entry, never a door",
+	);
+	// The request side is the contract's method and params, and it travelled as one frame.
+	const request = helper.ofMethod(REMOTE_HELPER_METHOD_FS_SEARCH_NAMES).at(-1);
+	assert.equal(request.method, REMOTE_HELPER_METHOD_FS_SEARCH_NAMES);
+	assert.deepEqual(Object.keys(request.params), ["path", "query"]);
+	assert.equal(request.params.path, ".");
+	assert.equal(request.params.query, "report");
+
+	// The match ceiling: 600 entries answer to "bulk" - the directory's own name included - so the walk
+	// stops at the ceiling and says so instead of looking like the whole tree.
+	const capped = plain(await search({ path: ".", query: "bulk" }));
+	assert.equal(capped.entries.length, REMOTE_HELPER_MAX_SEARCH_MATCHES);
+	assert.equal(capped.truncated, true);
+	assert.equal(capped.entries[0].path, "bulk");
+	assert.equal(capped.entries[1].path, "bulk/bulk-000.txt");
+	assert.equal(capped.entries.at(-1).path, "bulk/bulk-510.txt");
+	assert.equal(capped.scanned, 8 + 511, "eight root entries and the 511 matches that filled the ceiling");
+	// A caller's own ceiling truncates earlier, and the entry that fills it is part of the answer.
+	const small = plain(await search({ path: ".", query: "bulk", maxMatches: 2 }));
+	assert.deepEqual(
+		small.entries.map((entry) => entry.path),
+		["bulk", "bulk/bulk-000.txt"],
+	);
+	assert.equal(small.truncated, true);
+	assert.equal(small.scanned, 9);
+	// A huge maxMatches is clamped to the contract's ceiling, not honoured.
+	const huge = plain(await search({ path: ".", query: "bulk", maxMatches: 999 }));
+	assert.equal(huge.entries.length, REMOTE_HELPER_MAX_SEARCH_MATCHES);
+
+	// The containment rules are the batch's: an escape is refused before anything is opened, and an
+	// unusable query is refused under its own code.
+	const escaped = await rejection(helper.port.request(HOST_ID, REMOTE_HELPER_METHOD_FS_SEARCH_NAMES, { path: "../outside", query: "report" }, {}), "fs.searchNames outside the root");
+	assert.equal(escaped.code, "PATH_OUTSIDE_ROOT");
+	assert.equal(escaped.retryable, false);
+	const absolute = await rejection(helper.port.request(HOST_ID, REMOTE_HELPER_METHOD_FS_SEARCH_NAMES, { path: fixture.outside, query: "report" }, {}), "fs.searchNames of an absolute path");
+	assert.equal(absolute.code, "PATH_OUTSIDE_ROOT");
+	const empty = await rejection(helper.port.request(HOST_ID, REMOTE_HELPER_METHOD_FS_SEARCH_NAMES, { path: ".", query: "" }, {}), "fs.searchNames with an empty query");
+	assert.equal(empty.code, "QUERY_INVALID");
+	const overlong = await rejection(helper.port.request(HOST_ID, REMOTE_HELPER_METHOD_FS_SEARCH_NAMES, { path: ".", query: "r".repeat(REMOTE_HELPER_MAX_SEARCH_QUERY_LENGTH + 1) }, {}), "fs.searchNames with an over-long query");
+	assert.equal(overlong.code, "QUERY_INVALID");
+	for (const code of helper.wireCodes()) assert.ok(REMOTE_HELPER_ERROR_CODES.includes(code), code + " is not in the contract's closed vocabulary");
+	for (const text of [helper.lines.join("\n"), helper.stderrText()]) {
+		assert.equal(text.includes(DECOY), false, "the decoy outside the root must never be read");
+		assert.equal(text.includes("secret-report.txt"), false, "no remote text or requested path may travel back through an error");
+	}
 });

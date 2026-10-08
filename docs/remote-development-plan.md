@@ -738,6 +738,9 @@ Phase 1 是全计划风险最高的契约迁移（全库 path-bearing contract �
 >
 > **下一步与未完成项**：已确定设置页只留设备管理，项目登记移到侧栏「+」，删除旧 `remoteWorkspace*` 临时浏览通道；同时必须修复 `remoteProject*` 整次读取隔离，不能认为删掉设置页浏览就解决了项目间串根。确认时与重连时的 canonical 复核、失败后的 `needs-attention`、持久化/引用一致性、搜索/Session 扫描、Windows/WSL 验收与跨 store INV-5 仍未完成。继续沿用同主机单 helper/root、切项目重连，多 root 协议另行设计。完成任务与验收见交接文档 §3；**Phase 3 尚未完成**。
 
+> **状态更新（2026-02，第一批 + 第二批实施后）——上面这段「下一步与未完成项」中以下各条已落地，请以本行为准，不要把旧描述当现状**：① 设置页只留设备管理、项目登记已迁到侧栏「+」、旧 `remoteWorkspace*` 五条通道已删除；② `remoteProject*` 的**整次读取隔离**已修（`withProjectSession` 持有每主机 FIFO 锁覆盖切根 + 就绪判定 + 整次列目录/分块读，且会话绑定到建立它的 manager）；③ 确认时**与**重连/建立会话时的 canonical 复核已实现（漂移 `SSH_PROJECT_ROOT_CHANGED`、探测失败 `SSH_PROJECT_ROOT_UNRESOLVED`，都不建立会话）；④ 持久化/引用一致性已收敛到 `src/shared/projectLocation.ts` 的同一判据并 fail-closed；⑤ 远端项目**文件名搜索**已只读上线（冻结 helper `fs.searchNames`，build 1.6.0，经 `remote:project-search`）。
+> **仍未完成**：远端 Session 扫描（`session.list`/`session.readPage`、catalog 远端 locator、稳定 id 匹配）；root 漂移**接入 `needs-attention` 状态呈现**（当前只有 fail-closed 拒绝）；严格跨进程 CAS / 跨 store INV-5；真机与 Electron 验收；`remoteHostIpc` 按域拆分。逐条证据与未验收边界见 [交接文档](remote-development-handoff.md) §3 末。
+
 - 只允许添加已有远端目录；创建空目录和 `git init` 属于写操作，移到 Phase 5。
 - 文件树、文件读取、搜索和 Session 扫描先只读上线。
 - 本地 catalog 记录远端项目和 Session locator。

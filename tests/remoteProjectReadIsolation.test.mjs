@@ -135,6 +135,9 @@ function fakeManagerPorts(remote, overrides = {}) {
 		resolveNode: async () => ({ nodePath: "/usr/bin/node", version: "v24.11.0", probed: 1 }),
 		createSentinel: () => "sentinel-00000000",
 		createNonce: () => "nonce-" + String(calls.bootstrap.length + 1).padStart(12, "0"),
+		// 会话建立时的边界复核（lead F3）。默认回显请求路径＝「仍 canonical 指向它自己」，
+		// 否则替身会去打真实 SSH；要构造漂移就覆盖这里。
+		verifyRoot: async ({ userPath }) => ({ canonicalPath: userPath }),
 		createManager: (input) => {
 			const root = input.helperSession.root;
 			const record = { root, hostIds: [], requests: [], disconnects: [], disposed: 0 };

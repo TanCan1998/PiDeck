@@ -1,7 +1,8 @@
 # PiDeck SSH 远程开发 — 协作与交接
 
 > 当前开发分支：`feat/remote-development`。代码核对基线：`f7b18947`（第一次协作交接点）；首次交接提交：`a663947c`。
-> 第一批（A 读取隔离 / B 侧栏入口 / C 持久化校验）已实施完成，落地位置、验证命令与**未验收边界**见 §3 末尾与 §5；文档里凡未在真机或 Electron 内跑过的能力都保持「未验收」标注。
+> 第一批（A 读取隔离 / B 侧栏入口 / C 持久化校验）与第二批（F1 helper 只读搜索 / F2 搜索链路 / F3 会话建立与重连时的 root 复核）已实施完成，落地位置、验证命令与**未验收边界**见 §3 末尾与 §5；文档里凡未在真机或 Electron 内跑过的能力都保持「未验收」标注。
+> 下一步（第三批）：远端 Session 扫描（`session.list`/`session.readPage` + catalog 远端 locator）、root 漂移接入 `needs-attention` 的状态呈现、`remoteHostIpc` 按域拆分，以及真机/Electron 验收与跨 store INV-5。
 > 本页是协作入口：实现状态、下一批任务、验收与验证方法。架构和发布范围见 [实施计划](remote-development-plan.md)，跨 store 设计见 [事务设计](remote-host-cross-store-design.md)。
 > 文档中的任务包是待实施工作，不表示已分配给具体开发者或已创建 GitHub issue。
 
@@ -18,7 +19,8 @@
 | SSH 项目持久化、登记确认、按 `projectId` 只读浏览 | 已实现：写入侧 / codec 读取 / 主机引用扫描收敛到同一 shared 判据；approve 时复核 canonical root 与主机可用性。定向测试与独立操作链测试通过；**尚无 Electron/真机验收**，Phase 3 未收口 |
 | 跨 store rebind | journal、tx 锁、收敛算法及 store 端口已有实现；应用协调器与严格跨 store 写入互斥仍缺失 |
 | 远端 pi RPC | 曾完成一次 `get_available_models` 成功往返；尚未接入应用的远端 Agent/Session 生命周期 |
-| 搜索、远端 Session 扫描、写文件、Git、终端 | 尚未开放；不能回落到本地实现 |
+| 远端项目**文件名搜索** | 已实现：冻结 helper 新增有界 `fs.searchNames`（build 1.6.0），经 `remote:project-search` → `withProjectSession` → `RemoteSearchReader` 只读上线；有真实子进程端到端与独立对抗用例。**尚无真机/Electron 验收**；不含内容搜索 |
+| 远端 Session 扫描、写文件、Git、终端 | 尚未开放；不能回落到本地实现 |
 
 **已接线的调用链**：`main/index.ts` → `RemoteHostConnectionService` → `bootstrapPinnedHost` → `RemoteBootstrapDeployment` → upload/finalize；连接 manager/attempt 消费 `RemoteControlClient`。修复也已有 IPC。项目只读读取走 `remote:project-list/read` → `withProjectSession` → `RemoteWorkspaceReader`。不要把这些模块当作“只有脚本会调用”的桩，也不要只凭 `index.ts` 有没有直接 import 判定可达性。
 
@@ -91,11 +93,34 @@ A/B/C 可由不同开发者并行，D 随开发跟进。每块指定一个负责
 - 用户显式断开后，后台读取返回 `SSH_HOST_DISCONNECTED` 而不是偷偷重连；用户自己发起的 `remote:connect` 会替换被 latch 的 manager 并恢复读取。
 
 **第一批未完成 / 未验收（不得描述为已完成）**：
-1. **读取时复核 canonical root**：`withProjectSession` 直接拿 `ProjectStore` 的 `remotePath` 当边界；全仓 `resolveRemoteBrowseRoot` 只在「登记 offer」与「approve 复核」两处调用。所以 §3.A 最后一条「持久项目重连时复核 canonical root，漂移/无法复核需拒绝读取」**尚未实现**，只有 approve 时复核落地。端到端验收需要真实 SSH 探测。
+1. **读取时复核 canonical root**：**已在第二批（F3）实现**——会话需要建立或重建时，在操作锁内用 `verifyRoot`（默认 `resolveRemoteBrowseRoot`）复核，漂移 `SSH_PROJECT_ROOT_CHANGED`、探测失败 `SSH_PROJECT_ROOT_UNRESOLVED`，两者都不建立会话、不发 helper 请求。**仍未做的是状态呈现**：漂移没有路由进连接状态机的终态 `needs-attention`（见第二批遗留项 2），且真机上的 pinned 探测未验收。
 2. **严格跨进程 CAS 与跨 store interlock** 仍未交付（见 §3C 末条）；现有实现与测试不得被描述为事务安全已闭环。
 3. **sessions 域同类不对称仍在**：`SessionCatalog.isSessionLocator` 接受任意非空 `hostId`，而引用扫描要求 UUID。归属 `src/main/sessions/**`，本批未改。
 4. **真机 / Electron 验收未做**：添加主机整条链路（独立核验指纹 / pin / 真实 bootstrap 与 helper 上传）、真实 `resolveRemoteBrowseRoot` 探测、侧栏「+」→ 登记弹框的真实点击链、Dialog 交互与 Esc/遮罩关闭，全部未在真机或 Electron 内跑过。
 5. **体量债**：`src/main/ipc/remoteHostIpc.ts` 仍有 ~727 行（仓库规则 >600 行须评估拆分），本批只做删减、未拆分。
+
+### 第二批落地结果与遗留项（实施后核对）
+
+本批把 Phase 3 剩余只读能力里的**文件名搜索**做完，并补上「会话建立/重连时复核 canonical root」。远端 Session 扫描**有意推迟到第三批**（理由见下）。
+
+| 块 | 落地位置 | 验证 |
+| --- | --- | --- |
+| F1 冻结 helper 只读扩展 | `RemoteHelperContract.ts`（op `fs.searchNames`、`QUERY_INVALID`、上限常量 512/20000/12/128、capabilities）；`RemoteHelperEntry.ts`（build **1.6.0**，sha `66b041d2…c538f`） | `tests/remoteHelperSearchNames.test.mjs`、`tests/remoteWorkspaceEndToEnd.test.mjs`（真实子进程 + 真实 `--root`）、`tests/remoteHelperEntry.test.mjs`；独立验证 `tests/remoteSearchIsolation.test.mjs` |
+| F2 搜索链路 | `src/main/remote/RemoteSearchReader.ts`（严格逐字段校验并重建、稳定码、远端文本不外传）；`remote:project-search` handler；渲染层 `useRemoteProjectSearch` + 面板搜索入口（迟到结果作废、截断如实提示） | `tests/remoteSearchReader.test.mjs`、`tests/remoteProjectSearchState.test.mjs`、`tests/remoteHostIpc.test.mjs`（通道三处同步 + 边界校验 + 门禁） |
+| F3 会话建立/重连时复核 root | `RemoteHostConnectionService`：新增 `verifyRoot` 端口（默认接 `resolveRemoteBrowseRoot`），只在会话需要建立或重建时、于操作锁内复核 | `tests/remoteProjectReadConcurrency.test.mjs`（先红后绿）、`tests/remoteHostConnectionService.test.mjs`；独立验证 `tests/remoteProjectRootReverify.test.mjs` |
+
+**已自动验收**：文件名搜索的 16 例逃逸与 8 例非法 query/params 全拒且零帧；匹配/已扫描/深度/单目录 dirent 四项上限与 `truncated` 语义；symlink 恒 `other` 且从不跟随；queued 与 in-flight cancel 各恰好一帧 `REQUEST_CANCELLED` 且无部分结果；reader 对 25 类畸形结果的 `PROTOCOL_INVALID`；`truncated` 如实透传（0 匹配 + 截断不被折叠）；渲染层迟到结果作废；root 复核先于建会话、锁内执行、漂移零 helper 请求；在真实 helper 子进程上把 root 改指到 root 外或删除 root 后 `fs.list`/`fs.searchNames`/`fs.read` 全部被拒且零泄漏；helper 源码 sha 与导出常量、manifest、上传计划自洽（陈旧 sha 会被 `BUNDLE_MANIFEST_INVALID` fail-closed）。
+
+**两处必须写清的取舍**：
+1. **搜索的 I/O 取舍（已裁决，不是缺陷）**：要让截断结果是**按 name 序的可复现前缀**，helper 必须先把当前目录的名字读完再按序访问。因此「匹配上限触顶」保证的是 **stop-visiting**（不再开新目录、不再访问新条目、不深入子树），**不是 stop-reading**；单次调用 dirent 读取硬上限 20001，最坏相对理想路径 ≤39 倍放大。想改成 stop-reading 就必须先放弃名序可复现性——那是契约改写，别在下游把它当 bug 修。
+2. **helper 的 `node -e <source>` 启动形态不再有测试覆盖**：helper body 增长后，其 `-e` 命令行超过 Windows CreateProcess 上限（32767）。**生产不受影响**：生产只用 `-e` 启 bootstrap entry（`RemoteBootstrapContract` 的载荷 14689 字节，仍在限内），helper 本体是**写文件后按文件路径启动**的（`RemoteBootstrapDeployment` 写盘 → manager 用部署路径 spawn）。测试里保留反向 tripwire 记录这次覆盖是刻意移除的。
+
+**第二批未完成 / 未验收**：
+1. **远端 Session 扫描仍完全未做**（`session.list`/`session.readPage`、catalog 远端 locator 与稳定 id 匹配、两层标题获取）。推迟理由：`session.list` 必须先定清「远端 session 根」是什么——那是远端 pi 的会话目录布局，属 Phase 4 的 runtime 探测面；现在定会把 op 定义在半空中，且 helper 版本要为它再 bump 一次。**第三批第一步**。
+2. **root 漂移未接入 `needs-attention` 的状态呈现**：本批落地的是「复核 + 拒绝读取」（fail-closed），漂移以稳定码呈现。Phase 3 门禁里「重连时 root 复核失败进入 `needs-attention`」的**状态那一半仍未接线**：`needs-attention` 由 `SshConnectionManager` 拥有且只有 attempt 失败能进入，新增该路由需要管理器/服务新接口，本批未做。
+3. **真机与 Electron 全未验收**：`verifyRoot` 的 pinned 探测、搜索、侧栏与面板的真实点击链都只在假 ports + 真实子进程 helper 上验过；POSIX symlink 语义用 Windows junction 代替。
+4. **严格跨进程 CAS / 跨 store interlock** 仍未交付（同第一批遗留项 2）。
+5. **`src/main/ipc/remoteHostIpc.ts` 体量债未清**：本批又给它加了一个 handler（现约 800 行，>600 规则）。拆分方案已明确——把「项目登记 + 项目读取 + 搜索」拆到 `src/main/ipc/remoteProjectIpc.ts`，hosts（添加/指纹/连接/诊断/修复）留在原文件，`main/index.ts` 多注册一个域。**建议第三批随 Session 通道一起做**（那次必然新增 IPC 文件，正好一次拆到位）；单独拆一个刚被验证过的文件收益低、风险高。
 
 ## 4. M1 之后如何推进
 
@@ -120,14 +145,14 @@ PIDECK_REMOTE_EXPERIMENTAL=1 npm run dev
 
 ```bash
 npm run typecheck
-node --test tests/remoteHostIpc.test.mjs tests/remoteHostConnectionService.test.mjs tests/remoteProjectReadConcurrency.test.mjs tests/remoteHostOperationLock.test.mjs tests/remoteProjectReadIsolation.test.mjs tests/remoteProjectReadChain.test.mjs
+node --test tests/remoteHostIpc.test.mjs tests/remoteHostConnectionService.test.mjs tests/remoteProjectReadConcurrency.test.mjs tests/remoteHostOperationLock.test.mjs tests/remoteProjectReadIsolation.test.mjs tests/remoteProjectReadChain.test.mjs tests/remoteSearchReader.test.mjs tests/remoteHelperSearchNames.test.mjs tests/remoteSearchIsolation.test.mjs tests/remoteProjectRootReverify.test.mjs
 ```
 
 跨域集成时再跑：`npm run check:format`，以及 `tests/remoteBrowseRoot.test.mjs`（本机有 1 个既有的 `/bin/sh` 平台失败）、`tests/remoteWorkspaceReader.test.mjs`、`tests/remoteWorkspaceEndToEnd.test.mjs`。
 
 C 对应 `projectStoreCodec.test.mjs`、`projectStoreMigration.test.mjs`、`remoteHostReferenceSources.test.mjs`；B 需更新 `settingsTabLayout.test.mjs` 并补实际交互状态覆盖。格式化仅涉及文件（`node_modules/.bin/biome format --write <files...>`）；集成时运行 `npm run check:format`。纯文档修改检查差异、链接与命令准确性即可。
 
-**测试记录的边界（第一批实施后更新）**：本批在 Windows / Node 24.19 上跑的集成集合为 remote + project store 共 33 个文件，实测 **512 项 / 505 pass / 2 fail / 5 skip**；那 2 个 fail 就是下面列出的**既有**失败，在干净基线 worktree 上逐字复现。`npm run typecheck` 与 `npm run check:format`（2173 个文件，无改动）通过。全量 `npm test` 本批未跑（仓库规则：仅跨域大改动或合并前最终确认时跑），因此**没有「全量已全绿」这个结论**。
+**测试记录的边界（第二批实施后更新）**：Windows / Node 24.19 上跑的集成集合（remote* + projectStore* + 侧栏/面板/文案/连接管理器）：第一批时 33 个文件 **512 项 / 505 pass / 2 fail / 5 skip**；第二批后 **46 个文件 689 项 / 682 pass / 2 fail / 5 skip**。两轮 fail 的**名称与断言完全相同**，就是下面列出的**既有**失败，并已在干净基线 worktree 上逐字复现——所以第二批零回归。`npm run typecheck` 与 `npm run check:format`（2173 个文件，无改动）通过。全量 `npm test` 本批未跑（仓库规则：仅跨域大改动或合并前最终确认时跑），因此**没有「全量已全绿」这个结论**。
 
 这 2 个既有失败已在**干净基线 worktree（`f7b18947`，不含本批任何改动）上逐字复现**，不是本批引入的回归，而且不能全归为平台原因：
 - `tests/remoteBootstrapSessionIntegration.test.mjs` → `BOOTSTRAP_READY_INVALID`（真实子进程 + frozen entry 握手，两侧同样失败）；

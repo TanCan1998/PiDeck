@@ -3,7 +3,7 @@
  * Types and limits only — parsing, framing and validation live in the modules that own them, so this
  * file stays the single place both sides agree on.
  *
- * The read-only workspace batch (`fs.stat`, `fs.list`, `fs.read`) is declared here in the same spirit:
+ * The read-only workspace batch (`fs.stat`, `fs.list`, `fs.read`, `fs.searchNames`) is declared here in the same spirit:
  * the method name, the exact result fields and every bound are literals in this file, and the frozen
  * helper body — which cannot import anything — repeats those literals under test (§7.1). A result shape
  * that is not stated here is not part of the protocol, and a bound that is not stated here is not
@@ -47,7 +47,9 @@ export const REMOTE_HELPER_MAX_REQUEST_TIMEOUT_MS = 300_000;
  * no file access. `RESULT_TOO_LARGE` is a bounded result that is refused instead of truncated, `ROOT_INVALID`
  * is the fatal startup answer of a helper whose `--root` argument is present but unusable (empty, relative,
  * `/`, not a directory or unreadable), and `NOT_A_FILE` covers both a directory and a non-regular entry
- * handed to `fs.read`.
+ * handed to `fs.read`. `QUERY_INVALID` is `fs.searchNames`' own refusal for a search term that is absent,
+ * empty, longer than REMOTE_HELPER_MAX_SEARCH_QUERY_LENGTH or carrying a control byte: the term is checked
+ * before any filesystem access, the way a path is, so an unusable query never becomes a partial walk.
  */
 export const REMOTE_HELPER_ERROR_CODES = [
 	"METHOD_NOT_FOUND",
@@ -58,6 +60,7 @@ export const REMOTE_HELPER_ERROR_CODES = [
 	"PATH_NOT_FOUND",
 	"NOT_A_DIRECTORY",
 	"NOT_A_FILE",
+	"QUERY_INVALID",
 	"PERMISSION_DENIED",
 	"IO_ERROR",
 	"ROOT_INVALID",
@@ -76,7 +79,13 @@ export const REMOTE_HELPER_METHOD_CANCEL = "cancel";
 export const REMOTE_HELPER_METHOD_FS_STAT = "fs.stat";
 export const REMOTE_HELPER_METHOD_FS_LIST = "fs.list";
 export const REMOTE_HELPER_METHOD_FS_READ = "fs.read";
-export const REMOTE_HELPER_CAPABILITIES = ["echo", "fs.stat", "fs.list", "fs.read"] as const;
+/**
+ * `fs.list`'s recursive cousin: one bounded walk below a request path, answering the entries whose
+ * basename contains a query. It is the one read-only method that is not a single filesystem call, so it
+ * holds a concurrency slot and can be cancelled while it runs (the other three run inline in dispatch).
+ */
+export const REMOTE_HELPER_METHOD_FS_SEARCH_NAMES = "fs.searchNames";
+export const REMOTE_HELPER_CAPABILITIES = ["echo", "fs.stat", "fs.list", "fs.read", "fs.searchNames"] as const;
 export type RemoteHelperCapability = (typeof REMOTE_HELPER_CAPABILITIES)[number];
 /**
  * Ceiling for one requested relative path. It is applied to the raw string before any filesystem access,
@@ -89,6 +98,21 @@ export const REMOTE_HELPER_MAX_PATH_LENGTH = 4096;
  * 4096 entries of at most 255 byte names stay below the 8 MiB frame cap with room to spare.
  */
 export const REMOTE_HELPER_MAX_LIST_ENTRIES = 4096;
+/**
+ * Hard ceilings for `fs.searchNames`, all of them enforced inside the frozen helper. At most 512 matches
+ * are answered, at most 20000 directory entries are visited, and no entry deeper than 12 path segments
+ * below the request path is reached (the request path itself is depth 0, a file directly inside it depth
+ * 1). Reaching any of them stops the walk *at that entry* and answers `truncated: true`, so a bounded
+ * answer is a deterministic prefix instead of a listing that quietly looks complete. The walk is
+ * breadth first and visits each directory's entries in name order, so one directory is read (bounded by the
+ * entry ceiling) before any of its entries is visited: that ceiling is also the work bound of a call. 512 entries of at
+ * most 255 byte names stay far below the 8 MiB frame cap with room to spare.
+ */
+export const REMOTE_HELPER_MAX_SEARCH_MATCHES = 512;
+export const REMOTE_HELPER_MAX_SEARCH_SCANNED = 20000;
+export const REMOTE_HELPER_MAX_SEARCH_DEPTH = 12;
+/** Query ceiling for `fs.searchNames`, counted in characters and checked before any filesystem access. */
+export const REMOTE_HELPER_MAX_SEARCH_QUERY_LENGTH = 128;
 /** Bounded concurrency plus a bounded waiting room: past both, a request is refused, never buffered. */
 export const REMOTE_HELPER_MAX_QUEUED_REQUESTS = 64;
 /**
@@ -151,6 +175,26 @@ export type RemoteHelperListParams = { path: string };
 export type RemoteHelperListEntry = { name: string; kind: RemoteHelperPathKind; bytes?: number };
 /** Entries are sorted by name in code-unit order and capped by REMOTE_HELPER_MAX_LIST_ENTRIES. */
 export type RemoteHelperListResult = { entries: readonly RemoteHelperListEntry[] };
+
+/**
+ * `path` names the directory to walk and is checked exactly as `fs.list` checks one. `query` is matched
+ * against each entry's basename, case-insensitively, and directory names take part in the match.
+ * `maxMatches` is optional and is *clamped* by the helper to 1..REMOTE_HELPER_MAX_SEARCH_MATCHES (absent
+ * means that ceiling); a value that is not a safe integer is refused as PROTOCOL_INVALID.
+ */
+export type RemoteHelperSearchParams = { path: string; query: string; maxMatches?: number };
+/**
+ * `path` is the entry's relative POSIX path inside the root (never absolute, never the root itself),
+ * `name` its basename and `kind` its own classification — a symlink is `other` and is never followed.
+ * `bytes` is present for regular files only. Entries are sorted by `path` in code-unit order.
+ */
+export type RemoteHelperSearchEntry = { path: string; name: string; kind: RemoteHelperPathKind; bytes?: number };
+/**
+ * `scanned` counts every entry the walk visited, matching or not, so it is always at least
+ * `entries.length` and never above REMOTE_HELPER_MAX_SEARCH_SCANNED; `truncated` says that one of the
+ * three ceilings stopped the walk, which is the only case in which the answer is not the whole tree.
+ */
+export type RemoteHelperSearchResult = { entries: readonly RemoteHelperSearchEntry[]; scanned: number; truncated: boolean };
 
 /**
  * `offset` and `bytes` are safe non-negative integers; `bytes` is at most REMOTE_HELPER_MAX_CHUNK_BYTES,

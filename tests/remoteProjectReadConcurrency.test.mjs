@@ -86,7 +86,9 @@ async function harness(run) {
 		const events = [];
 		const requests = [];
 		const managers = [];
-		const control = { gate: null, connectFails: false };
+		const verifyCalls = [];
+		// verifyRootCanonical 用来制造「root 已漂移」；verifyRootFails 用来制造「无法复核」。
+		const control = { gate: null, connectFails: false, verifyRootCanonical: undefined, verifyRootFails: false };
 		let disposed = 0;
 
 		const ports = {
@@ -94,6 +96,13 @@ async function harness(run) {
 			resolveNode: async () => ({ nodePath: "/usr/bin/node", version: "v24.11.0", probed: 1 }),
 			createSentinel: () => "sentinel00000001",
 			createNonce: () => "nonce-000000000001",
+			// 真实实现是 RemoteBrowseRoot.resolveRemoteBrowseRoot（pinned readlink -f 探测）；默认回显请求值，
+			// 让「复核通过」这条路径在替身上也可测。
+			verifyRoot: async ({ hostId, userPath }) => {
+				verifyCalls.push({ hostId, userPath });
+				if (control.verifyRootFails) throw new Error("REMOTE_BROWSE_ROOT_UNRESOLVED");
+				return { canonicalPath: control.verifyRootCanonical ?? userPath };
+			},
 			createManager: (input) => {
 				// root 在会话创建时固定：这正是「切根必须重建会话」的原因。
 				const root = input.helperSession.root;
@@ -168,6 +177,7 @@ async function harness(run) {
 			events,
 			requests,
 			managers,
+			verifyCalls,
 			control,
 			disposedCount: () => disposed,
 			list: (projectId, path = "") => handlers.get("remote:project-list")({}, projectId, path),
@@ -283,6 +293,37 @@ test("用户显式断开后，用户自己发起的重连必须能恢复", async
 		const read = await api.read("project-a", "data.bin");
 		assert.equal(read.ok, true, "用户重连后必须可读，实际 " + JSON.stringify(read));
 		assert.equal(decodeBase64(read.contentBase64), "AAAA");
+	});
+});
+
+test("root 在会话建立前已被改指时，读取必须被拒且不发出任何 helper 请求", async () => {
+	await harness(async (api) => {
+		api.control.verifyRootCanonical = "/srv/a-moved";
+		const read = await api.read("project-a", "data.bin");
+		assert.equal(read.ok, false, "漂移的边界不得被读取");
+		assert.equal(read.code, "SSH_PROJECT_ROOT_CHANGED");
+		assert.deepEqual(api.requests, [], "会话都没建立，一个 helper 请求都不该发出");
+		assert.equal(api.managers.length, 0, "也不该建立任何会话");
+	});
+});
+
+test("root 无法复核时，读取必须 fail-closed", async () => {
+	await harness(async (api) => {
+		api.control.verifyRootFails = true;
+		const read = await api.read("project-a", "data.bin");
+		assert.equal(read.ok, false, "复核不了就不能读");
+		assert.equal(read.code, "SSH_PROJECT_ROOT_UNRESOLVED");
+		assert.deepEqual(api.requests, [], "复核失败不得发出 helper 请求");
+	});
+});
+
+test("复核只在会话建立时发生，不会加到每次读取的热路径上", async () => {
+	await harness(async (api) => {
+		assert.equal((await api.read("project-a", "data.bin")).ok, true, "复核通过时读取照常");
+		const afterFirst = api.verifyCalls.length;
+		assert.ok(afterFirst >= 1, "会话建立时必须复核一次");
+		assert.equal((await api.read("project-a", "data.bin")).ok, true);
+		assert.equal(api.verifyCalls.length, afterFirst, "同一个已建立的会话不得每次读取都重新探测");
 	});
 });
 

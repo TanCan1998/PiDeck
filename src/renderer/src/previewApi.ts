@@ -364,6 +364,7 @@ export function createPreviewApi(): PiDesktopApi {
 			onProjectEnrollConfirm: () => () => undefined,
 			listProject: async () => ({ ok: false as const, code: "REMOTE_FEATURE_DISABLED" }),
 			readProjectFile: async () => ({ ok: false as const, code: "REMOTE_FEATURE_DISABLED" }),
+			searchProject: async () => ({ ok: false as const, code: "REMOTE_FEATURE_DISABLED" }),
 		},
 		projects: {
 			list: async () => projects,

@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { RemoteHostStore } from "./RemoteHostStore";
 import { createRemoteHostOperationLock } from "./RemoteHostOperationLock";
+import { resolveRemoteBrowseRoot } from "./RemoteBrowseRoot";
 import { bootstrapPinnedHost, resolveRemoteNodeExecutable } from "./RemoteBootstrapSession";
 import { createSshConnectionManager, type SshConnectionManager, type SshHelperSession } from "./SshConnectionManager";
 import { createSshProcessLauncher } from "./SshProcessLauncher";
@@ -33,6 +34,11 @@ export type RemoteHostConnectionPorts = {
 	createNonce: () => string;
 	/** Mint the login-shell probe sentinel; injected so tests are deterministic. */
 	createSentinel: () => string;
+	/**
+	 * Re-prove that a project's boundary still canonicalizes to itself (a pinned `readlink -f`). Injected so
+	 * tests never probe a real host; the default is the same resolver the enrollment flow already uses.
+	 */
+	verifyRoot: (input: { userDataDir: string; hostId: string; client: SshClientRuntime; userPath: string }) => Promise<{ canonicalPath: string }>;
 };
 
 export type RemoteHostConnectionServiceOptions = {
@@ -103,6 +109,7 @@ function defaultPorts(): RemoteHostConnectionPorts {
 		createManager: (options) => createSshConnectionManager(options),
 		createNonce: () => randomBytes(DEFAULT_NONCE_BYTES).toString("base64url"),
 		createSentinel: () => randomBytes(DEFAULT_NONCE_BYTES).toString("hex"),
+		verifyRoot: (input) => resolveRemoteBrowseRoot(input),
 	};
 }
 
@@ -257,6 +264,26 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 	 * establish error can be translated into its own stable code instead of being flattened by the caller
 	 * into a generic read failure. The returned session is bound to the manager it was established on.
 	 */
+	/**
+	 * Re-prove that a project's boundary still canonicalizes to itself.
+	 *
+	 * A persisted `remotePath` is only a string from `ProjectStore`; nothing about it proves the directory is
+	 * still the one the user confirmed. A path that was deleted, replaced, or whose symlink now points
+	 * elsewhere would otherwise be read as if it were that boundary. Worth one pinned `readlink -f` per
+	 * session establishment (drift is a low-frequency event); far too expensive on every read.
+	 */
+	async function verifyProjectRoot(hostId: string, root: string): Promise<{ ok: true } | { ok: false; code: string }> {
+		let canonicalPath: string;
+		try {
+			canonicalPath = (await ports.verifyRoot({ userDataDir: options.userDataDir, hostId, client: options.client, userPath: root })).canonicalPath;
+		} catch {
+			// The probe's own code describes the probe, not the project boundary; callers act on the latter.
+			return { ok: false, code: "SSH_PROJECT_ROOT_UNRESOLVED" };
+		}
+		if (canonicalPath !== root) return { ok: false, code: "SSH_PROJECT_ROOT_CHANGED" };
+		return { ok: true };
+	}
+
 	async function establishProjectSession(hostId: string, root: string): Promise<{ ok: true; session: RemoteProjectSession } | { ok: false; code: string }> {
 		const entry = entryFor(hostId);
 		if ((workspaceRoots.get(hostId) ?? options.root) !== root) {
@@ -266,6 +293,8 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 			discard(entry);
 		}
 		let manager = entry.manager;
+		// A ready session on the requested root is the only case that needs neither a probe nor a new session.
+		let reestablish = true;
 		if (manager !== undefined) {
 			const current = manager.getState(hostId);
 			if (current.latched === true) {
@@ -276,12 +305,16 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 				// An attempt is already in flight, or the manager is healing itself: rebuilding here would fight
 				// it, so report the state's own code and let its owner finish.
 				return { ok: false, code: current.lastCode ?? "SSH_HOST_NOT_READY" };
-			} else if (current.state !== "ready") {
-				// disconnected/offline: the verified helper location is still valid, so revive in place instead
-				// of paying for node discovery and another upload.
-				const revived = await manager.connect(hostId);
-				if (revived.state !== "ready") return { ok: false, code: revived.lastCode ?? "SSH_HOST_NOT_READY" };
+			} else if (current.state === "ready") {
+				reestablish = false;
 			}
+		}
+		if (reestablish) {
+			// Re-check the boundary before rebuilding or reconnecting on it. Runs here, inside the host's
+			// operation lock: probing first and establishing outside it would leave a window in which the
+			// verified path is not the path the session is actually confined to.
+			const verified = await verifyProjectRoot(hostId, root);
+			if (!verified.ok) return verified;
 		}
 		if (manager === undefined) {
 			const held = await ensureHeld(entry, hostId);
@@ -289,6 +322,11 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 			entry.manager = manager;
 			const connected = await manager.connect(hostId);
 			if (connected.state !== "ready") return { ok: false, code: connected.lastCode ?? "SSH_HOST_NOT_READY" };
+		} else if (reestablish) {
+			// disconnected/offline: the verified helper location is still valid, so revive in place instead of
+			// paying for node discovery and another upload.
+			const revived = await manager.connect(hostId);
+			if (revived.state !== "ready") return { ok: false, code: revived.lastCode ?? "SSH_HOST_NOT_READY" };
 		}
 		const bound = manager;
 		return {

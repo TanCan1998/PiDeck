@@ -185,3 +185,14 @@ export type RemoteProjectListResult = { ok: true; entries: RemoteWorkspaceEntry[
 
 /** 读项目内文件的结果；`contentBase64` 跨 IPC 传二进制。 */
 export type RemoteProjectReadResult = { ok: true; contentBase64: string; bytes: number; mtimeMs: number } | { ok: false; code: string };
+
+/** 一条文件名匹配；`path` 是**相对项目根**的 POSIX 路径，渲染层不得当成本机路径。 */
+export type RemoteProjectSearchEntry = { path: string; name: string; kind: RemoteWorkspacePathKind; bytes?: number };
+
+/**
+ * 项目内文件名搜索结果。
+ *
+ * `truncated` 必须如实呈现：它表示遍历在某一项上限处收束（匹配数 / 已扫描条目 / 深度 / 单目录条目），
+ * 因此界面可以说「结果已截断」，而不是把一屏结果伪装成完整答案。
+ */
+export type RemoteProjectSearchResult = { ok: true; entries: RemoteProjectSearchEntry[]; scanned: number; truncated: boolean } | { ok: false; code: string };
