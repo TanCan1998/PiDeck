@@ -34,10 +34,11 @@ function createManager(options) {
 }
 
 /** A legal `hello` result: the manager only has to agree on the protocol version and the platform fields. */
-function helloResult(protocolVersion = 1, root = null) {
+function helloResult(protocolVersion = 1, root = null, home = "/home/dev") {
 	// `root` mirrors what the helper resolved at startup; the manager compares it against the root the
 	// attempt asked for, so a fake that reports the wrong one is a handshake failure, not a detail.
-	return { protocolVersion, platform: "linux", arch: "x64", home: "/home/dev", root, capabilities: ["echo", "fs.stat", "fs.list", "fs.read"], helperVersion: "1.2.0", nodeVersion: "v22.14.0", pid: 321 };
+	// `home` is the one handshake value the manager keeps per host, so a test has to be able to vary it.
+	return { protocolVersion, platform: "linux", arch: "x64", home, root, capabilities: ["echo", "fs.stat", "fs.list", "fs.read"], helperVersion: "1.2.0", nodeVersion: "v22.14.0", pid: 321 };
 }
 
 /** The response frame a fake helper sends for one request frame the manager wrote. */
@@ -60,7 +61,7 @@ async function waitForFrame(protocol, match, label = "the request frame") {
  * `hello` of the attempt through the handle's own emitter — so a silent helper is modelled by turning
  * that answer off (`answerHello: false`) rather than by leaving the manager without a transport.
  */
-function createFakeLauncher({ answerHello = true, protocolVersion = 1, root = null } = {}) {
+function createFakeLauncher({ answerHello = true, protocolVersion = 1, root = null, home = "/home/dev" } = {}) {
 	const requests = [];
 	const handles = [];
 	return {
@@ -101,7 +102,7 @@ function createFakeLauncher({ answerHello = true, protocolVersion = 1, root = nu
 						const request = JSON.parse(line);
 						if (!answerHello || request.method !== "hello" || handshakeAnswered) return;
 						handshakeAnswered = true;
-						const frame = helloFrame(request, helloResult(protocolVersion, root));
+						const frame = helloFrame(request, helloResult(protocolVersion, root, home));
 						// A real helper answers on stdout asynchronously; a queued microtask keeps the manager from
 						// ever observing the answer before the request left.
 						queueMicrotask(() => emitter.emit("stdout", JSON.stringify(frame)));
@@ -1041,4 +1042,94 @@ test("a helper that claims no root while a root was requested is refused", async
 	assert.equal(state.state, "needs-attention");
 	const codes = Array.from(manager.listDiagnostics(profile.id)).map((entry) => entry.code);
 	assert.ok(codes.includes("SSH_HELPER_ROOT_MISMATCH"), `expected the root mismatch to be recorded, got: ${codes.join(",")}`);
+});
+
+/**
+ * The handshake HOME is the only source of a remote session root (home + "/.pi/..."), so the manager keeps
+ * it per host - one attempt's value has to survive that attempt - and drops it as soon as the session ends.
+ */
+test("keeps the verified handshake home per host until the session is released", async (t) => {
+	const { directory, profile } = await createPinnedHostFixture(t);
+	const { client } = createPinnedClient(profile.id);
+	const fake = createFakeLauncher({ home: "/home/dev" });
+	const manager = createManager({ userDataDir: directory, client, launcher: fake.launcher, stabilityWindowMs: 0, timers: createManualTimers().timers, random: () => 0 });
+	t.after(() => manager.dispose());
+
+	assert.equal(manager.getHome(profile.id), undefined, "nothing is known before a handshake");
+	assert.equal(manager.getHome("0e0f18ba-6f0e-4bd8-9f6c-1c8f6f2a7d31"), undefined, "an unknown host must not get an entry either");
+	assert.equal((await connectAndSettle(manager, profile.id)).state, "ready");
+	assert.equal(manager.getHome(profile.id), "/home/dev");
+
+	// Releasing the session must clear it: a dead session may not keep naming a remote home.
+	await manager.disconnect(profile.id, "abort");
+	assert.equal(manager.getHome(profile.id), undefined);
+});
+
+test("drops a malformed handshake home instead of storing it", async (t) => {
+	for (const home of ["relative/home", "", "/home\u0000x", `/${"a".repeat(4096)}`]) {
+		const { directory, profile } = await createPinnedHostFixture(t);
+		const { client } = createPinnedClient(profile.id);
+		const fake = createFakeLauncher({ home });
+		const manager = createManager({ userDataDir: directory, client, launcher: fake.launcher, stabilityWindowMs: 0, timers: createManualTimers().timers, random: () => 0 });
+		t.after(() => manager.dispose());
+		assert.equal((await connectAndSettle(manager, profile.id)).state, "ready", JSON.stringify(home));
+		assert.equal(manager.getHome(profile.id), undefined, JSON.stringify(home));
+	}
+});
+
+test("an externally verified fatal condition puts a connected host into needs-attention", async (t) => {
+	const { directory, profile } = await createPinnedHostFixture(t);
+	const { client } = createPinnedClient(profile.id);
+	const fake = createFakeLauncher();
+	const manager = createManager({ userDataDir: directory, client, launcher: fake.launcher, stabilityWindowMs: 0, timers: createManualTimers().timers, random: () => 0 });
+	t.after(() => manager.dispose());
+	assert.equal((await connectAndSettle(manager, profile.id)).state, "ready");
+
+	manager.reportNeedsAttention(profile.id, "SSH_PROJECT_ROOT_CHANGED");
+	let state = manager.getState(profile.id);
+	assert.equal(state.state, "needs-attention");
+	assert.equal(state.lastCode, "SSH_PROJECT_ROOT_CHANGED");
+	// A second report is not a second transition, and must not overwrite the cause the user is acting on.
+	manager.reportNeedsAttention(profile.id, "SSH_PROJECT_ROOT_UNRESOLVED");
+	state = manager.getState(profile.id);
+	assert.equal(state.state, "needs-attention");
+	assert.equal(state.lastCode, "SSH_PROJECT_ROOT_CHANGED");
+});
+
+test("reportNeedsAttention collapses a non-stable code and reaches a host that never attempted", async (t) => {
+	const { directory, profile } = await createPinnedHostFixture(t);
+	const { client } = createPinnedClient(profile.id);
+	const fake = createFakeLauncher();
+	const manager = createManager({ userDataDir: directory, client, launcher: fake.launcher, stabilityWindowMs: 0, timers: createManualTimers().timers, random: () => 0 });
+	t.after(() => manager.dispose());
+
+	// Nothing was ever attempted: the report itself is what makes this host visibly actionable.
+	manager.reportNeedsAttention(profile.id, "ssh: connect to host 10.1.2.3 port 22: Connection refused");
+	const failed = manager.getState(profile.id);
+	assert.equal(failed.state, "needs-attention");
+	assert.equal(failed.lastCode, "SSH_CONNECTION_NEEDS_ATTENTION");
+	assert.equal(JSON.stringify(failed).includes("10.1.2.3"), false, "no free text may reach diagnostics or the UI");
+	assert.equal(JSON.stringify(failed).includes("refused"), false);
+
+	// user-retry is the reducer's one legal exit, and it starts a fresh attempt from the terminal state.
+	const recovered = await manager.retry(profile.id);
+	assert.equal(recovered.state, "ready");
+	assert.equal(fake.requests.length, 1);
+});
+
+test("a latched machine ignores an external report and stays latched", async (t) => {
+	const { directory, profile } = await createPinnedHostFixture(t);
+	const { client } = createPinnedClient(profile.id);
+	const fake = createFakeLauncher();
+	const manager = createManager({ userDataDir: directory, client, launcher: fake.launcher, stabilityWindowMs: 0, timers: createManualTimers().timers, random: () => 0 });
+	t.after(() => manager.dispose());
+	assert.equal((await connectAndSettle(manager, profile.id)).state, "ready");
+	await manager.disconnect(profile.id, "shutdown");
+	assert.equal(manager.getState(profile.id).latched, true);
+
+	manager.reportNeedsAttention(profile.id, "SSH_PROJECT_ROOT_CHANGED");
+	const state = manager.getState(profile.id);
+	assert.equal(state.latched, true, "the shutdown latch must survive an external report");
+	assert.equal(state.state, "offline");
+	assert.equal(state.lastCode, "SSH_CONNECTION_SHUTDOWN");
 });

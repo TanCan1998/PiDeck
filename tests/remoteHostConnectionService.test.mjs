@@ -76,13 +76,36 @@ function fakePorts(overrides = {}) {
 				disposed: 0,
 				disconnects: [],
 				state: "disconnected",
+				lastCode: "SSH_CONNECTION_READY",
+				/** 握手 home：真实 manager 只在成功握手后才有值，替身让测试直接摆布它。 */
+				home: undefined,
+				/** 外部致命条件的上报记录；needs-attention 就是这样从服务层进来的。 */
+				reportCalls: [],
+				tries: [],
 				// 真实 manager 用 getState 暴露机器状态（含 latch）；服务层的就绪判定与 latch 替换依赖它。
 				latched: false,
 				getState(hostId) {
-					return { hostId, generation: 1, state: manager.state, attempts: 0, latched: manager.latched };
+					return { hostId, generation: 1, state: manager.state, attempts: 0, lastCode: manager.lastCode, latched: manager.latched };
+				},
+				getHome() {
+					return manager.home;
+				},
+				reportNeedsAttention(hostId, code) {
+					manager.reportCalls.push({ hostId, code });
+					manager.state = "needs-attention";
+					manager.lastCode = code;
+				},
+				async retry(hostId) {
+					manager.tries.push(hostId);
+					manager.state = "ready";
+					manager.lastCode = "SSH_CONNECTION_READY";
+					return manager.getState(hostId);
 				},
 				async connect(hostId) {
 					manager.connected.push(hostId);
+					// needs-attention 是 reducer 的终态：begin-attempt（= 真实 connect）在那里会被丢弃。替身同样
+					// 拒绝，服务层若忘了改走 retry 就会在这里露出马脚。
+					if (manager.state === "needs-attention") return manager.getState(hostId);
 					manager.state = "ready";
 					return manager.state;
 				},
@@ -329,5 +352,115 @@ test("changing the workspace root discards the held session instead of reusing i
 		assert.equal(ports.calls.bootstrap.length, 4);
 		assert.equal(ports.calls.createManager[3].helperSession.root, undefined);
 		await service.dispose();
+	});
+});
+
+/**
+ * remoteHome 的三态契约：未知/未连接/畸形一律 undefined，只有「活着且握手成功」的会话才给出 home。
+ * 它来自远端且会被拼进会话路径，所以服务层不信上游已过滤，出站前再校验一次形态。
+ */
+test("remoteHome answers undefined for an unknown host, a dead session and a malformed home", async () => {
+	await withUserData(async (userDataDir) => {
+		await writeStore(userDataDir, 7, [{ id: HOST_ID }]);
+		const ports = fakePorts();
+		const service = createRemoteHostConnectionService({ userDataDir, client: CLIENT, nodePath: "/usr/bin/node", ports });
+		// 未知主机 / 尚未连接：只是元数据读取，既不建 manager 也不抛异常。
+		assert.equal(await service.remoteHome(OTHER_HOST_ID), undefined);
+		assert.equal(await service.remoteHome("not-a-host-id"), undefined);
+		assert.equal(ports.calls.createManager.length, 0);
+
+		assert.deepEqual(plain(await service.connect(HOST_ID)), { ok: true, hostId: HOST_ID, state: "ready" });
+		assert.equal(await service.remoteHome(HOST_ID), undefined, "没有握手的会话没有 home");
+
+		const manager = ports.managers[0];
+		for (const malformed of ["relative/home", "", "/home\u0000x", `/${"a".repeat(4096)}`]) {
+			manager.home = malformed;
+			assert.equal(await service.remoteHome(HOST_ID), undefined, JSON.stringify(malformed));
+		}
+		manager.home = "/home/dev";
+		assert.equal(await service.remoteHome(HOST_ID), "/home/dev");
+
+		// 会话不再活着时，之前记录的 home 不得继续外传。
+		manager.state = "offline";
+		assert.equal(await service.remoteHome(HOST_ID), undefined);
+	});
+});
+
+/**
+ * 可达路径（生产序列）：重连时 helper 握手发现 root 不匹配（FATAL）→ 主机进入 needs-attention。
+ * 此后每次读取都被拒并保留该码，直到用户按「连接」—— reducer 唯一合法出口是 user-retry，
+ * 所以服务层必须走 manager.retry；走 begin-attempt 会被终态丢弃，按钮点了也出不来。
+ */
+test("a host left in needs-attention by the handshake is refused until an explicit connect retries it", async () => {
+	await withUserData(async (userDataDir) => {
+		await writeStore(userDataDir, 7, [{ id: HOST_ID }]);
+		const ports = fakePorts();
+		const service = createRemoteHostConnectionService({ userDataDir, client: CLIENT, nodePath: "/usr/bin/node", ports });
+		service.setWorkspaceRoot(HOST_ID, "/srv/app");
+		assert.equal((await service.connect(HOST_ID)).ok, true);
+		const manager = ports.managers[0];
+		// 这正是 tests/sshConnectionManager.test.mjs 里 SSH_HELPER_ROOT_MISMATCH 之后留下的机器状态。
+		manager.state = "needs-attention";
+		manager.lastCode = "SSH_HELPER_ROOT_MISMATCH";
+
+		const refused = await service.withProjectSession(HOST_ID, "/srv/app", async () => "never");
+		assert.equal(refused.ok, false, JSON.stringify(refused));
+		assert.equal(refused.code, "SSH_HELPER_ROOT_MISMATCH", "终态自己的码必须原样返回");
+		assert.equal(manager.state, "needs-attention", "普通读取不得清掉终态");
+
+		const reconnected = await service.connect(HOST_ID);
+		assert.equal(reconnected.ok, true, JSON.stringify(reconnected));
+		assert.deepEqual(plain(manager.tries), [HOST_ID], "显式连接必须走 user-retry");
+		assert.deepEqual(plain(manager.connected), [HOST_ID], "不得再用被终态丢弃的 begin-attempt");
+		assert.equal(manager.state, "ready");
+	});
+});
+
+/**
+ * root 复核失败不只是「这次读取被拒」：主机必须进入可呈现的 needs-attention，且只有 user-retry 能离开。
+ *
+ * 注意可达性：这里的 manager 状态是直接注入的（disconnected），对应 reducer 新放开的来源状态；
+ * 生产接线里复核只在「manager 存在且非 transient」时才会跑，而那样一个 manager 目前只能由显式 abort
+ * 释放得到（其读取会被 explicitlyDisconnected 提前拒绝）。真正可达的那条漂移路径是重连时的 helper
+ * 握手（见下一个测试与 tests/sshConnectionManager.test.mjs）。本测试锁定的是服务层的接线契约本身。
+ */
+test("a refused root re-check moves the host into needs-attention, and an explicit connect is the retry that leaves it", async () => {
+	await withUserData(async (userDataDir) => {
+		await writeStore(userDataDir, 7, [{ id: HOST_ID }]);
+		// 复核结果可切换：先通过一次把会话建在已确认的 root 上，再让它漂移。
+		const control = { canonical: undefined };
+		const ports = fakePorts({
+			verifyRoot: async ({ userPath }) => ({ canonicalPath: control.canonical ?? userPath }),
+		});
+		const service = createRemoteHostConnectionService({ userDataDir, client: CLIENT, nodePath: "/usr/bin/node", ports });
+		// 先把已确认的 root 交给会话（setWorkspaceRoot + 显式连接），这样 manager 是建在这个 root 上的。
+		service.setWorkspaceRoot(HOST_ID, "/srv/app");
+		assert.equal((await service.connect(HOST_ID)).ok, true);
+		const manager = ports.managers[0];
+		// 会话掉了、但 helper 位置仍然有效：下一次读取会重建，重建前正是那次复核。
+		manager.state = "disconnected";
+		control.canonical = "/srv/app-moved";
+
+		const drifted = await service.withProjectSession(HOST_ID, "/srv/app", async () => "never");
+		assert.equal(drifted.ok, false);
+		assert.equal(drifted.code, "SSH_PROJECT_ROOT_CHANGED");
+		assert.deepEqual(plain(manager.reportCalls), [{ hostId: HOST_ID, code: "SSH_PROJECT_ROOT_CHANGED" }], "复核失败必须上报给活跃 manager");
+		assert.equal(manager.state, "needs-attention");
+
+		// 之后每一次读取仍被拒，普通读取不得把终态悄悄清掉。
+		for (let attempt = 0; attempt < 2; attempt += 1) {
+			const refused = await service.withProjectSession(HOST_ID, "/srv/app", async () => "never");
+			assert.equal(refused.ok, false);
+			assert.equal(refused.code, "SSH_PROJECT_ROOT_CHANGED");
+			assert.equal(manager.state, "needs-attention");
+		}
+		assert.equal(manager.reportCalls.length, 1, "终态下不再重复上报");
+
+		// 用户自己按「连接」= reducer 唯一合法出口 user-retry：begin-attempt 在 needs-attention 会被丢弃，
+		// 所以服务层必须走 manager.retry，否则按钮点了也出不来。
+		const reconnected = await service.connect(HOST_ID);
+		assert.equal(reconnected.ok, true, JSON.stringify(reconnected));
+		assert.deepEqual(plain(manager.tries), [HOST_ID]);
+		assert.equal(manager.state, "ready");
 	});
 });

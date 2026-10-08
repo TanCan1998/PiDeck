@@ -366,6 +366,10 @@ export function createPreviewApi(): PiDesktopApi {
 			readProjectFile: async () => ({ ok: false as const, code: "REMOTE_FEATURE_DISABLED" }),
 			searchProject: async () => ({ ok: false as const, code: "REMOTE_FEATURE_DISABLED" }),
 		},
+		remoteSessions: {
+			scan: async () => ({ ok: false as const, code: "REMOTE_FEATURE_DISABLED" }),
+			register: async () => ({ ok: false as const, code: "REMOTE_FEATURE_DISABLED" }),
+		},
 		projects: {
 			list: async () => projects,
 			add: async () => projects[0],

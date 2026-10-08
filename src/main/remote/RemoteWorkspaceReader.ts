@@ -81,6 +81,22 @@ export const REMOTE_WORKSPACE_MAX_READ_BYTES = 16 * 1024 * 1024;
  */
 export const REMOTE_WORKSPACE_MAX_READ_CHUNKS = Math.ceil(REMOTE_WORKSPACE_MAX_READ_BYTES / REMOTE_HELPER_MAX_CHUNK_BYTES);
 
+/**
+ * Local ceiling for one `readHead`, in bytes (G3，冻结设计第 6/7 条：单次 head ≤ 64 KiB）。
+ *
+ * `readHead` 存在的理由是**不要为了拿一段前缀而整文件读**：远端会话 JSONL 可能几百 MB，
+ * 而按需标题/头部解析只需要最前面的有界窗口。它是硬上限而不是默认值——请求超过它一律
+ * `RESULT_TOO_LARGE` 拒绝（与 `readFile` 的体量上限同一语义：有界结果被拒绝，绝不悄悄截断）。
+ */
+export const REMOTE_WORKSPACE_MAX_HEAD_BYTES = 64 * 1024;
+
+/**
+ * `readHead` 的分块预算：由契约分块大小推导，因此不是第二个魔数。
+ * 64 KiB 上限小于一个契约分块（1 MiB），所以正常情况下恒为 1 次 `fs.read`；
+ * 这个上界的作用是：即使将来把 `REMOTE_WORKSPACE_MAX_HEAD_BYTES` 调大，也不会退化成无限循环。
+ */
+export const REMOTE_WORKSPACE_MAX_HEAD_CHUNKS = Math.ceil(REMOTE_WORKSPACE_MAX_HEAD_BYTES / REMOTE_HELPER_MAX_CHUNK_BYTES);
+
 /** Options the reader passes to the transport for one helper request. */
 export type RemoteWorkspacePortRequestOptions = {
 	/** Local deadline, forwarded like `SshConnectionManager.request`'s option. */
@@ -137,6 +153,25 @@ export type RemoteWorkspaceFile = {
 	mtimeMs: number;
 };
 
+/**
+ * One bounded head read (G3 冻结设计第 6 条）：文件最前面的一段前缀，加上它是谁的描述。
+ *
+ * 与 `RemoteWorkspaceFile` 的区别是语义而非形状：`readFile` 拿到的是一份**完整版本**，
+ * `readHead` 拿到的只是一段**前缀**（`truncated` 说明后面还有没有字节），调用方不得把它当整份内容用。
+ */
+export type RemoteWorkspaceHead = {
+	/** 前缀字节：长度恒等于 `bytes`，且不超过请求的 `maxBytes` 与远端文件大小。 */
+	content: Uint8Array;
+	/** 本次真正返回的字节数（`content.length`）。 */
+	bytes: number;
+	/** true = 远端文件还有更多字节没读（size > maxBytes）；false = 已经读到文件尾。 */
+	truncated: boolean;
+	/** 远端文件完整大小（读取前那次 `fs.stat` 的 `bytes`），用来判断 head 是否截断。 */
+	size: number;
+	/** 修改时间，来自同一次 `fs.stat`。 */
+	mtimeMs: number;
+};
+
 /** Redacted diagnostic record: closed-vocabulary identity plus one stable code, never content. */
 export type RemoteWorkspaceReaderDiagnostic = {
 	/** Validated helper host id; a bogus id is refused before anything is reported about it. */
@@ -161,6 +196,13 @@ export type RemoteWorkspaceReader = {
 	list(hostId: string, path: string, options?: RemoteWorkspaceCallOptions): Promise<RemoteHelperListResult>;
 	/** Read one regular file in contract-sized chunks, validated against a single description of the entry. */
 	readFile(hostId: string, path: string, options?: RemoteWorkspaceCallOptions): Promise<RemoteWorkspaceFile>;
+	/**
+	 * Read at most `maxBytes` from the head of one regular file. Never reads the whole file:
+	 * `maxBytes` must be a positive integer no larger than `REMOTE_WORKSPACE_MAX_HEAD_BYTES`
+	 * (a larger value is refused as `RESULT_TOO_LARGE`, never clamped), and the request sent to the
+	 * helper is bounded by both `maxBytes` and the size the sizing `fs.stat` declared.
+	 */
+	readHead(hostId: string, path: string, maxBytes: number, options?: RemoteWorkspaceCallOptions): Promise<RemoteWorkspaceHead>;
 };
 
 /**
@@ -609,6 +651,57 @@ export function createRemoteWorkspaceReader(options: RemoteWorkspaceReaderOption
 		return { content, bytes: offset, mtimeMs: before.mtimeMs };
 	}
 
+	/**
+	 * 读 `readHead` 的 `maxBytes`：非正整数（含 undefined/NaN/小数）是 `PROTOCOL_INVALID`，
+	 * 超过本地 64 KiB 上限是 `RESULT_TOO_LARGE`。**拒绝而不是 clamp**：把 128 KiB 的请求悄悄截成 64 KiB
+	 * 会让调用方以为自己拿到了一整段，而它其实只是被本地上限切过的一截。
+	 */
+	function readHeadLimit(value: unknown): { readonly ok: true; readonly maxBytes: number } | { readonly ok: false; readonly code: string } {
+		if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) return { ok: false, code: "PROTOCOL_INVALID" };
+		if (value > REMOTE_WORKSPACE_MAX_HEAD_BYTES) return { ok: false, code: "RESULT_TOO_LARGE" };
+		return { ok: true, maxBytes: value };
+	}
+
+	/**
+	 * 有界读取一个普通文件的前缀（G3 冻结设计第 6 条）。
+	 *
+	 * 只发 `min(size, maxBytes)` 这一个（正常情况下也正是唯一一个）`fs.read`：先 sizing `fs.stat`
+	 * 拿到 kind/size，非普通文件在第一个字节之前就被拒（`NOT_A_FILE`），因此**任何情况下都不会整文件读**。
+	 * 空文件不发读请求（helper 对零字节请求答 `bytes:0, eof:false`，发了也永远读不到 eof）。
+	 *
+	 * 这里**刻意不做收尾 stat**，与 `readFile` 的 commit point 不同：head 的语义是「前缀」，
+	 * 一次 append 不会让已经拿到的前缀变成另一份内容；而活跃写入的会话 JSONL 几乎必然 mtime 变化，
+	 * 用 `REMOTE_WORKSPACE_FILE_CHANGED` 拒绝会让「按需解析文件头」频繁失败。兜底改由尺寸自洽承担：
+	 * 请求字节数由 sizing stat 决定，所以「拿到的字节数必须逐字等于它」且「eof 必须等于 size <= maxBytes」——
+	 * 文件缩小、内容被换掉或对端答非所问都会在这里被拒（`PROTOCOL_INVALID`）。
+	 */
+	async function readHeadRegularFile(setup: CallSetup, maxBytes: number): Promise<RemoteWorkspaceHead> {
+		const { path, cancellation, timeoutMs } = setup;
+		const site = siteOf(setup, REMOTE_HELPER_METHOD_FS_READ);
+		const before = await requestStat(setup);
+		if (before.kind !== "file") throw refuse(site, "NOT_A_FILE");
+		const total = before.bytes;
+		const expectedEof = total <= maxBytes;
+		const wantedTotal = Math.min(total, maxBytes);
+		const content = Buffer.alloc(wantedTotal);
+		let offset = 0;
+		let chunks = 0;
+		let reachedEof = wantedTotal === 0;
+		while (!reachedEof && offset < wantedTotal) {
+			if (chunks >= REMOTE_WORKSPACE_MAX_HEAD_CHUNKS) throw refuse(site, "RESULT_TOO_LARGE");
+			const wanted = Math.min(REMOTE_HELPER_MAX_CHUNK_BYTES, wantedTotal - offset);
+			const raw = await callHelper(site, { path, offset, bytes: wanted }, cancellation, timeoutMs);
+			const chunk = readChunkResult(raw, wanted);
+			if (chunk === undefined) throw refuse(site, "PROTOCOL_INVALID");
+			chunk.decoded.copy(content, offset);
+			offset += chunk.decoded.length;
+			chunks += 1;
+			reachedEof = chunk.eof;
+		}
+		if (offset !== wantedTotal || reachedEof !== expectedEof) throw refuse(site, "PROTOCOL_INVALID");
+		return { content, bytes: offset, truncated: total > maxBytes, size: total, mtimeMs: before.mtimeMs };
+	}
+
 	/** Validate the call, keep the path it resolved to and register its cancellation listener. */
 	function beginCall(hostId: unknown, path: unknown, options: unknown): CallSetup | undefined {
 		const host = readHostId(hostId);
@@ -646,6 +739,18 @@ export function createRemoteWorkspaceReader(options: RemoteWorkspaceReaderOption
 			if (setup === undefined) throw new RemoteWorkspaceError("PROTOCOL_INVALID", false);
 			try {
 				return await readRegularFile(setup);
+			} finally {
+				disposeCancellation(setup.cancellation);
+			}
+		},
+		async readHead(hostId, path, maxBytes, options) {
+			// 上限校验先于 beginCall：非法调用不应该先注册一个取消监听再抛出去。
+			const limit = readHeadLimit(maxBytes);
+			if (!limit.ok) throw new RemoteWorkspaceError(limit.code, false);
+			const setup = beginCall(hostId, path, options);
+			if (setup === undefined) throw new RemoteWorkspaceError("PROTOCOL_INVALID", false);
+			try {
+				return await readHeadRegularFile(setup, limit.maxBytes);
 			} finally {
 				disposeCancellation(setup.cancellation);
 			}

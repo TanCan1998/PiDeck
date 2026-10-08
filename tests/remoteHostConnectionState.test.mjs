@@ -147,6 +147,51 @@ test("keeps needs-attention terminal: no automatic recovery, only user-retry or 
 	}
 });
 
+test("enters needs-attention from an idle or offline host for an externally verified fatal condition", () => {
+	// Root drift is discovered by re-checking a host that has no attempt in flight at all: without this
+	// source the host would keep looking ordinary while every read of that boundary keeps failing.
+	for (const [label, from] of [
+		["disconnected", createConnectionMachine(HOST)],
+		["offline", reachOffline()],
+	]) {
+		const result = step(from, fatal(from.generation, "SSH_PROJECT_ROOT_CHANGED"));
+		assert.equal(result.state.state, "needs-attention", label);
+		assert.equal(result.state.lastCode, "SSH_PROJECT_ROOT_CHANGED", label);
+		assert.equal(result.state.attempts, 0, label);
+		assert.equal(result.state.generation, from.generation, "an external report starts no attempt", label);
+		assert.equal(result.state.latched, false, label);
+		assert.deepEqual(kinds(result.effects), [], label);
+	}
+});
+
+test("keeps an externally reported needs-attention terminal until the user retries", () => {
+	const terminal = apply(createConnectionMachine(HOST), fatal(0, "SSH_PROJECT_ROOT_CHANGED"));
+	assert.equal(terminal.state, "needs-attention");
+	// A second report is not a second transition, and no ordinary event may launder the terminal state away.
+	for (const event of [fatal(terminal.generation, "SSH_PROJECT_ROOT_CHANGED"), fatal(terminal.generation, "SSH_PROJECT_ROOT_UNRESOLVED"), offline(), begin(), connected(terminal.generation), lost(terminal.generation), degraded(terminal.generation)]) {
+		const result = step(terminal, event);
+		assert.equal(result.state, terminal, event.type);
+		assert.equal(result.effects.length, 0, event.type);
+	}
+	// The only legal exit stays the explicit user retry.
+	const retried = step(terminal, userRetry());
+	assert.equal(retried.state.state, "connecting");
+	assert.equal(retried.state.lastCode, "SSH_CONNECTION_USER_RETRY");
+	assert.equal(retried.state.attempts, 1);
+});
+
+test("a shutdown from an externally reported needs-attention still latches the machine", () => {
+	const offlineState = reachOffline();
+	const external = apply(offlineState, fatal(offlineState.generation, "SSH_PROJECT_ROOT_UNRESOLVED"));
+	assert.equal(external.state, "needs-attention");
+	const result = step(external, shutdown());
+	assert.equal(result.state.state, "needs-attention", "shutdown must not launder the terminal state away");
+	assert.equal(isConnectionMachineShutdown(result.state), true);
+	assert.deepEqual(kinds(result.effects), ["cancel-reconnect", "shutdown"]);
+	assert.equal(step(result.state, userRetry()).effects.length, 0, "a torn-down machine cannot be revived");
+	assert.equal(step(result.state, fatal(result.state.generation, "SSH_PROJECT_ROOT_CHANGED")).state, result.state, "a latched machine ignores external reports too");
+});
+
 test("fences events from another generation on every fenced event type", () => {
 	const state = inFlight();
 	for (const make of [(generation) => phase(generation, "platform"), connected, degraded, lost, due, fatal]) {
@@ -390,7 +435,6 @@ test("rejects every illegal transition with an identical state and no effects", 
 		["disconnected + phase", () => createConnectionMachine(HOST), (state) => phase(state.generation, "openssh")],
 		["disconnected + degraded", () => createConnectionMachine(HOST), (state) => degraded(state.generation)],
 		["disconnected + disconnected", () => createConnectionMachine(HOST), (state) => lost(state.generation)],
-		["disconnected + needs-attention", () => createConnectionMachine(HOST), (state) => fatal(state.generation)],
 		["disconnected + reconnect-due", () => createConnectionMachine(HOST), (state) => due(state.generation)],
 		["connecting + begin-attempt", inFlight, begin],
 		["connecting + user-retry", inFlight, userRetry],
@@ -411,7 +455,6 @@ test("rejects every illegal transition with an identical state and no effects", 
 		["reconnecting + reconnect-due", () => reachReconnecting(), (state) => due(state.generation + 1)],
 		["offline + connected", reachOffline, (state) => connected(state.generation)],
 		["offline + reconnect-due", reachOffline, (state) => due(state.generation)],
-		["offline + needs-attention", reachOffline, (state) => fatal(state.generation)],
 		["needs-attention + begin-attempt", reachNeedsAttention, begin],
 		["needs-attention + offline", reachNeedsAttention, () => offline()],
 	];

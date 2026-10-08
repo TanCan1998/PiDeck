@@ -2,7 +2,8 @@
 
 > 当前开发分支：`feat/remote-development`。代码核对基线：`f7b18947`（第一次协作交接点）；首次交接提交：`a663947c`。
 > 第一批（A 读取隔离 / B 侧栏入口 / C 持久化校验）与第二批（F1 helper 只读搜索 / F2 搜索链路 / F3 会话建立与重连时的 root 复核）已实施完成，落地位置、验证命令与**未验收边界**见 §3 末尾与 §5；文档里凡未在真机或 Electron 内跑过的能力都保持「未验收」标注。
-> 下一步（第三批）：远端 Session 扫描（`session.list`/`session.readPage` + catalog 远端 locator）、root 漂移接入 `needs-attention` 的状态呈现、`remoteHostIpc` 按域拆分，以及真机/Electron 验收与跨 store INV-5。
+> 第三批（G1 IPC 按域拆分 / G2 needs-attention 与握手 home / G3 远端 Session 只读发现与登记 / G5 集成）已实施完成；落地位置与**未验收边界**见 §3 末。
+> 下一步（第四批）：远端 Session 的**侧栏列表与导入 UI**、按需头部解析出真实标题（`readHead` 原语已就位）、root 漂移的**项目级**呈现（或复核顺序调整）、pi 自定义 `sessionDir` 覆盖、以及真机/Electron 验收与跨 store INV-5。
 > 本页是协作入口：实现状态、下一批任务、验收与验证方法。架构和发布范围见 [实施计划](remote-development-plan.md)，跨 store 设计见 [事务设计](remote-host-cross-store-design.md)。
 > 文档中的任务包是待实施工作，不表示已分配给具体开发者或已创建 GitHub issue。
 
@@ -122,6 +123,26 @@ A/B/C 可由不同开发者并行，D 随开发跟进。每块指定一个负责
 4. **严格跨进程 CAS / 跨 store interlock** 仍未交付（同第一批遗留项 2）。
 5. **`src/main/ipc/remoteHostIpc.ts` 体量债未清**：本批又给它加了一个 handler（现约 800 行，>600 规则）。拆分方案已明确——把「项目登记 + 项目读取 + 搜索」拆到 `src/main/ipc/remoteProjectIpc.ts`，hosts（添加/指纹/连接/诊断/修复）留在原文件，`main/index.ts` 多注册一个域。**建议第三批随 Session 通道一起做**（那次必然新增 IPC 文件，正好一次拆到位）；单独拆一个刚被验证过的文件收益低、风险高。
 
+### 第三批落地结果与遗留项（实施后核对）
+
+| 块 | 落地位置 | 验证 |
+| --- | --- | --- |
+| G1 IPC 按域拆分 | `remoteHostIpc.ts` 767→522 行（只留 hosts 域）、新增 `remoteProjectIpc.ts`（303 行，登记/回答/列表/读取/搜索）、新增 `remoteSessionIpc.ts`；`main/index.ts` 分域装配 | `tests/remoteProjectIpc.test.mjs`（两域通道互不越界、体量红线、装配两处注册）、`tests/remoteHostIpc.test.mjs` |
+| G2 root 漂移进 needs-attention + 握手 home | reducer 放开 `disconnected/offline` 来源（注释写明「外部已核验的致命条件与 attempt 失败同等可行动」，其余语义不变）；`SshConnectionManager.reportNeedsAttention(hostId, code)`（自由文本折叠成稳定码）；**修掉真缺口**：`connectLocked` 在终态改走 `manager.retry()`（否则 `remote:connect` 出不来终态）；`RemoteHostConnectionService.remoteHome(hostId)` 只在 ready/degraded 给值 | `tests/remoteHostConnectionState.test.mjs`、`tests/sshConnectionManager.test.mjs`、`tests/remoteHostConnectionService.test.mjs`；独立验证 `tests/remoteNeedsAttention.test.mjs`（19 项，含终态性穷举） |
+| G3 远端 Session 只读发现与登记 | `RemoteWorkspaceReader.readHead`（64 KiB 上限原语，拒绝不 clamp、绝不整文件读）；`RemoteSessionScanner`（会话根 = `<remote home>/.pi/agent/sessions`，只走现有 `fs.list`/`fs.stat`，不 import node:fs，上限 512 目录 / 2000 文件 / 1 MiB 预算 / 并发 4）；`SessionCatalog.ensureRemoteSession`（ssh locator、两遍匹配、幂等） | `tests/remoteSessionScanner.test.mjs`、`tests/remoteSessionRegistration.test.mjs`；独立验证 `tests/remoteSessionScanIsolation.test.mjs`（17 项） |
+| G5 集成 | 两个通道常量 + preload `remoteSessions` + previewApi 桩 + 装配注入（含 `projectIdForHost`）+ 共享返回类型收口到 `shared/types/remoteHost.ts` | `tests/remoteSessionWiring.test.mjs`（三处同步 + 类型不重复定义守卫） |
+
+**已自动验收**：needs-attention 从六种来源进入后**只有 user-retry 能离开**、其余事件返回同一 state 对象、恶意 code 折叠且不进诊断、fencing 与 shutdown latch 未被绕过；`remoteHome` 三态与畸形值不外传；`readHead` 对 10 MiB 文件只请求 64 KiB、空文件零 read 帧；扫描四项上限各自在**对应 I/O 之前**截停、symlink 目录绝不下钻、零 `fs.read` 帧、结果无正文；真实 SessionCatalog 上登记**幂等**（两次同 id、第二次不写盘）、两遍匹配顺序锁定。
+
+**第三批未完成 / 未验收（不得描述为已完成）**：
+1. **root 漂移 → needs-attention 这条接线在生产不可达（已接受为防御性代码）**：漂移发生时 manager 要么不存在、要么已被 discard；`manager` 从不发 `offline`，`disconnected` 只由 `service.disconnect(abort)` 产生且顺带置 `explicitlyDisconnected`（读取在 establish 之前就返回 `SSH_HOST_DISCONNECTED`）。因此**漂移只做到按项目 fail-closed（拒绝读取 + 稳定码），不驱动 needs-attention**；当前**可达**的 needs-attention 触发是重连时 helper 握手 `SSH_HELPER_ROOT_MISMATCH`（FATAL，`tests/sshConnectionManager.test.mjs` 端到端覆盖），且已修好「终态出不来」。下一批两种可选设计（当时明确未实现）：(i) 项目级「root needs attention」标志经 hosts-list/诊断呈现、不动连接状态机；(ii) 复核顺序改为「先验新 root、再丢旧会话」并把 needs-attention 语义收窄到 host 级。
+2. **侧栏列表/导入 UI 未做**：本批只到 main 进程的发现与登记，通道已按契约收口但渲染层无入口（**第四批**）。
+3. **标题是文件名 stem 且 `titleOrigin="fallback"`**：按需头部解析未做，本批只落地 `readHead` 原语。
+4. **覆盖缺口**：pi 自定义 `sessionDir` 不覆盖（远端只扫 `~/.pi/agent/sessions`）；深层嵌套 subagent 布局（`<stem>/<run>/session.jsonl`）不扫（冻结设计只要求两层）；`remotePathAliases` 未读写（命中历史记录时其 `remotePath` 会被本次相对路径改写，alias/冲突事务属 Phase 4）。
+5. **性能代价**：`fs.list` 不返回 mtime ⇒ 每个候选文件一次 `fs.stat`（≤2000 次、并发 ≤4）；正解是 helper 侧加 `session.list`，而不是在扫描器里编造 mtime。
+6. **真机/Electron 未验收**；POSIX symlink 语义用 Windows fixture 模拟，Linux 上未跑。
+7. **严格跨进程 CAS / 跨 store interlock** 仍未交付（同前两批）。
+
 ## 4. M1 之后如何推进
 
 1. **Phase 3 剩余只读能力**：目录/内容搜索与远端 Session 发现走 helper，由 catalog 保存远端 locator；不得把远端路径交给本地 scanner。结果数量、字节和超时必须有界。
@@ -152,7 +173,7 @@ node --test tests/remoteHostIpc.test.mjs tests/remoteHostConnectionService.test.
 
 C 对应 `projectStoreCodec.test.mjs`、`projectStoreMigration.test.mjs`、`remoteHostReferenceSources.test.mjs`；B 需更新 `settingsTabLayout.test.mjs` 并补实际交互状态覆盖。格式化仅涉及文件（`node_modules/.bin/biome format --write <files...>`）；集成时运行 `npm run check:format`。纯文档修改检查差异、链接与命令准确性即可。
 
-**测试记录的边界（第二批实施后更新）**：Windows / Node 24.19 上跑的集成集合（remote* + projectStore* + 侧栏/面板/文案/连接管理器）：第一批时 33 个文件 **512 项 / 505 pass / 2 fail / 5 skip**；第二批后 **46 个文件 689 项 / 682 pass / 2 fail / 5 skip**。两轮 fail 的**名称与断言完全相同**，就是下面列出的**既有**失败，并已在干净基线 worktree 上逐字复现——所以第二批零回归。`npm run typecheck` 与 `npm run check:format`（2173 个文件，无改动）通过。全量 `npm test` 本批未跑（仓库规则：仅跨域大改动或合并前最终确认时跑），因此**没有「全量已全绿」这个结论**。
+**测试记录的边界（第三批实施后更新）**：Windows / Node 24.19 上跑的集成集合（remote* + projectStore* + sessionCatalog* + hostRebind* + 侧栏/面板/文案/连接管理器/locationAdapters/workspaceTree）：第一批 33 个文件 **512 项 / 505 pass / 2 fail / 5 skip**；第二批 46 个文件 **689 项 / 682 pass / 2 fail / 5 skip**；第三批 **921 项 / 914 pass / 2 fail / 5 skip**。三轮 fail 的**名称与断言完全相同**，就是下面列出的**既有**失败，并已在干净基线 worktree(`f7b18947`) 上逐字复现——所以第二、三批均零回归。`npm run typecheck` 与 `npm run check:format`（2173 个文件，无改动）通过。全量 `npm test` 本批未跑（仓库规则：仅跨域大改动或合并前最终确认时跑），因此**没有「全量已全绿」这个结论**。
 
 这 2 个既有失败已在**干净基线 worktree（`f7b18947`，不含本批任何改动）上逐字复现**，不是本批引入的回归，而且不能全归为平台原因：
 - `tests/remoteBootstrapSessionIntegration.test.mjs` → `BOOTSTRAP_READY_INVALID`（真实子进程 + frozen entry 握手，两侧同样失败）；

@@ -331,6 +331,108 @@ function setLocalSessionFilePath(entry: SessionCatalogEntry, filePath: string | 
 		: undefined;
 }
 
+/** 远端 Session 的稳定身份（G3 冻结设计第 4/5 条）：hostId + 相对会话根的 POSIX 路径。 */
+export type RemoteSessionIdentity = {
+	hostId: string;
+	/** 远端文件的稳定身份：相对会话根的 POSIX 路径（含 .jsonl）。 */
+	remoteSessionId: string;
+	/** 本次冻结与 remoteSessionId 同值；独立保留是为了让「以后变成远端绝对路径」不改匹配契约。 */
+	remotePath: string;
+};
+
+/** 登记一次远端发现的入参；updatedAt 用远端文件 mtime（排序与「最后活动时间」）。 */
+export type RemoteSessionRegistrationInput = {
+	projectId: string;
+	hostId: string;
+	remoteSessionId: string;
+	remotePath: string;
+	/** 暂定标题（文件名 stem）；只在新建、或条目尚未被确认时写入。 */
+	title: string;
+	/** 远端文件 mtime。 */
+	updatedAt: number;
+};
+
+export type RemoteSessionRegistration = { record: SessionRecord; created: boolean };
+
+/**
+ * 稳定 id 匹配的**单条判定**（计划 §5.3 / G3 冻结设计第 5 条）：这条 locator 是不是这次发现的这个远端会话？
+ * 返回命中的依据字段（给测试断言匹配顺序用），不命中返回 undefined。
+ *
+ * remoteSessionId 是远端文件的稳定身份，优先于 remotePath（后者会随 move/archive 变化）。
+ */
+export function remoteSessionLocatorMatch(locator: SessionLocator | undefined, identity: RemoteSessionIdentity): "remoteSessionId" | "remotePath" | undefined {
+	if (locator?.kind !== "ssh" || locator.hostId !== identity.hostId) return undefined;
+	if (locator.remoteSessionId !== undefined && locator.remoteSessionId === identity.remoteSessionId) return "remoteSessionId";
+	if (locator.remotePath !== undefined && locator.remotePath === identity.remotePath) return "remotePath";
+	return undefined;
+}
+
+/**
+ * 两遍扫描的稳定 id 匹配：**先按 (hostId, remoteSessionId) 命中整表，再按 (hostId, remotePath) 命中整表**，
+ * 都没有才返回 undefined（调用方据此新建）。
+ *
+ * 为什么不是单遍 first-match：表里靠前的条目可能只有 remotePath 命中（旧记录还没回填 remoteSessionId），
+ * 而靠后的条目才是这次会话的 remoteSessionId 命中。单遍会把这次发现挂到错误记录上——表现为同一个远端
+ * 会话在侧栏出现两条，或者 stable id 在两次扫描之间漂移。这才是本函数存在的理由，也是它必须被单测锁住的地方。
+ */
+export function findRemoteSessionEntry(entries: readonly SessionCatalogEntry[], identity: RemoteSessionIdentity): SessionCatalogEntry | undefined {
+	const byRemoteSessionId = entries.find((entry) => remoteSessionLocatorMatch(entry.locator, identity) === "remoteSessionId");
+	if (byRemoteSessionId) return byRemoteSessionId;
+	return entries.find((entry) => remoteSessionLocatorMatch(entry.locator, identity) === "remotePath");
+}
+
+/** ssh 分支的 locator 类型；用 Extract 而不是再抄一遍结构，避免与 shared 契约漂移。 */
+type SshSessionLocator = Extract<SessionLocator, { kind: "ssh" }>;
+
+/**
+ * 登记入参 → 稳定身份（hostId 与两个路径字段的搬运只发生在这里）。
+ * 单独抽成具名函数而不是在闭包里就地拼对象：host 引用审计（remoteHostCrossStoreContract）按「具名函数」
+ * 归属引用来源，匿名闭包里的 hostId 会变成 <unscoped>，让审计失去可归责的名字。
+ */
+function remoteSessionIdentity(input: RemoteSessionRegistrationInput): RemoteSessionIdentity {
+	return { hostId: input.hostId, remoteSessionId: input.remoteSessionId, remotePath: input.remotePath };
+}
+
+/** 稳定身份 → ssh locator（唯一构造点，理由同上）。 */
+function remoteSessionLocator(identity: RemoteSessionIdentity): SshSessionLocator {
+	return { kind: "ssh", hostId: identity.hostId, remoteSessionId: identity.remoteSessionId, remotePath: identity.remotePath };
+}
+
+/** ssh locator 的身份字段比较（不含 alias：本批不读也不写 alias）。 */
+function sameSshLocator(left: SessionLocator | undefined, right: SshSessionLocator): boolean {
+	if (left === undefined || left.kind !== "ssh") return false;
+	return left.hostId === right.hostId && left.remoteSessionId === right.remoteSessionId && left.remotePath === right.remotePath;
+}
+
+/** 入参的协议形状校验：与 shared 的 isSessionLocator 同域，非法一律拒绝而不是截断。 */
+function isRemoteSessionRegistrationInput(value: RemoteSessionRegistrationInput): boolean {
+	const { projectId, hostId, remoteSessionId, remotePath, title } = value ?? {};
+	if (typeof projectId !== "string" || projectId.length === 0 || projectId.length > 256) return false;
+	if (typeof hostId !== "string" || hostId.length === 0 || hostId.length > 256 || CONTROL_CHARS_RE.test(hostId)) return false;
+	// 两个身份字段的上限来自 shared 的 SessionLocator（remoteSessionId ≤ 256、remotePath ≤ 4096）。
+	if (typeof remoteSessionId !== "string" || remoteSessionId.length === 0 || remoteSessionId.length > 256 || CONTROL_CHARS_RE.test(remoteSessionId)) return false;
+	if (typeof remotePath !== "string" || remotePath.length === 0 || remotePath.length > 4096 || CONTROL_CHARS_RE.test(remotePath)) return false;
+	return typeof title === "string";
+}
+
+/** 远端定位字段一旦变化就必须落盘；本地镜像字段非空说明读入路径没清干净，也要写回修掉。 */
+function remoteSessionEntryChanged(entry: SessionCatalogEntry, locator: SshSessionLocator, title: string | undefined, updatedAt: number): boolean {
+	return (
+		!sameSshLocator(entry.locator, locator) ||
+		(title !== undefined && entry.title !== title) ||
+		entry.updatedAt !== updatedAt ||
+		entry.filePath !== undefined ||
+		entry.originKey !== undefined ||
+		entry.piSessionId !== undefined ||
+		entry.wslDistro !== undefined ||
+		entry.wslUser !== undefined ||
+		entry.parentSessionPath !== undefined
+	);
+}
+
+/** 控制字节：与 shared 的 SessionLocator 校验同域（路径里出现即非法）。 */
+const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f]/;
+
 function equalModel(left?: SessionModelPreference, right?: SessionModelPreference): boolean {
 	return left?.provider === right?.provider && left?.modelId === right?.modelId;
 }
@@ -1262,6 +1364,69 @@ export class SessionCatalog implements HostRebindStorePort {
 			if (index < 0) return { value: false, changed: false };
 			entries.splice(index, 1);
 			return { value: true, changed: true };
+		});
+	}
+
+	/**
+	 * 登记一次远端 Session 发现（G3 冻结设计第 5/6 条）：
+	 * 稳定 id 匹配 (hostId, remoteSessionId) → (hostId, remotePath) → 新建。
+	 *
+	 * 幂等：同一远端文件重复登记命中同一条记录并返回同一个 SessionRecord.id；第二次起没有字段变化 ⇒
+	 * changed=false ⇒ 不写盘，也不会产生第二个 stable id。
+	 *
+	 * 只写远端身份与暂定标题，不碰本地镜像字段：ssh 分支经 normalizeEntryLocator 清空
+	 * filePath/originKey/piSessionId/wslDistro/wslUser/parentSessionPath —— 远端路径绝不落到本地字段。
+	 * 命中已有记录时不改 projectId：归属是用户/项目侧的决定，登记只负责发现。
+	 *
+	 * 注意（本批边界）：命中的条目若已有 remoteSessionId 但 remotePath 是别的写法（历史绝对路径），
+	 * 这里按冻结设计把 locator 改写成本次发现的相对路径；«改动即加入 remotePathAliases» 属于
+	 * Phase 4 的 move/archive 事务，本批不引入 alias 写入口。
+	 */
+	async ensureRemoteSession(input: RemoteSessionRegistrationInput): Promise<RemoteSessionRegistration> {
+		this.assertLoaded();
+		if (!isRemoteSessionRegistrationInput(input)) throw new Error("REMOTE_SESSION_IDENTITY_INVALID");
+		const identity = remoteSessionIdentity(input);
+		const updatedAt = Number.isFinite(input.updatedAt) && input.updatedAt > 0 ? input.updatedAt : undefined;
+		return this.enqueueMutation<RemoteSessionRegistration>((entries) => {
+			const locator = remoteSessionLocator(identity);
+			const existing = findRemoteSessionEntry(entries, identity);
+			if (existing) {
+				const next = normalizeEntryLocator({ ...existing, locator });
+				// 暂定标题只在条目尚未被确认时写入：用户改名 / 权威名是终态，登记不得覆盖。
+				const titleTarget = isTitleLocked(existing) || !input.title ? undefined : input.title;
+				const nextUpdatedAt = updatedAt ?? next.updatedAt;
+				if (!remoteSessionEntryChanged(existing, locator, titleTarget, nextUpdatedAt)) {
+					// 完全相同的重复登记：一个字节都不写（幂等的可观测形态）。
+					return { value: { record: this.recordFromEntry(existing), created: false }, changed: false };
+				}
+				next.updatedAt = nextUpdatedAt;
+				if (titleTarget !== undefined) {
+					next.title = titleTarget;
+					assignTitleOrigin(next, "fallback");
+				}
+				entries[entries.indexOf(existing)] = next;
+				return { value: { record: this.recordFromEntry(next), created: false }, changed: true };
+			}
+			const now = Date.now();
+			const entry: SessionCatalogEntry = {
+				id: randomUUID(),
+				projectId: input.projectId,
+				title: input.title,
+				// 文件名 stem 只是暂定名（冻结设计第 6 条）：标成 fallback，允许后续「按需头部解析」用
+				// applyAutomaticTitle(..., "auto") 升级；用户改名走 update() 落 manual 终态。
+				titleLocked: true,
+				titleOrigin: "fallback",
+				source: "pi",
+				// environment 是 catalog 的必填旧字段；ssh 条目由 normalizeEntryLocator 清空本地镜像字段，
+				// 这里的"native"不表示远端主机是本机（locator 才是位置真相）。
+				environment: "native",
+				locator,
+				status: "active",
+				createdAt: now,
+				updatedAt: updatedAt ?? now,
+			};
+			entries.push(entry);
+			return { value: { record: this.recordFromEntry(entry), created: true }, changed: true };
 		});
 	}
 

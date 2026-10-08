@@ -96,8 +96,13 @@ export type SshAttemptHost = {
 	enterPhase(phase: SshConnectionPhase): void;
 	/** Stable-code diagnostic sink of this host and generation. */
 	record(code: string, exitCode?: number): void;
-	/** The verified handshake answered on this session: the host applies `connected` and stamps the time. */
-	markReady(): void;
+	/**
+	 * The verified handshake answered on this session: the host applies `connected`, stamps the time and
+	 * keeps the reported remote HOME. The home is a required argument because it is part of what the
+	 * handshake proved - a `ready` session always comes with one - and the host is the only owner of the
+	 * per-host value; the attempt itself must not keep it.
+	 */
+	markReady(home: string): void;
 	/** True while the machine still runs this generation; a newer attempt fences this one off. */
 	isCurrentGeneration(): boolean;
 	/** True once the caller aborted, the host was torn down or a newer attempt took over. */
@@ -184,8 +189,11 @@ export function releaseSshAttempt(attempt: SshConnectionAttempt, reason: SshAtte
  * A released attempt is not a handshake failure: abort, shutdown and a lost session have already recorded
  * their own outcome, so their pending request ends as SUPERSEDED and the caller's failure path skips the
  * attempt instead of reporting it twice.
+ *
+ * It answers with the HOME the helper reported - the one place the remote session root can come from - so
+ * that value reaches the host with the same proof instead of being discarded after validation.
  */
-async function assertHelperHandshake(host: SshAttemptHost, deps: SshAttemptDeps, control: RemoteControlClient): Promise<void> {
+async function assertHelperHandshake(host: SshAttemptHost, deps: SshAttemptDeps, control: RemoteControlClient): Promise<string> {
 	let result: unknown;
 	try {
 		// `hello` takes no params; the deadline is the attempt's own, so a silent helper fails the attempt
@@ -204,6 +212,11 @@ async function assertHelperHandshake(host: SshAttemptHost, deps: SshAttemptDeps,
 		throw new Error("SSH_HELPER_PROTOCOL_MISMATCH");
 	}
 	if (typeof result.platform !== "string" || typeof result.arch !== "string" || typeof result.home !== "string" || !Array.isArray(result.capabilities)) throw new Error("SSH_HELPER_HANDSHAKE_INVALID");
+	// The reported HOME is part of the proof, not decoration: the remote session root (`<home>/.pi/...`)
+	// has no other source, so it travels back to the host with the rest of the verified handshake instead
+	// of being dropped here. Shape validation stays a layer above: the host stores only a usable path and
+	// the service re-validates before handing it to anyone else.
+	const home = result.home;
 	// The helper resolves its root once at startup and reports the canonical result. Comparing it against
 	// what this attempt asked for is the only way to know that the confinement boundary is the directory
 	// we named: a root that is itself a symlink, or reached through one, would otherwise leave the helper
@@ -217,6 +230,7 @@ async function assertHelperHandshake(host: SshAttemptHost, deps: SshAttemptDeps,
 	// `helperVersion`/`nodeVersion`/`pid` are identity for the UI, not evidence of compatibility, so a
 	// helper that omits them is still a working helper.
 	host.record("SSH_HELPER_HANDSHAKE_OK");
+	return home;
 }
 
 /** Build the helper command from the verified bootstrap; an unusable value fails closed like a missing one. */
@@ -300,11 +314,11 @@ export async function runSshConnectionAttempt(host: SshAttemptHost, deps: SshAtt
 		// Staged progress with real evidence (plan §11.1): the machine reports `bootstrapping` while the
 		// activated bundle is asked to identify itself, and `ready` is applied only after it answered.
 		host.enterPhase("helper");
-		await assertHelperHandshake(host, deps, control);
+		const home = await assertHelperHandshake(host, deps, control);
 		// The handshake is another await on this path: abort, shutdown or a lost session may have released
 		// the attempt while the helper was answering, and only a live attempt may become ready.
 		if (!host.ownsLiveAttempt()) return;
-		host.markReady();
+		host.markReady(home);
 	} catch (error) {
 		// The attempt is handed over unconditionally: the host applies its own ownership fence, so a caller
 		// abort and an already released attempt are skipped there instead of being reported twice here.

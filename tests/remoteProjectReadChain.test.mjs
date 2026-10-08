@@ -172,24 +172,30 @@ async function createLifecycle(userDataDir, remote, ports, browseRoot = async ({
 	await projectStore.load();
 
 	const handlers = new Map();
-	const { registerRemoteHostIpc } = loadTsCommonJs("src/main/ipc/remoteHostIpc.ts", {
-		stubs: {
-			electron: { ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) } },
-			// 真实探测需要 SSH 主机；这里用可配置替身（见文件头“未覆盖”）。默认把用户输入当 canonical。
-			"../remote/RemoteBrowseRoot": { resolveRemoteBrowseRoot: browseRoot },
-			"../remote/RemoteHostStore": { RemoteHostStore: { open: async () => ({ getSnapshot: () => ({ status: "ready", revision: 1, profiles: [] }) }) } },
-			"../remote/SshHostPinStore": {
-				SshHostPinStore: class {
-					dispose() {}
-				},
+	const stubs = {
+		electron: { ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) } },
+		// 真实探测需要 SSH 主机；这里用可配置替身（见文件头“未覆盖”）。默认把用户输入当 canonical。
+		"../remote/RemoteBrowseRoot": { resolveRemoteBrowseRoot: browseRoot },
+		"../remote/RemoteHostStore": { RemoteHostStore: { open: async () => ({ getSnapshot: () => ({ status: "ready", revision: 1, profiles: [] }) }) } },
+		"../remote/SshHostPinStore": {
+			SshHostPinStore: class {
+				dispose() {}
 			},
 		},
-	});
+	};
+	// G1 拆分后 hosts 域与项目域各有注册入口；两个 load 共用同一批替身（否则 fakes 不同源）。
+	const { registerRemoteHostIpc } = loadTsCommonJs("src/main/ipc/remoteHostIpc.ts", { stubs });
+	const { registerRemoteProjectIpc } = loadTsCommonJs("src/main/ipc/remoteProjectIpc.ts", { stubs });
 	const service = createRemoteHostConnectionService({ userDataDir, client: CLIENT, nodePath: "/usr/bin/node", ports });
 	registerRemoteHostIpc({
 		enabled: true,
 		userDataDir,
 		list: async () => ({ snapshot: { status: "ready", profiles: [] }, findings: [] }),
+		service: () => service,
+	});
+	registerRemoteProjectIpc({
+		enabled: true,
+		userDataDir,
 		service: () => service,
 		projects: {
 			enroll: async ({ hostId, canonicalRemotePath }) => ({ projectId: (await projectStore.addRemote({ hostId, canonicalRemotePath })).id }),

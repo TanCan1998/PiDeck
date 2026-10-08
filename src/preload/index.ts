@@ -271,6 +271,11 @@ const api = {
 		/** 项目内文件名搜索（不含内容搜索）；`path` 传空串表示项目根。 */
 		searchProject: (projectId: string, path: string, query: string) => ipcRenderer.invoke(ipcChannels.remoteProjectSearch, projectId, path, query) as Promise<import("../shared/types/remoteHost").RemoteProjectSearchResult>,
 	},
+	/** 远端会话只读发现与登记（Phase 3 第三段）；本批无侧栏 UI，通道先按 IPC 契约收口。 */
+	remoteSessions: {
+		scan: (hostId: string) => ipcRenderer.invoke(ipcChannels.remoteSessionScan, hostId) as Promise<import("../shared/types/remoteHost").RemoteSessionScanResult>,
+		register: (hostId: string, remoteSessionId: string) => ipcRenderer.invoke(ipcChannels.remoteSessionRegister, hostId, remoteSessionId) as Promise<import("../shared/types/remoteHost").RemoteSessionRegisterResult>,
+	},
 	projects: {
 		list: () => ipcRenderer.invoke(ipcChannels.projectsList) as Promise<Project[]>,
 		add: () => ipcRenderer.invoke(ipcChannels.projectsAdd) as Promise<Project | null>,

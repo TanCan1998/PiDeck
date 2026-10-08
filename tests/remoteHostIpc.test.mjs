@@ -803,7 +803,8 @@ function projectHandlers(options = {}) {
 	// 测试用的项目库：只支持 ssh locator（本入口不处理本机项目）。
 	const projects = options.projects ?? {};
 	const handlers = new Map();
-	const { registerRemoteHostIpc } = loadTsCommonJs("src/main/ipc/remoteHostIpc.ts", {
+	// G1 拆分后项目域有自己的注册入口；stub 的 specifier 与拆分前一致（同一目录下的 ../remote/*）。
+	const { registerRemoteProjectIpc } = loadTsCommonJs("src/main/ipc/remoteProjectIpc.ts", {
 		stubs: {
 			electron: { ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) } },
 			"../remote/RemoteBrowseRoot": {
@@ -859,10 +860,9 @@ function projectHandlers(options = {}) {
 			},
 		},
 	});
-	registerRemoteHostIpc({
+	registerRemoteProjectIpc({
 		enabled: options.enabled ?? true,
 		userDataDir: "/tmp/ignored",
-		list: async () => ({ snapshot: { status: "ready", profiles: [] }, findings: [] }),
 		service: () => ({
 			client: { sshPath: "/usr/bin/ssh", scpPath: "/usr/bin/scp", env: {}, run: async () => ({ exitCode: 0, stdout: "" }) },
 			async request() {},

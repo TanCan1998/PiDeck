@@ -123,8 +123,24 @@ function fakePorts(userDataDir) {
 				root,
 				state: "disconnected",
 				latched: false,
+				lastCode: "SSH_CONNECTION_READY",
+				retries: [],
 				machine() {
-					return { hostId: HOST_ID, generation: 1, state: manager.state, attempts: 0, lastCode: "SSH_CONNECTION_READY", latched: manager.latched };
+					return { hostId: HOST_ID, generation: 1, state: manager.state, attempts: 0, lastCode: manager.lastCode, latched: manager.latched };
+				},
+				// 真实 manager 的外部致命条件入口：needs-attention 就是这样从服务层进来的。替身缺了它就会比生产
+				// 实现更宽松，把「漂移是否真的进入终态」这件事测没。
+				reportNeedsAttention(hostId, code) {
+					events.push("needs-attention:" + code);
+					manager.state = "needs-attention";
+					manager.lastCode = code;
+				},
+				// reducer 里离开 needs-attention 的唯一合法出口是 user-retry，替身如实复刻。
+				async retry() {
+					manager.retries.push(root);
+					manager.state = "ready";
+					manager.lastCode = "SSH_CONNECTION_READY";
+					return manager.machine();
 				},
 				getState() {
 					return manager.machine();
@@ -132,6 +148,9 @@ function fakePorts(userDataDir) {
 				async connect() {
 					events.push("connect:" + String(root));
 					if (manager.latched) return manager.machine();
+					// 真实 reducer 只允许从 disconnected/offline 进入 connecting：needs-attention 是终态，
+					// begin-attempt 会被丢弃。替身如实拒绝，否则「只有 user-retry 能离开终态」测不出来。
+					if (manager.state === "needs-attention") return manager.machine();
 					manager.state = "ready";
 					return manager.machine();
 				},
@@ -266,6 +285,49 @@ test("reconnecting re-verifies the root, and a drift found there is refused befo
 		assert.equal(api.ports.requests.length, requestsBefore, "no helper request may be made after a failed re-check");
 		assert.ok(!api.ports.events.includes("connect:" + ROOT_A + "#2"), "no reconnect may happen after a failed re-check");
 		assert.equal(api.ports.events.filter((event) => event === "connect:" + ROOT_A).length, 1, "only the first establishment connected");
+		// A drift found while reconnecting is not only a code on this one call: the host itself has to become
+		// visibly actionable, which is the state the connections UI renders.
+		assert.equal(manager.state, "needs-attention", "the drift must enter the terminal host state");
+		assert.deepEqual(
+			api.ports.events.filter((event) => event.startsWith("needs-attention:")),
+			["needs-attention:SSH_PROJECT_ROOT_CHANGED"],
+		);
+	});
+});
+
+test("a drift found while reconnecting keeps refusing reads until the user retries the host", async () => {
+	await harness(async (api) => {
+		assert.equal((await api.stat(HOST_ID, ROOT_A, "a.txt")).ok, true);
+		const manager = api.ports.managers[0];
+		// The session is gone but its verified helper location still stands: the next read revives it, and
+		// that revive is exactly where the boundary is re-proved.
+		manager.state = "disconnected";
+		api.ports.control.canonical = ROOT_A + "-moved";
+
+		const drifted = await api.stat(HOST_ID, ROOT_A, "a.txt");
+		assert.equal(drifted.ok, false, JSON.stringify(drifted));
+		assert.equal(drifted.code, "SSH_PROJECT_ROOT_CHANGED");
+		assert.equal(manager.state, "needs-attention");
+
+		// Every later read stays refused with the same code; nothing about an ordinary read may clear the
+		// terminal state, and the terminal session is never re-probed (that is what makes it terminal).
+		for (let attempt = 0; attempt < 2; attempt += 1) {
+			const refused = await api.stat(HOST_ID, ROOT_A, "a.txt");
+			assert.equal(refused.ok, false, "needs-attention must stay refused");
+			assert.equal(refused.code, "SSH_PROJECT_ROOT_CHANGED");
+			assert.equal(manager.state, "needs-attention");
+		}
+		assert.equal(api.ports.verifyCalls.length, 2, "a terminal host must not be probed again by a read");
+
+		// The user re-points the boundary and presses connect: that is the reducer's user-retry, the only legal
+		// exit, so the service must reach the manager through `retry` instead of `connect`/begin-attempt.
+		api.ports.control.canonical = undefined;
+		const reconnected = await api.service.connect(HOST_ID);
+		assert.equal(reconnected.ok, true, JSON.stringify(reconnected));
+		assert.deepEqual(plain(manager.retries), [ROOT_A], "an explicit connect is the user retry");
+		assert.equal(manager.state, "ready");
+		const served = await api.stat(HOST_ID, ROOT_A, "a.txt");
+		assert.equal(served.ok, true, "after the fix and the user retry the read is served again");
 	});
 });
 

@@ -24,6 +24,13 @@ const COVERED_HOST_ID_FIELDS = new Map([
 	// 漏掉这个文件会让「谁在引用某台主机」的审计凭空少一层。
 	["src/shared/projectLocation.ts:readSshProjectLocator", "projects"],
 	["src/main/sessions/SessionCatalog.ts:hostRebindTargetLocator", "sessions"],
+	// G3 远端 Session 登记（远端身份 → ssh locator 的匹配与构造）：这四个名字只服务于把远端会话登记进
+	// catalog 的那条引用——真正落盘的是 SessionLocator（已由 sessions 源覆盖）。归 sessions 而不是 runtime，
+	// 因为它们是「下一次 catalog 写入里那条 host 引用的来源」；hostRebindTargetLocator 是同类先例。
+	["src/main/sessions/SessionCatalog.ts:RemoteSessionIdentity", "sessions"],
+	["src/main/sessions/SessionCatalog.ts:RemoteSessionRegistrationInput", "sessions"],
+	["src/main/sessions/SessionCatalog.ts:remoteSessionIdentity", "sessions"],
+	["src/main/sessions/SessionCatalog.ts:remoteSessionLocator", "sessions"],
 	["src/shared/types/remoteHost.ts:RemoteHostConnectResult", "runtime"],
 	["src/shared/types/remoteHost.ts:RemoteHostDisconnectResult", "runtime"],
 	["src/shared/types/remoteHost.ts:RemoteHostDiagnosticsResult", "runtime"],

@@ -196,3 +196,22 @@ export type RemoteProjectSearchEntry = { path: string; name: string; kind: Remot
  * 因此界面可以说「结果已截断」，而不是把一屏结果伪装成完整答案。
  */
 export type RemoteProjectSearchResult = { ok: true; entries: RemoteProjectSearchEntry[]; scanned: number; truncated: boolean } | { ok: false; code: string };
+
+/**
+ * 一条远端会话文件（Phase 3 第三段，只读发现）。
+ *
+ * `remoteSessionId` 是远端文件的稳定身份 = 相对会话根的 POSIX 路径；渲染层绝不能把它当本机路径。
+ */
+export type RemoteSessionEntry = {
+	remoteSessionId: string;
+	/** 本批与 remoteSessionId 同值（冻结设计第 4 条）。 */
+	remotePath: string;
+	/** 文件名 stem —— **暂定**标题，不是解析出来的会话名（按需头部解析留待下一增量）。 */
+	name: string;
+	size: number;
+	mtimeMs: number;
+};
+
+export type RemoteSessionScanResult = { ok: true; entries: RemoteSessionEntry[] } | { ok: false; code: string };
+
+export type RemoteSessionRegisterResult = { ok: true; sessionId: string; created: boolean; remoteSessionId: string; remotePath: string } | { ok: false; code: string };

@@ -94,6 +94,25 @@ export type SshConnectionManager = {
 	 * the request's own outcome.
 	 */
 	cancel(hostId: string, requestId: string, options?: { timeoutMs?: number }): Promise<RemoteHelperCancelResult>;
+	/**
+	 * Report an externally verified fatal condition about this host - a project root that no longer
+	 * canonicalizes to itself, for instance. Unlike a failed attempt this report is not tied to an attempt,
+	 * so it may arrive while nothing is in flight (disconnected/offline) and the host enters the terminal
+	 * needs-attention state from there; the same actionability rules apply (only user-retry leaves it,
+	 * generation fencing and the shutdown latch stay intact).
+	 *
+	 * A code that is not a stable enumerable code is collapsed to SSH_CONNECTION_NEEDS_ATTENTION: the code
+	 * usually comes from a remote probe, and free text must never reach diagnostics or the renderer. An
+	 * unknown host id gets an entry exactly like getState/connect does; a torn-down machine ignores it.
+	 */
+	reportNeedsAttention(hostId: string, code: string): void;
+	/**
+	 * The remote HOME a successful handshake reported for this host, or undefined while this host never
+	 * handshook (or its session was released). Only a usable absolute POSIX path is ever stored, but the
+	 * value still comes from the remote: callers must re-validate it before use (see
+	 * RemoteHostConnectionService.remoteHome).
+	 */
+	getHome(hostId: string): string | undefined;
 	disconnect(hostId: string, reason: "abort" | "shutdown"): Promise<void>;
 	dispose(): Promise<void>;
 };
@@ -125,6 +144,13 @@ type HostEntry = {
 	/** Codes already recorded for the current generation, so remote noise cannot flush the history. */
 	recordedCodes: Set<string>;
 	latestPhase: SshConnectionPhase;
+	/**
+	 * Remote HOME reported by the last successful handshake of this entry. Kept per host, not per attempt,
+	 * because the session root a reader derives from it (home + ".pi/agent/sessions") outlives one attempt;
+	 * cleared when the session is released so a dead session cannot keep naming a home that was never
+	 * proven usably reachable. Only a value that passes readRemoteHome is stored.
+	 */
+	home?: string;
 };
 
 const DEFAULT_STABILITY_WINDOW_MS = 750;
@@ -136,6 +162,12 @@ const MAX_STABILITY_WINDOW_MS = 10_000;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 10_000;
 /** Stable diagnostic codes only; anything else is collapsed before it reaches the redaction layer. */
 const DIAGNOSTIC_CODE = /^[A-Z][A-Z0-9_]{2,63}$/;
+/** Fallback when a caller-supplied fatal code is not a stable enumerable one (see reportNeedsAttention). */
+const CODE_NEEDS_ATTENTION = "SSH_CONNECTION_NEEDS_ATTENTION";
+/** Control bytes must never survive in a path handed on to another module. */
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+/** Upper bound of a stored remote HOME, matching the helper's own MAX_HOME ceiling. */
+const REMOTE_HOME_MAX_LENGTH = 4096;
 /** A session that dies before this uptime is a flap, not a working connection. */
 const MIN_HEALTHY_UPTIME_MS = 30_000;
 /** Flaps tolerated (across ready cycles) before the manager stops retrying and asks the user. */
@@ -170,6 +202,18 @@ function readHelperSession(value: unknown): SshHelperSession | undefined {
 	if (root === undefined) return { nodePath, deployRoot, bundleSha256 };
 	if (typeof root !== "string" || root.length === 0) return undefined;
 	return { nodePath, deployRoot, bundleSha256, root };
+}
+
+/**
+ * A remote HOME is only storable when it is a non-empty absolute POSIX path without control bytes and
+ * within the helper's own ceiling. The attempt already proved the handshake carried a string, but that is
+ * a type fact about a value that came from the far side: anything else is dropped here instead of being
+ * kept as a path another module could later join into a session location.
+ */
+function readRemoteHome(value: unknown): string | undefined {
+	if (typeof value !== "string" || value.length === 0 || value.length > REMOTE_HOME_MAX_LENGTH) return undefined;
+	if (value.charAt(0) !== "/" || CONTROL_CHARS.test(value)) return undefined;
+	return value;
 }
 
 /** A missing or nonsensical handshake budget falls back to the default; the deadline is never disabled. */
@@ -479,9 +523,12 @@ export function createSshConnectionManager(options: SshConnectionManagerOptions)
 			record(code, exitCode) {
 				record(entry, code, exitCode);
 			},
-			markReady() {
+			markReady(home) {
 				apply(entry, { type: "connected", generation });
 				entry.readyAt = now();
+				// The handshake is the only place this host's remote HOME exists: the manager never guesses one,
+				// so a value that cannot be used as a POSIX path is dropped rather than stored half-usable.
+				entry.home = readRemoteHome(home);
 				record(entry, "SSH_CONNECTION_READY");
 			},
 			isCurrentGeneration() {
@@ -544,6 +591,9 @@ export function createSshConnectionManager(options: SshConnectionManagerOptions)
 		const live = entry.live;
 		if (live) await releaseLive(entry, live, reason);
 		entry.readyAt = undefined;
+		// A released session must not keep naming a remote home: `remoteHome` answers "unknown" for a host
+		// that is not connected, and the next handshake records the home of the session that actually ran.
+		entry.home = undefined;
 		if (reason === "shutdown") {
 			// App exit latches the machine: no timer or retry may revive a torn-down connection.
 			apply(entry, { type: "shutdown" });
@@ -576,6 +626,22 @@ export function createSshConnectionManager(options: SshConnectionManagerOptions)
 			const entry = entryFor(hostId);
 			await kickOff(entry, apply(entry, { type: "user-retry" }).startGeneration);
 			return entry.machine;
+		},
+		reportNeedsAttention(hostId, code) {
+			// A malformed id is ignored instead of creating an unreachable entry keyed by garbage; a usable one
+			// creates its host entry exactly like getState/connect does, so a verified condition can become
+			// visible even before this host ever attempted a connection.
+			if (disposed || typeof hostId !== "string" || hostId.length === 0) return;
+			const entry = entryFor(hostId);
+			// The reducer fences on generation because it normally speaks about one attempt. This report speaks
+			// about the machine as it exists now, which is precisely the current generation - that is what lets an
+			// external condition land on an idle host without inventing an attempt.
+			apply(entry, { type: "needs-attention", generation: entry.machine.generation, code: DIAGNOSTIC_CODE.test(code) ? code : CODE_NEEDS_ATTENTION });
+		},
+		getHome(hostId) {
+			// No entry is created here: asking about a home must not make an unknown host look known, and the
+			// caller re-validates the shape anyway (this value came from the remote).
+			return hosts.get(hostId)?.home;
 		},
 		async disconnect(hostId, reason) {
 			return disconnectHost(entryFor(hostId), reason);

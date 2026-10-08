@@ -101,6 +101,24 @@ const HOST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 const DEFAULT_NONCE_BYTES = 16;
 /** Nonces must stay distinguishable between attempts of the same host. */
 const NONCE = /^[A-Za-z0-9][A-Za-z0-9_-]{15,63}$/;
+/** Control bytes must never survive in a path handed on to another module. */
+const CONTROL_BYTES = /[\u0000-\u001f\u007f]/;
+/** Upper bound of a remote HOME, matching the helper contract's own ceiling. */
+const MAX_REMOTE_HOME_LENGTH = 4096;
+
+/**
+ * Re-validate a remote HOME on the way out of this service.
+ *
+ * The manager stores only what its own shape check accepted, but this value is still remote input: it
+ * arrives in a helper handshake, and callers join it into remote session paths. The egress check is
+ * therefore repeated here (non-empty, absolute POSIX, no control bytes, bounded length) instead of trusting
+ * an upstream filter, and a value that does not pass is reported as "unknown" rather than partially used.
+ */
+function readRemoteHome(value: unknown): string | undefined {
+	if (typeof value !== "string" || value.length === 0 || value.length > MAX_REMOTE_HOME_LENGTH) return undefined;
+	if (value.charAt(0) !== "/" || CONTROL_BYTES.test(value)) return undefined;
+	return value;
+}
 
 function defaultPorts(): RemoteHostConnectionPorts {
 	return {
@@ -248,7 +266,10 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 			if (disposed) return { ok: false, hostId, code: "REMOTE_CONNECTION_SERVICE_DISPOSED" };
 			const manager = entry.manager ?? managerFor(held);
 			entry.manager = manager;
-			const state = await manager.connect(hostId);
+			// needs-attention is terminal for the reducer: `begin-attempt` is dropped there, so a plain connect
+			// would only report the terminal state back and the user's own "connect" could never leave it. The
+			// reducer's one legal exit is `user-retry`, which is exactly what an explicit connect means here.
+			const state = manager.getState(hostId).state === "needs-attention" ? await manager.retry(hostId) : await manager.connect(hostId);
 			return { ok: true, hostId, state };
 		} catch (error) {
 			// A failed connect must not leave a helper session behind that the next attempt would trust.
@@ -314,7 +335,38 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 			// operation lock: probing first and establishing outside it would leave a window in which the
 			// verified path is not the path the session is actually confined to.
 			const verified = await verifyProjectRoot(hostId, root);
-			if (!verified.ok) return verified;
+			if (!verified.ok) {
+				// The read is already refused fail-closed; the host itself has to become visibly actionable too,
+				// otherwise the drift stays a code on one call while the host keeps looking ordinary and the only
+				// user-visible reason to act is a diagnostic nobody watched. Reported through the live manager when
+				// there is one - needs-attention is a connection state, so a host that never established a session
+				// has no machine to move, and building one only to fail would bootstrap a helper for a boundary
+				// that was just refused. A latched manager is skipped on purpose: its latch is terminal.
+				//
+				// Reachability, stated honestly rather than assumed: with today's wiring an existing manager is
+				// either live (connecting/probing/bootstrapping/ready/degraded/reconnecting -> early return above),
+				// terminal (needs-attention -> early return above, latched -> discarded above) or released by an
+				// explicit abort, whose reads never get here because `explicitlyDisconnected` refuses first. So the
+				// drift a *live* session hides is caught by the helper handshake instead
+				// (SSH_HELPER_ROOT_MISMATCH is fatal -> needs-attention), which is the reachable half of this
+				// condition and is covered end to end in tests/sshConnectionManager.test.mjs. This report stays
+				// because it is the correct wiring for the sources the reducer now accepts and for an injected
+				// manager, and because a future release path that does not mark the host user-disconnected must not
+				// silently lose a verified drift.
+				//
+				// KNOWN LIMITATION, stated precisely instead of left as a vague TODO: root drift is enforced per
+				// project only - the read is refused fail-closed with a stable code - and it does **not** drive
+				// needs-attention in the current wiring, for the reason above. The reachable needs-attention trigger
+				// for this condition today is the helper handshake (SSH_HELPER_ROOT_MISMATCH, FATAL).
+				//
+				// Two designs a later batch may choose instead (deliberately NOT implemented here):
+				// (i) a project-level "root needs attention" flag surfaced through hosts-list/diagnostics, leaving
+				//     the connection state machine untouched;
+				// (ii) reorder the re-check to "verify the new root first, then drop the old session", and narrow
+				//     needs-attention to the host level.
+				manager?.reportNeedsAttention(hostId, verified.code);
+				return verified;
+			}
 		}
 		if (manager === undefined) {
 			const held = await ensureHeld(entry, hostId);
@@ -365,6 +417,32 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 				return await run;
 			} finally {
 				if (entry.inFlight === run) entry.inFlight = undefined;
+			}
+		},
+		/**
+		 * The verified remote HOME of one host, for readers that derive a remote session root from it.
+		 *
+		 * Narrow on purpose, and it never throws: an unknown host, a host with no manager, a host whose
+		 * machine is not actually connected, and a home that does not look like an absolute POSIX path all
+		 * answer `undefined`. Callers run across IPC, where "not connected yet" is an ordinary state, not an
+		 * error. The value is remote input, so it is re-validated here rather than trusted because the
+		 * manager already filtered it once.
+		 */
+		async remoteHome(hostId: string): Promise<string | undefined> {
+			if (typeof hostId !== "string" || !HOST_ID.test(hostId)) return undefined;
+			const manager = hosts.get(hostId)?.manager;
+			if (manager === undefined) return undefined;
+			try {
+				// Only a live session whose handshake succeeded may name a home: reconnecting/offline (and a
+				// terminal needs-attention) are not "connected", and a home recorded by an earlier ready session
+				// must not outlive the session it was proven on.
+				const state = manager.getState(hostId).state;
+				if (state !== "ready" && state !== "degraded") return undefined;
+				return readRemoteHome(manager.getHome(hostId));
+			} catch {
+				// A manager that cannot answer is reported as "unknown", exactly like an unknown host: this is a
+				// metadata read and must never fail a caller's read path with a raw exception.
+				return undefined;
 			}
 		},
 		/**

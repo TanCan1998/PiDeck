@@ -4,17 +4,17 @@
  * 为什么单独成模块：搜索的核心规则是「代次 + 三种终态」，与 React 无关，必须能离开组件单测——
  * 尤其是**迟到结果作废**这条（切项目、发起新搜索之后，旧请求的结果绝不能覆盖新查询）。
  *
- * 代次复用的就是 \`remoteRequestGate\`：与远端目录读取同一个闸门语义，不另立一套。
- * \`settle\` 在代次不是当前代次时返回 false 并**不动任何状态**，因此「旧结果盖新查询」在结构上
+ * 代次复用的就是 `remoteRequestGate`：与远端目录读取同一个闸门语义，不另立一套。
+ * `settle` 在代次不是当前代次时返回 false 并**不动任何状态**，因此「旧结果盖新查询」在结构上
  * 就不可能发生，而不是靠调用方自觉。
  *
- * IPC 返回也是外部数据：渲染层不假设主进程一定给了正确形状，\`readSearchResponse\` 逐字段收窄，
+ * IPC 返回也是外部数据：渲染层不假设主进程一定给了正确形状，`readSearchResponse` 逐字段收窄，
  * 读不懂就当作「请求失败」，绝不把畸形对象渲染出去。
  */
 
 import { createRequestGate } from "./remoteRequestGate";
 
-/** 渲染层能安全使用的匹配项：\`path\` 已证明可拆段（相对 POSIX、无 \`..\`/空段/控制字节）。 */
+/** 渲染层能安全使用的匹配项：`path` 已证明可拆段（相对 POSIX、无 `..`/空段/控制字节）。 */
 export type RemoteSearchEntryView = {
 	path: string;
 	name: string;
@@ -94,7 +94,7 @@ function readSearchEntryView(value: unknown): RemoteSearchEntryView | undefined 
 }
 
 /**
- * 把 IPC 返回收窄成一次终态。任何读不懂的形状都是 \`rejected\`（请求失败），而不是「空结果」——
+ * 把 IPC 返回收窄成一次终态。任何读不懂的形状都是 `rejected`（请求失败），而不是「空结果」——
  * 把畸形响应当成「没有匹配」是这里最危险的一种谎。
  */
 export function readSearchResponse(raw: unknown): RemoteSearchOutcome {

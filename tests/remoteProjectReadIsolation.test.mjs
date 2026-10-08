@@ -206,18 +206,19 @@ async function writeStore(userDataDir, revision = 7) {
  */
 function registerIpc({ service, projects, userDataDir, beforeProjectOperation }) {
 	const handlers = new Map();
-	const { registerRemoteHostIpc } = loadTsCommonJs("src/main/ipc/remoteHostIpc.ts", {
-		stubs: {
-			electron: { ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) } },
-			"../remote/RemoteBrowseRoot": { resolveRemoteBrowseRoot: async () => ({ canonicalPath: ROOT_A }) },
-			"../remote/RemoteHostStore": { RemoteHostStore: { open: async () => ({ getSnapshot: () => ({ status: "ready", revision: 1, profiles: [] }) }) } },
-			"../remote/SshHostPinStore": {
-				SshHostPinStore: class {
-					dispose() {}
-				},
+	const stubs = {
+		electron: { ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) } },
+		"../remote/RemoteBrowseRoot": { resolveRemoteBrowseRoot: async () => ({ canonicalPath: ROOT_A }) },
+		"../remote/RemoteHostStore": { RemoteHostStore: { open: async () => ({ getSnapshot: () => ({ status: "ready", revision: 1, profiles: [] }) }) } },
+		"../remote/SshHostPinStore": {
+			SshHostPinStore: class {
+				dispose() {}
 			},
 		},
-	});
+	};
+	// G1 拆分后 hosts 域与项目域各有注册入口；两个 load 共用同一批替身（否则 fakes 不同源）。
+	const { registerRemoteHostIpc } = loadTsCommonJs("src/main/ipc/remoteHostIpc.ts", { stubs });
+	const { registerRemoteProjectIpc } = loadTsCommonJs("src/main/ipc/remoteProjectIpc.ts", { stubs });
 	// 传输包装：withProjectSession 是整次项目读取的入口；在它**取锁之前**留一个 barrier，
 	// 就能精确制造「这次操作还没开始，另一个项目先切根」的窗口。其余原样转发给真实 service。
 	const wrapped = new Proxy(service, {
@@ -236,6 +237,11 @@ function registerIpc({ service, projects, userDataDir, beforeProjectOperation })
 		enabled: true,
 		userDataDir,
 		list: async () => ({ snapshot: { status: "ready", profiles: [] }, findings: [] }),
+		service: () => wrapped,
+	});
+	registerRemoteProjectIpc({
+		enabled: true,
+		userDataDir,
 		service: () => wrapped,
 		projects: {
 			enroll: async () => ({ projectId: PROJECT_A }),

@@ -16,6 +16,12 @@ import { SSH_RECONNECT_BACKOFF_MS, type RemoteHostConnectionState, type SshConne
  *   problems (auth denied, unsupported platform, missing node/helper) must never be retried
  *   silently, so a transient transport loss is reported as `disconnected` instead and arms the
  *   backoff.
+ * - needs-attention has a second, equally actionable trigger besides a failed attempt: an externally
+ *   verified fatal condition reported while nothing is in flight at all. A project root that no longer
+ *   canonicalizes to itself is exactly that - the drift is discovered by re-checking a host that is idle,
+ *   disconnected or offline - so those sources are accepted too (see the `needs-attention` case below).
+ *   Being able to enter the terminal state without an attempt is what makes the condition visible to the
+ *   user at all; a rejected event would leave the host looking ordinary while every read keeps failing.
  * - `generation` identifies one attempt. Every fenced event echoes the generation its attempt was
  *   started with, and anything else is dropped (original state, no effects) so a late failure or a
  *   stale timer from a previous attempt can never corrupt the current one.
@@ -33,6 +39,10 @@ export type ConnectionMachineState = { hostId: string; generation: number; state
  *
  * `disconnected` vs `needs-attention` is the caller's classification of the same failure: the
  * former is transient (retry on the backoff schedule), the latter is actionable (stop and ask).
+ *
+ * `needs-attention` is the one fenced event a non-attempt reporter may also send (see
+ * SshConnectionManager.reportNeedsAttention): it carries the generation it speaks about - the machine's
+ * current one - which is exactly what keeps a stale external report from landing on a newer attempt.
  */
 export type ConnectionEvent =
 	| { type: "begin-attempt" }
@@ -256,7 +266,15 @@ export function reduceConnectionEvent(state: ConnectionMachineState, event: Conn
 		}
 		case "needs-attention": {
 			const live = attemptRank(state.state) !== undefined;
-			if (!live && state.state !== "ready" && state.state !== "degraded" && state.state !== "reconnecting") return reject(state);
+			// Two kinds of fatal condition land here and they are equally actionable:
+			// - an attempt failed in a way no retry can fix (auth denied, unsupported platform, missing
+			//   node/helper): the attempt stages plus ready/degraded/reconnecting;
+			// - an externally verified fatal condition reported while nothing is in flight at all: a
+			//   project root that no longer canonicalizes to itself is found by re-checking an idle,
+			//   disconnected or offline host, so those states must be accepted too. Rejecting them would
+			//   leave the host looking ordinary while every read keeps failing - the user would have no
+			//   visible reason to act.
+			if (!live && state.state !== "ready" && state.state !== "degraded" && state.state !== "reconnecting" && state.state !== "disconnected" && state.state !== "offline") return reject(state);
 			// Fatal and actionable: stop retrying, hand the problem to the user.
 			const effects = state.state === "reconnecting" ? [cancelReconnect(state)] : [];
 			return { state: nextState(state, { state: "needs-attention", attempts: 0, lastCode: normalizeCode(event.code, CODE_NEEDS_ATTENTION) }), effects };

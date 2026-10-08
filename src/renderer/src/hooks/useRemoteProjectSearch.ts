@@ -4,10 +4,10 @@ import { createRemoteProjectSearchController, readSearchResponse, type RemotePro
 /**
  * 远端项目文件名搜索（渲染层，F2）。
  *
- * 状态机在 \`remoteProjectSearchState\`（纯函数，可离开 React 单测）；这里只做三件事：
+ * 状态机在 `remoteProjectSearchState`（纯函数，可离开 React 单测）；这里只做三件事：
  * 把主进程能力收窄成一个窄 port、按代次落地结果、在切项目/卸载时作废在途结果。
  *
- * port 的取值是**结构探测**而不是类型断言：F5 接线之前 preload 上没有 \`searchProject\`，
+ * port 的取值是**结构探测**而不是类型断言：F5 接线之前 preload 上没有 `searchProject`，
  * 这时宁可报「未接线」稳定码，也不假装成功、也不崩溃。接线落地后同一个调用点自然生效。
  */
 export type RemoteProjectSearchPort = (projectId: string, path: string, query: string) => Promise<unknown>;
@@ -16,9 +16,9 @@ export type RemoteProjectSearchPort = (projectId: string, path: string, query: s
 export const REMOTE_SEARCH_UNWIRED_CODE = "REMOTE_PROJECT_SEARCH_UNWIRED";
 
 /**
- * 逐层结构收窄 \`desktopApi.remoteHosts.searchProject\`。
+ * 逐层结构收窄 `desktopApi.remoteHosts.searchProject`。
  *
- * 用 \`Reflect.get\` 逐层取值，是为了在 preload 尚未暴露该方法（或整个 api 是「未装载 preload」的
+ * 用 `Reflect.get` 逐层取值，是为了在 preload 尚未暴露该方法（或整个 api 是「未装载 preload」的
  * 抛错 Proxy）时不带断言地安全失败；任何一层不是预期的函数就是「未接线」。
  */
 function searchProjectOf(api: unknown): RemoteProjectSearchPort | undefined {

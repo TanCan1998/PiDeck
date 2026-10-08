@@ -262,6 +262,8 @@ import { ResourceImportManager } from "./resourceImport/ResourceImportManager";
 import { toWslLinuxPath, toWindowsHostPath } from "./wsl/WslPaths";
 import { registerProjectsIpc } from "./ipc/projectsIpc";
 import { registerRemoteHostIpc } from "./ipc/remoteHostIpc";
+import { registerRemoteProjectIpc } from "./ipc/remoteProjectIpc";
+import { registerRemoteSessionIpc } from "./ipc/remoteSessionIpc";
 import { createRemoteHostConnectionService } from "./remote/RemoteHostConnectionService";
 import { createSshClientRuntime, resolvePosixSshClient } from "./remote/SshClientRuntime";
 import { openRemoteHostCatalogView } from "./remote/RemoteHostCatalogView";
@@ -2407,6 +2409,16 @@ function registerIpc() {
 		userDataDir: app.getPath("userData"),
 		list: () => openRemoteHostCatalogView(app.getPath("userData")),
 		service: remoteHostServiceIfEnabled,
+		// The add-host flow holds a pin store across two IPC calls (offer, then the user's answer), so its
+		// lifetime is the process, not a call. Registering disposal here keeps the broker's timers from
+		// outliving the app.
+		registerCleanup: (cleanup) => quitCleanup.register("remote-host-stores", cleanup),
+	});
+	// 远端项目域（登记/回答/列表/读取/搜索）与 hosts 域分开注册：同一个连接服务端口，不同域的 handler。
+	registerRemoteProjectIpc({
+		enabled: remoteExperimentEnabled,
+		userDataDir: app.getPath("userData"),
+		service: remoteHostServiceIfEnabled,
 		// 远端项目登记端口（Phase 3 第二段）：canonical 值已由 IPC 层校验/确认，这里只做持久化
 		// 与按 projectId 取 locator。只暴露 ssh 项目，本机项目不经过这条入口。
 		projects: {
@@ -2419,10 +2431,16 @@ function registerIpc() {
 				return project && isRemoteProject(project) ? project.locator : undefined;
 			},
 		},
-		// The add-host flow holds a pin store across two IPC calls (offer, then the user's answer), so its
-		// lifetime is the process, not a call. Registering disposal here keeps the broker's timers from
-		// outliving the app.
-		registerCleanup: (cleanup) => quitCleanup.register("remote-host-stores", cleanup),
+	});
+	// 远端 Session 只读发现与登记（Phase 3 第三段）。通道名由装配注入（与 contentStoreIpc 的 ChannelGroup 同一先例）。
+	registerRemoteSessionIpc({
+		enabled: remoteExperimentEnabled,
+		service: remoteHostServiceIfEnabled,
+		catalog: () => sessionCatalog,
+		// 本批不解析会话正文，无法从远端会话内容推断归属：按「同主机上的远端项目」解析；
+		// 解析不出（该主机没有远端项目）就不登记，fail closed，不写半条记录。
+		projectIdForHost: (hostId) => projectStore.list().find((project) => isRemoteProject(project) && project.locator.hostId === hostId)?.id,
+		channels: { scan: ipcChannels.remoteSessionScan, register: ipcChannels.remoteSessionRegister },
 	});
 	// 用量统计：业务在 UsageStatsService，handler 薄层只校验/适配
 	registerUsageStatsIpc(ipcMain, usageStatsService);

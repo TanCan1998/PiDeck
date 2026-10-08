@@ -162,13 +162,20 @@ async function harness(run) {
 		const service = createRemoteHostConnectionService({ userDataDir, client: CLIENT, nodePath: "/usr/bin/node", ports });
 
 		const handlers = new Map();
-		const { registerRemoteHostIpc } = loadTsCommonJs("src/main/ipc/remoteHostIpc.ts", {
-			stubs: { electron: { ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) } } },
-		});
+		const stubs = { electron: { ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) } } };
+		// G1 拆分后 hosts 域与项目域各有注册入口；两个 load 共用同一批替身（否则 fakes 不同源）。
+		// 本套件同时用 host 通道（connect/disconnect）与项目通道，所以两个 register 都要调。
+		const { registerRemoteHostIpc } = loadTsCommonJs("src/main/ipc/remoteHostIpc.ts", { stubs });
+		const { registerRemoteProjectIpc } = loadTsCommonJs("src/main/ipc/remoteProjectIpc.ts", { stubs });
 		registerRemoteHostIpc({
 			enabled: true,
 			userDataDir,
 			list: async () => ({ snapshot: { status: "ready", revision: 7, profiles: [], retiredHostIds: [] }, findings: [] }),
+			service: () => service,
+		});
+		registerRemoteProjectIpc({
+			enabled: true,
+			userDataDir,
 			service: () => service,
 			projects: { enroll: async () => ({ projectId: "project-a" }), locator: (projectId) => PROJECTS[projectId] },
 		});

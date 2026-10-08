@@ -36,6 +36,10 @@ export const ipcChannels = {
 	remoteProjectRead: "remote:project-read",
 	/** 按 projectId 在项目内做**文件名**搜索（不含内容搜索）；query 在 main 边界重新校验。 */
 	remoteProjectSearch: "remote:project-search",
+	/** 列出远端主机上的会话文件（只读、有界；不含正文）。 */
+	remoteSessionScan: "remote:remote-session-scan",
+	/** 把一条远端会话幂等登记进本地 catalog。 */
+	remoteSessionRegister: "remote:remote-session-register",
 	projectsList: "projects:list",
 	projectsAdd: "projects:add",
 	// 文件夹右键菜单直达：按路径添加项目（渲染层确认后调用；projectsAdd 走系统目录选择框）
