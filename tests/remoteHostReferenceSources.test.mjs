@@ -98,13 +98,33 @@ test("unknown versions, locators and malformed siblings fail closed", async (t) 
 		{ version: 2, sessions: [] },
 		{ version: 1, sessions: [session("remote-1", { kind: "future", hostId: HOST_ID })] },
 		{ version: 1, sessions: [session("remote-1", { kind: "ssh", hostId: "not-a-host-id" })] },
+		// hostId 是 host store 的 profile 主键：大写/截断/非字符串域外取值与非法字段一律判死。
+		{ version: 1, sessions: [session("remote-1", { kind: "ssh", hostId: HOST_ID.toUpperCase() })] },
+		{ version: 1, sessions: [session("remote-1", { kind: "ssh", hostId: HOST_ID, remotePath: 7 })] },
+		{ version: 1, sessions: [session("remote-1", { kind: "ssh", hostId: HOST_ID, remotePath: "x".repeat(4097) })] },
+		// 本地 locator 携带 hostId：一条不在 ssh 分支里的主机引用，不能当成本地会话跳过。
+		{ version: 1, sessions: [session("local-host", { kind: "local", environment: "native", filePath: "/work/local", hostId: HOST_ID })] },
 		{ version: 1, sessions: [session("remote-1", { kind: "ssh", hostId: HOST_ID }), {}] },
 	]) {
 		await writeFile(filePath, JSON.stringify(snapshot));
 		const scan = await registryFor(paths).scan();
-		assert.equal(scan.complete, false);
+		assert.equal(scan.complete, false, `${JSON.stringify(snapshot)} must not certify an empty set`);
 		assert.deepEqual(Array.from(scan.unavailable), ["sessions"]);
 	}
+});
+
+// G3 早期只写 hostId（remotePath/remoteSessionId 一直是可选字段）：收窄 hostId 值域不得把这类
+// 历史记录判成"没有引用"。
+test("an ssh session locator with only a hostId still contributes a reference", async (t) => {
+	const paths = await registryPaths(t);
+	await writeFile(paths.catalogPath, JSON.stringify({ version: 1, sessions: [session("remote-1", { kind: "ssh", hostId: HOST_ID })] }));
+	const scan = await registryFor(paths).scan();
+	assert.equal(scan.complete, true);
+	assert.deepEqual(Array.from(scan.referencedHostIds), [HOST_ID]);
+	assert.deepEqual(
+		Array.from(scan.hits, (hit) => `${hit.source}:${hit.recordId}`),
+		["sessions:remote-1"],
+	);
 });
 
 test("an oversized catalog is incomplete without reading it into memory", async (t) => {

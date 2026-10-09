@@ -223,11 +223,18 @@ export type RemoteProjectRootStatusResult = { ok: true; status: "ok" | "needs-at
 export type RemoteSessionScanResult = { ok: true; entries: RemoteSessionEntry[] } | { ok: false; code: string };
 
 /**
- * 一条远端会话的**按需**标题（Phase 3 第四批）。
+ * 一条远端会话的**按需**标题（Phase 3 第四批；I1 把 origin 拆成三档）。
  *
- * `titleOrigin` 必须如实区分：`"parsed"` 是从有界头部解析出来的真实名字，`"fallback"` 是
- * 文件名 stem 兜底（解析不出时**绝不编造**）。界面据此决定是否标注「暂定」。
+ * 读取是**两段式**：先有界头窗口（≤64 KiB），头内没有权威名时再补一次有界尾窗口（≤64 KiB）——
+ * pi 的 `/name` 权威名是**追加在文件尾**的。单次解析最多 1 次 sizing stat + 头读 + 尾读，各自字节有界。
+ *
+ * `titleOrigin` 必须如实区分三档（口径冻结）：
+ * - `"authoritative"`：标题来自**名字字段**——pi 的 `session_info`，或旧版 PiDeck 私有 `sessionName` 行；
+ * - `"inferred"`：内容派生的弱兜底（首条 user/assistant 文本，经共享剥块清洗）；
+ * - `"fallback"`：文件名 stem 兜底（解析不出时**绝不编造**）。
+ *
+ * 界面据此决定是否标注「暂定」：只有 `authoritative` 是会话的真实名字。
  */
-export type RemoteSessionTitleResult = { ok: true; title: string; titleOrigin: "parsed" | "fallback" } | { ok: false; code: string };
+export type RemoteSessionTitleResult = { ok: true; title: string; titleOrigin: "authoritative" | "inferred" | "fallback" } | { ok: false; code: string };
 
 export type RemoteSessionRegisterResult = { ok: true; sessionId: string; created: boolean; remoteSessionId: string; remotePath: string } | { ok: false; code: string };

@@ -165,6 +165,32 @@ A/B/C 可由不同开发者并行，D 随开发跟进。每块指定一个负责
 7. **64 KiB 头窗口覆盖不到文件尾的权威名**（H1 实现时如实记录）：pi 的权威 `session_info`（`/name`）是**追加在文件尾**的，落在 64 KiB 头窗口之外，所以那类会话会得到 `parsed` 的**弱兜底**（首条 user 文本，与本地管线对无名字行会话的行为一致）或 `fallback`（文件名 stem）。**这是冻结契约（头读 ≤64 KiB）的设计后果，不是缺陷**；要提升覆盖率需要显式修订契约（尾窗口或更大上界），建议作为下一增量单独提出。
 8. **`parsed` 的两种强度需要区分看待**：`titleOrigin="parsed"` 现在同时覆盖「权威名（`session_info` / 旧版私有 `sessionName` 字段）」与「弱兜底（首条 user/assistant 文本）」。理由是不复用下半条本地管线就等于只复用半个；若后续要区分，需要给契约加第三档而不是改这两档的含义。
 
+### 第五批落地结果与遗留项（实施后核对）
+
+| 块 | 落地位置 | 验证 |
+| --- | --- | --- |
+| I1 标题覆盖率修订（尾窗口 + 三档） | `RemoteWorkspaceReader` 新增有界 `readWindow(hostId, path, { offset, maxBytes })`（超 64 KiB **拒绝不 clamp**）；标题改两段式：头内有权威名 → **零尾读**，否则读一次有界尾窗口（≤64 KiB）；`titleOrigin` 由两档升为**三档 `authoritative \| inferred \| fallback`**（authoritative=权威名；inferred=首条 user/assistant 弱兜底；fallback=stem） | `tests/remoteSessionTitle.test.mjs`、`tests/remoteSessionsUiState.test.mjs`（18，含把已废止的 `parsed` 固化为拒绝断言）；独立验证 `tests/remoteSessionWindowIsolation.test.mjs`（19） |
+| I2 sessions 域 hostId 判据收敛 | `shared/projectLocation.ts` 新增唯一判据 `readSshSessionLocator`；`SessionCatalog.isSessionLocator` 委托它、**local 分支新增拒绝携带 hostId**；引用扫描删掉自带正则，只经共享判据 | `tests/sessionLocatorHostId.test.mjs`（8）；独立验证 `tests/sessionLocatorHostIdIsolation.test.mjs`（5） |
+
+**已自动验收要点**：`readWindow` 给了 size 就 **0 次 stat**、不给恰 1 次；offset 超 EOF → 空窗口且**零读帧**；10 MiB 文件尾部才放权威名 → `authoritative` 且**恰 2 次读**（各 ≤64 KiB、求和 ≤128 KiB、复用头那次 stat）；头部已覆盖整个文件时**不重复读成自己的尾**；**尾读失败降级为头部结果**（不把标题整体判失败）；非 UUID hostId 在 shared 判据 / catalog / 引用扫描**三处一致拒绝**；候选记录 fail-closed（catalog 条目为空 + 写入抛 `SESSION_CATALOG_NEEDS_REPAIR` + 扫描 `complete=false`，**绝不判成「无引用」**）；合法旧数据（含只带 hostId 的早期记录、带 aliases、local locator、stale 镜像字段）**零误拒**且 scan **不改写文件**。
+
+**真机验收（2026-02，首次从 Windows 客户端通过）**：
+- **独立核验成立**：服务器控制台自述 `SHA256:a/qeVMKmlbe47KuxZlAzT2rcUTwtHPNNPqnS5uij/DM` 与本机原记录逐字节一致（未采用 TOFU；不一致就停下不连）。
+- `verify-remote-host.mjs --bootstrap` **通过**：`PINNED_PROFILE_OK`；node 经**登录 shell** 解析出 nvm `v24.11.0`（非交互 shell 的 v12.22.9 被正确绕过）；`BOOTSTRAP_FINALIZED 5a46222d…` —— **helper 1.6.0 的新 bundle + sha 在真实主机上成功上传并激活**（第二批换版后必须重跑的一步，现已完成）。
+- `verify-remote-connection-service.mjs` **通过**：`state=ready`、`attempts=0`（**首次即成**，未进重试阶梯）、诊断链完整 `SSH_CONNECTION_ATTEMPT_STARTED → PREFLIGHT → PHASE_AUTHENTICATE → PHASE_HELPER → SSH_HELPER_HANDSHAKE_OK → SSH_CONNECTION_READY`；`SERVICE_RECONNECT` 复用已持有会话。
+- **顺带修掉真机脚本的 3 处平台缺口**（此前只有 POSIX 客户端能跑）：① 硬编码 `sshPath: "/usr/bin/ssh"`（Windows 上直接抛 `SSH_CLIENT_SCRIPT_SHIM`）；② 硬编码 `/usr/bin/ssh-keyscan`；③ Windows 的 `ssh-keyscan` 对该主机 KEX 协商失败（实测 `choose_kex: unsupported KEX method sntrup761x25519-sha512@openssh.com`，服务端 Ubuntu OpenSSH_8.9p1）→ 增加候选回退。**安全性不受影响**：keyscan 只提供**候选**，指纹由用户从服务器控制台独立核验，脚本随后断言观测值与之逐字节一致，对不上即 fail-closed。
+
+**第五批未完成 / 未验收**：
+1. **第四批的功能级真机/Electron 验收仍未做**：远端会话列表/标题、项目级 root 状态只有替身级与源码级断言；需要在 Electron + `PIDECK_REMOTE_EXPERIMENTAL=1` 下按操作链手动走（checklist 待补）。
+2. **smoke 脚本仍用 `ssh-keyscan` 取候选**：产品设计明确「不得用裸 `ssh-keyscan` 替代」，应改为直接用产品的已认证握手路径（`verifyDraftSshHost` / `querySshDraftRoute`）；本轮只做了平台修正，未动验证工具本身。
+3. I1 的 **append 竞争**场景未在真机验证（按冻结语义不校验 eof、以字节数逐字相等兜底）。
+4. `SessionCatalog.load()` **不抛异常**：非法记录让**整份快照被拒**（entries 清空、needsRepair），只有写入路径才抛 `SESSION_CATALOG_NEEDS_REPAIR`——这是既有语义，已被测试锁定。
+5. 严格跨进程 CAS / 跨 store INV-5 仍未交付。
+6. 传输边界 `RemoteSessionScanner.readHostId` 仍是宽松判据（持久化边界已 fail-closed，端到端安全）。
+7. **头窗口与尾窗口在 `64 KiB < size < 128 KiB` 时会重叠**：尾窗按冻结算法取「最后 ≤64 KiB」（`offset = max(0, size - maxBytes)`），因此该区间内两窗有重叠（请求总量仍 ≤128 KiB、每段 ≤64 KiB、不读中间段）。要「零重叠」只需把 `offset` 改为 `max(headBytes, size - maxBytes)`（对 10 MiB 这类大文件结果不变）——是纯 I/O 优化、不影响正确性或安全性，**本批按冻结算法实现，未擅自修订契约**。
+8. **尾读失败是静默降级**（best-effort，与本地 `readHeadAndInfer` 同口径）：降级结果仍是诚实的 `inferred`/`fallback`，绝不编造；但若要「尾读失败也上报」，需要给 title 结果加一个「已降级」标记（契约修订），本批不做。
+9. **测试对机器负载敏感**：`sessionScannerSubagents` 的「aborts a hung WSL scan」在多 agent 并发抢 CPU 时可能被 `--test-timeout` 掐掉（单文件跑 102 ms 即绿，`--test-concurrency=1` 全绿）；这是负载/并发度问题，与代码路径无关——集成跑红了**先看这条**再判回归。
+
 ## 4. M1 之后如何推进
 
 1. **Phase 3 剩余只读能力**：目录/内容搜索与远端 Session 发现走 helper，由 catalog 保存远端 locator；不得把远端路径交给本地 scanner。结果数量、字节和超时必须有界。
@@ -195,7 +221,7 @@ node --test tests/remoteHostIpc.test.mjs tests/remoteHostConnectionService.test.
 
 C 对应 `projectStoreCodec.test.mjs`、`projectStoreMigration.test.mjs`、`remoteHostReferenceSources.test.mjs`；B 需更新 `settingsTabLayout.test.mjs` 并补实际交互状态覆盖。格式化仅涉及文件（`node_modules/.bin/biome format --write <files...>`）；集成时运行 `npm run check:format`。纯文档修改检查差异、链接与命令准确性即可。
 
-**测试记录的边界（第四批实施后更新）**：Windows / Node 24.19 上跑的集成集合（remote* + projectStore* + sessionCatalog* + hostRebind* + 侧栏/面板/文案/连接管理器/locationAdapters/workspaceTree/sessionFirstRenderer）：第一批 **512 项 / 505 pass / 2 fail / 5 skip**；第二批 **689 项 / 682 pass / 2 fail / 5 skip**；第三批 **921 项 / 914 pass / 2 fail / 5 skip**；第四批 **991 项 / 984 pass / 2 fail / 5 skip**。四轮 fail 的**名称与断言完全相同**，就是下面列出的**既有**失败，并已在干净基线 worktree(`f7b18947`) 上逐字复现——所以第二、三、四批均零回归。`npm run typecheck` 与 `npm run check:format`（2173 个文件，无改动）通过。全量 `npm test` 本批未跑（仓库规则：仅跨域大改动或合并前最终确认时跑），因此**没有「全量已全绿」这个结论**。
+**测试记录的边界（第四批实施后更新）**：Windows / Node 24.19 上跑的集成集合（remote* + projectStore* + sessionCatalog* + hostRebind* + 侧栏/面板/文案/连接管理器/locationAdapters/workspaceTree/sessionFirstRenderer）：第一批 **512 项 / 505 pass / 2 fail / 5 skip**；第二批 **689 项 / 682 pass / 2 fail / 5 skip**；第三批 **921 项 / 914 pass / 2 fail / 5 skip**；第四批 **991 项 / 984 pass / 2 fail / 5 skip**；第五批 **1040 项 / 1033 pass / 2 fail / 5 skip**。五轮 fail 的**名称与断言完全相同**，就是下面列出的**既有**失败，并已在干净基线 worktree(`f7b18947`) 上逐字复现——所以第二、三、四批均零回归。`npm run typecheck` 与 `npm run check:format`（2173 个文件，无改动）通过。全量 `npm test` 本批未跑（仓库规则：仅跨域大改动或合并前最终确认时跑），因此**没有「全量已全绿」这个结论**。
 
 这 2 个既有失败已在**干净基线 worktree（`f7b18947`，不含本批任何改动）上逐字复现**，不是本批引入的回归，而且不能全归为平台原因：
 - `tests/remoteBootstrapSessionIntegration.test.mjs` → `BOOTSTRAP_READY_INVALID`（真实子进程 + frozen entry 握手，两侧同样失败）；

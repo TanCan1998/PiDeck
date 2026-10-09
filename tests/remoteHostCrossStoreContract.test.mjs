@@ -23,6 +23,12 @@ const COVERED_HOST_ID_FIELDS = new Map([
 	// RemoteHostReferenceSources 扫描都经由它，所以持久化引用的真正来源在这里；
 	// 漏掉这个文件会让「谁在引用某台主机」的审计凭空少一层。
 	["src/shared/projectLocation.ts:readSshProjectLocator", "projects"],
+	// 同一文件里的会话判据：catalog 读取 / 远端登记写入 / 主机引用扫描三处共用，hostId 与项目域
+	// 同一个 UUID 值域。漏登记它同样会让「谁在引用某台主机」的审计少一层。
+	["src/shared/projectLocation.ts:readSshSessionLocator", "sessions"],
+	// 登记写入侧的 hostId 判据（shared readSshSessionLocator）也归 sessions：它决定了下一次 catalog
+	// 写入里会不会出现一条非法的 host 引用。
+	["src/main/sessions/SessionCatalog.ts:isRemoteSessionRegistrationInput", "sessions"],
 	["src/main/sessions/SessionCatalog.ts:hostRebindTargetLocator", "sessions"],
 	// G3 远端 Session 登记（远端身份 → ssh locator 的匹配与构造）：这四个名字只服务于把远端会话登记进
 	// catalog 的那条引用——真正落盘的是 SessionLocator（已由 sessions 源覆盖）。归 sessions 而不是 runtime，

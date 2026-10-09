@@ -4,18 +4,19 @@ import test from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
 /*
- * F4 independent verification of the on-demand remote session title (task-20, H1).
+ * F4 independent verification of the on-demand remote session title (task-20, H1; tiers re-cut by I1/task-22).
  *
  * The claims that matter here are the ones a happy path cannot show:
  *
  * 1. Read-only: the title channel must not write the catalog (the registration channel owns that), so a
  *    counting catalog port has to stay at zero across every title call.
- * 2. Never fabricated: when the bounded head yields no title at all, the answer is the file stem with
- *    titleOrigin "fallback" - never a JSON fragment, never an empty string, never a made-up name. And the
- *    two "no name" shapes are asserted separately, because the local pipeline legitimately treats a first
- *    user message as a title while an empty/malformed head yields nothing.
+ * 2. Never fabricated: when neither window yields a title at all, the answer is the file stem with
+ *    titleOrigin "fallback" - never a JSON fragment, never an empty string, never a made-up name. The three
+ *    shapes are asserted separately (authoritative name field / first-message weak title / nothing), because
+ *    the local pipeline legitimately treats a first user message as a title while an empty head yields nothing.
  * 3. Bounded: the port counts every fs.read frame, so a 10 MiB remote session may never cost more than one
- *    stat and one 64 KiB read (the frame shape the frozen design promises).
+ *    sizing stat and two window reads of at most 64 KiB each (head + tail, the frame shape I1 promises), and
+ *    the requested total is always far below the file size.
  */
 
 const { inferSessionTitleFromHeadText } = loadTsCommonJs("src/main/sessions/sessionNameLine.ts");
@@ -118,30 +119,33 @@ function standardFiles() {
 	};
 }
 
-test("an authoritative name line yields a parsed title", async () => {
+test("an authoritative name line yields an authoritative title", async () => {
 	const harness = titleHarness({ files: standardFiles() });
 	const result = await titleOf(harness, HOST_ID, NAMED);
 	assert.equal(result.ok, true, JSON.stringify(result));
 	assert.equal(result.title, "Refactor the parser");
-	assert.equal(result.titleOrigin, "parsed");
+	assert.equal(result.titleOrigin, "authoritative");
 	assert.equal(harness.catalogCalls.ensureRemoteSession, 0, "the title path must not write the catalog");
 	// The scanner factory is invoked once when the handler resolves its scanner (that is ordinary wiring); what
 	// must stay at zero is any *use* of the catalog port, asserted above and in the scanner-level test.
 });
 
-test("a legacy private name line is parsed, and a first user message is the weak title the local pipeline uses", async () => {
+test("a legacy private name line is authoritative, and a first user message is the weaker inferred title", async () => {
 	const harness = titleHarness({ files: standardFiles() });
 	const legacy = await titleOf(harness, HOST_ID, LEGACY);
 	assert.equal(legacy.ok, true, JSON.stringify(legacy));
 	assert.equal(legacy.title, "Old rename");
-	assert.equal(legacy.titleOrigin, "parsed");
+	// 旧版私有 sessionName 行是**名字字段**（当年 PiDeck 写的会话名），不是内容猜测：与本地管线同判据，
+	// fromSessionInfo=true ⇒ authoritative（本地 scannedTitleOrigin 也把同一判据落成 catalog 的 manual）。
+	assert.equal(legacy.titleOrigin, "authoritative");
 
 	// The local pipeline titles a session whose file has no session_info by its first user message; excluding
-	// that here would only reuse half the pipeline, so it is parsed (weaker origin), not fabricated.
+	// that here would only reuse half the pipeline. It is honestly the WEAKER tier (inferred), not fabricated
+	// and not the authoritative name the session never had.
 	const weak = await titleOf(harness, HOST_ID, WEAK);
 	assert.equal(weak.ok, true, JSON.stringify(weak));
 	assert.equal(weak.title, "Fix the failing test");
-	assert.equal(weak.titleOrigin, "parsed");
+	assert.equal(weak.titleOrigin, "inferred");
 	assert.equal(harness.catalogCalls.ensureRemoteSession, 0);
 });
 
@@ -159,7 +163,7 @@ test("a head with nothing to name falls back to the file stem and never invents 
 	assert.equal(harness.catalogCalls.ensureRemoteSession, 0);
 });
 
-test("the head read is bounded: one stat and at most one 64 KiB read for a 10 MiB session", async () => {
+test("the two window reads are bounded: one stat and at most two 64 KiB reads for a 10 MiB session", async () => {
 	const big = "session-big.jsonl";
 	const payload = Buffer.concat([Buffer.from('{"type":"session","id":"big"}\n', "utf8"), Buffer.alloc(10 * 1024 * 1024, 121)]);
 	const harness = titleHarness({ files: { [big]: { bytes: payload, mtimeMs: 3 } } });
@@ -167,11 +171,16 @@ test("the head read is bounded: one stat and at most one 64 KiB read for a 10 Mi
 	assert.equal(result.ok, true, JSON.stringify(result));
 	assert.equal(result.titleOrigin, "fallback", "the payload has no name line");
 	assert.equal(result.title, big.replace(/\.jsonl$/, ""));
-	assert.equal(harness.stats().length, 1, "exactly one sizing stat");
-	assert.equal(harness.reads().length, 1, "exactly one read frame");
-	assert.equal(harness.reads()[0].params.bytes, MAX_HEAD, "the read must ask for the head ceiling, not the file size");
+	// I1：头内没有权威名（这里一个名字都没有），所以会补一次有界尾读——pi 的 `/name` 追加在文件尾。
+	assert.equal(harness.stats().length, 1, "exactly one sizing stat for both windows");
+	assert.equal(harness.reads().length, 2, "one head read + one tail read, never more");
+	assert.equal(harness.reads()[0].params.offset, 0, "the first read is the head");
+	assert.equal(harness.reads()[0].params.bytes, MAX_HEAD, "the head read asks for the head ceiling, not the file size");
+	assert.equal(harness.reads()[1].params.offset, payload.length - MAX_HEAD, "the tail read is anchored at the end of the file");
+	assert.equal(harness.reads()[1].params.bytes, MAX_HEAD);
+	for (const frame of harness.reads()) assert.ok(frame.params.bytes <= MAX_HEAD, "every window is bounded by the ceiling");
 	const requested = harness.reads().reduce((total, frame) => total + frame.params.bytes, 0);
-	assert.ok(requested <= MAX_HEAD, "requested " + requested + " bytes, which is more than the head ceiling");
+	assert.ok(requested <= 2 * MAX_HEAD, "requested " + requested + " bytes, which is more than two windows");
 	assert.ok(requested < payload.length, "the request must not be the whole file");
 });
 
@@ -187,7 +196,7 @@ test("a window that cuts a multi-byte character degrades to the stem instead of 
 	const result = await titleOf(harness, HOST_ID, cut);
 	assert.equal(result.ok, true, JSON.stringify(result));
 	assert.equal(result.title, "Cut title", "a complete earlier line must still be used");
-	assert.equal(result.titleOrigin, "parsed");
+	assert.equal(result.titleOrigin, "authoritative");
 
 	// Now only the broken tail exists: nothing parseable, so the answer is the stem, not a guess.
 	const onlyBroken = Buffer.concat([Buffer.from('{"type":"session","id":"x"}\n{"type":"message","text":"', "utf8"), multibyte.subarray(0, 2)]);
@@ -370,7 +379,7 @@ test("title fetching is lazy, per row and host-scoped", () => {
 	// Each row has its own generation: settling one row must not disturb another row's in-flight request.
 	const other = controller.begin("host-a", "b.jsonl");
 	assert.notEqual(other, null);
-	assert.equal(controller.settle(other, "host-a", "b.jsonl", { kind: "ok", title: "B", origin: "parsed" }), true);
+	assert.equal(controller.settle(other, "host-a", "b.jsonl", { kind: "ok", title: "B", origin: "authoritative" }), true);
 	assert.equal(controller.statusOf("b.jsonl").title, "B");
 	assert.equal(controller.statusOf("a.jsonl").status, "loading");
 	assert.equal(controller.settle(first, "host-a", "a.jsonl", { kind: "ok", title: "A", origin: "fallback" }), true);
@@ -381,19 +390,21 @@ test("title fetching is lazy, per row and host-scoped", () => {
 	const nextHost = controller.begin("host-b", "a.jsonl");
 	assert.notEqual(nextHost, null, "another host re-requests even for the same relative id");
 	assert.equal(controller.statusOf("b.jsonl").status, "idle", "the previous host's cache is gone");
-	assert.equal(controller.settle(nextHost, "host-a", "a.jsonl", { kind: "ok", title: "stale", origin: "parsed" }), false, "a result from the previous host must be dropped");
+	assert.equal(controller.settle(nextHost, "host-a", "a.jsonl", { kind: "ok", title: "stale", origin: "authoritative" }), false, "a result from the previous host must be dropped");
 	assert.equal(controller.statusOf("a.jsonl").status, "loading");
-	assert.equal(controller.settle(nextHost, "host-b", "a.jsonl", { kind: "ok", title: "B host", origin: "parsed" }), true);
+	assert.equal(controller.settle(nextHost, "host-b", "a.jsonl", { kind: "ok", title: "B host", origin: "authoritative" }), true);
 
 	controller.reset();
 	assert.equal(controller.statusOf("a.jsonl").status, "idle");
 });
 
 test("title responses are narrowed, and unwired/failed states stay distinct", () => {
-	assert.deepEqual(plain(readTitleResponse({ ok: true, title: "T", titleOrigin: "parsed" })), { kind: "ok", title: "T", origin: "parsed" });
+	assert.deepEqual(plain(readTitleResponse({ ok: true, title: "T", titleOrigin: "authoritative" })), { kind: "ok", title: "T", origin: "authoritative" });
+	assert.deepEqual(plain(readTitleResponse({ ok: true, title: "T", titleOrigin: "inferred" })), { kind: "ok", title: "T", origin: "inferred" });
 	assert.deepEqual(plain(readTitleResponse({ ok: true, title: "T", titleOrigin: "fallback" })), { kind: "ok", title: "T", origin: "fallback" });
 	assert.deepEqual(plain(readTitleResponse({ ok: false, code: "REMOTE_SESSION_HOME_UNAVAILABLE" })), { kind: "failed", code: "REMOTE_SESSION_HOME_UNAVAILABLE" });
-	for (const raw of [{ ok: true, title: "", titleOrigin: "parsed" }, { ok: true, title: "T", titleOrigin: "guess" }, { ok: true, title: "T" }, { ok: false, code: "boom" }, null]) {
+	// 空标题、未知档位、已废止的旧档位字面量（"parsed"）、缺档位、坏码：全都是「读不懂」，必须拒绝。
+	for (const raw of [{ ok: true, title: "", titleOrigin: "authoritative" }, { ok: true, title: "T", titleOrigin: "guess" }, { ok: true, title: "T", titleOrigin: "parsed" }, { ok: true, title: "T" }, { ok: false, code: "boom" }, null]) {
 		assert.equal(readTitleResponse(raw).kind, "rejected", JSON.stringify(raw) + " must be rejected");
 	}
 
@@ -406,7 +417,7 @@ test("title responses are narrowed, and unwired/failed states stay distinct", ()
 	assert.equal(controller.statusOf("b.jsonl").status, "failed");
 	assert.equal(controller.statusOf("b.jsonl").code, "PATH_NOT_FOUND");
 	// A restored snapshot must drop rows that were left "loading" by a previous mount.
-	controller.restore("host-a", { "a.jsonl": { status: "ready", title: "kept", origin: "parsed", code: null }, "b.jsonl": { status: "loading", title: null, origin: null, code: null } });
+	controller.restore("host-a", { "a.jsonl": { status: "ready", title: "kept", origin: "authoritative", code: null }, "b.jsonl": { status: "loading", title: null, origin: null, code: null } });
 	assert.equal(controller.statusOf("a.jsonl").title, "kept");
 	assert.equal(controller.statusOf("b.jsonl").status, "idle", "a stale loading row must be re-fetched, not left spinning");
 });
@@ -416,12 +427,12 @@ test("title responses are narrowed, and unwired/failed states stay distinct", ()
  * independent of whether the assembly has wired the channel yet, and it is the same port that counts frames.
  */
 
-test("scanner title: parsed for a name line, parsed for a weak first message, fallback to the stem otherwise", async () => {
+test("scanner title: authoritative for a name line, inferred for a weak first message, fallback to the stem otherwise", async () => {
 	const harness = titleHarness({ files: standardFiles() });
 	const named = await harness.scanner.title({ hostId: HOST_ID, remoteSessionId: NAMED });
-	assert.deepEqual(plain(named), { ok: true, title: "Refactor the parser", titleOrigin: "parsed" });
+	assert.deepEqual(plain(named), { ok: true, title: "Refactor the parser", titleOrigin: "authoritative" });
 	const weak = await harness.scanner.title({ hostId: HOST_ID, remoteSessionId: WEAK });
-	assert.deepEqual(plain(weak), { ok: true, title: "Fix the failing test", titleOrigin: "parsed" });
+	assert.deepEqual(plain(weak), { ok: true, title: "Fix the failing test", titleOrigin: "inferred" });
 	for (const id of [EMPTY_HEAD, MALFORMED, TIMESTAMP_NAME]) {
 		const result = await harness.scanner.title({ hostId: HOST_ID, remoteSessionId: id });
 		assert.equal(result.ok, true, JSON.stringify(result));
@@ -432,7 +443,7 @@ test("scanner title: parsed for a name line, parsed for a weak first message, fa
 	assert.equal(harness.catalogCalls.factory, 0);
 });
 
-test("scanner title: the head read is bounded to one stat and one 64 KiB read", async () => {
+test("scanner title: both window reads are bounded to one stat and at most two 64 KiB reads", async () => {
 	const big = "session-big.jsonl";
 	const payload = Buffer.concat([Buffer.from('{"type":"session","id":"big"}\n', "utf8"), Buffer.alloc(10 * 1024 * 1024, 121)]);
 	const harness = titleHarness({ files: { [big]: { bytes: payload, mtimeMs: 3 } } });
@@ -440,9 +451,10 @@ test("scanner title: the head read is bounded to one stat and one 64 KiB read", 
 	assert.equal(result.ok, true, JSON.stringify(result));
 	assert.equal(result.titleOrigin, "fallback");
 	assert.equal(harness.stats().length, 1, "exactly one sizing stat");
-	assert.equal(harness.reads().length, 1, "exactly one read frame");
-	assert.equal(harness.reads()[0].params.bytes, MAX_HEAD, "the read asks for the head ceiling, not the file size");
-	assert.ok(harness.reads().reduce((total, frame) => total + frame.params.bytes, 0) <= MAX_HEAD);
+	assert.equal(harness.reads().length, 2, "one head read + one tail read");
+	assert.equal(harness.reads()[0].params.bytes, MAX_HEAD, "the head read asks for the head ceiling, not the file size");
+	assert.equal(harness.reads()[1].params.offset, payload.length - MAX_HEAD, "the tail read is anchored at the end");
+	assert.ok(harness.reads().reduce((total, frame) => total + frame.params.bytes, 0) <= 2 * MAX_HEAD);
 });
 
 test("scanner title: identities, home and remote failures keep their own stable codes", async () => {
@@ -481,6 +493,8 @@ test("scanner title: identities, home and remote failures keep their own stable 
  */
 
 const SECTIONS_SOURCE = "src/renderer/src/components/sidebar/RemoteSessionsSection.tsx";
+const TITLE_STATE_SOURCE = "src/renderer/src/components/session/remoteSessionTitleState.ts";
+const TITLE_STATE_SOURCE_TEXT = readFileSync(TITLE_STATE_SOURCE, "utf8");
 const PROJECT_TREE_SOURCE = "src/renderer/src/components/sidebar/ProjectTree.tsx";
 const ZH_COPY = "src/renderer/src/i18n/rendererCopy.zh-CN.ts";
 const EN_COPY = "src/renderer/src/i18n/rendererCopy.en-US.ts";
@@ -496,9 +510,11 @@ test("the sidebar section keeps its ceiling branch and its tentative branch", ()
 	const fallbackIndex = source.indexOf("sidebar.remoteSessions.scanFailed");
 	assert.ok(fallbackIndex > limitIndex, "the generic failure copy must stay the fallback, after the ceiling branch");
 
-	// Only an authoritative parse may drop the provisional marker: parsed shows the real name, everything else
-	// (fallback/unwired/loading/failed) is the file-name placeholder and must be marked provisional.
-	assert.match(source, /const tentative = title\.origin !== "parsed";/, "the tentative marker must be driven by titleOrigin");
+	// Only an authoritative name may drop the provisional marker: inferred (first-message weak title) and
+	// fallback (stem), plus unwired/loading/failed, are all provisional. The rule itself lives in the origin
+	// vocabulary module, so this pins both the call site and the rule it calls.
+	assert.match(source, /const tentative = isProvisionalTitleOrigin\(title\.origin\);/, "the tentative marker must be driven by titleOrigin");
+	assert.match(TITLE_STATE_SOURCE_TEXT, /isProvisionalTitleOrigin\(origin: RemoteSessionTitleOrigin \| null\): boolean \{[\s\S]{0,240}?return origin !== "authoritative";/, "the provisional rule must be exactly 'not authoritative'");
 	assert.match(source, /\{tentative \?[\s\S]{0,200}?sidebar\.remoteSessions\.tentative"/, "the tentative badge must render only in that branch");
 	assert.match(source, /title\.title \?\? entry\.name/, "the placeholder must come from the scanned stem");
 

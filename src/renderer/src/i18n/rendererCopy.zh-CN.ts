@@ -161,7 +161,7 @@ export const zhCN = {
 	"sidebar.remoteSessions.projectUnresolved": "这台主机还没有对应的本地项目，无法登记会话。",
 	"sidebar.remoteSessions.catalogUnavailable": "本地会话目录不可用，无法登记。",
 	"sidebar.remoteSessions.tentative": "暂定",
-	"sidebar.remoteSessions.tentativeHint": "标题来自文件名兜底，真实标题尚未解析。",
+	"sidebar.remoteSessions.tentativeHint": "标题不是权威来源（可能来自首条消息的弱推断，或退回文件名），请以会话内容为准。",
 	"sidebar.remoteSessions.titleParsing": "正在解析标题…",
 	"sidebar.remoteProject.needsAttention": "需处理",
 	"sidebar.remoteProject.needsAttentionHint": "这个远端项目的目录需要复核（打开项目查看详情）。",

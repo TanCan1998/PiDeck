@@ -54,7 +54,9 @@ test("catalog records expose canonical SSH locators without a stale local file p
 						source: "pi",
 						environment: "native",
 						backend: "pi",
-						locator: { kind: "ssh", hostId: "host-a", remotePath: "/srv/repo/.pi/sessions/one.jsonl", remoteSessionId: "remote-session-1" },
+						// hostId 的权威值域是 RemoteHostStore 的 UUID（randomUUID）：本用例验证的是
+						// stale 本地镜像字段的规范化，用一个值域内的 id 才不会把归一化与合法性混在一起。
+						locator: { kind: "ssh", hostId: "11111111-1111-4111-8111-111111111111", remotePath: "/srv/repo/.pi/sessions/one.jsonl", remoteSessionId: "remote-session-1" },
 						originKey: staleLocalOrigin,
 						piSessionId: "stale-pi-session",
 						filePath: "C:/stale/local/session.jsonl",

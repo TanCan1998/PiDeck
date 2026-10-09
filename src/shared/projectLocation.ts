@@ -7,6 +7,7 @@
  * 远端分支由调用方显式处理（拒绝 / 路由到远端服务），不允许用 `!` 或 `as` 绕过。
  */
 import type { LocalProject, Project, ProjectLocator, RemoteProject } from "./types/project";
+import type { SessionLocator } from "./types/session";
 
 /** 本机（含 WSL）项目：拥有 `path`，可交给 `node:fs`/Git/终端等本机实现。 */
 export function isLocalProject(project: Project): project is LocalProject {
@@ -104,4 +105,51 @@ export function readProjectLocator(value: unknown): ProjectLocator | undefined {
 	}
 	if (record.kind === "ssh") return readSshProjectLocator(record);
 	return undefined;
+}
+
+/** 会话身份字段的既有值域（与 SessionCatalog 历史判据逐字一致：收窄 hostId 不改变这些字段的放行集）。 */
+const MAX_SESSION_REMOTE_PATH = 4096;
+const MAX_SESSION_REMOTE_ID = 256;
+const MAX_SESSION_PATH_ALIASES = 32;
+
+/** ssh 会话 locator 的窄化形状（`SessionLocator` 的 ssh 分支）。 */
+export type SshSessionLocator = Extract<SessionLocator, { kind: "ssh" }>;
+
+/**
+ * ssh 会话 locator 的唯一判据（catalog 读取 / 远端登记写入 / 主机引用扫描三处共用）。
+ *
+ * `hostId` 与项目域共用同一个权威取值域 `PROJECT_HOST_ID_PATTERN`：它只可能是 RemoteHostStore 用
+ * `randomUUID()` 生成的 profile 主键，非 UUID 永远命中不了任何主机 —— 既不是合法的远端会话身份，
+ * 也不能被当成「某个主机的引用」。所以这里不是把扫描放宽成「任意非空字符串」，而是把 catalog 读取
+ * 与登记写入一起收窄到 UUID；否则同一记录会出现「catalog 放行、扫描抛错」。
+ *
+ * 会话专用字段保持既有值域且**全部可选**：`remotePath`（会话文件身份，≤4096）、`remoteSessionId`
+ * （≤256）、`remotePathAliases`（≤32 × ≤4096）。G3 早期只写 remoteSessionId、或只带 hostId 的历史
+ * 记录因此仍然合法，不会因为本次收窄被拒。注意会话的 remotePath 是相对会话根的身份，不是 canonical
+ * 授权根，所以这里刻意不复用 `readSshProjectLocator`（那会把历史记录整片拒掉）。
+ */
+export function readSshSessionLocator(value: unknown): SshSessionLocator | undefined {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	const record = value as Record<string, unknown>;
+	if (record.kind !== "ssh") return undefined;
+	if (typeof record.hostId !== "string" || !PROJECT_HOST_ID_PATTERN.test(record.hostId)) return undefined;
+	if (record.remotePath !== undefined && (typeof record.remotePath !== "string" || record.remotePath.length > MAX_SESSION_REMOTE_PATH)) return undefined;
+	if (record.remoteSessionId !== undefined && (typeof record.remoteSessionId !== "string" || record.remoteSessionId.length > MAX_SESSION_REMOTE_ID)) return undefined;
+	let remotePathAliases: string[] | undefined;
+	if (record.remotePathAliases !== undefined) {
+		if (!Array.isArray(record.remotePathAliases) || record.remotePathAliases.length > MAX_SESSION_PATH_ALIASES) return undefined;
+		const aliases: string[] = [];
+		for (const alias of record.remotePathAliases) {
+			if (typeof alias !== "string" || alias.length > MAX_SESSION_REMOTE_PATH) return undefined;
+			aliases.push(alias);
+		}
+		remotePathAliases = aliases;
+	}
+	return {
+		kind: "ssh",
+		hostId: record.hostId,
+		...(typeof record.remotePath === "string" ? { remotePath: record.remotePath } : {}),
+		...(typeof record.remoteSessionId === "string" ? { remoteSessionId: record.remoteSessionId } : {}),
+		...(remotePathAliases ? { remotePathAliases } : {}),
+	};
 }

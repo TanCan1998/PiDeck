@@ -19,10 +19,10 @@
  */
 
 import { REMOTE_HELPER_MAX_HOST_ID_LENGTH, type RemoteHelperListEntry } from "../remote/RemoteHelperContract";
-import { createRemoteWorkspaceReader, REMOTE_WORKSPACE_MAX_HEAD_BYTES, type RemoteWorkspacePort } from "../remote/RemoteWorkspaceReader";
+import { createRemoteWorkspaceReader, REMOTE_WORKSPACE_MAX_HEAD_BYTES, REMOTE_WORKSPACE_MAX_WINDOW_BYTES, type RemoteWorkspacePort } from "../remote/RemoteWorkspaceReader";
 import { SUBAGENT_ARTIFACTS_DIR_NAME } from "../../shared/sessionIdentity";
 import type { RemoteSessionRegistration, RemoteSessionRegistrationInput } from "./SessionCatalog";
-import { inferSessionTitleFromHeadText } from "./sessionNameLine";
+import { inferSessionTitleFromHeadText, type SessionTitleInference } from "./sessionNameLine";
 // 渲染层要消费这三个结构，所以它们是 shared 契约而不是本模块私有类型；这里只转出，避免同一结构两处各定义一份。
 import type { RemoteSessionEntry, RemoteSessionRegisterResult, RemoteSessionScanResult, RemoteSessionTitleResult } from "../../shared/types/remoteHost";
 export type { RemoteSessionEntry, RemoteSessionRegisterResult, RemoteSessionScanResult } from "../../shared/types/remoteHost";
@@ -182,6 +182,15 @@ function readRemoteSessionId(value: unknown): string | undefined {
 	const last = segments[segments.length - 1] ?? "";
 	if (last.length <= ".jsonl".length || !last.toLowerCase().endsWith(".jsonl")) return undefined;
 	return value;
+}
+
+/**
+ * 权威标题判据（I1 三档口径）：标题来自**名字字段**——pi 的 session_info，或旧版 PiDeck 私有
+ * sessionName 行——而不是首条 user/assistant 文本的弱兜底。本地管线用同一个 fromSessionInfo 标志
+ * 把权威名落成 catalog 的 manual、弱兜底落成 fallback，所以这里必须同判据。
+ */
+function isAuthoritativeTitle(inference: SessionTitleInference): boolean {
+	return inference.name !== undefined && inference.fromSessionInfo;
 }
 
 /** 文件名 stem（暂定标题）。时间戳 stem 由 catalog 的展示层清成 Untitled，这里不做产品判断。 */
@@ -369,19 +378,40 @@ export function createRemoteSessionScanner(options: RemoteSessionScannerOptions)
 			const root = await resolveSessionRoot(host);
 			if (root === undefined) return { ok: false, code: REMOTE_SESSION_CODES.homeUnavailable };
 			try {
-				// 只读：整次解析在受控 root 内完成，只发 readHead 内部的 sizing stat + 一次 ≤64 KiB 的 fs.read；
-				// 刻意不接收也不需要 catalog —— 标题通道不写盘（写盘仍只属于 register）。
+				// 只读：整次解析在受控 root 内完成。帧预算 = 1 次 sizing stat + 头读 +（仅在头不足时）尾读，
+				// 每段各自 ≤64 KiB；刻意不接收也不需要 catalog —— 标题通道不写盘（写盘仍只属于 register）。
 				const outcome = await port.withProjectSession(host, root, async (session) => {
 					const reader = createRemoteWorkspaceReader({ port: sessionPort(session, host) });
 					const head = await reader.readHead(host, remoteSessionId, REMOTE_WORKSPACE_MAX_HEAD_BYTES);
 					// 头尾可能截断多字节字符：fatal:false 会得到 U+FFFD，落在最后一行 → 该行 JSON.parse 失败被跳过。
-					return new TextDecoder().decode(head.content);
+					const headText = new TextDecoder().decode(head.content);
+					const headInference = inferSessionTitleFromHeadText(headText);
+					// 头内已经有权威名（session_info 或旧版私有 sessionName 行）就够了：不读尾。
+					if (isAuthoritativeTitle(headInference)) return headInference;
+					// 头已经覆盖整个文件（size ≤ 头上限）：尾窗口就是同一段内容，不重复读。
+					if (head.size <= REMOTE_WORKSPACE_MAX_HEAD_BYTES) return headInference;
+					// pi 的 `/name` 是**追加在文件尾**的，所以只有头不足时才补一次有界尾窗口。
+					// 尾读复用头读的 size ⇒ 全程只有 1 次 sizing stat；尾读是增益步骤：失败降级为头部结果
+					// （与本地 readHeadAndInfer 的 best-effort 口径一致），而头读失败仍然按稳定码拒绝——
+					// 那时连文件是否存在都没有证据。
+					try {
+						const offset = Math.max(0, head.size - REMOTE_WORKSPACE_MAX_WINDOW_BYTES);
+						const tail = await reader.readWindow(host, remoteSessionId, { offset, maxBytes: REMOTE_WORKSPACE_MAX_WINDOW_BYTES, size: head.size });
+						if (tail.bytes === 0) return headInference;
+						// 同一套解析器跑 head + tail（本地 readHeadAndInfer 也是把两个窗口拼起来解析一次）：
+						// 权威名优先，弱兜底仍取最早一条 user 文本（头窗口在前）。
+						return inferSessionTitleFromHeadText(headText + "\n" + new TextDecoder().decode(tail.content));
+					} catch {
+						return headInference;
+					}
 				});
 				if (!outcome.ok) return { ok: false, code: outcome.code };
-				const inferred = inferSessionTitleFromHeadText(outcome.value);
+				const inferred = outcome.value;
 				// 解析不出绝不编造：强制 fallback 到文件名 stem（与 G3 的暂定标题同一取值）。
-				// parsed 含弱兜底（首条 user/assistant 文本）——那正是本地管线给出的标题，catalog 侧由所有权来源区分强弱。
-				return inferred.name === undefined ? { ok: true, title: titleFromRemoteSessionId(remoteSessionId), titleOrigin: "fallback" } : { ok: true, title: inferred.name, titleOrigin: "parsed" };
+				if (inferred.name === undefined) return { ok: true, title: titleFromRemoteSessionId(remoteSessionId), titleOrigin: "fallback" };
+				// 档位如实区分（口径冻结 authoritative/inferred/fallback）：来自名字字段 = authoritative
+				// （含旧版私有 sessionName 行——本地 scannedTitleOrigin 对同一判据落 manual）；首条消息弱兜底 = inferred。
+				return { ok: true, title: inferred.name, titleOrigin: isAuthoritativeTitle(inferred) ? "authoritative" : "inferred" };
 			} catch (error) {
 				return { ok: false, code: stableCodeOf(error) ?? REMOTE_SESSION_CODES.titleFailed };
 			}

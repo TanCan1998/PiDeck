@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { copyFile, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { sessionLocatorFromLegacy } from "../../shared/locationAdapters";
+import { readSshSessionLocator } from "../../shared/projectLocation";
 import type { AgentBackend, AgentTab, SessionEnvironment, SessionLocator, SessionModelPreference, SessionRecord, SessionSource, SessionSummary } from "../../shared/types";
 import type { SessionProxyOverride } from "../../shared/types/session";
 import { SessionLocatorRouter } from "./SessionLocatorRouter";
@@ -263,6 +264,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export function isSessionLocator(value: unknown): value is SessionLocator {
 	if (!isRecord(value)) return false;
 	if (value.kind === "local") {
+		// 本地 locator 不得携带 hostId：那是一条扫描看不见的主机引用（与项目域同一判据）。放行会把
+		// 「指向某主机」读成「本地会话 ⇒ 没有引用」，退役流程据此硬删仍被引用的主机。
+		if (value.hostId !== undefined) return false;
 		return (
 			(value.environment === "native" || value.environment === "wsl") &&
 			(value.filePath === undefined || (typeof value.filePath === "string" && value.filePath.length <= 4096)) &&
@@ -271,14 +275,10 @@ export function isSessionLocator(value: unknown): value is SessionLocator {
 		);
 	}
 	if (value.kind !== "ssh") return false;
-	return (
-		typeof value.hostId === "string" &&
-		Boolean(value.hostId.trim()) &&
-		value.hostId.length <= 256 &&
-		(value.remotePath === undefined || (typeof value.remotePath === "string" && value.remotePath.length <= 4096)) &&
-		(value.remoteSessionId === undefined || (typeof value.remoteSessionId === "string" && value.remoteSessionId.length <= 256)) &&
-		(value.remotePathAliases === undefined || (Array.isArray(value.remotePathAliases) && value.remotePathAliases.length <= 32 && value.remotePathAliases.every((path) => typeof path === "string" && path.length <= 4096)))
-	);
+	// ssh 分支的唯一判据在 shared `readSshSessionLocator`（hostId 与项目域同一个权威值域）。
+	// 这里不再写第二套规则：catalog 读取、登记写入与主机引用扫描同判，才不会出现
+	// 「codec 放行、扫描抛错」这种同一记录两种结论。
+	return readSshSessionLocator(value) !== undefined;
 }
 
 function cloneSessionLocator(locator: SessionLocator | undefined): SessionLocator | undefined {
@@ -404,14 +404,18 @@ function sameSshLocator(left: SessionLocator | undefined, right: SshSessionLocat
 	return left.hostId === right.hostId && left.remoteSessionId === right.remoteSessionId && left.remotePath === right.remotePath;
 }
 
-/** 入参的协议形状校验：与 shared 的 isSessionLocator 同域，非法一律拒绝而不是截断。 */
+/**
+ * 入参的协议形状校验：hostId 与持久化判据同源（shared `readSshSessionLocator` 的 UUID 值域），
+ * 非法一律拒绝而不是截断。两个身份字段的长度上界也由 shared 把关，本函数只补「登记入参必须显式
+ * 给出、且不含控制字节」——非 UUID 的 hostId 永远命中不了任何主机，不能借这条写入路径落盘。
+ */
 function isRemoteSessionRegistrationInput(value: RemoteSessionRegistrationInput): boolean {
 	const { projectId, hostId, remoteSessionId, remotePath, title } = value ?? {};
 	if (typeof projectId !== "string" || projectId.length === 0 || projectId.length > 256) return false;
-	if (typeof hostId !== "string" || hostId.length === 0 || hostId.length > 256 || CONTROL_CHARS_RE.test(hostId)) return false;
-	// 两个身份字段的上限来自 shared 的 SessionLocator（remoteSessionId ≤ 256、remotePath ≤ 4096）。
-	if (typeof remoteSessionId !== "string" || remoteSessionId.length === 0 || remoteSessionId.length > 256 || CONTROL_CHARS_RE.test(remoteSessionId)) return false;
-	if (typeof remotePath !== "string" || remotePath.length === 0 || remotePath.length > 4096 || CONTROL_CHARS_RE.test(remotePath)) return false;
+	const locator = readSshSessionLocator({ kind: "ssh", hostId, remoteSessionId, remotePath });
+	if (!locator) return false;
+	if (locator.remoteSessionId === undefined || locator.remoteSessionId.length === 0 || CONTROL_CHARS_RE.test(locator.remoteSessionId)) return false;
+	if (locator.remotePath === undefined || locator.remotePath.length === 0 || CONTROL_CHARS_RE.test(locator.remotePath)) return false;
 	return typeof title === "string";
 }
 

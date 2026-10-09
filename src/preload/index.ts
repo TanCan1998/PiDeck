@@ -277,7 +277,7 @@ const api = {
 	remoteSessions: {
 		scan: (hostId: string) => ipcRenderer.invoke(ipcChannels.remoteSessionScan, hostId) as Promise<import("../shared/types/remoteHost").RemoteSessionScanResult>,
 		register: (hostId: string, remoteSessionId: string) => ipcRenderer.invoke(ipcChannels.remoteSessionRegister, hostId, remoteSessionId) as Promise<import("../shared/types/remoteHost").RemoteSessionRegisterResult>,
-		/** 按需解析标题（有界头读）；`titleOrigin` 区分真实解析与 stem 兜底。 */
+		/** 按需解析标题（有界头读；头内没有权威名时再补一次有界尾读）；`titleOrigin` 三档：authoritative（名字字段）/ inferred（首条消息弱兜底）/ fallback（文件名 stem）。 */
 		title: (hostId: string, remoteSessionId: string) => ipcRenderer.invoke(ipcChannels.remoteSessionTitle, hostId, remoteSessionId) as Promise<import("../shared/types/remoteHost").RemoteSessionTitleResult>,
 	},
 	projects: {

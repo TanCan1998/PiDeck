@@ -4,13 +4,24 @@
  * 惰性：每条会话只在**首次需要**时取一次标题；正在取或已取到就不重复发起。
  * 代次：切主机（或卸载）作废在途结果——旧主机的迟到标题绝不能落到新主机的会话上。
  *
- * H1 的契约是 `{ ok: true; title; titleOrigin: "parsed" | "fallback" } | { ok: false; code }`。
- * `titleOrigin` 必须保留：fallback 时 title 也是非空的 stem，只看「title 非空」会把兜底当解析结果，
+ * 契约是 `{ ok: true; title; titleOrigin } | { ok: false; code }`，其中 titleOrigin 三档（I1 口径冻结）：
+ * `"authoritative"` = 名字字段里的真实名字（session_info / 旧版私有 sessionName 行）、
+ * `"inferred"` = 首条消息派生的弱兜底、`"fallback"` = 文件名 stem 兜底。
+ * `titleOrigin` 必须保留：后两档 title 也是非空字符串，只看「title 非空」会把兜底当解析结果，
  * 界面就没法诚实地标「暂定」。未接线时记成 unavailable，界面继续显示扫描给的 stem 占位。
  */
 
-/** parsed = 解析出的真实名字；fallback = stem 兜底（界面要标「暂定」）。 */
-export type RemoteSessionTitleOrigin = "parsed" | "fallback";
+/** 三档：authoritative = 真实名字；inferred = 内容派生弱兜底；fallback = stem 兜底（后两档标「暂定」）。 */
+export type RemoteSessionTitleOrigin = "authoritative" | "inferred" | "fallback";
+
+/**
+ * 「暂定」判据的唯一出处：**只有 authoritative 是会话的真实名字**，另外两档都要标暂定。
+ * 放在这里而不是各组件里各写一遍，是因为这个判断与 origin 的档位词表同生命周期。
+ */
+export function isProvisionalTitleOrigin(origin: RemoteSessionTitleOrigin | null): boolean {
+	// null = 还没取到（loading/idle/unavailable/failed）：那当然按「暂定」处理，列表先显示扫描给的 stem。
+	return origin !== "authoritative";
+}
 
 export type RemoteSessionTitleOutcome = { kind: "ok"; title: string; origin: RemoteSessionTitleOrigin } | { kind: "unwired" } | { kind: "failed"; code: string } | { kind: "rejected" };
 
@@ -43,7 +54,7 @@ export function readTitleResponse(raw: unknown): RemoteSessionTitleOutcome {
 	const title = raw.title;
 	if (typeof title !== "string" || title.length === 0 || title.length > MAX_TITLE_LENGTH || CONTROL_CHARS.test(title)) return { kind: "rejected" };
 	const origin = raw.titleOrigin;
-	if (origin !== "parsed" && origin !== "fallback") return { kind: "rejected" };
+	if (origin !== "authoritative" && origin !== "inferred" && origin !== "fallback") return { kind: "rejected" };
 	return { kind: "ok", title, origin };
 }
 

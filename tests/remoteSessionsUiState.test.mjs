@@ -8,7 +8,7 @@ const titleState = loadTsCommonJs("src/renderer/src/components/session/remoteSes
 const rootStatusState = loadTsCommonJs("src/renderer/src/components/sidebar/remoteProjectStatusState.ts");
 
 const { readScanResponse, readRegisterResponse, collectRegisteredRemoteSessionIds, createRemoteSessionListController, REMOTE_SESSION_LIMIT_CODES } = listState;
-const { readTitleResponse, createRemoteSessionTitleController } = titleState;
+const { readTitleResponse, createRemoteSessionTitleController, isProvisionalTitleOrigin } = titleState;
 const { readRootStatusResponse } = rootStatusState;
 
 /** 一条合法的远端会话条目（主进程扫描返回的字段形状）。 */
@@ -127,23 +127,38 @@ test("已导入标记只认同主机且带 remoteSessionId 的 ssh locator", () 
 	assert.deepEqual([...ids], ["ws-a/1.jsonl"]);
 });
 
-test("标题响应带 titleOrigin：parsed 才是真名，fallback 仍是 stem 兜底", () => {
-	const parsed = readTitleResponse({ ok: true, title: "Fix the parser", titleOrigin: "parsed" });
-	assert.equal(parsed.kind, "ok");
-	assert.equal(parsed.title, "Fix the parser");
-	assert.equal(parsed.origin, "parsed");
-	// fallback 时 title 也非空（就是 stem）：界面必须能区分出来标「暂定」。
+test("标题响应带 titleOrigin 三档：authoritative 是真名，inferred/fallback 都要标暂定", () => {
+	const authoritative = readTitleResponse({ ok: true, title: "Fix the parser", titleOrigin: "authoritative" });
+	assert.equal(authoritative.kind, "ok");
+	assert.equal(authoritative.title, "Fix the parser");
+	assert.equal(authoritative.origin, "authoritative");
+	// inferred = 首条消息派生的弱兜底；fallback = 文件名 stem。两者 title 都非空，
+	// 界面必须靠 origin（而不是「title 非空」）区分真假，否则会把兜底当解析结果。
+	const inferred = readTitleResponse({ ok: true, title: "修复解析器", titleOrigin: "inferred" });
+	assert.equal(inferred.kind, "ok");
+	assert.equal(inferred.origin, "inferred");
 	const fallback = readTitleResponse({ ok: true, title: "1730000000000", titleOrigin: "fallback" });
 	assert.equal(fallback.kind, "ok");
 	assert.equal(fallback.origin, "fallback");
 	// 没有/不认识的 titleOrigin = 读不懂：回退扫描给的 stem 占位，不猜真名。
 	assert.equal(readTitleResponse({ ok: true, title: "Fix the parser" }).kind, "rejected");
 	assert.equal(readTitleResponse({ ok: true, title: "Fix the parser", titleOrigin: "maybe" }).kind, "rejected");
-	assert.equal(readTitleResponse({ ok: true, title: "", titleOrigin: "parsed" }).kind, "rejected");
-	assert.equal(readTitleResponse({ ok: true, title: 42, titleOrigin: "parsed" }).kind, "rejected");
+	// 已废止的旧字面量必须继续被拒绝：契约换档时不能把历史值当合法档位放行。
+	assert.equal(readTitleResponse({ ok: true, title: "Fix the parser", titleOrigin: "parsed" }).kind, "rejected");
+	assert.equal(readTitleResponse({ ok: true, title: "", titleOrigin: "authoritative" }).kind, "rejected");
+	assert.equal(readTitleResponse({ ok: true, title: 42, titleOrigin: "authoritative" }).kind, "rejected");
 	assert.equal(readTitleResponse({ ok: false, code: "REMOTE_SESSION_TITLE_UNAVAILABLE" }).kind, "failed");
 	assert.equal(readTitleResponse({ ok: false, code: "not a code" }).kind, "rejected");
 	assert.equal(readTitleResponse("nope").kind, "rejected");
+});
+
+test("「暂定」判据只有一个出处：只有 authoritative 不算暂定", () => {
+	// 界面标「暂定」的依据必须与 origin 词表同生命周期，不能在组件里各写一遍。
+	assert.equal(isProvisionalTitleOrigin("authoritative"), false);
+	assert.equal(isProvisionalTitleOrigin("inferred"), true);
+	assert.equal(isProvisionalTitleOrigin("fallback"), true);
+	// 还没取到（loading/idle/unavailable/failed）：当然按暂定处理，列表先显示 stem。
+	assert.equal(isProvisionalTitleOrigin(null), true);
 });
 
 test("标题状态机：按需取一次、旧代次作废、未接线回退占位", () => {
@@ -159,11 +174,15 @@ test("标题状态机：按需取一次、旧代次作废、未接线回退占�
 	// 已在途/已就绪不重复发起（惰性 = 每条只取一次）。
 	assert.equal(controller.begin("host-a", "ws-a/1.jsonl"), null);
 
-	assert.equal(controller.settle(first, "host-a", "ws-a/1.jsonl", { kind: "ok", title: "真实标题", origin: "parsed" }), true);
+	assert.equal(controller.settle(first, "host-a", "ws-a/1.jsonl", { kind: "ok", title: "真实标题", origin: "authoritative" }), true);
 	const readyEntry = controller.statusOf("ws-a/1.jsonl");
 	assert.equal(readyEntry.status, "ready");
 	assert.equal(readyEntry.title, "真实标题");
-	assert.equal(readyEntry.origin, "parsed");
+	assert.equal(readyEntry.origin, "authoritative");
+	// 弱兜底档位同样要落地成 ready（界面靠 origin 决定标不标暂定，而不是拒绝它）。
+	const weak = controller.begin("host-a", "ws-a/weak.jsonl");
+	assert.equal(controller.settle(weak, "host-a", "ws-a/weak.jsonl", { kind: "ok", title: "弱兜底", origin: "inferred" }), true);
+	assert.equal(controller.statusOf("ws-a/weak.jsonl").origin, "inferred");
 	assert.equal(readyEntry.code, null);
 	assert.equal(controller.begin("host-a", "ws-a/1.jsonl"), null, "ready 之后不再请求");
 
@@ -177,7 +196,7 @@ test("标题状态机：按需取一次、旧代次作废、未接线回退占�
 	// 切主机：作废在途 + 丢掉上一个主机的标题缓存。
 	const third = controller.begin("host-a", "ws-a/3.jsonl");
 	controller.reset();
-	assert.equal(controller.settle(third, "host-a", "ws-a/3.jsonl", { kind: "ok", title: "迟到", origin: "parsed" }), false);
+	assert.equal(controller.settle(third, "host-a", "ws-a/3.jsonl", { kind: "ok", title: "迟到", origin: "authoritative" }), false);
 	assert.equal(controller.statusOf("ws-a/1.jsonl").status, "idle");
 	assert.equal(controller.statusOf("ws-a/3.jsonl").status, "idle");
 });
@@ -493,7 +512,7 @@ function titlesHarness(initialTitles) {
 }
 
 test("标题 hook：首帧按需请求不丢、ready 命中缓存不重取、切主机丢弃迟到结果", async () => {
-	const cached = { status: "ready", title: "缓存标题", origin: "parsed", code: null };
+	const cached = { status: "ready", title: "缓存标题", origin: "authoritative", code: null };
 	const h = titlesHarness({ "host-a": { "ws-a/old.jsonl": cached } });
 	h.render();
 	// 第一帧就发请求：hostId 在首次渲染前已就位，不依赖父级 effect（子行 effect 先于父级运行）。
@@ -504,7 +523,7 @@ test("标题 hook：首帧按需请求不丢、ready 命中缓存不重取、切
 	assert.equal(h.calls.length, 1);
 	assert.equal(h.render().statusOf("ws-a/old.jsonl").title, "缓存标题");
 
-	h.resolve("ws-a/1.jsonl", { ok: true, title: "真实标题", titleOrigin: "parsed" });
+	h.resolve("ws-a/1.jsonl", { ok: true, title: "真实标题", titleOrigin: "authoritative" });
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(h.titles()["host-a"]["ws-a/1.jsonl"].title, "真实标题");
 
@@ -512,7 +531,7 @@ test("标题 hook：首帧按需请求不丢、ready 命中缓存不重取、切
 	h.render().request("ws-a/2.jsonl");
 	h.setHostId("host-b");
 	h.render();
-	h.resolve("ws-a/2.jsonl", { ok: true, title: "迟到", titleOrigin: "parsed" });
+	h.resolve("ws-a/2.jsonl", { ok: true, title: "迟到", titleOrigin: "authoritative" });
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(h.render().statusOf("ws-a/2.jsonl").status, "idle");
 });

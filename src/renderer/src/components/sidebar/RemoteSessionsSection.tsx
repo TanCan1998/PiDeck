@@ -5,7 +5,7 @@ import { REMOTE_SESSION_UNWIRED_CODE, useRemoteSessions, type RemoteSessionImpor
 import { useRemoteSessionTitles } from "../../hooks/useRemoteSessionTitles";
 import { formatI18nDateTime, t } from "../../i18n";
 import { REMOTE_SESSION_LIMIT_CODES, type RemoteSessionEntryView } from "../session/remoteSessionListState";
-import type { RemoteSessionTitleEntry } from "../session/remoteSessionTitleState";
+import { isProvisionalTitleOrigin, type RemoteSessionTitleEntry } from "../session/remoteSessionTitleState";
 import type { RemoteSessionImportFeedback } from "../../atoms/remote-sessions-atoms";
 import { Button } from "../ui-shadcn/button";
 
@@ -14,8 +14,8 @@ import { Button } from "../ui-shadcn/button";
  *
  * 三个"分开"是刻意的：
  * - 空 / 加载 / 错误三态分开呈现：扫描成功但为空，和扫描失败是两件事，不能共用一句话；
- * - 标题与占位分开：列表先用扫描给的 stem，进入视口才惰性取真实标题；origin=fallback 时标题仍是
- *   stem，必须标「暂定」，不能把兜底当解析结果；
+ * - 标题与占位分开：列表先用扫描给的 stem，进入视口才惰性取真实标题；只有 origin=authoritative 是真实
+ *   名字，inferred/fallback（以及未接线/失败）都必须标「暂定」，不能把兜底当解析结果；
  * - 超过硬上限是**稳定码拒绝**（不是截断）：单独提示「被整体拒绝」，绝不假装列表完整。
  *
  * 导入成功后由宿主（App 的 sessions.importRemoteSession）刷新本地会话列表并选中新会话；
@@ -57,8 +57,9 @@ function RemoteSessionRow(props: { entry: RemoteSessionEntryView; title: RemoteS
 		props.onRequestTitle(entry.remoteSessionId);
 	}, [entry.remoteSessionId, props.onRequestTitle]);
 	const displayTitle = title.title ?? entry.name;
-	// 只有 origin=parsed 才是解析出的真名；fallback / 未接线 / 失败都只是文件名兜底，必须标「暂定」。
-	const tentative = title.origin !== "parsed";
+	// 只有 origin=authoritative 才是会话的真实名字；inferred（首条消息弱兜底）/ fallback（stem）/ 未接线 / 失败
+	// 都必须标「暂定」。判据本身在 origin 的词表模块里（isProvisionalTitleOrigin），避免两处各写一遍。
+	const tentative = isProvisionalTitleOrigin(title.origin);
 	return (
 		<li data-remote-session-id={entry.remoteSessionId} className="shrink-0 rounded-md px-1 py-1 hover:bg-muted/60">
 			<div className="flex items-center gap-1.5">

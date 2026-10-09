@@ -100,10 +100,14 @@ test("标题管线：时间戳/Untitled 名被清洗，整段抽不出标题时 
 	assert.equal(truncated.fromSessionInfo, true);
 });
 
-test("title：有名字行→parsed；空头/畸形→fallback=文件名 stem", async () => {
+test("title：有名字行→authoritative；只有首条消息→inferred；空头/畸形→fallback=文件名 stem", async () => {
 	const named = fakeTitleRemote({ content: Buffer.from('{"type":"session_info","name":"Refactor the parser"}\n') });
 	const parsed = await createRemoteSessionScanner({ port: named.port }).title({ hostId: HOST, remoteSessionId: stemId });
-	assert.deepEqual(plain(parsed), { ok: true, title: "Refactor the parser", titleOrigin: "parsed" });
+	assert.deepEqual(plain(parsed), { ok: true, title: "Refactor the parser", titleOrigin: "authoritative" });
+
+	// 弱兜底是独立一档（inferred）：它是首条消息派生的，不是会话的真实名字。
+	const weak = fakeTitleRemote({ content: Buffer.from('{"type":"message","message":{"role":"user","content":"Fix the failing test"}}\n') });
+	assert.deepEqual(plain(await createRemoteSessionScanner({ port: weak.port }).title({ hostId: HOST, remoteSessionId: "ws/weak.jsonl" })), { ok: true, title: "Fix the failing test", titleOrigin: "inferred" });
 	// 会话根来自握手 home，整次读取都在受控 root 内。
 	assert.deepEqual(named.roots, ["/home/dev/.pi/agent/sessions"]);
 
@@ -121,21 +125,20 @@ test("title：有名字行→parsed；空头/畸形→fallback=文件名 stem", 
 	assert.equal(stemTitle, stemId.slice(stemId.lastIndexOf("/") + 1).replace(/\.jsonl$/, ""));
 });
 
-test("title：只读有界头（≤64 KiB）——一次 stat + 一次 read，绝不整文件读", async () => {
+test("title：两段式各段都有界（≤64 KiB）——1 次 stat + 头读 + 尾读，绝不整文件读", async () => {
 	const big = fakeTitleRemote({ content: Buffer.alloc(10 * 1024 * 1024, 0x20), size: 10 * 1024 * 1024 });
 	const result = await createRemoteSessionScanner({ port: big.port }).title({ hostId: HOST, remoteSessionId: "ws/big.jsonl" });
 	assert.deepEqual(plain(result), { ok: true, title: "big", titleOrigin: "fallback" });
 	const reads = big.frames.filter((frame) => frame.method === "fs.read");
 	const stats = big.frames.filter((frame) => frame.method === "fs.stat");
-	assert.equal(reads.length, 1, "64 KiB 正好一个契约分块");
+	// 10 MiB 文件头内没有权威名 ⇒ 按 I1 补一次有界尾读（每段都是一个契约分块的量级）。
+	assert.equal(reads.length, 2, "头读 + 尾读");
+	assert.equal(reads[0].params.offset, 0);
 	assert.equal(reads[0].params.bytes, REMOTE_WORKSPACE_MAX_HEAD_BYTES);
-	assert.equal(
-		reads.reduce((sum, frame) => sum + frame.params.bytes, 0),
-		REMOTE_WORKSPACE_MAX_HEAD_BYTES,
-		"请求字节总和必须等于头上限，而不是文件大小",
-	);
+	assert.equal(reads[1].params.offset, 10 * 1024 * 1024 - REMOTE_WORKSPACE_MAX_HEAD_BYTES, "尾窗口贴住文件尾");
 	assert.ok(reads.every((frame) => frame.params.bytes <= REMOTE_WORKSPACE_MAX_HEAD_BYTES));
-	assert.equal(stats.length, 1, "只有 readHead 内部的 sizing stat，没有第二次 stat");
+	assert.ok(reads.reduce((sum, frame) => sum + frame.params.bytes, 0) <= 2 * REMOTE_WORKSPACE_MAX_HEAD_BYTES, "请求字节总和必须 ≤ 两个窗口，而不是文件大小");
+	assert.equal(stats.length, 1, "只有一次 sizing stat：尾读复用头读的 size");
 });
 
 test("title：只读——catalog 端口一次都不被调用，真实 catalog 在磁盘上不留写入", async (t) => {
@@ -148,7 +151,7 @@ test("title：只读——catalog 端口一次都不被调用，真实 catalog �
 	};
 	const remote = fakeTitleRemote({ content: Buffer.from('{"type":"session_info","name":"Named"}\n') });
 	const scanner = createRemoteSessionScanner({ port: remote.port, catalog: catalogPort, projectIdForHost: () => "p-1" });
-	assert.deepEqual(plain(await scanner.title({ hostId: HOST, remoteSessionId: "ws/a.jsonl" })), { ok: true, title: "Named", titleOrigin: "parsed" });
+	assert.deepEqual(plain(await scanner.title({ hostId: HOST, remoteSessionId: "ws/a.jsonl" })), { ok: true, title: "Named", titleOrigin: "authoritative" });
 	assert.equal(counter.calls, 0, "title 路径根本不该有 catalog 端口调用");
 
 	// 真实 SessionCatalog + open() 计数：只读通道不允许产生任何写盘（register 才写）。
@@ -238,11 +241,14 @@ function ipcFor(input) {
 
 const CHANNELS = { scan: "remote:remote-session-scan", register: "remote:remote-session-register", title: "remote:remote-session-title" };
 
-test("IPC title：注入 title 通道时注册并透传 parsed/fallback；未注入时不注册（fail closed）", async () => {
+test("IPC title：注入 title 通道时注册并透传三档 origin；未注入时不注册（fail closed）", async () => {
 	const named = fakeTitleRemote({ content: Buffer.from('{"type":"session_info","name":"Refactor the parser"}\n') });
 	const handlers = ipcFor({ enabled: true, service: () => named.port, channels: CHANNELS });
 	assert.equal(handlers.has(CHANNELS.title), true);
-	assert.deepEqual(plain(await handlers.get(CHANNELS.title)({}, HOST, stemId)), { ok: true, title: "Refactor the parser", titleOrigin: "parsed" });
+	assert.deepEqual(plain(await handlers.get(CHANNELS.title)({}, HOST, stemId)), { ok: true, title: "Refactor the parser", titleOrigin: "authoritative" });
+	const weakRemote = fakeTitleRemote({ content: Buffer.from('{"type":"message","message":{"role":"user","content":"Fix the failing test"}}\n') });
+	const weakHandlers = ipcFor({ enabled: true, service: () => weakRemote.port, channels: CHANNELS });
+	assert.deepEqual(plain(await weakHandlers.get(CHANNELS.title)({}, HOST, stemId)), { ok: true, title: "Fix the failing test", titleOrigin: "inferred" });
 	const fallbackRemote = fakeTitleRemote({ content: Buffer.from("") });
 	const fallbackHandlers = ipcFor({ enabled: true, service: () => fallbackRemote.port, channels: CHANNELS });
 	assert.deepEqual(plain(await fallbackHandlers.get(CHANNELS.title)({}, HOST, stemId)), { ok: true, title: stemTitle, titleOrigin: "fallback" });

@@ -19,7 +19,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { loadTsCommonJs } from "../tests/helpers/loadTsCommonJs.mjs";
 
 const { createSshClientRuntime } = loadTsCommonJs("src/main/remote/SshClientRuntime.ts");
@@ -29,11 +29,37 @@ const { fingerprintSshHostKey } = loadTsCommonJs("src/main/remote/SshHostVerifie
 const { createRemoteHostConnectionService } = loadTsCommonJs("src/main/remote/RemoteHostConnectionService.ts");
 
 /** 用独立核验过的指纹建立一个已 pin 的主机，返回其 hostId。 */
+/**
+ * 取该主机上报的 host key（仅作**候选**）。
+ *
+ * 指纹本身由调用方**独立核验**（来自服务器控制台），随后会断言这里的观测值与它逐字节一致，
+ * 因此 keyscan 是否可信不影响结论：对不上就 fail-closed。选择哪个 keyscan 二进制同样不影响强度。
+ * Windows 上 System32 的 ssh-keyscan 对某些服务端 KEX 协商失败（实测 Ubuntu OpenSSH_8.9p1 的
+ * sntrup761x25519-sha512@openssh.com 会 choose_kex 报错），故退到 Git for Windows 自带的较新 OpenSSH。
+ */
+function scanHostKey(host, primary) {
+	const candidates = [primary];
+	if (process.platform === "win32") {
+		const programFiles = process.env.ProgramFiles;
+		if (typeof programFiles === "string" && programFiles.length > 0) candidates.push(join(programFiles, "Git", "usr", "bin", "ssh-keyscan.exe"));
+	}
+	let lastError;
+	for (const candidate of candidates) {
+		try {
+			return execFileSync(candidate, ["-T", "8", "-t", "ed25519", host], { encoding: "utf8", timeout: 12_000, stdio: ["ignore", "pipe", "ignore"] });
+		} catch (error) {
+			lastError = error;
+		}
+	}
+	throw lastError ?? new Error("KEYSCAN_FAILED");
+}
+
 async function pinHost(directory, client, host, user, fingerprint) {
 	const pinStore = new SshHostPinStore(directory, { client });
 	const store = await RemoteHostStore.open(directory, { pinStore });
 	const profile = await store.createDraft({ label: "service-smoke", sshHost: host, user, port: 22, connectTimeoutMs: 10_000 }, 0);
-	const scanned = execFileSync("/usr/bin/ssh-keyscan", ["-T", "8", "-t", "ed25519", host], { encoding: "utf8", timeout: 12_000, stdio: ["ignore", "pipe", "ignore"] });
+	const sshKeyscanPath = join(dirname(client.sshPath), process.platform === "win32" ? "ssh-keyscan.exe" : "ssh-keyscan");
+	const scanned = scanHostKey(host, sshKeyscanPath);
 	const lines = scanned
 		.trim()
 		.split("\n")
@@ -53,7 +79,8 @@ async function pinHost(directory, client, host, user, fingerprint) {
 async function main(host, user, fingerprint) {
 	if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) || !/^[a-z_][a-z0-9_-]*$/.test(user) || !/^SHA256:[A-Za-z0-9+/]{43}$/.test(fingerprint)) throw new Error("SMOKE_INPUT_INVALID");
 	const directory = await mkdtemp(join(tmpdir(), "pideck-service-e2e-"));
-	const client = createSshClientRuntime({ sshPath: "/usr/bin/ssh" });
+	// 同上：POSIX 显式绑定 /usr/bin/ssh，Windows 交给运行时解析（脚本平台缺口，非产品缺口）。
+	const client = process.platform === "win32" ? createSshClientRuntime() : createSshClientRuntime({ sshPath: "/usr/bin/ssh" });
 	let pinStore;
 	let service;
 	try {

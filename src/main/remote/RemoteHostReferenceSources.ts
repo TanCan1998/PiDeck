@@ -3,7 +3,6 @@ import { lstat, open, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { isSessionLocator } from "../sessions/SessionCatalog";
 import { readProjectLocator } from "../../shared/projectLocation";
-import { HOST_ID } from "./RemoteHostStoreCodec";
 import { HOST_REFERENCE_SOURCES, RemoteHostReferenceRegistry, type RemoteHostReferenceScan, type RemoteHostReferenceSource } from "./RemoteHostReferenceRegistry";
 
 const MAX_CATALOG_BYTES = 16 * 1024 * 1024;
@@ -67,7 +66,14 @@ async function readReferenceFile(filePath: string): Promise<string | undefined> 
 	}
 }
 
-/** Scan only durable sessions; backup recovery and live transient records cannot certify an empty disk. */
+/**
+ * Scan only durable sessions; backup recovery and live transient records cannot certify an empty disk.
+ *
+ * The per-locator verdict is `SessionCatalog.isSessionLocator` itself (ssh 分支 → shared
+ * `readSshSessionLocator`), so "catalog loads it, scan refuses it" cannot happen for the same record.
+ * A refused locator makes the whole source incomplete: an unreadable record must never be read as
+ * "this session references nothing". Absent locators stay legal (draft / no-session / DSH records).
+ */
 async function scanPersistedSessions(filePath: string): Promise<RemoteHostReferenceScan> {
 	const text = await readReferenceFile(filePath);
 	if (text === undefined) return { referencedHostIds: new Set(), hits: [], complete: true, unavailable: [] };
@@ -79,11 +85,12 @@ async function scanPersistedSessions(filePath: string): Promise<RemoteHostRefere
 		if (!isRecord(entry) || typeof entry.id !== "string" || typeof entry.projectId !== "string" || typeof entry.title !== "string" || (entry.environment !== "native" && entry.environment !== "wsl") || (entry.status !== "draft" && entry.status !== "active")) throw new Error("REMOTE_HOST_REFERENCE_SCAN_INVALID");
 		if (entry.locator === undefined) continue;
 		if (!isSessionLocator(entry.locator)) throw new Error("REMOTE_HOST_REFERENCE_SCAN_INVALID");
-		if (entry.locator.kind === "ssh") {
-			if (!HOST_ID.test(entry.locator.hostId)) throw new Error("REMOTE_HOST_REFERENCE_SCAN_INVALID");
-			referencedHostIds.add(entry.locator.hostId);
-			hits.push({ source: "sessions", recordId: entry.id });
-		}
+		if (entry.locator.kind !== "ssh") continue;
+		// hostId 的取值域由 isSessionLocator（→ shared readSshSessionLocator）保证：这里不再写第二套
+		// 正则，否则同一记录又会出现「catalog 放行、扫描抛错」。catalog 读不出来的记录一律让整个
+		// sessions 源 incomplete，而不是当作「没有引用」。
+		referencedHostIds.add(entry.locator.hostId);
+		hits.push({ source: "sessions", recordId: entry.id });
 	}
 	return { referencedHostIds, hits, complete: true, unavailable: [] };
 }
