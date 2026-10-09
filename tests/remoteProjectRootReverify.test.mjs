@@ -285,17 +285,21 @@ test("reconnecting re-verifies the root, and a drift found there is refused befo
 		assert.equal(api.ports.requests.length, requestsBefore, "no helper request may be made after a failed re-check");
 		assert.ok(!api.ports.events.includes("connect:" + ROOT_A + "#2"), "no reconnect may happen after a failed re-check");
 		assert.equal(api.ports.events.filter((event) => event === "connect:" + ROOT_A).length, 1, "only the first establishment connected");
-		// A drift found while reconnecting is not only a code on this one call: the host itself has to become
-		// visibly actionable, which is the state the connections UI renders.
-		assert.equal(manager.state, "needs-attention", "the drift must enter the terminal host state");
-		assert.deepEqual(
-			api.ports.events.filter((event) => event.startsWith("needs-attention:")),
-			["needs-attention:SSH_PROJECT_ROOT_CHANGED"],
+		// Design (i): the drift becomes a record for **this project's** confirmed root, and the host machine is
+		// never moved - routing it into host needs-attention would let one moved directory block every other
+		// project on the same host. The reachable host-level needs-attention for root drift is the helper
+		// handshake (SSH_HELPER_ROOT_MISMATCH), covered by tests/remoteNeedsAttention.test.mjs.
+		assert.deepEqual(plain(api.service.projectRootStatus(HOST_ID, ROOT_A)), { status: "needs-attention", code: "SSH_PROJECT_ROOT_CHANGED" });
+		assert.equal(manager.state, "disconnected", "the drift must not move the host machine");
+		assert.equal(
+			api.ports.events.some((event) => event.startsWith("needs-attention:")),
+			false,
+			"no host-level report may be sent for a drift",
 		);
 	});
 });
 
-test("a drift found while reconnecting keeps refusing reads until the user retries the host", async () => {
+test("a drift found while reconnecting is recorded per project, keeps refusing reads, and clears once the root is re-proved", async () => {
 	await harness(async (api) => {
 		assert.equal((await api.stat(HOST_ID, ROOT_A, "a.txt")).ok, true);
 		const manager = api.ports.managers[0];
@@ -307,30 +311,28 @@ test("a drift found while reconnecting keeps refusing reads until the user retri
 		const drifted = await api.stat(HOST_ID, ROOT_A, "a.txt");
 		assert.equal(drifted.ok, false, JSON.stringify(drifted));
 		assert.equal(drifted.code, "SSH_PROJECT_ROOT_CHANGED");
-		assert.equal(manager.state, "needs-attention");
+		assert.deepEqual(plain(api.service.projectRootStatus(HOST_ID, ROOT_A)), { status: "needs-attention", code: "SSH_PROJECT_ROOT_CHANGED" });
 
-		// Every later read stays refused with the same code; nothing about an ordinary read may clear the
-		// terminal state, and the terminal session is never re-probed (that is what makes it terminal).
+		// Every later read of this project stays refused with the same code. The record is per project and the
+		// host machine stays exactly where it was, so another project on this host keeps working - that half is
+		// asserted end to end (including a successful read of the healthy project) in
+		// tests/remoteProjectRootStatus.test.mjs.
 		for (let attempt = 0; attempt < 2; attempt += 1) {
 			const refused = await api.stat(HOST_ID, ROOT_A, "a.txt");
-			assert.equal(refused.ok, false, "needs-attention must stay refused");
+			assert.equal(refused.ok, false, "a marked boundary must stay refused");
 			assert.equal(refused.code, "SSH_PROJECT_ROOT_CHANGED");
-			assert.equal(manager.state, "needs-attention");
+			assert.deepEqual(plain(api.service.projectRootStatus(HOST_ID, ROOT_A)), { status: "needs-attention", code: "SSH_PROJECT_ROOT_CHANGED" });
 		}
-		assert.equal(api.ports.verifyCalls.length, 2, "a terminal host must not be probed again by a read");
+		assert.equal(manager.state, "disconnected", "drift never moves the host machine");
+		assert.deepEqual(plain(manager.retries), [], "drift consumes no user-retry allowance");
 
-		// The user re-points the boundary and presses connect: that is the reducer's user-retry, the only legal
-		// exit, so the service must reach the manager through `retry` instead of `connect`/begin-attempt.
+		// The user re-points the boundary: the next establishment re-proves it, clears the record and serves.
 		api.ports.control.canonical = undefined;
-		const reconnected = await api.service.connect(HOST_ID);
-		assert.equal(reconnected.ok, true, JSON.stringify(reconnected));
-		assert.deepEqual(plain(manager.retries), [ROOT_A], "an explicit connect is the user retry");
-		assert.equal(manager.state, "ready");
 		const served = await api.stat(HOST_ID, ROOT_A, "a.txt");
-		assert.equal(served.ok, true, "after the fix and the user retry the read is served again");
+		assert.equal(served.ok, true, "after the fix the read is served again");
+		assert.deepEqual(plain(api.service.projectRootStatus(HOST_ID, ROOT_A)), { status: "ok" });
 	});
 });
-
 test("reconnecting on a stable root revives the session and serves the read", async () => {
 	await harness(async (api) => {
 		assert.equal((await api.stat(HOST_ID, ROOT_A, "a.txt")).ok, true);

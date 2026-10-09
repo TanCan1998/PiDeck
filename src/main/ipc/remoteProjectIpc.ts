@@ -1,7 +1,8 @@
 /**
  * 远端项目域的 IPC 注册（G1：按域从 remoteHostIpc.ts 拆出，纯搬迁）。
  *
- * 这里只放「连上一台主机之后，按 projectId 只读地看什么」：项目登记 + 确认回答 + 列表 + 读取 + 搜索。
+ * 这里只放「连上一台主机之后，按 projectId 只读地看什么」：项目登记 + 确认回答 + 列表 + 读取 + 搜索
+ * + 项目级 root 复核状态（第四批设计 (i)）。
  * hosts 域（连得上吗、诊断、修复）留在 remoteHostIpc.ts。拆分的动因是体量红线，域边界本来就在：
  * 两个域共用同一套窄依赖（enabled / service / userDataDir 与懒构建的连接服务），但 handler、校验
  * 与错误码各自独立。
@@ -14,7 +15,7 @@
 import { createHash } from "node:crypto";
 import { ipcMain, type WebContents } from "electron";
 import { ipcChannels } from "../../shared/ipc";
-import type { RemoteProjectEnrollAnswerResult, RemoteProjectEnrollRequest, RemoteProjectEnrollResult, RemoteProjectListResult, RemoteProjectReadResult, RemoteProjectSearchResult } from "../../shared/types/remoteHost";
+import type { RemoteProjectEnrollAnswerResult, RemoteProjectEnrollRequest, RemoteProjectEnrollResult, RemoteProjectListResult, RemoteProjectReadResult, RemoteProjectRootStatusResult, RemoteProjectSearchResult } from "../../shared/types/remoteHost";
 import type { RemoteHostConnectionService, RemoteProjectSession } from "../remote/RemoteHostConnectionService";
 import { REMOTE_HELPER_MAX_SEARCH_QUERY_LENGTH } from "../remote/RemoteHelperContract";
 import { resolveRemoteBrowseRoot } from "../remote/RemoteBrowseRoot";
@@ -298,5 +299,22 @@ export function registerRemoteProjectIpc(input: {
 		} catch (error) {
 			return { ok: false, code: codeOf(error, "REMOTE_PROJECT_READ_FAILED") };
 		}
+	});
+
+	/**
+	 * 项目级 root 复核状态（第四批设计 (i)）。
+	 *
+	 * 只读既往复核结果：不连主机、不发任何 helper 请求、不建立会话，也不在这里重新复核（复核只在建立/恢复
+	 * 会话时发生）。projectId → (hostId, remotePath) 由 main 从项目库解析，渲染层不传路径，因此同一个 host 上
+	 * 某个项目漂移不会污染另一个健康项目的答案——这正是 (i) 相对「接到主机级 needs-attention」的价值。
+	 * projectReadTarget 已经做完全部入参/归属校验（非法 id、未知项目、非 ssh 项目各自的稳定码），这里复用它，
+	 * 但只取 locator 与 service，不碰会话。
+	 */
+	ipcMain.handle(ipcChannels.remoteProjectRootStatus, async (_event, projectIdValue: unknown): Promise<RemoteProjectRootStatusResult> => {
+		if (!input.enabled) return { ok: false, code: "REMOTE_FEATURE_DISABLED" };
+		const target = await projectReadTarget(projectIdValue);
+		if ("code" in target) return { ok: false, code: target.code };
+		const status = target.service.projectRootStatus(target.hostId, target.remotePath);
+		return status.status === "ok" ? { ok: true, status: "ok" } : { ok: true, status: "needs-attention", code: status.code };
 	});
 }

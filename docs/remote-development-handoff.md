@@ -3,7 +3,8 @@
 > 当前开发分支：`feat/remote-development`。代码核对基线：`f7b18947`（第一次协作交接点）；首次交接提交：`a663947c`。
 > 第一批（A 读取隔离 / B 侧栏入口 / C 持久化校验）与第二批（F1 helper 只读搜索 / F2 搜索链路 / F3 会话建立与重连时的 root 复核）已实施完成，落地位置、验证命令与**未验收边界**见 §3 末尾与 §5；文档里凡未在真机或 Electron 内跑过的能力都保持「未验收」标注。
 > 第三批（G1 IPC 按域拆分 / G2 needs-attention 与握手 home / G3 远端 Session 只读发现与登记 / G5 集成）已实施完成；落地位置与**未验收边界**见 §3 末。
-> 下一步（第四批）：远端 Session 的**侧栏列表与导入 UI**、按需头部解析出真实标题（`readHead` 原语已就位）、root 漂移的**项目级**呈现（或复核顺序调整）、pi 自定义 `sessionDir` 覆盖、以及真机/Electron 验收与跨 store INV-5。
+> 第四批（H1 按需标题 / H2 侧栏远端会话列表与导入 / H3 项目级 root 状态（设计 (i)）/ H5 集成）已实施完成；落地与未验收边界见 §3 末。
+> 下一步（第五批建议）：**真机与 Electron 验收**（需主机凭据）、pi 自定义 `sessionDir` 覆盖、`remotePathAliases` 与 move/archive 事务（Phase 4）、`ProjectTree` 插槽化、跨 store INV-5，然后进 Phase 4 的远端 pi 端到端会话。
 > 本页是协作入口：实现状态、下一批任务、验收与验证方法。架构和发布范围见 [实施计划](remote-development-plan.md)，跨 store 设计见 [事务设计](remote-host-cross-store-design.md)。
 > 文档中的任务包是待实施工作，不表示已分配给具体开发者或已创建 GitHub issue。
 
@@ -143,6 +144,27 @@ A/B/C 可由不同开发者并行，D 随开发跟进。每块指定一个负责
 6. **真机/Electron 未验收**；POSIX symlink 语义用 Windows fixture 模拟，Linux 上未跑。
 7. **严格跨进程 CAS / 跨 store interlock** 仍未交付（同前两批）。
 
+### 第四批落地结果与遗留项（实施后核对）
+
+| 块 | 落地位置 | 验证 |
+| --- | --- | --- |
+| H1 按需会话标题 | 新通道 `remote:remote-session-title`（只读、**不写 catalog**）：有界头读 64 KiB → 复用本地既有解析管线（仅抽出「接受文本的纯函数」这一种最小重构），解析不出强制 fallback=文件名 stem 且 `titleOrigin="fallback"`（**绝不编造**） | `tests/remoteSessionTitle.test.mjs`；独立验证 `tests/remoteSessionTitleIsolation.test.mjs`（18 项） |
+| H2 侧栏远端会话列表与导入 | `RemoteSessionsSection`（SessionTree 下方，已导入的仍走本地树）+ 纯状态机（列表/标题）+ hooks + Jotai atom；惰性标题（只有 `titleOrigin="parsed"` 显示真名，fallback/未接线标「暂定」）、三态分离、上限按**整体拒绝**呈现（与第二批 `truncated` 区分）、`created=false` 独立回执、回显不一致判读不懂；成功后刷新清单 + 选中，不建会话不开 Tab；`RemoteProjectStatusTag` 显示项目级「需处理」 | `tests/remoteSessionsUiState.test.mjs`（17 项）+ 渲染分支源码级守卫 |
+| H3 项目级 root 状态（设计 (i)） | 服务按 `(hostId, root)` 记最近一次复核失败码、复核成功只清自己的键；`remote:project-root-status`（只读、零 helper 请求、零 bootstrap、零会话建立）；**收敛**：漂移不再调 `reportNeedsAttention`（否则 A 漂移会阻断同主机 B）；**防永久误报**：该键有记录时即使会话已 ready 也强制再复核一次 | `tests/remoteProjectRootStatus.test.mjs`（6 项）；独立验证 `tests/remoteProjectRootStatusIsolation.test.mjs`（7 项） |
+| H5 集成 | `title` / `root-status` 的 shared 常量+类型+preload+previewApi+装配注入；PROJECT_CHANNELS 守卫清单补齐 | `tests/remoteSessionWiring.test.mjs`（9 项）、`tests/remoteProjectIpc.test.mjs` |
+
+**已自动验收（要点）**：**设计 (i) 未被证伪**——同主机 A 的 root 改指后，读 A 被拒（`SSH_PROJECT_ROOT_CHANGED`）、**读 B 仍成功**、`status(A)=needs-attention` 带码而 **`status(B)=ok` 且无码**，且 B 的成功复核不清除 A 的记录；连续查询 5 次，进程/bootstrap/探测/状态推送计数全不变（只读无副作用）。标题：10 MiB 会话只请求 65536 字节、无第二次读；catalog 写入计数 0；空头/畸形/时间戳名/Untitled 一律 fallback 且断言不编造。列表：迟到 scan 作废且状态**引用不变**、`created=false` 独立透传、回显不符即 rejected（防选错会话）。
+
+**第四批未完成 / 未验收**：
+1. **真机与 Electron 未验收**：需要一台**已授权**测试主机（IPv4 + 用户名 + 独立核验的 ED25519 指纹）才能跑 `scripts/verify-remote-host.mjs` / `verify-remote-connection-service.mjs`（注意：第二批已把 helper 升到 1.6.0 并换了 sha，**真机脚本需重跑一次**以确认新 bundle 仍能 bootstrap）。第四批的会话列表/标题与项目级 root 状态**没有真机脚本**，需要在 Electron + `PIDECK_REMOTE_EXPERIMENTAL=1` 下按操作链手动走。没有凭据时一律记「未验收」，不得用替身结果冒充。
+2. **`reportNeedsAttention` 当前无生产调用方**：能力与 reducer 放开 `disconnected/offline` 两件事保留（有测试、语义通用），但漂移不再驱动它（设计 (i) 的直接后果）；当前可达的主机级 needs-attention 触发是重连时 helper 握手 `SSH_HELPER_ROOT_MISMATCH`。
+3. **导入只保证「刷新清单 + 选中」**：远端会话**正文读取**属 Phase 4；选中后正文不可读是主进程既有显式拒绝，不是静默失败。
+4. **「已导入」标记依赖该项目 catalog 已有记录**：远端项目不做本地扫描预热，首次展开时标记可能为空（导入后刷新会补上）。
+5. **`ProjectTree.tsx` 414 行**（目标 ≤400、硬限 600）：本批只增接线；建议后续把远端展开体抽成插槽组件，避免与侧栏其他改动打架。
+6. **覆盖缺口仍在**：pi 自定义 `sessionDir`、深层嵌套 subagent 布局、`remotePathAliases`、严格跨进程 CAS / 跨 store INV-5。
+7. **64 KiB 头窗口覆盖不到文件尾的权威名**（H1 实现时如实记录）：pi 的权威 `session_info`（`/name`）是**追加在文件尾**的，落在 64 KiB 头窗口之外，所以那类会话会得到 `parsed` 的**弱兜底**（首条 user 文本，与本地管线对无名字行会话的行为一致）或 `fallback`（文件名 stem）。**这是冻结契约（头读 ≤64 KiB）的设计后果，不是缺陷**；要提升覆盖率需要显式修订契约（尾窗口或更大上界），建议作为下一增量单独提出。
+8. **`parsed` 的两种强度需要区分看待**：`titleOrigin="parsed"` 现在同时覆盖「权威名（`session_info` / 旧版私有 `sessionName` 字段）」与「弱兜底（首条 user/assistant 文本）」。理由是不复用下半条本地管线就等于只复用半个；若后续要区分，需要给契约加第三档而不是改这两档的含义。
+
 ## 4. M1 之后如何推进
 
 1. **Phase 3 剩余只读能力**：目录/内容搜索与远端 Session 发现走 helper，由 catalog 保存远端 locator；不得把远端路径交给本地 scanner。结果数量、字节和超时必须有界。
@@ -173,7 +195,7 @@ node --test tests/remoteHostIpc.test.mjs tests/remoteHostConnectionService.test.
 
 C 对应 `projectStoreCodec.test.mjs`、`projectStoreMigration.test.mjs`、`remoteHostReferenceSources.test.mjs`；B 需更新 `settingsTabLayout.test.mjs` 并补实际交互状态覆盖。格式化仅涉及文件（`node_modules/.bin/biome format --write <files...>`）；集成时运行 `npm run check:format`。纯文档修改检查差异、链接与命令准确性即可。
 
-**测试记录的边界（第三批实施后更新）**：Windows / Node 24.19 上跑的集成集合（remote* + projectStore* + sessionCatalog* + hostRebind* + 侧栏/面板/文案/连接管理器/locationAdapters/workspaceTree）：第一批 33 个文件 **512 项 / 505 pass / 2 fail / 5 skip**；第二批 46 个文件 **689 项 / 682 pass / 2 fail / 5 skip**；第三批 **921 项 / 914 pass / 2 fail / 5 skip**。三轮 fail 的**名称与断言完全相同**，就是下面列出的**既有**失败，并已在干净基线 worktree(`f7b18947`) 上逐字复现——所以第二、三批均零回归。`npm run typecheck` 与 `npm run check:format`（2173 个文件，无改动）通过。全量 `npm test` 本批未跑（仓库规则：仅跨域大改动或合并前最终确认时跑），因此**没有「全量已全绿」这个结论**。
+**测试记录的边界（第四批实施后更新）**：Windows / Node 24.19 上跑的集成集合（remote* + projectStore* + sessionCatalog* + hostRebind* + 侧栏/面板/文案/连接管理器/locationAdapters/workspaceTree/sessionFirstRenderer）：第一批 **512 项 / 505 pass / 2 fail / 5 skip**；第二批 **689 项 / 682 pass / 2 fail / 5 skip**；第三批 **921 项 / 914 pass / 2 fail / 5 skip**；第四批 **991 项 / 984 pass / 2 fail / 5 skip**。四轮 fail 的**名称与断言完全相同**，就是下面列出的**既有**失败，并已在干净基线 worktree(`f7b18947`) 上逐字复现——所以第二、三、四批均零回归。`npm run typecheck` 与 `npm run check:format`（2173 个文件，无改动）通过。全量 `npm test` 本批未跑（仓库规则：仅跨域大改动或合并前最终确认时跑），因此**没有「全量已全绿」这个结论**。
 
 这 2 个既有失败已在**干净基线 worktree（`f7b18947`，不含本批任何改动）上逐字复现**，不是本批引入的回归，而且不能全归为平台原因：
 - `tests/remoteBootstrapSessionIntegration.test.mjs` → `BOOTSTRAP_READY_INVALID`（真实子进程 + frozen entry 握手，两侧同样失败）；

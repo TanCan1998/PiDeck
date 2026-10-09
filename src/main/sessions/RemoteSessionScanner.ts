@@ -1,8 +1,9 @@
 /**
  * 远端 Session 只读发现（G3，Phase 3 第三段）。
  *
- * 这里做的事只有两件：**列出远端会话文件**（列表级元数据）与**把其中一条幂等登记进本地 SessionCatalog**。
- * 不解析 JSONL 正文、不做侧栏 UI、不做 move/archive/delete（Phase 4/5）。
+ * 这里做的事有三件：**列出远端会话文件**（列表级元数据）、**把其中一条幂等登记进本地 SessionCatalog**，
+ * 以及**按需解析一条会话的标题**（H1：有界读头部后交给本地标题管线，只读、不写 catalog）。
+ * 列表级扫描仍然不做任何内容解析——标题走独立通道；不做侧栏 UI、不做 move/archive/delete（Phase 4/5）。
  *
  * 边界与不变量（全部 fail-closed）：
  * - 远端路径**绝不进本地 fs**：本模块不 import node:fs，唯一的远端访问通道是
@@ -18,12 +19,15 @@
  */
 
 import { REMOTE_HELPER_MAX_HOST_ID_LENGTH, type RemoteHelperListEntry } from "../remote/RemoteHelperContract";
-import { createRemoteWorkspaceReader, type RemoteWorkspacePort } from "../remote/RemoteWorkspaceReader";
+import { createRemoteWorkspaceReader, REMOTE_WORKSPACE_MAX_HEAD_BYTES, type RemoteWorkspacePort } from "../remote/RemoteWorkspaceReader";
 import { SUBAGENT_ARTIFACTS_DIR_NAME } from "../../shared/sessionIdentity";
 import type { RemoteSessionRegistration, RemoteSessionRegistrationInput } from "./SessionCatalog";
+import { inferSessionTitleFromHeadText } from "./sessionNameLine";
 // 渲染层要消费这三个结构，所以它们是 shared 契约而不是本模块私有类型；这里只转出，避免同一结构两处各定义一份。
-import type { RemoteSessionEntry, RemoteSessionRegisterResult, RemoteSessionScanResult } from "../../shared/types/remoteHost";
+import type { RemoteSessionEntry, RemoteSessionRegisterResult, RemoteSessionScanResult, RemoteSessionTitleResult } from "../../shared/types/remoteHost";
 export type { RemoteSessionEntry, RemoteSessionRegisterResult, RemoteSessionScanResult } from "../../shared/types/remoteHost";
+// H1 新增的按需标题结果同样只转出 shared 契约（remoteSessionWiring 钉的是上一行的既有形状，不合并两行）。
+export type { RemoteSessionTitleResult } from "../../shared/types/remoteHost";
 
 /** 会话根相对远端 home 的固定后缀（冻结设计第 1 条：<remote home>/.pi/agent/sessions）。 */
 export const REMOTE_SESSION_ROOT_SUFFIX = ".pi/agent/sessions";
@@ -76,6 +80,8 @@ export const REMOTE_SESSION_CODES = {
 	registerFailed: "REMOTE_SESSION_REGISTER_FAILED",
 	/** 扫描过程中出现了不带稳定码的异常。 */
 	scanFailed: "REMOTE_SESSION_SCAN_FAILED",
+	/** 按需标题解析过程中出现了不带稳定码的异常。 */
+	titleFailed: "REMOTE_SESSION_TITLE_FAILED",
 } as const;
 
 /** 一条远端会话的列表级元数据；不含任何正文。 */
@@ -126,6 +132,11 @@ export type RemoteSessionScanner = {
 	scan(hostId: string): Promise<RemoteSessionScanResult>;
 	/** 在远端确认该文件仍存在后，幂等登记进 catalog 并返回稳定 sessionId。 */
 	register(input: { hostId: string; remoteSessionId: string }): Promise<RemoteSessionRegisterResult>;
+	/**
+	 * 按需解析真实标题（H1）：有界读头部（≤ REMOTE_WORKSPACE_MAX_HEAD_BYTES）交给本地标题管线。
+	 * 只读、不写 catalog；解析不出强制 fallback（title = 文件名 stem），绝不编造。
+	 */
+	title(input: { hostId: string; remoteSessionId: string }): Promise<RemoteSessionTitleResult>;
 };
 
 /** 一个码就是一个码，绝不是自由文本。 */
@@ -342,11 +353,37 @@ export function createRemoteSessionScanner(options: RemoteSessionScannerOptions)
 				const outcome = await port.withProjectSession(host, root, (session) => createRemoteWorkspaceReader({ port: sessionPort(session, host) }).stat(host, remoteSessionId));
 				if (!outcome.ok) return { ok: false, code: outcome.code };
 				if (outcome.value.kind !== "file") return { ok: false, code: "NOT_A_FILE" };
-				// 标题是文件名 stem（暂定）；catalog 里标成 fallback，等下一增量的有界头部解析升级。
+				// 登记的标题仍是文件名 stem（暂定，catalog 里标成 fallback）：真实标题走 title() 按需解析，
+				// 登记路径**不读正文**（列表级发现必须与内容解析分离）。
 				const registration = await catalog.ensureRemoteSession({ projectId, hostId: host, remoteSessionId, remotePath: remoteSessionId, title: titleFromRemoteSessionId(remoteSessionId), updatedAt: outcome.value.mtimeMs });
 				return { ok: true, sessionId: registration.record.id, created: registration.created, remoteSessionId, remotePath: remoteSessionId };
 			} catch (error) {
 				return { ok: false, code: stableCodeOf(error) ?? REMOTE_SESSION_CODES.registerFailed };
+			}
+		},
+		async title(input) {
+			const host = readHostId(input?.hostId);
+			if (host === undefined) return { ok: false, code: REMOTE_SESSION_CODES.hostIdInvalid };
+			const remoteSessionId = readRemoteSessionId(input?.remoteSessionId);
+			if (remoteSessionId === undefined) return { ok: false, code: REMOTE_SESSION_CODES.idInvalid };
+			const root = await resolveSessionRoot(host);
+			if (root === undefined) return { ok: false, code: REMOTE_SESSION_CODES.homeUnavailable };
+			try {
+				// 只读：整次解析在受控 root 内完成，只发 readHead 内部的 sizing stat + 一次 ≤64 KiB 的 fs.read；
+				// 刻意不接收也不需要 catalog —— 标题通道不写盘（写盘仍只属于 register）。
+				const outcome = await port.withProjectSession(host, root, async (session) => {
+					const reader = createRemoteWorkspaceReader({ port: sessionPort(session, host) });
+					const head = await reader.readHead(host, remoteSessionId, REMOTE_WORKSPACE_MAX_HEAD_BYTES);
+					// 头尾可能截断多字节字符：fatal:false 会得到 U+FFFD，落在最后一行 → 该行 JSON.parse 失败被跳过。
+					return new TextDecoder().decode(head.content);
+				});
+				if (!outcome.ok) return { ok: false, code: outcome.code };
+				const inferred = inferSessionTitleFromHeadText(outcome.value);
+				// 解析不出绝不编造：强制 fallback 到文件名 stem（与 G3 的暂定标题同一取值）。
+				// parsed 含弱兜底（首条 user/assistant 文本）——那正是本地管线给出的标题，catalog 侧由所有权来源区分强弱。
+				return inferred.name === undefined ? { ok: true, title: titleFromRemoteSessionId(remoteSessionId), titleOrigin: "fallback" } : { ok: true, title: inferred.name, titleOrigin: "parsed" };
+			} catch (error) {
+				return { ok: false, code: stableCodeOf(error) ?? REMOTE_SESSION_CODES.titleFailed };
 			}
 		},
 	};

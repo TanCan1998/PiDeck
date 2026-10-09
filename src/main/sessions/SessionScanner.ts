@@ -9,13 +9,13 @@ import type { ArchivedPiSession, ChatMessage, ChatRole, SessionLocator, SessionS
 import type { MainProcessTranslationKey } from "../../shared/i18n/mainProcessCopy";
 import { getCodexSessionThreadInfo } from "../../shared/codexSessionMeta";
 import { sessionLocatorFromLegacy } from "../../shared/locationAdapters";
-import { isInSubagentArtifactsDir, isValidPiSessionFileHead, looksLikePiSessionFileStem, SUBAGENT_ARTIFACTS_DIR_NAME } from "../../shared/sessionIdentity";
+import { isInSubagentArtifactsDir, isValidPiSessionFileHead, SUBAGENT_ARTIFACTS_DIR_NAME } from "../../shared/sessionIdentity";
 import { extractMessageText, extractThinkingRaw } from "../pi/messageContent";
 import { isRoleMessageRole } from "../pi/sessionEntryIds";
-import { replaceExpandedRefBlocksWithLabels, textForSessionTitle } from "../../shared/expandedRefBlocks";
+import { replaceExpandedRefBlocksWithLabels } from "../../shared/expandedRefBlocks";
 import { toWindowsHostPath, toWslLinuxPath, type WslEnvironment } from "../wsl/WslPaths";
 import { getAppLogger } from "../logging/sharedLogger";
-import { isLegacySessionNameEntry, isLegacySessionNameLine, stripLegacySessionNameLine, tryRestorePathGluedHeader } from "./sessionNameLine";
+import { cleanSessionTitleCandidate, extractTextFromContent, inferSessionTitleFromLines, isLegacySessionNameEntry, isLegacySessionNameLine, isSessionScanLine, stripLegacySessionNameLine, tryRestorePathGluedHeader, type SessionScanLine, type SessionScanMessage } from "./sessionNameLine";
 import { SessionSummaryCache, type SessionFileVersion } from "./sessionSummaryCache";
 import { rewriteJsonlLines, scanJsonlLines, type JsonlLineContext } from "./jsonlLineStream";
 
@@ -34,110 +34,7 @@ function defaultTranslate(key: SessionScannerCopyKey, params: Record<string, str
 	return defaultSessionScannerCopy[key].replace(/\{([A-Za-z0-9_]+)\}/g, (match, name) => (Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : match));
 }
 
-/** catalog 扫描只取摘要字段；JSONL 行形态不固定，未知字段忽略。 */
-type SessionScanMessage = {
-	role?: string;
-	content?: unknown;
-	provider?: string;
-	model?: string;
-	/** 生图消息标识：PiDeck 本地写入的 api=openai-images 或 imageGen 元数据 */
-	api?: string;
-	imageGen?: unknown;
-};
-
-type SessionScanLine = {
-	type?: string;
-	customType?: string;
-	name?: string;
-	sessionName?: string;
-	cwd?: string;
-	projectPath?: string;
-	parentSession?: string;
-	provider?: string;
-	modelId?: string;
-	thinkingLevel?: string;
-	codexSessionId?: string;
-	sourcePath?: string;
-	threadSource?: string;
-	parentThreadId?: string;
-	agentRole?: string;
-	agentNickname?: string;
-	role?: string;
-	content?: unknown;
-	model?: string;
-	message?: SessionScanMessage;
-	data?: {
-		name?: string;
-		cwd?: string;
-		message?: SessionScanMessage;
-		session?: { cwd?: string };
-	};
-	header?: { name?: string; cwd?: string; parentSession?: string };
-	session?: { name?: string; cwd?: string };
-};
-
-function isSessionScanLine(value: unknown): value is SessionScanLine {
-	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-/** 清洗会话标题候选：时间戳文件名 / 纯 untitled 不算标题；标题本身不做存储截断。 */
-function cleanScanTitle(value?: string): string | undefined {
-	const text = value?.replace(/\s+/g, " ").trim();
-	// 时间戳文件名不是会话名：跳过才能回退到首条 user/assistant 文本。
-	if (!text || /^untitled$/i.test(text) || looksLikePiSessionFileStem(text)) return undefined;
-	// 侧栏负责视觉窗口与 hover 滚动；这里必须保留 session_info 的完整名称，尤其是末尾的 (fork)。
-	return text;
-}
-
-/**
- * 从已解析的 JSONL 行序列推断会话标题（与 readSummary 的 inferredName 同一优先级：
- * session_info 名 > 旧版私有 sessionName > 首条 user 文本 > 首条 assistant 文本）。
- * 推断不出返回 undefined（空文件/只有 tool 消息），由调用方兜底 Untitled。
- *
- * @returns { name, fromSessionInfo, fallbackName }：fromSessionInfo 仅保留来源信息，供诊断与
- * 首次发现标题推断使用。PiDeck catalog 已有记录后不再接受任何 JSONL 名称反向写入。
- * fallbackName 是本文件的弱兜底候选（首条 user 文本，其次首条 assistant 文本），
- * 与最终 name 取谁无关：#266 存量自愈要用它判断 catalog 里存的这一行是不是当年被误锁的首句。
- */
-function inferScanNameFromLines(lines: string[], extractText: (content: unknown) => string): { name?: string; fromSessionInfo: boolean; fallbackName?: string } {
-	let latestSessionInfoName: string | undefined;
-	let name: string | undefined;
-	let firstUserText = "";
-	let firstAssistantText = "";
-	for (const line of lines) {
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(line);
-		} catch {
-			// 头部截断的半行/损坏行：跳过，不影响标题推断。
-			continue;
-		}
-		if (!isSessionScanLine(parsed)) continue;
-		const entry = parsed;
-		if (entry.type === "session_info") {
-			// Forked sessions may contain an older copied name; only the latest marker is authoritative.
-			latestSessionInfoName = typeof entry.name === "string" ? entry.name : entry.data?.name;
-		}
-		name ||= entry.sessionName || entry.name || entry.data?.name || entry.header?.name || entry.session?.name;
-		const nested = entry.message ?? entry.data?.message;
-		const message: SessionScanMessage = nested ?? { role: entry.role, content: entry.content };
-		if (message.role) {
-			const text = extractText(message.content).trim();
-			if (text && message.role === "user" && !firstUserText) firstUserText = text;
-			if (text && message.role === "assistant" && !firstAssistantText) firstAssistantText = text;
-		}
-	}
-	// 取出 clean 前先保留来源标记：清洗后也可能是 timestamp/stem，
-	// 此时它不再能作为 session_info 标题使用。
-	const infoName = cleanScanTitle(latestSessionInfoName) || cleanScanTitle(name);
-	// 首条 user 可能是展开后的 `/模板名` / `&会话引用` 块：先剥块正文，只拿用户自己写的字当回退标题，
-	// 否则重开/扫描会把 `<prompt_template …>` 原文写回 catalog（与 inferTitleFromMessages 同一套清洗）。
-	// 弱兜底候选先算出来，权威名赢的时候也要带出去（#266 指纹修复的比对基准）。
-	const fallback = cleanScanTitle(textForSessionTitle(firstUserText)) || cleanScanTitle(firstAssistantText);
-	if (infoName) return { name: infoName, fromSessionInfo: true, fallbackName: fallback };
-	if (fallback) return { name: fallback, fromSessionInfo: false, fallbackName: fallback };
-	return { name: undefined, fromSessionInfo: false };
-}
+// 会话标题推断已抽到 ./sessionNameLine.ts（纯函数，远端按需标题 H1 与本地扫描共用同一份实现）。
 
 /**
  * 在文本片段（通常是文件头 4KB）中探测旧版私有 sessionName 行。
@@ -1914,8 +1811,8 @@ export class SessionScanner {
 		// 会话名优先级与 pi getSessionName 一致：最后一条 session_info 为准；
 		// 旧版 PiDeck 的 sessionName 私有行及其他字段仅作降级回退。
 		// pi 默认 sessionName / 未改名的 session_info 是 JSONL 文件名时间戳，不能当标题。
-		// 与轻量补名共用 inferScanNameFromLines，保证两处推断结果一致。
-		const inferred = inferScanNameFromLines(lines, (content) => this.extractText(content));
+		// 与轻量补名共用 inferSessionTitleFromLines，保证两处推断结果一致。
+		const inferred = inferSessionTitleFromLines(lines, (content) => this.extractText(content));
 		const inferredName = inferred.name || this.translate("session.untitled");
 
 		const summary: SessionSummary = {
@@ -1973,18 +1870,8 @@ export class SessionScanner {
 	}
 
 	private extractText(content: unknown): string {
-		if (typeof content === "string") return content;
-		if (Array.isArray(content)) {
-			return content
-				.map((item) => {
-					if (typeof item === "string") return item;
-					if (item && typeof item === "object") return String((item as any).text ?? (item as any).thinking ?? "");
-					return "";
-				})
-				.filter(Boolean)
-				.join(" ");
-		}
-		return "";
+		// 实现搬到 sessionNameLine.extractTextFromContent：与远端按需标题共用同一份提取口径。
+		return extractTextFromContent(content);
 	}
 
 	/**
@@ -2004,7 +1891,7 @@ export class SessionScanner {
 				}
 				if (!isSessionScanLine(parsed) || parsed.type !== "session_info") return;
 				const candidate = typeof parsed.name === "string" ? parsed.name : parsed.data?.name;
-				const title = cleanScanTitle(candidate);
+				const title = cleanSessionTitleCandidate(candidate);
 				if (title) latestName = title;
 			},
 			// Read only through the size snapshot: a concurrently growing session must not
@@ -2032,8 +1919,8 @@ export class SessionScanner {
 				const tail = isWsl ? await this.readWslFileTail(filePath, windowBytes) : await this.readLocalFileSuffix(filePath, windowBytes, version.size);
 				titleText = `${head}\n${tail}`;
 			}
-			// 头/尾窗口边界可能截断半行；inferScanNameFromLines 会跳过不可解析行。
-			const inferred = inferScanNameFromLines(titleText.split(/\r?\n/).filter(Boolean), (content) => this.extractText(content));
+			// 头/尾窗口边界可能截断半行；inferSessionTitleFromLines 会跳过不可解析行。
+			const inferred = inferSessionTitleFromLines(titleText.split(/\r?\n/).filter(Boolean), (content) => this.extractText(content));
 			if (version.size <= SessionScanner.SUMMARY_NAME_FULL_SCAN_MAX_BYTES && version.size > windowBytes) {
 				const latestSessionInfoName = await this.inferLatestSessionInfoFromSmallFile(filePath, version.size);
 				if (latestSessionInfoName) {
@@ -2120,8 +2007,8 @@ export class SessionScanner {
 	async inferFirstMessageTitle(filePath: string, maxBytes = SessionScanner.FIRST_MESSAGE_TITLE_MAX_BYTES): Promise<string | undefined> {
 		try {
 			const prefix = this.isWslPath(filePath) ? await this.readWslFileHead(filePath, maxBytes) : await this.readLocalFilePrefix(filePath, maxBytes);
-			// 末尾可能截断半行：inferScanNameFromLines 会跳过不可解析行。
-			return inferScanNameFromLines(prefix.split(/\r?\n/).filter(Boolean), (content) => this.extractText(content)).fallbackName;
+			// 末尾可能截断半行：inferSessionTitleFromLines 会跳过不可解析行。
+			return inferSessionTitleFromLines(prefix.split(/\r?\n/).filter(Boolean), (content) => this.extractText(content)).fallbackName;
 		} catch {
 			return undefined;
 		}

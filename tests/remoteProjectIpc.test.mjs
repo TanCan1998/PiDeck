@@ -13,7 +13,7 @@ import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 const HOSTS_FILE = "src/main/ipc/remoteHostIpc.ts";
 const PROJECT_FILE = "src/main/ipc/remoteProjectIpc.ts";
 const HOST_CHANNELS = ["remote:hosts-list", "remote:connect", "remote:disconnect", "remote:diagnostics", "remote:scan-config", "remote:add", "remote:answer-pin", "remote:repair-diagnose", "remote:repair-run", "remote:repair-answer"];
-const PROJECT_CHANNELS = ["remote:project-enroll", "remote:project-answer", "remote:project-list", "remote:project-read", "remote:project-search"];
+const PROJECT_CHANNELS = ["remote:project-enroll", "remote:project-answer", "remote:project-list", "remote:project-read", "remote:project-search", "remote:project-root-status"];
 
 function registeredChannels(file, registerName, input) {
 	const handlers = new Map();

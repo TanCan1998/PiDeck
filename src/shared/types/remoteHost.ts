@@ -212,6 +212,22 @@ export type RemoteSessionEntry = {
 	mtimeMs: number;
 };
 
+/**
+ * 一个远端项目**已确认 root** 的最近一次复核结果（Phase 3 第四批，设计 (i) 项目级）。
+ *
+ * 刻意是项目级而不是主机级：漂移属于某一个项目的持久路径，若把它升级成主机级 needs-attention，
+ * 一个目录被挪动就会阻断同主机上所有其他项目的读取。`needs-attention` 时 `code` 是稳定的失败码。
+ */
+export type RemoteProjectRootStatusResult = { ok: true; status: "ok" | "needs-attention"; code?: string } | { ok: false; code: string };
+
 export type RemoteSessionScanResult = { ok: true; entries: RemoteSessionEntry[] } | { ok: false; code: string };
+
+/**
+ * 一条远端会话的**按需**标题（Phase 3 第四批）。
+ *
+ * `titleOrigin` 必须如实区分：`"parsed"` 是从有界头部解析出来的真实名字，`"fallback"` 是
+ * 文件名 stem 兜底（解析不出时**绝不编造**）。界面据此决定是否标注「暂定」。
+ */
+export type RemoteSessionTitleResult = { ok: true; title: string; titleOrigin: "parsed" | "fallback" } | { ok: false; code: string };
 
 export type RemoteSessionRegisterResult = { ok: true; sessionId: string; created: boolean; remoteSessionId: string; remotePath: string } | { ok: false; code: string };

@@ -99,7 +99,9 @@ test("session title surfaces strip reference block bodies", () => {
 	// 扩展是 pi 用 -e 加载的独立文件，不能 import shared，因此断言各自的入口函数名。
 	const surfaces = {
 		"占位标题（主进程）": ["src/main/pi/agentUtils.ts", /textForSessionTitle/],
-		"历史扫描回退（主进程）": ["src/main/sessions/SessionScanner.ts", /textForSessionTitle/],
+		// H1 把「从行文本推断标题」的纯函数抽到 sessionNameLine.ts（本地扫描与远端按需标题共用一份），
+		// 这个标题出口随之搬家；断言的是同一条规则仍然经过共享剥块函数，不是文件位置本身。
+		"历史扫描回退（主进程）": ["src/main/sessions/sessionNameLine.ts", /textForSessionTitle/],
 		"catalog 脏标题识别": ["src/main/sessions/SessionCatalog.ts", /looksLikeExpandedRefBlockTitle/],
 		"异步总结标题（内置扩展）": ["resources/extensions/pi-deck-session-title.ts", /titleTextFromUserInput/],
 	};

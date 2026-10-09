@@ -1,17 +1,19 @@
 /**
- * 远端 Session 发现/登记的 IPC 域（G3 冻结设计的两个通道）。
+ * 远端 Session 的 IPC 域：发现（scan）、登记（register）、按需标题（title）。
  *
- * 只做两件事：校验渲染层来的 hostId，解析出 scanner，把结果按稳定码回传。校验在边界、结果只含元数据：
- * - 远端路径、正文、凭据都不过这个边界；返回的字段就是 RemoteSessionEntry / sessionId / created。
+ * 只做三件事：校验渲染层来的 hostId，解析出 scanner，把结果按稳定码回传。校验在边界：
+ * - 远端路径、正文、凭据都不过这个边界；scan 只回 RemoteSessionEntry，title 只回 title/titleOrigin。
  * - 每个 handler 第一行是开关与入参校验；任何异常都折叠成稳定码，绝不把裸异常跨 IPC 抛出去。
+ * - title 是**只读**通道：不写 catalog（写盘仍只属于 register）。
  *
- * 通道名由装配注入（channels），本文件不 import shared/ipc.ts：G5 负责把 remoteSessionScan /
- * remoteSessionRegister 加进 ipcChannels 再到装配处接线（仓库既有先例：contentStoreIpc 的 ChannelGroup）。
- * 这样 main 侧实现不必等 shared 契约落地就能独立通过 typecheck。
+ * 通道名由装配注入（channels），本文件不 import shared/ipc.ts（仓库既有先例：contentStoreIpc 的
+ * ChannelGroup）。scan/register 缺失是接线错误，构造期抛出；**title 允许暂缺**：装配尚未注入时
+ * 不注册该 handler（fail closed），等 H5 注入 ipcChannels.remoteSessionTitle 后自动生效——
+ * 这样在装配落地前 main 侧仍能独立通过 typecheck，而不会出现「注册到 undefined 通道」。
  */
 
 import { ipcMain } from "electron";
-import { createRemoteSessionScanner, REMOTE_SESSION_CODES, type RemoteSessionCatalogPort, type RemoteSessionProjectResolver, type RemoteSessionRegisterResult, type RemoteSessionScannerPort, type RemoteSessionScanResult } from "../sessions/RemoteSessionScanner";
+import { createRemoteSessionScanner, REMOTE_SESSION_CODES, type RemoteSessionCatalogPort, type RemoteSessionProjectResolver, type RemoteSessionRegisterResult, type RemoteSessionScannerPort, type RemoteSessionScanResult, type RemoteSessionTitleResult } from "../sessions/RemoteSessionScanner";
 
 /** 与 remoteHostIpc 同域：hostId 是 UUID 形态的稳定端点身份。 */
 const HOST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -20,7 +22,8 @@ const STABLE_CODE = /^[A-Z][A-Z0-9_]{2,63}$/;
 /** 装配没给通道名（或给了空串）：这是接线错误，构造期就要炸。 */
 const CHANNELS_INVALID = "REMOTE_SESSION_CHANNELS_INVALID";
 
-export type RemoteSessionIpcChannels = { scan: string; register: string };
+/** 通道组：scan/register 是 H1 之前的既有通道，title 是 H1 的按需标题通道（装配未注入时不注册）。 */
+export type RemoteSessionIpcChannels = { scan: string; register: string; title?: string };
 
 export type RemoteSessionIpcInput = {
 	/** 实验开关：关掉时渲染层连「有这台主机」都学不到，通道本身也不做任何事。 */
@@ -54,7 +57,7 @@ function readHostId(value: unknown): string | undefined {
 }
 
 /**
- * 注册远端 Session 的两个通道。
+ * 注册远端 Session 的通道。
  *
  * 与 remoteHostIpc 的 resolveService 同构：把「服务构建失败」也变成一个稳定码，而不是让 rejection
  * 逃到渲染层变成 "Error invoking remote method"。
@@ -62,6 +65,7 @@ function readHostId(value: unknown): string | undefined {
 export function registerRemoteSessionIpc(input: RemoteSessionIpcInput): void {
 	const scanChannel = input?.channels?.scan;
 	const registerChannel = input?.channels?.register;
+	const titleChannel = input?.channels?.title;
 	if (typeof scanChannel !== "string" || scanChannel.length === 0 || typeof registerChannel !== "string" || registerChannel.length === 0) throw new Error(CHANNELS_INVALID);
 
 	const resolveScanner = async (): Promise<{ scanner: ReturnType<typeof createRemoteSessionScanner> } | { code: string }> => {
@@ -102,4 +106,22 @@ export function registerRemoteSessionIpc(input: RemoteSessionIpcInput): void {
 			return { ok: false, code: codeOf(error, REMOTE_SESSION_CODES.registerFailed) };
 		}
 	});
+
+	// title 是按需标题（H1）：只读、不写 catalog；装配没注入通道名时**不注册**（fail closed，
+	// 不能拿 scan/register 顶上，也不能注册到 undefined）。
+	if (typeof titleChannel === "string" && titleChannel.length > 0) {
+		ipcMain.handle(titleChannel, async (_event, hostIdValue: unknown, remoteSessionIdValue: unknown): Promise<RemoteSessionTitleResult> => {
+			if (!input.enabled) return { ok: false, code: "REMOTE_FEATURE_DISABLED" };
+			const hostId = readHostId(hostIdValue);
+			if (hostId === undefined) return { ok: false, code: REMOTE_SESSION_CODES.hostIdInvalid };
+			if (typeof remoteSessionIdValue !== "string") return { ok: false, code: REMOTE_SESSION_CODES.idInvalid };
+			const resolved = await resolveScanner();
+			if ("code" in resolved) return { ok: false, code: resolved.code };
+			try {
+				return await resolved.scanner.title({ hostId, remoteSessionId: remoteSessionIdValue });
+			} catch (error) {
+				return { ok: false, code: codeOf(error, REMOTE_SESSION_CODES.titleFailed) };
+			}
+		});
+	}
 }

@@ -178,7 +178,36 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 	 * (the root string matching proves nothing about whether a live session exists).
 	 */
 	const explicitlyDisconnected = new Set<string>();
+	/**
+	 * The most recent **failed** re-check of one confirmed root, keyed by host and then by root.
+	 *
+	 * This is the whole storage of design (i) and it is deliberately project-scoped: a moved directory is a
+	 * property of *this project's persisted path*, not of the host's health, so nothing here may drive the
+	 * host connection state. Moving project A's root must not block reads of project B on the same host -
+	 * that is exactly why the drift is not routed into the host's needs-attention state.
+	 *
+	 * Only stable codes are stored (both producers below are stable), a later failure overwrites the earlier
+	 * one for the same key, and a successful re-check of that key removes it. Nothing else clears a key: a
+	 * query must never be able to make an unresolved boundary look healthy.
+	 */
+	const rootFailures = new Map<string, Map<string, string>>();
 	let disposed = false;
+
+	/** Remember (or overwrite) the failure of one confirmed root, and answer the caller's failure shape. */
+	function rememberRootFailure(hostId: string, root: string, code: string): { ok: false; code: string } {
+		const byRoot = rootFailures.get(hostId) ?? new Map<string, string>();
+		byRoot.set(root, code);
+		rootFailures.set(hostId, byRoot);
+		return { ok: false, code };
+	}
+
+	/** A re-check proved this boundary again: the key - and only this key - is cleared. */
+	function forgetRootFailure(hostId: string, root: string): void {
+		const byRoot = rootFailures.get(hostId);
+		if (byRoot === undefined) return;
+		byRoot.delete(root);
+		if (byRoot.size === 0) rootFailures.delete(hostId);
+	}
 	let disposing: Promise<void> | undefined;
 
 	/** Read the current store revision, so a held bootstrap can be tied to the profile it came from. */
@@ -292,6 +321,9 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 	 * still the one the user confirmed. A path that was deleted, replaced, or whose symlink now points
 	 * elsewhere would otherwise be read as if it were that boundary. Worth one pinned `readlink -f` per
 	 * session establishment (drift is a low-frequency event); far too expensive on every read.
+	 *
+	 * This is also the only place a project's root status changes: a failure is recorded under (hostId, root)
+	 * and a success clears that same key, so `projectRootStatus` answers from evidence instead of guessing.
 	 */
 	async function verifyProjectRoot(hostId: string, root: string): Promise<{ ok: true } | { ok: false; code: string }> {
 		let canonicalPath: string;
@@ -299,9 +331,12 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 			canonicalPath = (await ports.verifyRoot({ userDataDir: options.userDataDir, hostId, client: options.client, userPath: root })).canonicalPath;
 		} catch {
 			// The probe's own code describes the probe, not the project boundary; callers act on the latter.
-			return { ok: false, code: "SSH_PROJECT_ROOT_UNRESOLVED" };
+			return rememberRootFailure(hostId, root, "SSH_PROJECT_ROOT_UNRESOLVED");
 		}
-		if (canonicalPath !== root) return { ok: false, code: "SSH_PROJECT_ROOT_CHANGED" };
+		if (canonicalPath !== root) return rememberRootFailure(hostId, root, "SSH_PROJECT_ROOT_CHANGED");
+		// Only a proven boundary clears the record - and only its own key, so another project's unresolved
+		// root on the same host stays visible.
+		forgetRootFailure(hostId, root);
 		return { ok: true };
 	}
 
@@ -327,7 +362,12 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 				// it, so report the state's own code and let its owner finish.
 				return { ok: false, code: current.lastCode ?? "SSH_HOST_NOT_READY" };
 			} else if (current.state === "ready") {
-				reestablish = false;
+				// A ready session normally skips the re-check: that is the hot-path promise, and a reuse must not pay
+				// for a probe. The one exception is a key this service already marked failed - the record is then the
+				// only thing making the project look broken, so re-verify before serving. It is also the only way such
+				// a record can clear on a host whose session was re-established without a probe (an explicit connect
+				// is not a boundary check), which would otherwise leave a permanent false warning while reads work.
+				reestablish = rootFailures.get(hostId)?.has(root) === true;
 			}
 		}
 		if (reestablish) {
@@ -336,35 +376,18 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 			// verified path is not the path the session is actually confined to.
 			const verified = await verifyProjectRoot(hostId, root);
 			if (!verified.ok) {
-				// The read is already refused fail-closed; the host itself has to become visibly actionable too,
-				// otherwise the drift stays a code on one call while the host keeps looking ordinary and the only
-				// user-visible reason to act is a diagnostic nobody watched. Reported through the live manager when
-				// there is one - needs-attention is a connection state, so a host that never established a session
-				// has no machine to move, and building one only to fail would bootstrap a helper for a boundary
-				// that was just refused. A latched manager is skipped on purpose: its latch is terminal.
+				// Fail-closed read plus a per-project record (design (i), phase 4). The record is deliberately
+				// project-scoped: a moved directory is a property of this confirmed path, not of the host's health,
+				// so nothing here may drive the host connection state. Routing it into the host's needs-attention
+				// would let one moved directory block every other project on that host - the exact outcome (i)
+				// exists to avoid. Surfacing happens through `projectRootStatus`, which answers from this record
+				// without touching the host: no connect, no probe, no session.
 				//
-				// Reachability, stated honestly rather than assumed: with today's wiring an existing manager is
-				// either live (connecting/probing/bootstrapping/ready/degraded/reconnecting -> early return above),
-				// terminal (needs-attention -> early return above, latched -> discarded above) or released by an
-				// explicit abort, whose reads never get here because `explicitlyDisconnected` refuses first. So the
-				// drift a *live* session hides is caught by the helper handshake instead
-				// (SSH_HELPER_ROOT_MISMATCH is fatal -> needs-attention), which is the reachable half of this
-				// condition and is covered end to end in tests/sshConnectionManager.test.mjs. This report stays
-				// because it is the correct wiring for the sources the reducer now accepts and for an injected
-				// manager, and because a future release path that does not mark the host user-disconnected must not
-				// silently lose a verified drift.
-				//
-				// KNOWN LIMITATION, stated precisely instead of left as a vague TODO: root drift is enforced per
-				// project only - the read is refused fail-closed with a stable code - and it does **not** drive
-				// needs-attention in the current wiring, for the reason above. The reachable needs-attention trigger
-				// for this condition today is the helper handshake (SSH_HELPER_ROOT_MISMATCH, FATAL).
-				//
-				// Two designs a later batch may choose instead (deliberately NOT implemented here):
-				// (i) a project-level "root needs attention" flag surfaced through hosts-list/diagnostics, leaving
-				//     the connection state machine untouched;
-				// (ii) reorder the re-check to "verify the new root first, then drop the old session", and narrow
-				//     needs-attention to the host level.
-				manager?.reportNeedsAttention(hostId, verified.code);
+				// Consequence, stated so it is not re-wired by accident: drift no longer calls
+				// `manager.reportNeedsAttention` at all. That manager entry point and the reducer's newly opened
+				// disconnected/offline sources stay as a general capability (the reachable needs-attention trigger
+				// for root drift remains the helper handshake, SSH_HELPER_ROOT_MISMATCH, FATAL - covered end to end
+				// in tests/sshConnectionManager.test.mjs), but they have no production caller for this condition.
 				return verified;
 			}
 		}
@@ -444,6 +467,22 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 				// metadata read and must never fail a caller's read path with a raw exception.
 				return undefined;
 			}
+		},
+		/**
+		 * The last re-check outcome of one project's confirmed boundary, by (hostId, root).
+		 *
+		 * Read-only and side-effect free by construction: the answer comes from what previous re-checks
+		 * recorded, so asking never connects, never probes and never opens a session - that is what lets the UI
+		 * ask on every render without waking a host. A key this service never saw, or one whose re-check later
+		 * succeeded, is "ok": the status says nothing is *known* to be wrong with this path, and knowing more
+		 * requires a real re-check at session establishment, not a query.
+		 *
+		 * Project-scoped on purpose (design (i)): the same host can hold a drifted project and healthy ones,
+		 * and each answers for its own root.
+		 */
+		projectRootStatus(hostId: string, root: string): { status: "ok" } | { status: "needs-attention"; code: string } {
+			const code = rootFailures.get(hostId)?.get(root);
+			return code === undefined ? { status: "ok" } : { status: "needs-attention", code };
 		},
 		/**
 		 * Point this host's next session at a confirmed workspace root.

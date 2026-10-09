@@ -1,13 +1,20 @@
 /**
- * 旧版 PiDeck 私有 sessionName 行识别与剔除（纯函数，零运行时依赖，便于单测）。
+ * pi 会话 JSONL 文本里的「命名规则」：旧版私有 sessionName 行 + 会话标题推断（纯函数）。
  *
- * 历史背景：旧版 PiDeck 重命名会话时会在 JSONL 文件头前置
+ * 为什么这两件事在同一个文件：它们都是「文本里的会话名从哪来」。本地扫描/补名（SessionScanner）
+ * 与远端按需标题（RemoteSessionScanner，H1）必须共用同一套规则，否则同一个文件在侧栏与远端会得到
+ * 两个标题。这里只依赖 shared 的纯文本工具，不碰 electron / fs / 网络，便于直接单测。
+ *
+ * 历史背景（私有行）：旧版 PiDeck 重命名会话时会在 JSONL 文件头前置
  * {"sessionName":<名称>,"ts":<时间戳>}（无 type 字段）。pi 要求会话文件
  * 首条可解析记录必须是 type:"session" 头（loadEntriesFromFile 校验 entries[0]），
  * 私有行位于头部时 pi 会拒绝加载（"Session file is not a valid pi session"，exit 1），
  * 表现为桌面端「Failed to start session runtime」。新版已改为追加 pi 原生
- * session_info 记录；本模块负责识别并剔除存量私有行（#114）。
+ * session_info 记录；本模块负责识别并剔除存量私有行（#114），同时在推断标题时把它当作名字候选。
  */
+
+import { looksLikePiSessionFileStem } from "../../shared/sessionIdentity";
+import { textForSessionTitle } from "../../shared/expandedRefBlocks";
 
 /** 判定解析后的记录是否为旧版私有 sessionName 行：有 sessionName 字符串且无 type（pi 原生记录一律有 type）。 */
 export function isLegacySessionNameEntry(parsed: unknown): boolean {
@@ -65,4 +72,148 @@ export function stripLegacySessionNameLine(raw: string): string {
 		kept.push(trimmed);
 	}
 	return kept.length > 0 ? `${kept.join("\n")}\n` : "";
+}
+
+// ── 会话标题推断：从 JSONL 文本到标题（纯函数） ───────────────────────
+// SessionScanner（本地扫描/补名）与 RemoteSessionScanner（远端按需标题，H1）共用这一套：
+// 「pi 会话的标题从哪来」只允许有一份实现。这些函数原本是 SessionScanner 的模块私有级
+// 实现（inferScanNameFromLines / cleanScanTitle / extractText），远端要复用就只能复制一份，
+// 所以这里把「接受文本的纯函数」抽出来共用，行为逐字不变。
+
+/** catalog 扫描只取摘要字段；JSONL 行形态不固定，未知字段忽略。 */
+export type SessionScanMessage = {
+	role?: string;
+	content?: unknown;
+	provider?: string;
+	model?: string;
+	/** 生图消息标识：PiDeck 本地写入的 api=openai-images 或 imageGen 元数据 */
+	api?: string;
+	imageGen?: unknown;
+};
+
+export type SessionScanLine = {
+	type?: string;
+	customType?: string;
+	name?: string;
+	sessionName?: string;
+	cwd?: string;
+	projectPath?: string;
+	parentSession?: string;
+	provider?: string;
+	modelId?: string;
+	thinkingLevel?: string;
+	codexSessionId?: string;
+	sourcePath?: string;
+	threadSource?: string;
+	parentThreadId?: string;
+	agentRole?: string;
+	agentNickname?: string;
+	role?: string;
+	content?: unknown;
+	model?: string;
+	message?: SessionScanMessage;
+	data?: {
+		name?: string;
+		cwd?: string;
+		message?: SessionScanMessage;
+		session?: { cwd?: string };
+	};
+	header?: { name?: string; cwd?: string; parentSession?: string };
+	session?: { name?: string; cwd?: string };
+};
+
+export function isSessionScanLine(value: unknown): value is SessionScanLine {
+	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+/** 清洗会话标题候选：时间戳文件名 / 纯 untitled 不算标题；标题本身不做存储截断。 */
+export function cleanSessionTitleCandidate(value?: string): string | undefined {
+	const text = value?.replace(/\s+/g, " ").trim();
+	// 时间戳文件名不是会话名：跳过才能回退到首条 user/assistant 文本。
+	if (!text || /^untitled$/i.test(text) || looksLikePiSessionFileStem(text)) return undefined;
+	// 侧栏负责视觉窗口与 hover 滚动；这里必须保留 session_info 的完整名称，尤其是末尾的 (fork)。
+	return text;
+}
+
+/**
+ * 消息 content → 纯文本。搬自 SessionScanner 的私有 extractText，行为逐字不变：
+ * 字符串原样；数组里取字符串项与对象的 text/thinking；其余忽略。
+ */
+export function extractTextFromContent(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (Array.isArray(content)) {
+		return content
+			.map((item) => {
+				if (typeof item === "string") return item;
+				if (item !== null && typeof item === "object") {
+					const record = item as Record<string, unknown>;
+					return String(record.text ?? record.thinking ?? "");
+				}
+				return "";
+			})
+			.filter(Boolean)
+			.join(" ");
+	}
+	return "";
+}
+
+/** 标题推断结果；fromSessionInfo 只保留来源信息（与本地 readSummary 的 inferredName 同一契约）。 */
+export type SessionTitleInference = { name?: string; fromSessionInfo: boolean; fallbackName?: string };
+
+/**
+ * 从已解析的 JSONL 行序列推断会话标题（与 readSummary 的 inferredName 同一优先级：
+ * session_info 名 > 旧版私有 sessionName > 首条 user 文本 > 首条 assistant 文本）。
+ * 推断不出返回 name=undefined（空文件/只有 tool 消息/全是畸形行），由调用方兜底。
+ *
+ * @returns { name, fromSessionInfo, fallbackName }：fromSessionInfo 仅保留来源信息，供诊断与
+ * 首次发现标题推断使用。PiDeck catalog 已有记录后不再接受任何 JSONL 名称反向写入。
+ * fallbackName 是本文件的弱兜底候选（首条 user 文本，其次首条 assistant 文本），
+ * 与最终 name 取谁无关：#266 存量自愈要用它判断 catalog 里存的这一行是不是当年被误锁的首句。
+ */
+export function inferSessionTitleFromLines(lines: readonly string[], extractText: (content: unknown) => string = extractTextFromContent): SessionTitleInference {
+	let latestSessionInfoName: string | undefined;
+	let name: string | undefined;
+	let firstUserText = "";
+	let firstAssistantText = "";
+	for (const line of lines) {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(line);
+		} catch {
+			// 头部截断的半行/损坏行：跳过，不影响标题推断。
+			continue;
+		}
+		if (!isSessionScanLine(parsed)) continue;
+		const entry = parsed;
+		if (entry.type === "session_info") {
+			// Forked sessions may contain an older copied name; only the latest marker is authoritative.
+			latestSessionInfoName = typeof entry.name === "string" ? entry.name : entry.data?.name;
+		}
+		name ||= entry.sessionName || entry.name || entry.data?.name || entry.header?.name || entry.session?.name;
+		const nested = entry.message ?? entry.data?.message;
+		const message: SessionScanMessage = nested ?? { role: entry.role, content: entry.content };
+		if (message.role) {
+			const text = extractText(message.content).trim();
+			if (text && message.role === "user" && !firstUserText) firstUserText = text;
+			if (text && message.role === "assistant" && !firstAssistantText) firstAssistantText = text;
+		}
+	}
+	// 取出 clean 前先保留来源标记：清洗后也可能是 timestamp/stem，
+	// 此时它不再能作为 session_info 标题使用。
+	const infoName = cleanSessionTitleCandidate(latestSessionInfoName) || cleanSessionTitleCandidate(name);
+	// 首条 user 可能是展开后的 `/模板名` / `&会话引用` 块：先剥块正文，只拿用户自己写的字当回退标题，
+	// 否则重开/扫描会把 `<prompt_template …>` 原文写回 catalog（与 inferTitleFromMessages 同一套清洗）。
+	// 弱兜底候选先算出来，权威名赢的时候也要带出去（#266 指纹修复的比对基准）。
+	const fallback = cleanSessionTitleCandidate(textForSessionTitle(firstUserText)) || cleanSessionTitleCandidate(firstAssistantText);
+	if (infoName) return { name: infoName, fromSessionInfo: true, fallbackName: fallback };
+	if (fallback) return { name: fallback, fromSessionInfo: false, fallbackName: fallback };
+	return { name: undefined, fromSessionInfo: false };
+}
+
+/**
+ * 有界头文本 → 标题推断（远端按需标题通道 H1 的入口；本地头窗口推断同样走它）。
+ * 行边界可能被截断（半行 JSON 解析失败即跳过），所以调用方不需要先对齐行。
+ */
+export function inferSessionTitleFromHeadText(text: string, extractText: (content: unknown) => string = extractTextFromContent): SessionTitleInference {
+	return inferSessionTitleFromLines(text.split(/\r?\n/).filter(Boolean), extractText);
 }

@@ -87,7 +87,9 @@ test("扫描上限与稳定码是冻结值，且模块不把远端路径交给�
 	assert.deepEqual(plain(REMOTE_SESSION_LIMITS), { maxWorkspaceDirs: 512, maxFiles: 2000, maxTotalBytes: 1024 * 1024, concurrency: 4 });
 	assert.equal(REMOTE_SESSION_ENTRY_OVERHEAD_BYTES, 32);
 	assert.equal(REMOTE_SESSION_ROOT_SUFFIX, ".pi/agent/sessions");
-	assert.deepEqual(plain(REMOTE_SESSION_CODES), {
+	// 逐键断言而不是整对象 deepEqual：新增一个稳定码（例如 H1 的 titleFailed）不该让整组转红，
+	// 但已冻结的值改了必须红——这才是「冻结值」要锁的东西。
+	const frozenCodes = {
 		hostIdInvalid: "REMOTE_SESSION_HOST_ID_INVALID",
 		homeUnavailable: "REMOTE_SESSION_HOME_UNAVAILABLE",
 		idInvalid: "REMOTE_SESSION_ID_INVALID",
@@ -98,7 +100,9 @@ test("扫描上限与稳定码是冻结值，且模块不把远端路径交给�
 		catalogUnavailable: "REMOTE_SESSION_CATALOG_UNAVAILABLE",
 		registerFailed: "REMOTE_SESSION_REGISTER_FAILED",
 		scanFailed: "REMOTE_SESSION_SCAN_FAILED",
-	});
+		titleFailed: "REMOTE_SESSION_TITLE_FAILED",
+	};
+	for (const [key, value] of Object.entries(frozenCodes)) assert.equal(plain(REMOTE_SESSION_CODES)[key], value, key);
 	// 边界（冻结设计第 8 条）：远端路径绝不进本地 fs，这一层不许出现 node:fs / node:path / electron。
 	assert.doesNotMatch(SCANNER_SOURCE, /from "node:fs/);
 	assert.doesNotMatch(SCANNER_SOURCE, /from "node:path/);

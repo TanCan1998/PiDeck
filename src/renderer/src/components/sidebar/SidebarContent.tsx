@@ -67,6 +67,12 @@ export type SidebarActions = {
 		endDrag?: () => void;
 		createDraft: (projectId: string) => Promise<void>;
 		createAnonymous: (projectId: string) => Promise<void>;
+		/**
+		 * 远端会话登记成功后：显式重拉该项目的本地会话清单并选中新会话。
+		 * 远端发现/登记本身在侧栏「远端会话」区块里发起（register 已写进 catalog），这里只做「刷新 + 选中」，
+		 * 不创建任何会话、也不打开 Tab（选中 ≠ 呈现）。
+		 */
+		importRemoteSession: (projectId: string, sessionId: string) => Promise<void>;
 		deleteDraft: (session: SessionRecord) => Promise<void>;
 		rename: (projectId: string, session: SessionSummary) => void;
 		export: (projectId: string, session: SessionSummary) => Promise<void>;

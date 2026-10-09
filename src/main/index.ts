@@ -2440,7 +2440,7 @@ function registerIpc() {
 		// 本批不解析会话正文，无法从远端会话内容推断归属：按「同主机上的远端项目」解析；
 		// 解析不出（该主机没有远端项目）就不登记，fail closed，不写半条记录。
 		projectIdForHost: (hostId) => projectStore.list().find((project) => isRemoteProject(project) && project.locator.hostId === hostId)?.id,
-		channels: { scan: ipcChannels.remoteSessionScan, register: ipcChannels.remoteSessionRegister },
+		channels: { scan: ipcChannels.remoteSessionScan, register: ipcChannels.remoteSessionRegister, title: ipcChannels.remoteSessionTitle },
 	});
 	// 用量统计：业务在 UsageStatsService，handler 薄层只校验/适配
 	registerUsageStatsIpc(ipcMain, usageStatsService);

@@ -6,7 +6,13 @@ import type { Project, WorktreeEntry } from "../../../../shared/types";
 import type { SidebarController } from "../../hooks/useSidebarController";
 import { t } from "../../i18n";
 import type { SidebarActions } from "./SidebarContent";
+import { isRemoteProject } from "../../../../shared/projectLocation";
+import { desktopApi } from "../../desktopApi";
+import { collectRegisteredRemoteSessionIds } from "../session/remoteSessionListState";
 import { AddProjectMenu } from "./AddProjectMenu";
+import { RemoteProjectStatusTag } from "./RemoteProjectStatusTag";
+import { RemoteSessionsSection } from "./RemoteSessionsSection";
+import { useRemoteProjectRootStatuses } from "./useRemoteProjectRootStatuses";
 import { ActiveSessionsTree } from "./ActiveSessionsTree";
 import { SessionTree } from "./SessionTree";
 import { WorktreeTree } from "./WorktreeTree";
@@ -73,6 +79,9 @@ export function ProjectTree(props: {
 	removingWorktreeProjectIds?: ReadonlySet<string>;
 }) {
 	const sessionRuntimeUiById = useAtomValue(sessionRuntimeUiByIdAtom);
+	// 远端项目的 root 复核状态：项目级只读查询，随清单刷新的整批结果按代次落地（不在这里渲染）。
+	// 侧栏只读 atom（RemoteProjectStatusTag），所以查询集中一处、不随行重复发。
+	useRemoteProjectRootStatuses(desktopApi, props.controller.catalog.projects);
 	const rootProjects = props.controller.catalog.projects.filter((project) => !project.worktreeParentId && matchesProject(project, props.controller.search.trim(), props.controller));
 	const dragStart = (event: DragEvent<HTMLButtonElement>, projectId: string) => {
 		if (props.controller.search.trim()) return;
@@ -163,6 +172,8 @@ export function ProjectTree(props: {
 										{t("app.projectMissing")}
 									</span>
 								)}
+								{/* 远端项目 root 复核需要用户处理时给「需处理」提示：项目级、不影响同主机其他项目 */}
+								{isRemoteProject(project) ? <RemoteProjectStatusTag projectId={project.id} /> : null}
 							</div>
 							{/* 项目名称只承担导航信息；详细会话状态由下方的 Agent/历史会话行承担。 */}
 						</div>
@@ -224,6 +235,12 @@ export function ProjectTree(props: {
 								branch={props.branchByProject?.[project.id]}
 								removingWorktreeProjectIds={props.removingWorktreeProjectIds}
 							/>
+						) : isRemoteProject(project) ? (
+							<>
+								{/* 已导入本地的远端会话仍在 SessionTree 里；下面这块是远端侧的「发现」列表（只读扫描 + 导入）。 */}
+								<SessionTree project={project} sessions={rootProjectSessions} agents={props.controller.catalog.agents} currentSessionId={props.currentSessionId} controller={props.controller} actions={props.actions} />
+								<RemoteSessionsSection hostId={project.locator.hostId} importedRemoteSessionIds={collectRegisteredRemoteSessionIds(rootProjectSessions, project.locator.hostId)} onImported={(result) => props.actions.sessions.importRemoteSession(project.id, result.sessionId)} />
+							</>
 						) : (
 							<SessionTree project={project} sessions={rootProjectSessions} agents={props.controller.catalog.agents} currentSessionId={props.currentSessionId} controller={props.controller} actions={props.actions} />
 						)}

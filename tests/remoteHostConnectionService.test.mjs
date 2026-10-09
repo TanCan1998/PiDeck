@@ -17,6 +17,12 @@ const CLIENT = { sshPath: "/usr/bin/ssh", scpPath: "/usr/bin/scp", env: { PATH: 
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
 /**
+ * 真实 manager 的 getState 形状。替身以前 connect() 返回裸字符串，于是 establishProjectSession 的
+ * `connected.state !== "ready"` 判定永远失败——那正是「假替身比生产更宽松/更严格」掩盖 bug 的形态。
+ */
+const machine = (hostId, state = "ready") => ({ hostId, generation: 1, state, attempts: 0, lastCode: state === "ready" ? "SSH_CONNECTION_READY" : "SSH_HOST_NOT_READY", latched: false });
+
+/**
  * A structurally valid profile: the store fails closed to revision 0 / needs-repair on a malformed
  * snapshot (`REMOTE_HOST_SNAPSHOT_INVALID`), which would silently make the revision checks vacuous.
  * No `verifiedEndpoint`, so the profile is a never-verified draft and needs no pin on disk.
@@ -107,7 +113,8 @@ function fakePorts(overrides = {}) {
 					// 拒绝，服务层若忘了改走 retry 就会在这里露出马脚。
 					if (manager.state === "needs-attention") return manager.getState(hostId);
 					manager.state = "ready";
-					return manager.state;
+					// 与真实 manager 一致：connect 解析为机器快照，而不是状态字符串。
+					return manager.getState(hostId);
 				},
 				async disconnect(hostId, reason) {
 					manager.disconnects.push({ hostId, reason });
@@ -151,7 +158,7 @@ test("one connect bootstraps once, hands the verified session to the manager and
 		const ports = fakePorts();
 		const service = createRemoteHostConnectionService({ userDataDir, client: CLIENT, nodePath: "/usr/bin/node", ports });
 		const first = plain(await service.connect(HOST_ID));
-		assert.deepEqual(first, { ok: true, hostId: HOST_ID, state: "ready" });
+		assert.deepEqual(first, { ok: true, hostId: HOST_ID, state: machine(HOST_ID) });
 		assert.equal(ports.calls.bootstrap.length, 1);
 		assert.equal(ports.calls.createManager.length, 1);
 		// The manager must receive the verified helper location, never a guess: deployRoot and the bundle
@@ -161,7 +168,7 @@ test("one connect bootstraps once, hands the verified session to the manager and
 
 		// A second connect under the same revision must reuse both the held bootstrap and the manager:
 		// re-uploading the bundle on every connect would re-mint a nonce and invalidate the pin evidence.
-		assert.deepEqual(plain(await service.connect(HOST_ID)), { ok: true, hostId: HOST_ID, state: "ready" });
+		assert.deepEqual(plain(await service.connect(HOST_ID)), { ok: true, hostId: HOST_ID, state: machine(HOST_ID) });
 		assert.equal(ports.calls.bootstrap.length, 1);
 		assert.equal(ports.calls.createManager.length, 1);
 		assert.deepEqual(plain(ports.managers[0].connected), [HOST_ID, HOST_ID]);
@@ -239,7 +246,7 @@ test("the service discovers the remote node itself instead of requiring it up fr
 		const ports = fakePorts();
 		// 关键：不传 nodePath。
 		const service = createRemoteHostConnectionService({ userDataDir, client: CLIENT, ports });
-		assert.deepEqual(plain(await service.connect(HOST_ID)), { ok: true, hostId: HOST_ID, state: "ready" });
+		assert.deepEqual(plain(await service.connect(HOST_ID)), { ok: true, hostId: HOST_ID, state: machine(HOST_ID) });
 
 		// 发现必须真的发生，且结果被送进 bootstrap 与 helper session（两者必须一致，否则
 		// 探测的是一个 node、执行的却是另一个）。
@@ -259,7 +266,7 @@ test("an explicit nodePath overrides discovery entirely", async () => {
 		await writeStore(userDataDir, 3, [{ id: HOST_ID }]);
 		const ports = fakePorts();
 		const service = createRemoteHostConnectionService({ userDataDir, client: CLIENT, nodePath: "/opt/pinned/bin/node", ports });
-		assert.deepEqual(plain(await service.connect(HOST_ID)), { ok: true, hostId: HOST_ID, state: "ready" });
+		assert.deepEqual(plain(await service.connect(HOST_ID)), { ok: true, hostId: HOST_ID, state: machine(HOST_ID) });
 		// 覆盖时不发探测请求：调用方已经给出了答案。
 		assert.equal(ports.calls.resolveNode.length, 0);
 		assert.equal(ports.calls.bootstrap[0].nodePath, "/opt/pinned/bin/node");
@@ -369,7 +376,7 @@ test("remoteHome answers undefined for an unknown host, a dead session and a mal
 		assert.equal(await service.remoteHome("not-a-host-id"), undefined);
 		assert.equal(ports.calls.createManager.length, 0);
 
-		assert.deepEqual(plain(await service.connect(HOST_ID)), { ok: true, hostId: HOST_ID, state: "ready" });
+		assert.deepEqual(plain(await service.connect(HOST_ID)), { ok: true, hostId: HOST_ID, state: machine(HOST_ID) });
 		assert.equal(await service.remoteHome(HOST_ID), undefined, "没有握手的会话没有 home");
 
 		const manager = ports.managers[0];
@@ -417,50 +424,45 @@ test("a host left in needs-attention by the handshake is refused until an explic
 });
 
 /**
- * root 复核失败不只是「这次读取被拒」：主机必须进入可呈现的 needs-attention，且只有 user-retry 能离开。
+ * 设计 (i)：漂移只属于**这一个项目的持久路径**，不得升级成主机健康状态。
  *
- * 注意可达性：这里的 manager 状态是直接注入的（disconnected），对应 reducer 新放开的来源状态；
- * 生产接线里复核只在「manager 存在且非 transient」时才会跑，而那样一个 manager 目前只能由显式 abort
- * 释放得到（其读取会被 explicitlyDisconnected 提前拒绝）。真正可达的那条漂移路径是重连时的 helper
- * 握手（见下一个测试与 tests/sshConnectionManager.test.mjs）。本测试锁定的是服务层的接线契约本身。
+ * 记录键是 (hostId, root)；未记录的键回答 ok；复核成功清除该键；同一主机上另一个健康项目完全不受影响
+ * ——这正是 (i) 相对「漂移接到主机级 needs-attention」的价值（否则一个目录被挪动就会阻断该主机上所有
+ * 其他项目的读取）。本文件只做服务层判定；端到端（含同主机另一项目读取仍成功）在
+ * tests/remoteProjectRootStatus.test.mjs。
  */
-test("a refused root re-check moves the host into needs-attention, and an explicit connect is the retry that leaves it", async () => {
+test("a refused root re-check is recorded per project and never moves the host", async () => {
 	await withUserData(async (userDataDir) => {
 		await writeStore(userDataDir, 7, [{ id: HOST_ID }]);
-		// 复核结果可切换：先通过一次把会话建在已确认的 root 上，再让它漂移。
-		const control = { canonical: undefined };
+		const control = { canonical: "/srv/app-moved" };
 		const ports = fakePorts({
 			verifyRoot: async ({ userPath }) => ({ canonicalPath: control.canonical ?? userPath }),
 		});
 		const service = createRemoteHostConnectionService({ userDataDir, client: CLIENT, nodePath: "/usr/bin/node", ports });
-		// 先把已确认的 root 交给会话（setWorkspaceRoot + 显式连接），这样 manager 是建在这个 root 上的。
 		service.setWorkspaceRoot(HOST_ID, "/srv/app");
-		assert.equal((await service.connect(HOST_ID)).ok, true);
-		const manager = ports.managers[0];
-		// 会话掉了、但 helper 位置仍然有效：下一次读取会重建，重建前正是那次复核。
-		manager.state = "disconnected";
-		control.canonical = "/srv/app-moved";
 
+		// 复核失败发生在建立会话之前：被拒的边界既不得 bootstrap，也不得建 manager（更没有主机状态可动）。
 		const drifted = await service.withProjectSession(HOST_ID, "/srv/app", async () => "never");
 		assert.equal(drifted.ok, false);
 		assert.equal(drifted.code, "SSH_PROJECT_ROOT_CHANGED");
-		assert.deepEqual(plain(manager.reportCalls), [{ hostId: HOST_ID, code: "SSH_PROJECT_ROOT_CHANGED" }], "复核失败必须上报给活跃 manager");
-		assert.equal(manager.state, "needs-attention");
+		assert.deepEqual(plain(service.projectRootStatus(HOST_ID, "/srv/app")), { status: "needs-attention", code: "SSH_PROJECT_ROOT_CHANGED" });
+		assert.equal(ports.calls.bootstrap.length, 0, "被拒的边界不得 bootstrap");
+		assert.equal(ports.calls.createManager.length, 0, "被拒的边界不得建立会话");
 
-		// 之后每一次读取仍被拒，普通读取不得把终态悄悄清掉。
-		for (let attempt = 0; attempt < 2; attempt += 1) {
-			const refused = await service.withProjectSession(HOST_ID, "/srv/app", async () => "never");
-			assert.equal(refused.ok, false);
-			assert.equal(refused.code, "SSH_PROJECT_ROOT_CHANGED");
-			assert.equal(manager.state, "needs-attention");
-		}
-		assert.equal(manager.reportCalls.length, 1, "终态下不再重复上报");
+		// 同主机另一个健康项目、以及从未复核过的键，都回答 ok（「没有已知问题」，不是去问主机）。
+		assert.deepEqual(plain(service.projectRootStatus(HOST_ID, "/srv/other")), { status: "ok" });
+		assert.deepEqual(plain(service.projectRootStatus(OTHER_HOST_ID, "/srv/app")), { status: "ok" });
 
-		// 用户自己按「连接」= reducer 唯一合法出口 user-retry：begin-attempt 在 needs-attention 会被丢弃，
-		// 所以服务层必须走 manager.retry，否则按钮点了也出不来。
-		const reconnected = await service.connect(HOST_ID);
-		assert.equal(reconnected.ok, true, JSON.stringify(reconnected));
-		assert.deepEqual(plain(manager.tries), [HOST_ID]);
-		assert.equal(manager.state, "ready");
+		// 反复读取既不清记录也不改码。
+		const again = await service.withProjectSession(HOST_ID, "/srv/app", async () => "never");
+		assert.equal(again.code, "SSH_PROJECT_ROOT_CHANGED");
+		assert.deepEqual(plain(service.projectRootStatus(HOST_ID, "/srv/app")), { status: "needs-attention", code: "SSH_PROJECT_ROOT_CHANGED" });
+
+		// 远端路径恢复后，下一次复核成功即清除该键；复核通过之后会话才第一次建立。
+		control.canonical = undefined;
+		const recovered = await service.withProjectSession(HOST_ID, "/srv/app", async () => "ok");
+		assert.equal(recovered.ok, true, JSON.stringify(recovered));
+		assert.deepEqual(plain(service.projectRootStatus(HOST_ID, "/srv/app")), { status: "ok" });
+		assert.equal(ports.calls.createManager.length, 1, "复核通过后才建立会话");
 	});
 });

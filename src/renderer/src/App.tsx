@@ -3067,6 +3067,12 @@ export function App() {
 			ensureCatalogsLoaded: (projectIds) => {
 				for (const projectId of projectIds) ensureProjectCatalogLoaded(projectId, true);
 			},
+			// 远端会话登记（侧栏「远端会话」→ 导入）：register 已把记录写进主进程 catalog，
+			// 这里只做「显式重拉本地会话清单 + 选中新会话」——不创建会话、也不开 Tab。
+			importRemoteSession: async (projectId, sessionId) => {
+				await refreshProjectSessions(projectId, true).catch(() => undefined);
+				selectSessionCommand(projectId, sessionId);
+			},
 			beginDrag: workspaceChrome.beginDrag,
 			endDrag: workspaceChrome.endDrag,
 			createDraft: async (projectId) => {

@@ -36,8 +36,12 @@ export const ipcChannels = {
 	remoteProjectRead: "remote:project-read",
 	/** 按 projectId 在项目内做**文件名**搜索（不含内容搜索）；query 在 main 边界重新校验。 */
 	remoteProjectSearch: "remote:project-search",
+	/** 项目已确认 root 的最近一次复核结果（只读、不建会话、无 helper 请求）。 */
+	remoteProjectRootStatus: "remote:project-root-status",
 	/** 列出远端主机上的会话文件（只读、有界；不含正文）。 */
 	remoteSessionScan: "remote:remote-session-scan",
+	/** 按需解析一条远端会话的标题（有界头读；只读、不写 catalog）。 */
+	remoteSessionTitle: "remote:remote-session-title",
 	/** 把一条远端会话幂等登记进本地 catalog。 */
 	remoteSessionRegister: "remote:remote-session-register",
 	projectsList: "projects:list",

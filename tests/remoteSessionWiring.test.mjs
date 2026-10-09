@@ -20,6 +20,16 @@ const sharedTypes = readFileSync("src/shared/types/remoteHost.ts", "utf8");
 test("the remote session channels are declared with the frozen names", () => {
 	assert.match(shared, /remoteSessionScan:\s*"remote:remote-session-scan"/);
 	assert.match(shared, /remoteSessionRegister:\s*"remote:remote-session-register"/);
+	// 第四批：按需标题（只读、有界头读）。
+	assert.match(shared, /remoteSessionTitle:\s*"remote:remote-session-title"/);
+});
+
+test("the project-level root status channel is declared and bridged (design (i))", () => {
+	// 项目级而非主机级：漂移不得阻断同主机其它项目，所以它是 project 域的只读查询。
+	assert.match(shared, /remoteProjectRootStatus:\s*"remote:project-root-status"/);
+	assert.match(preload, /rootStatus:\s*\(projectId: string\)\s*=>\s*ipcRenderer\.invoke\(ipcChannels\.remoteProjectRootStatus/);
+	assert.match(previewApi, /rootStatus: async/);
+	assert.match(sharedTypes, /export type RemoteProjectRootStatusResult =/);
 });
 
 test("preload bridges both channels and the preview facade stubs them", () => {
@@ -27,14 +37,16 @@ test("preload bridges both channels and the preview facade stubs them", () => {
 	assert.match(preload, /scan:\s*\(hostId: string\)\s*=>\s*ipcRenderer\.invoke\(ipcChannels\.remoteSessionScan/);
 	assert.match(preload, /register:\s*\(hostId: string, remoteSessionId: string\)\s*=>\s*ipcRenderer\.invoke\(ipcChannels\.remoteSessionRegister/);
 	// 预览/降级面必须同样暴露这两个方法，否则渲染层在非 Electron 预览下会取到 undefined。
-	assert.match(previewApi, /remoteSessions:\s*\{[\s\S]{0,200}?scan: async/);
-	assert.match(previewApi, /remoteSessions:\s*\{[\s\S]{0,200}?register: async/);
+	assert.match(previewApi, /remoteSessions:\s*\{[\s\S]{0,300}?scan: async/);
+	assert.match(previewApi, /remoteSessions:\s*\{[\s\S]{0,300}?register: async/);
+	assert.match(previewApi, /remoteSessions:\s*\{[\s\S]{0,300}?title: async/);
+	assert.match(preload, /title:\s*\(hostId: string, remoteSessionId: string\)\s*=>\s*ipcRenderer\.invoke\(ipcChannels\.remoteSessionTitle/);
 });
 
 test("the assembly registers the session domain with the injected channel names", () => {
 	assert.match(main, /registerRemoteSessionIpc\(\{/);
 	// 注入式通道：装配必须把 shared 常量传进去，否则通道名会与 preload 不一致。
-	assert.match(main, /channels:\s*\{\s*scan:\s*ipcChannels\.remoteSessionScan,\s*register:\s*ipcChannels\.remoteSessionRegister\s*\}/);
+	assert.match(main, /channels:\s*\{\s*scan:\s*ipcChannels\.remoteSessionScan,\s*register:\s*ipcChannels\.remoteSessionRegister,\s*title:\s*ipcChannels\.remoteSessionTitle\s*\}/);
 	// 归属解析必须由装配提供（scanner 无法自行推断）；缺失会让登记一律 fail closed。
 	assert.match(main, /projectIdForHost:/);
 });
