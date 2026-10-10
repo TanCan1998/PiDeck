@@ -218,6 +218,22 @@ export async function resolvePosixSshClient(options: { candidates?: string[]; en
 }
 
 /**
+ * 按**本平台**该有的方式解析 SSH 客户端。
+ *
+ * Windows 自己解析 System32 下的 OpenSSH（并拒绝脚本 shim）；其它平台必须走已验证的 POSIX 发现。
+ * 这个函数存在的原因是两个分支曾被写在两处并漂移：`SshHostPinStore` 的懒解析回退直接调
+ * `resolvePosixSshClient()`，而它在 Windows 上必抛 `SSH_CLIENT_UNSUPPORTED_PLATFORM` ⇒ 那里**完全无法
+ * 添加主机**；这与更早「裸调 `createSshClientRuntime()` 导致 Linux 加主机失败」是同一类故障、方向相反。
+ * 平台判断**只允许**留在这里。
+ */
+export async function resolveVerifiedSshClient(options: { candidates?: string[]; env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform } = {}): Promise<SshClientRuntime> {
+	const platform = options.platform ?? process.platform;
+	// Windows 分支不接受 candidates（那是 POSIX 发现路径的参数），只透传 env。
+	if (platform === "win32") return createSshClientRuntime(options.env === undefined ? { platform } : { platform, env: options.env });
+	return resolvePosixSshClient({ ...options, platform });
+}
+
+/**
  * Prove the client's `-G` output is shaped the way the strict parser requires.
  *
  * The query names a syntax that cannot resolve locally: `-F /dev/null` drops the user's config (so a

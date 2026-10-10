@@ -291,8 +291,16 @@ test("the lazily discovered verifier goes through verified client discovery, not
 	// 这里断言的是**源码形态 + 可替换的发现函数**，因为真实发现在没有 ssh 的机器上会失败，
 	// 而这条测试要锁的是「走的是哪条路径」。
 	const source = readFileSync("src/main/remote/SshHostPinStore.ts", "utf8");
-	assert.match(source, /resolvePosixSshClient/, "the lazy path must use verified discovery");
+	// 2026-02 等价迁移：平台判断收口到 resolveVerifiedSshClient()（Windows 走自己的 OpenSSH，POSIX 走已验证发现）。
+	// 原来这里断言源码里出现 resolvePosixSshClient —— 而那条**正是 Windows 加主机必炸的根因**（真机 e2e 抓到：
+	// 保存主机即报 SSH_CLIENT_UNSUPPORTED_PLATFORM，pin 弹框永不出现）。所以改成锁「走的是那个唯一入口」，
+	// 并同时锁住它两条分支都不许回退（Linux 侧不得因这次修复而失守）。
+	assert.match(source, /resolveVerifiedSshClient/, "the lazy path must go through the single platform decision");
 	assert.doesNotMatch(source, /this\.client \?\? createSshClientRuntime\(\)/, "a bare constructor refuses every non-Windows platform");
+	assert.doesNotMatch(source, /this\.client \?\? \(await resolvePosixSshClient\(\)\)/, "nor may it call the POSIX-only resolver directly: that throws on Windows");
+	const runtime = readFileSync("src/main/remote/SshClientRuntime.ts", "utf8");
+	assert.match(runtime, /createSshClientRuntime\(options\.env === undefined/, "Windows must keep resolving its own OpenSSH");
+	assert.match(runtime, /resolvePosixSshClient\(\{ \.\.\.options, platform \}\)/, "POSIX must keep using verified discovery");
 	// 懒加载是异步的（发现要探测二进制），所有调用点必须 await 它。
 	const awaited = source.match(/await \(await this\.verifierFor\(\)\)/g) ?? [];
 	assert.equal(awaited.length, 3, "every verifier use must await discovery");

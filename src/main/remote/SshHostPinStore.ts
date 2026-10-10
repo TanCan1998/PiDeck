@@ -3,7 +3,7 @@ import { link, lstat, mkdir, open, unlink } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { PendingConfirmationBroker } from "../security/PendingConfirmationBroker";
 import { buildSshConfigQueryArgs, type SshDraftRoute } from "./SshCommandBuilder";
-import { resolvePosixSshClient, type SshClientRuntime } from "./SshClientRuntime";
+import { resolveVerifiedSshClient, type SshClientRuntime } from "./SshClientRuntime";
 import { fingerprintSshHostKey, readBoundedHostKey, type PreverifiedSshHostKey, type SshDraftHostCandidate, verifyDraftSshHost } from "./SshHostVerifier";
 
 export type VerifiedSshEndpoint = Omit<SshDraftHostCandidate, "knownHostsBase64">;
@@ -114,7 +114,9 @@ export class SshHostPinStore {
 	 */
 	private async verifierFor(): Promise<SshHostPinVerifier> {
 		if (this.verifier) return this.verifier;
-		this.resolvedClient ??= this.client ?? (await resolvePosixSshClient());
+		// 平台判断只允许在 resolveVerifiedSshClient() 里：Windows 走自己的 OpenSSH，POSIX 走已验证发现。
+		// 直接调 POSIX-only 的解析器会在 Windows 必抛 SSH_CLIENT_UNSUPPORTED_PLATFORM（真机 e2e 抓到）。
+		this.resolvedClient ??= this.client ?? (await resolveVerifiedSshClient());
 		const client: SshClientRuntime = this.resolvedClient;
 		return (route, pinAlias, preverifiedHostKey) => verifyDraftSshHost(route, pinAlias, { client, ...(preverifiedHostKey === undefined ? {} : { preverifiedHostKey }) });
 	}
