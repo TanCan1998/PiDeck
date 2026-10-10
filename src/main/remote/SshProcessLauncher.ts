@@ -166,6 +166,10 @@ export function createSshProcessLauncher(options?: { spawn?: typeof import("node
 	return {
 		async start(request: SshLauncherRequest): Promise<SshLauncherHandle> {
 			const target = readLaunchTarget(request?.invocation);
+			// Default when the field is absent: "command", which is exactly the behaviour every existing caller
+			// had. A session has no deadline at all, so a timeout it also carried would be a contract that lies.
+			const lifetime = request?.lifetime === "session" ? "session" : "command";
+			if (lifetime === "session" && request?.timeoutMs !== undefined) throw invalidRequest();
 			const timeoutMs = readBoundedDuration(request?.timeoutMs, SSH_LAUNCHER_DEFAULT_TIMEOUT_MS, SSH_LAUNCHER_MAX_TIMEOUT_MS);
 			const maxOutputBytes = readBoundedDuration(request?.maxOutputBytes, SSH_LAUNCHER_DEFAULT_MAX_OUTPUT_BYTES, SSH_LAUNCHER_MAX_OUTPUT_BYTES);
 			const maxLineBytes = readBoundedDuration(request?.maxLineBytes, SSH_LAUNCHER_DEFAULT_MAX_LINE_BYTES, SSH_LAUNCHER_MAX_LINE_BYTES);
@@ -289,6 +293,10 @@ export function createSshProcessLauncher(options?: { spawn?: typeof import("node
 			}
 
 			function armDeadline(): void {
+				// A session owns its lifetime: no wall-clock timer exists for it, which is what makes it impossible for
+				// a healthy session to be killed by a budget it never agreed to. Its bounds are the output/line budgets,
+				// the ssh keepalive, and whoever owns it (the connection machine, a runner lease).
+				if (lifetime === "session") return;
 				if (settled !== null || deadlineTimer !== undefined) return;
 				deadlineTimer = setTimeout(() => {
 					deadlineTimer = undefined;

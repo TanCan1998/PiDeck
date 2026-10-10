@@ -5,7 +5,7 @@ import { REMOTE_SESSION_UNWIRED_CODE, useRemoteSessions, type RemoteSessionImpor
 import { useRemoteSessionTitles } from "../../hooks/useRemoteSessionTitles";
 import { formatI18nDateTime, t } from "../../i18n";
 import { REMOTE_SESSION_LIMIT_CODES, type RemoteSessionEntryView } from "../session/remoteSessionListState";
-import { isProvisionalTitleOrigin, type RemoteSessionTitleEntry } from "../session/remoteSessionTitleState";
+import { isProvisionalTitleOrigin, isTitleTailDegraded, type RemoteSessionTitleEntry } from "../session/remoteSessionTitleState";
 import type { RemoteSessionImportFeedback } from "../../atoms/remote-sessions-atoms";
 import { Button } from "../ui-shadcn/button";
 
@@ -60,33 +60,47 @@ function RemoteSessionRow(props: { entry: RemoteSessionEntryView; title: RemoteS
 	// 只有 origin=authoritative 才是会话的真实名字；inferred（首条消息弱兜底）/ fallback（stem）/ 未接线 / 失败
 	// 都必须标「暂定」。判据本身在 origin 的词表模块里（isProvisionalTitleOrigin），避免两处各写一遍。
 	const tentative = isProvisionalTitleOrigin(title.origin);
+	// K2-3：「尾窗没读到」是**另一个**判据（标题可能仍是权威名，只是这次没看到文件尾）。
+	// 与「暂定」分开、不合并成一个词：两个标记可以同时出现。
+	const tailDegraded = isTitleTailDegraded(title);
 	return (
 		<li data-remote-session-id={entry.remoteSessionId} className="shrink-0 rounded-md px-1 py-1 hover:bg-muted/60">
 			<div className="flex items-center gap-1.5">
 				{title.status === "loading" ? <Loader2 className="size-3 shrink-0 animate-spin text-muted-foreground" aria-label={t("sidebar.remoteSessions.titleParsing")} /> : <FileText className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />}
-				<span className="min-w-0 flex-1 truncate text-label" title={tentative ? t("sidebar.remoteSessions.tentativeHint") : displayTitle}>
+				<span data-testid="remote-session-title" className="min-w-0 flex-1 truncate text-label" title={tailDegraded ? t("sidebar.remoteSessions.tailDegradedHint") : tentative ? t("sidebar.remoteSessions.tentativeHint") : displayTitle}>
 					{displayTitle}
 				</span>
-				{tentative ? <span className="shrink-0 rounded bg-muted px-1 text-[10px] leading-4 text-muted-foreground">{t("sidebar.remoteSessions.tentative")}</span> : null}
+				{tentative ? (
+					<span data-testid="remote-session-tentative" className="shrink-0 rounded bg-muted px-1 text-[10px] leading-4 text-muted-foreground">
+						{t("sidebar.remoteSessions.tentative")}
+					</span>
+				) : null}
+				{/* 降级标记：比「暂定」更轻（同色系更淡、无背景），只说明「这次没读到文件尾」，不是错误。 */}
+				{tailDegraded ? (
+					<span data-testid="remote-session-tail-degraded" className="shrink-0 rounded px-1 text-[10px] leading-4 text-muted-foreground/70">
+						{t("sidebar.remoteSessions.tailDegraded")}
+					</span>
+				) : null}
+				{/* 「已导入」是状态标记，不夺走入口：登记是幂等的，再次点它必须能给出 created=false 的区分回执。 */}
 				{props.imported ? (
 					<span className="flex shrink-0 items-center gap-0.5 text-[10px] leading-4 text-muted-foreground">
 						<Check className="size-3" aria-hidden="true" />
 						{t("sidebar.remoteSessions.importedTag")}
 					</span>
-				) : (
-					<Button
-						type="button"
-						variant="ghost"
-						size="icon-xs"
-						className="size-6 shrink-0 text-muted-foreground hover:bg-muted hover:text-foreground"
-						disabled={props.busy || props.importing}
-						title={props.importing ? t("sidebar.remoteSessions.importing") : t("sidebar.remoteSessions.import")}
-						aria-label={props.importing ? t("sidebar.remoteSessions.importing") : t("sidebar.remoteSessions.import")}
-						onClick={props.onImport}
-					>
-						{props.importing ? <Loader2 className="size-3 animate-spin" /> : <ArrowDownToLine className="size-3" />}
-					</Button>
-				)}
+				) : null}
+				<Button
+					type="button"
+					variant="ghost"
+					size="icon-xs"
+					data-testid="remote-session-import"
+					className="size-6 shrink-0 text-muted-foreground hover:bg-muted hover:text-foreground"
+					disabled={props.busy || props.importing}
+					title={props.importing ? t("sidebar.remoteSessions.importing") : t("sidebar.remoteSessions.import")}
+					aria-label={props.importing ? t("sidebar.remoteSessions.importing") : t("sidebar.remoteSessions.import")}
+					onClick={props.onImport}
+				>
+					{props.importing ? <Loader2 className="size-3 animate-spin" /> : <ArrowDownToLine className="size-3" />}
+				</Button>
 			</div>
 			<div className="flex items-center gap-2 pl-5 text-[10px] leading-4 text-muted-foreground">
 				<span>{formatSize(entry.size)}</span>
@@ -112,7 +126,17 @@ export function RemoteSessionsSection(props: { hostId: string; importedRemoteSes
 					<span className="truncate">{t("sidebar.remoteSessions.title")}</span>
 					{state.phase === "entries" ? <span className="shrink-0">{t("sidebar.remoteSessions.count", { count: state.entries.length })}</span> : null}
 				</span>
-				<Button type="button" variant="ghost" size="icon-xs" className="grid size-6 shrink-0 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground" title={scanLabel} aria-label={scanLabel} disabled={scanning || importing} onClick={() => void sessions.scan()}>
+				<Button
+					type="button"
+					variant="ghost"
+					size="icon-xs"
+					data-testid="remote-sessions-scan"
+					className="grid size-6 shrink-0 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+					title={scanLabel}
+					aria-label={scanLabel}
+					disabled={scanning || importing}
+					onClick={() => void sessions.scan()}
+				>
 					{scanning ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
 				</Button>
 			</div>

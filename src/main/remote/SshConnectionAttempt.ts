@@ -1,7 +1,7 @@
 import { createRemoteControlClient, type RemoteControlClient } from "./RemoteControlClient";
 import { REMOTE_HELPER_MAX_FRAME_BYTES, REMOTE_HELPER_METHOD_HELLO, REMOTE_HELPER_PROTOCOL_VERSION } from "./RemoteHelperContract";
 import { buildHelperRemoteCommand } from "./RemoteHelperCommand";
-import { SSH_LAUNCHER_MAX_OUTPUT_BYTES, SSH_LAUNCHER_MAX_TIMEOUT_MS } from "./SshProcessLauncher";
+import { SSH_LAUNCHER_MAX_OUTPUT_BYTES } from "./SshProcessLauncher";
 import { buildPinnedSshInvocation } from "./SshVerifiedConnection";
 import type { SshClientRuntime } from "./SshClientRuntime";
 import type { SshConnectionPhase, SshLauncherHandle, SshProcessExit, SshProcessLauncher } from "./RemoteHostConnectionTypes";
@@ -120,10 +120,11 @@ export type SshAttemptHost = {
 };
 
 /**
- * A control session must outlive a one-shot probe, so an attempt states its own deadline explicitly
- * instead of inheriting the launcher's 30s command default. The launcher cap is the hard bound.
+ * A control session must outlive any one-shot budget, so an attempt states the `session` lifetime instead of
+ * a deadline: the launcher arms no wall-clock timer at all (docs/remote-phase4-plan.md §3.6). Its real bounds
+ * are the output budget below, the handshake's own local deadline, the ssh keepalive, and this attempt's
+ * paired release path - a session is never left for nobody to own.
  */
-const SESSION_DEADLINE_MS = SSH_LAUNCHER_MAX_TIMEOUT_MS;
 const SESSION_MAX_OUTPUT_BYTES = SSH_LAUNCHER_MAX_OUTPUT_BYTES;
 /**
  * The shape `RemoteControlClient` mints for its request ids (`req-N`, bounded by the contract's id ceiling),
@@ -182,6 +183,29 @@ export function releaseSshAttempt(attempt: SshConnectionAttempt, reason: SshAtte
 }
 
 /**
+ * Operations every ready control session is expected to serve: the read-only workspace batch the session
+ * and workspace readers stand on. hello/echo/cancel are mandatory by contract, and anything beyond this
+ * list (fs.searchNames today, runtime/artifact operations later) is optional here - a host that lacks one
+ * is still a usable host, and the feature that needs it has to gate itself.
+ */
+const REQUIRED_HELPER_CAPABILITIES = ["fs.stat", "fs.list", "fs.read"] as const;
+/**
+ * Terminal code of a helper that cannot serve a required operation. It is fatal on purpose: the helper was
+ * deployed from the content-addressed bundle PiDeck verified, so reconnecting answers the same build with
+ * the same missing operation - the actionable fix is redeploying/upgrading the remote bundle, never a retry.
+ */
+const CODE_CAPABILITY_MISSING = "SSH_HELPER_CAPABILITY_MISSING";
+/**
+ * One diagnostic code per required operation, so the history names what is actually absent instead of only
+ * the fact that something is. Stable codes only: free text never reaches a diagnostic record.
+ */
+const CAPABILITY_MISSING_CODES: Readonly<Record<string, string>> = {
+	"fs.stat": "SSH_HELPER_CAPABILITY_MISSING_FS_STAT",
+	"fs.list": "SSH_HELPER_CAPABILITY_MISSING_FS_LIST",
+	"fs.read": "SSH_HELPER_CAPABILITY_MISSING_FS_READ",
+};
+
+/**
  * `ready` may only mean "the remote helper answered a v1 handshake" (plan §10/§11.1). The pinned ssh
  * session is the transport, so the handshake is the one piece of evidence that the *activated bundle* -
  * not a login shell, not another version of the helper - is on the other end.
@@ -226,6 +250,17 @@ async function assertHelperHandshake(host: SshAttemptHost, deps: SshAttemptDeps,
 	if (result.root !== requestedRoot) {
 		host.record("SSH_HELPER_ROOT_MISMATCH");
 		throw new Error("SSH_HELPER_ROOT_MISMATCH");
+	}
+	// The capability list is the build's own answer to "what can I serve on this session". A helper that
+	// cannot answer one of the required operations must never become ready: the readers a ready host feeds
+	// would fail later, one call at a time, and the user would see a broken host instead of an incompatible
+	// one. The missing operations are recorded one by one, then the whole attempt is refused fatally.
+	// The list is re-read into a local because the shape guard above narrows only inside its own expression.
+	const capabilities: readonly unknown[] = Array.isArray(result.capabilities) ? result.capabilities : [];
+	const missing = REQUIRED_HELPER_CAPABILITIES.filter((capability) => capabilities.includes(capability) === false);
+	if (missing.length > 0) {
+		for (const capability of missing) host.record(CAPABILITY_MISSING_CODES[capability]);
+		throw new Error(CODE_CAPABILITY_MISSING);
 	}
 	// `helperVersion`/`nodeVersion`/`pid` are identity for the UI, not evidence of compatibility, so a
 	// helper that omits them is still a working helper.
@@ -276,7 +311,7 @@ export async function runSshConnectionAttempt(host: SshAttemptHost, deps: SshAtt
 		const invocation = await buildPinnedSshInvocation(deps.userDataDir, host.hostId, "ssh-batch", { client: deps.client, remoteCommand });
 		if (!host.isCurrentGeneration()) return;
 		host.enterPhase("authenticate");
-		const handle = await deps.launcher.start({ hostId: host.hostId, generation: host.generation, invocation, timeoutMs: SESSION_DEADLINE_MS, maxOutputBytes: SESSION_MAX_OUTPUT_BYTES, maxLineBytes: REMOTE_HELPER_MAX_FRAME_BYTES, stdin: true });
+		const handle = await deps.launcher.start({ hostId: host.hostId, generation: host.generation, invocation, lifetime: "session", maxOutputBytes: SESSION_MAX_OUTPUT_BYTES, maxLineBytes: REMOTE_HELPER_MAX_FRAME_BYTES, stdin: true });
 		if (host.isSuperseded()) {
 			// The attempt was superseded, aborted or torn down while spawning: the process must not
 			// survive it, even though start() already produced a live handle.

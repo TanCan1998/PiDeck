@@ -31,7 +31,7 @@ function fileEntry(name, bytes = 10) {
 function fakeRemote(options = {}) {
 	const listings = options.listings ?? {};
 	const files = options.files ?? {};
-	const calls = { home: [], sessions: [], list: [], stat: [], read: [] };
+	const calls = { home: [], sessions: [], list: [], stat: [], read: [], probe: [] };
 	let inFlight = 0;
 	let maxInFlight = 0;
 	const port = {
@@ -42,10 +42,17 @@ function fakeRemote(options = {}) {
 			return Object.hasOwn(options, "home") ? options.home : "/home/dev";
 		},
 		async withProjectSession(hostId, root, task) {
-			calls.sessions.push({ hostId, root });
+			// J2：根解析会先用 root=<home>/.pi/agent 探测 settings.json。这份替身没有这个文件，所以探测
+			// 固定「读不到」⇒ 退回默认根；探测帧单独记，既有「会话阶段」帧断言保持原意。
+			const probing = root === "/home/dev/.pi/agent";
+			(probing ? calls.probe : calls.sessions).push(probing ? root : { hostId, root });
 			if (options.withProjectSession) return options.withProjectSession(hostId, root, task);
 			const session = {
 				async request(method, params) {
+					if (probing) {
+						calls.probe.push(method + ":" + params.path);
+						throw Object.assign(new Error("PATH_NOT_FOUND"), { code: "PATH_NOT_FOUND" });
+					}
 					if (method === "fs.list") {
 						calls.list.push(params.path);
 						inFlight += 1;

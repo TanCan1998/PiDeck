@@ -6,7 +6,7 @@ import { createManualTimers, createPinnedClient, createPinnedHostFixture, fakeEn
 
 const { createSshConnectionManager } = loadTsCommonJs("src/main/remote/SshConnectionManager.ts");
 const { createRemoteWorkspaceReader } = loadTsCommonJs("src/main/remote/RemoteWorkspaceReader.ts");
-const { createSshProcessLauncher, SSH_LAUNCHER_MAX_OUTPUT_BYTES, SSH_LAUNCHER_MAX_TIMEOUT_MS } = loadTsCommonJs("src/main/remote/SshProcessLauncher.ts");
+const { createSshProcessLauncher, SSH_LAUNCHER_MAX_OUTPUT_BYTES } = loadTsCommonJs("src/main/remote/SshProcessLauncher.ts");
 const { buildHelperRemoteCommand } = loadTsCommonJs("src/main/remote/RemoteHelperCommand.ts");
 const { quotePosixArgument } = loadTsCommonJs("src/main/remote/RemoteBootstrapContract.ts");
 
@@ -766,8 +766,10 @@ test("composes with the real launcher: explicit session deadline and exit classi
 		await connecting;
 		assert.equal(manager.getState(profile.id).state, "reconnecting", shape.label);
 		assert.equal(requests.length, 1, shape.label);
-		// The launcher's own default is a 30s command deadline; a control session must state a longer bound.
-		assert.equal(requests[0].timeoutMs, SSH_LAUNCHER_MAX_TIMEOUT_MS, shape.label);
+		// A control session is not a command: it states the session lifetime and carries no wall-clock budget at
+		// all (the old 120 s ceiling is exactly what Phase 4 cannot live with; docs/remote-phase4-plan.md §3.6).
+		assert.equal(requests[0].lifetime, "session", shape.label);
+		assert.equal(requests[0].timeoutMs, undefined, shape.label);
 		assert.equal(requests[0].maxOutputBytes, SSH_LAUNCHER_MAX_OUTPUT_BYTES, shape.label);
 		assert.equal(requests[0].invocation.executable, fakeSshPath, shape.label);
 		// The helper command is the one remote token sequence and travels as the last argv element, directly

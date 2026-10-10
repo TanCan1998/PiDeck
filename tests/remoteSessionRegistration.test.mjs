@@ -175,16 +175,23 @@ test("登记：非法身份入参在 catalog 边界也被拒（防御直接调�
 
 /** 远端替身：登记路径只需要 fs.stat（扫描覆盖在 remoteSessionScanner.test.mjs）。 */
 function fakeRegisterPort(options = {}) {
-	const calls = { stat: [], sessions: [] };
+	const calls = { stat: [], sessions: [], probe: [] };
 	const port = {
 		async remoteHome() {
 			return Object.hasOwn(options, "home") ? options.home : "/home/dev";
 		},
 		async withProjectSession(hostId, root, task) {
-			calls.sessions.push({ hostId, root });
+			// J2：配置探测（root=<home>/.pi/agent）在这份替身里固定「读不到 settings.json」⇒ 退回默认根；
+			// 探测帧与真正的登记帧分开记，避免污染 calls.sessions / calls.stat 的既有断言。
+			const probing = root === "/home/dev/.pi/agent";
+			(probing ? calls.probe : calls.sessions).push(probing ? root : { hostId, root });
 			if (options.sessionFailure) return { ok: false, code: options.sessionFailure };
 			const session = {
 				async request(method, params) {
+					if (probing) {
+						calls.probe.push(method + ":" + params.path);
+						throw Object.assign(new Error("PATH_NOT_FOUND"), { code: "PATH_NOT_FOUND" });
+					}
 					if (method !== "fs.stat") throw new Error("PROTOCOL_INVALID");
 					calls.stat.push(params.path);
 					const file = (options.files ?? {})[params.path];

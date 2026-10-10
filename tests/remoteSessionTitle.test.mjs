@@ -14,6 +14,7 @@ const { createRemoteSessionScanner, REMOTE_SESSION_CODES } = loadTsCommonJs("src
 const { cleanSessionTitleCandidate, inferSessionTitleFromHeadText, inferSessionTitleFromLines } = loadTsCommonJs("src/main/sessions/sessionNameLine.ts");
 const { formatPromptTemplateBlock } = loadTsCommonJs("src/shared/expandedRefBlocks.ts");
 const { REMOTE_WORKSPACE_MAX_HEAD_BYTES } = loadTsCommonJs("src/main/remote/RemoteWorkspaceReader.ts");
+const { createRemoteSessionTitleController, readTitleResponse, isProvisionalTitleOrigin, isTitleTailDegraded } = loadTsCommonJs("src/renderer/src/components/session/remoteSessionTitleState.ts");
 
 /** 跨 VM realm 的比较前先归一化（deepStrictEqual 会比较原型）。 */
 function plain(value) {
@@ -46,16 +47,31 @@ function fakeTitleRemote(options = {}) {
 		},
 	};
 	const roots = [];
+	const probeRoots = [];
+	// 配置探测阶段（root=<home>/.pi/agent）的替身：这份远端没有 settings.json，任何请求都「读不到」。
+	const probeSession = {
+		async request() {
+			throw Object.assign(new Error("PATH_NOT_FOUND"), { code: "PATH_NOT_FOUND" });
+		},
+		async cancel() {
+			return { cancelled: true };
+		},
+	};
 	const port = {
 		remoteHome: async () => (Object.hasOwn(options, "home") ? options.home : "/home/dev"),
 		async withProjectSession(hostId, root, task) {
+			// J2 的配置探测不产生 frames/roots 记录：既有断言锁的是「会话阶段」的帧预算。
+			if (root === "/home/dev/.pi/agent") {
+				probeRoots.push(root);
+				return { ok: true, value: await task(probeSession) };
+			}
 			roots.push(root);
 			if (options.sessionFailure) return { ok: false, code: options.sessionFailure };
 			if (options.throwInTask) return { ok: true, value: await options.throwInTask() };
 			return { ok: true, value: await task(session) };
 		},
 	};
-	return { port, frames, roots };
+	return { port, frames, roots, probeRoots };
 }
 
 const stemId = "ws/2026-02-03T10-00-00-000Z_abc.jsonl";
@@ -285,6 +301,43 @@ test("IPC title：开关关掉/非法 hostId/非字符串 id 都不过边界，�
 	assert.equal(called, false);
 });
 
+test("渲染层：tailDegraded 如实透传（缺省=false；非布尔=读不懂，不静默）", () => {
+	// 尾读失败时主进程会带 tailDegraded:true；渲染层必须原样携带，否则「降级」在 UI 侧仍是静默。
+	assert.deepEqual(plain(readTitleResponse({ ok: true, title: "T", titleOrigin: "authoritative", tailDegraded: true })), { kind: "ok", title: "T", origin: "authoritative", tailDegraded: true });
+	assert.deepEqual(plain(readTitleResponse({ ok: true, title: "T", titleOrigin: "inferred" })), { kind: "ok", title: "T", origin: "inferred", tailDegraded: false });
+	assert.deepEqual(plain(readTitleResponse({ ok: true, title: "T", titleOrigin: "fallback", tailDegraded: false })), { kind: "ok", title: "T", origin: "fallback", tailDegraded: false });
+	// 契约只说 boolean | undefined：别的类型属于「读不懂」，回退扫描给的 stem 占位。
+	for (const tailDegraded of ["yes", 1, {}, null]) {
+		assert.equal(readTitleResponse({ ok: true, title: "T", titleOrigin: "authoritative", tailDegraded }).kind, "rejected", JSON.stringify(tailDegraded));
+	}
+	const controller = createRemoteSessionTitleController();
+	const generation = controller.begin("host-a", "a.jsonl");
+	assert.equal(controller.settle(generation, "host-a", "a.jsonl", { kind: "ok", title: "T", origin: "inferred", tailDegraded: true }), true);
+	assert.equal(controller.statusOf("a.jsonl").tailDegraded, true, "状态条目必须携带降级标记");
+	const clean = controller.begin("host-a", "b.jsonl");
+	assert.equal(controller.settle(clean, "host-a", "b.jsonl", { kind: "ok", title: "B", origin: "authoritative" }), true);
+	assert.equal(controller.statusOf("b.jsonl").tailDegraded, false);
+});
+
+test("两个判据独立：暂定（origin）与降级（tailDegraded）不得合并成一个词", () => {
+	const entry = (origin, tailDegraded) => ({ status: "ready", title: "T", origin, code: null, tailDegraded });
+	// [origin, tailDegraded, 期望 provisional, 期望 tailDegraded]
+	const matrix = [
+		["authoritative", true, false, true],
+		["authoritative", false, false, false],
+		["inferred", true, true, true],
+		["fallback", false, true, false],
+	];
+	for (const [origin, degraded, provisional, tailDegraded] of matrix) {
+		const item = entry(origin, degraded);
+		assert.equal(isProvisionalTitleOrigin(item.origin), provisional, origin + "/" + degraded + " provisional");
+		assert.equal(isTitleTailDegraded(item), tailDegraded, origin + "/" + degraded + " tailDegraded");
+	}
+	// 反例（合并就红）：把「降级」当成「暂定」会让 (authoritative,true) 期望的 provisional=false 变 true；
+	// 反过来把「暂定」当成「降级」会让 (inferred,false) 期望的 tailDegraded=false 变 true。上面两格已经锁死。
+	assert.equal(isProvisionalTitleOrigin("authoritative") && isTitleTailDegraded(entry("inferred", false)), false);
+});
+
 test("本地解析只有一份实现：SessionScanner 不再自带副本，远端不自己解析行", () => {
 	const scannerSource = readFileSync("src/main/sessions/SessionScanner.ts", "utf8");
 	assert.doesNotMatch(scannerSource, /function inferScanNameFromLines/);
@@ -293,6 +346,9 @@ test("本地解析只有一份实现：SessionScanner 不再自带副本，远�
 	assert.match(scannerSource, /inferSessionTitleFromLines\(/);
 	const remoteSource = readFileSync("src/main/sessions/RemoteSessionScanner.ts", "utf8");
 	assert.match(remoteSource, /inferSessionTitleFromHeadText/);
-	// 远端不得自己 JSON.parse 行做标题推断（那是第二套解析器的入口）。
-	assert.doesNotMatch(remoteSource, /JSON\.parse\(/);
+	// 远端不得自己解析 JSONL **行**做标题推断（那是第二套解析器的入口）。J2 之后模块里确实有一处
+	// JSON.parse，但它解析的是 settings.json（配置，用来决定会话根），不是逐行 JSONL；这里锁的是
+	// 「没有手写的行解析器」：既不能对 line 调 JSON.parse，也不能自己切行。
+	assert.doesNotMatch(remoteSource, /JSON\.parse\(line/);
+	assert.doesNotMatch(remoteSource, /split\(\/\\r\?\\n\//);
 });

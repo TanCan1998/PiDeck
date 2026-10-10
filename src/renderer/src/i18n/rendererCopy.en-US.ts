@@ -163,6 +163,8 @@ export const enUS: Record<TranslationKey, string> = {
 	"sidebar.remoteSessions.catalogUnavailable": "The local session catalog is unavailable; cannot register.",
 	"sidebar.remoteSessions.tentative": "Tentative",
 	"sidebar.remoteSessions.tentativeHint": "The title is not from an authoritative source (it may be inferred from the first message or fall back to the file name); rely on the session content.",
+	"sidebar.remoteSessions.tailDegraded": "Tail not read",
+	"sidebar.remoteSessions.tailDegradedHint": "Only the head of the session file was read this time: the title may be outdated (authoritative names are usually appended at the end of the file) or incomplete.",
 	"sidebar.remoteSessions.titleParsing": "Parsing title…",
 	"sidebar.remoteProject.needsAttention": "Needs attention",
 	"sidebar.remoteProject.needsAttentionHint": "This remote project's directory needs re-checking (open the project for details).",

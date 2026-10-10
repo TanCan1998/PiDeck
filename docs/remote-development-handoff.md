@@ -139,7 +139,7 @@ A/B/C 可由不同开发者并行，D 随开发跟进。每块指定一个负责
 1. **root 漂移 → needs-attention 这条接线在生产不可达（已接受为防御性代码）**：漂移发生时 manager 要么不存在、要么已被 discard；`manager` 从不发 `offline`，`disconnected` 只由 `service.disconnect(abort)` 产生且顺带置 `explicitlyDisconnected`（读取在 establish 之前就返回 `SSH_HOST_DISCONNECTED`）。因此**漂移只做到按项目 fail-closed（拒绝读取 + 稳定码），不驱动 needs-attention**；当前**可达**的 needs-attention 触发是重连时 helper 握手 `SSH_HELPER_ROOT_MISMATCH`（FATAL，`tests/sshConnectionManager.test.mjs` 端到端覆盖），且已修好「终态出不来」。下一批两种可选设计（当时明确未实现）：(i) 项目级「root needs attention」标志经 hosts-list/诊断呈现、不动连接状态机；(ii) 复核顺序改为「先验新 root、再丢旧会话」并把 needs-attention 语义收窄到 host 级。
 2. **侧栏列表/导入 UI 未做**：本批只到 main 进程的发现与登记，通道已按契约收口但渲染层无入口（**第四批**）。
 3. **标题是文件名 stem 且 `titleOrigin="fallback"`**：按需头部解析未做，本批只落地 `readHead` 原语。
-4. **覆盖缺口**：pi 自定义 `sessionDir` 不覆盖（远端只扫 `~/.pi/agent/sessions`）；深层嵌套 subagent 布局（`<stem>/<run>/session.jsonl`）不扫（冻结设计只要求两层）；`remotePathAliases` 未读写（命中历史记录时其 `remotePath` 会被本次相对路径改写，alias/冲突事务属 Phase 4）。
+4. **覆盖缺口**：pi 自定义 `sessionDir` 不覆盖（远端只扫 `~/.pi/agent/sessions`；**第六批已覆盖 user-level 设置，边界见第六批章节**）；深层嵌套 subagent 布局（`<stem>/<run>/session.jsonl`）不扫（冻结设计只要求两层）；`remotePathAliases` 未读写（命中历史记录时其 `remotePath` 会被本次相对路径改写，alias/冲突事务属 Phase 4）。
 5. **性能代价**：`fs.list` 不返回 mtime ⇒ 每个候选文件一次 `fs.stat`（≤2000 次、并发 ≤4）；正解是 helper 侧加 `session.list`，而不是在扫描器里编造 mtime。
 6. **真机/Electron 未验收**；POSIX symlink 语义用 Windows fixture 模拟，Linux 上未跑。
 7. **严格跨进程 CAS / 跨 store interlock** 仍未交付（同前两批）。
@@ -161,7 +161,7 @@ A/B/C 可由不同开发者并行，D 随开发跟进。每块指定一个负责
 3. **导入只保证「刷新清单 + 选中」**：远端会话**正文读取**属 Phase 4；选中后正文不可读是主进程既有显式拒绝，不是静默失败。
 4. **「已导入」标记依赖该项目 catalog 已有记录**：远端项目不做本地扫描预热，首次展开时标记可能为空（导入后刷新会补上）。
 5. **`ProjectTree.tsx` 414 行**（目标 ≤400、硬限 600）：本批只增接线；建议后续把远端展开体抽成插槽组件，避免与侧栏其他改动打架。
-6. **覆盖缺口仍在**：pi 自定义 `sessionDir`、深层嵌套 subagent 布局、`remotePathAliases`、严格跨进程 CAS / 跨 store INV-5。
+6. **覆盖缺口仍在**：pi 自定义 `sessionDir`（**第六批已覆盖 user-level 设置；env 与 project 作用域边界见第六批**）、深层嵌套 subagent 布局、`remotePathAliases`、严格跨进程 CAS / 跨 store INV-5。
 7. **64 KiB 头窗口覆盖不到文件尾的权威名**（H1 实现时如实记录）：pi 的权威 `session_info`（`/name`）是**追加在文件尾**的，落在 64 KiB 头窗口之外，所以那类会话会得到 `parsed` 的**弱兜底**（首条 user 文本，与本地管线对无名字行会话的行为一致）或 `fallback`（文件名 stem）。**这是冻结契约（头读 ≤64 KiB）的设计后果，不是缺陷**；要提升覆盖率需要显式修订契约（尾窗口或更大上界），建议作为下一增量单独提出。
 8. **`parsed` 的两种强度需要区分看待**：`titleOrigin="parsed"` 现在同时覆盖「权威名（`session_info` / 旧版私有 `sessionName` 字段）」与「弱兜底（首条 user/assistant 文本）」。理由是不复用下半条本地管线就等于只复用半个；若后续要区分，需要给契约加第三档而不是改这两档的含义。
 
@@ -190,6 +190,34 @@ A/B/C 可由不同开发者并行，D 随开发跟进。每块指定一个负责
 7. **头窗口与尾窗口在 `64 KiB < size < 128 KiB` 时会重叠**：尾窗按冻结算法取「最后 ≤64 KiB」（`offset = max(0, size - maxBytes)`），因此该区间内两窗有重叠（请求总量仍 ≤128 KiB、每段 ≤64 KiB、不读中间段）。要「零重叠」只需把 `offset` 改为 `max(headBytes, size - maxBytes)`（对 10 MiB 这类大文件结果不变）——是纯 I/O 优化、不影响正确性或安全性，**本批按冻结算法实现，未擅自修订契约**。
 8. **尾读失败是静默降级**（best-effort，与本地 `readHeadAndInfer` 同口径）：降级结果仍是诚实的 `inferred`/`fallback`，绝不编造；但若要「尾读失败也上报」，需要给 title 结果加一个「已降级」标记（契约修订），本批不做。
 9. **测试对机器负载敏感**：`sessionScannerSubagents` 的「aborts a hung WSL scan」在多 agent 并发抢 CPU 时可能被 `--test-timeout` 掐掉（单文件跑 102 ms 即绿，`--test-concurrency=1` 全绿）；这是负载/并发度问题，与代码路径无关——集成跑红了**先看这条**再判回归。
+
+### 第六批落地结果与遗留项（实施后核对）
+
+| 块 | 落地位置 | 验证 |
+| --- | --- | --- |
+| J2 pi 自定义 `sessionDir` 覆盖 | `RemoteSessionScanner.resolveSessionRoot`：默认 `<home>/.pi/agent/sessions`；每次 scan/title/register 先做一次**有界配置探测**（root=`<home>/.pi/agent`，`fs.stat`+`fs.read` 读 `settings.json` ≤64 KiB，**不新增 helper op**）。`sessionDir` 合法（展开 `~`、`.`/`..` 规范化、规范化后必须仍在 home 内）⇒ 用它当会话根（自定义目录是**平铺** `*.jsonl`、无 cwd 编码；默认根才有 encoded-cwd 子目录——两种布局走同一条「根级 + 一层子目录」扫描路径）；值不可用 ⇒ 稳定码 `REMOTE_SESSION_SESSION_DIR_INVALID`；配置缺失/读不到/畸形 JSON/超上限截断/是目录 ⇒ 退回默认根（与今天逐字一致）。`remoteSessionId` 仍相对会话根 ⇒ catalog 身份语义不变 | `tests/remoteSessionRootResolution.test.mjs`（10，先红后绿）；独立验证 `tests/remoteSessionRootIsolation.test.mjs`（13） |
+| J1 Electron 功能级真机验收 | 新 `e2e/remoteHostAcceptance.spec.ts`（270 行）+ `e2e/remote-fixtures.ts`：**环境门控**（缺任一凭据整体 skip，Playwright 在 fixture setup 之前就拦下 ⇒ **不启动 Electron**）；隔离 userData 但**刻意不隔离 HOME/USERPROFILE**（产品要用真实 `~/.ssh` 私钥）；主机与指纹只来自环境变量、不进仓库。流程覆盖：加主机 pin → ready → 登记两个远端项目 → 远端会话列表 → 惰性标题（「暂定」只在非 `authoritative` 出现）→ 导入（刷新 + 选中 + 不新建会话不开 Tab）→ 重复导入（`created=false` 区分回执）→ 项目级 root 漂移（A 显示「需处理」，**同主机 B 仍可读且状态仍 ok**） | `tests/remoteAcceptanceSpecGuard.test.mjs`（7 pass / 1 需凭据 skip）；Lead 独立复核：`--list`=1 test、无凭据 `1 skipped` exit 0、并用**进程路径**证明未起 Electron（当时 6 个 electron 进程全属用户自己在跑的 `F:\PiDeck`） |
+| K2 收尾三项 | ① `readHostId` 传输边界收敛到 shared `PROJECT_HOST_ID_PATTERN`（稳定码仍 `REMOTE_SESSION_HOST_ID_INVALID`）；② 标题尾窗改 `offset = max(head.bytes, size - 64 KiB)` **消除头尾重叠**（`RemoteWorkspaceReader` 原语 **0 改动**——零重叠属调用方的 offset 选择，不是原语职责）；③ title 结果新增**可选** `tailDegraded`（只在真降级时出现，旧读取方忽略无碍），一路到侧栏**可见提示**且与「暂定」严格区分 | `tests/remoteHostIdTransportBoundary.test.mjs`（3，**先红 2/3**：非 UUID 原本真能穿过传输边界并发出 `remoteHome` + `withProjectSession`）；零重叠用例（fixture `size=98974`，旧算法重叠 33438 字节）；`remoteSessionsUiState`（20）+ `remoteSessionTitle`（12），含**变异验证**（换文案 / 删 en key 各自转红，还原后 32/32） |
+| K1 跨 store 一致性设计 | 新 `docs/remote-cross-store-consistency-plan.md`（299 行，状态行「设计待评审、未实施」，**无 src 改动**）：§1 今天真实成立的保证 46 条**全部带测试名** + 10 条「今天不成立」；§2 INV-5 拆 5a/5b/5c 并覆盖 7 个操作边界；§3 四个候选方案各自写清「能防住哪种具名交错、代价、**以及防不住什么**」；§4 九条「不做」；§5 对照表；§6 合并门禁（4 个新测试 + 5 条必须先在旧代码上红的反例）；§7 六个待拍板问题 | 脚本核对文档引用的 **102 条测试名无漂移**；8 个跨 store 套件 81/79 pass（2 条 symlink 在 Windows skip）；typecheck 0 |
+
+**pi 证据（本机全局 `@earendil-works/pi-coding-agent@1.0.4`，已由独立验证逐条复核）**：`dist/config.js:491-497`（`getAgentDir() = $PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent")`）、`:511-513`（`getSettingsPath()`）、`:527-528`（`getSessionsDir() = join(getAgentDir(), "sessions")`）；`dist/core/settings-manager.js:499-502`（`getSessionDir() = normalizePath(settings.sessionDir)`）；`dist/core/session-manager.js:290-295`（默认 `join(agentDir, "sessions", "--<encoded-cwd>--")`）、`:713`（自定义目录下 `join(sessionDir, <ts>_<id>.jsonl)`）；`docs/sessions.md:50`（默认 `~/.pi/agent/sessions/` 按 cwd 分组）；`docs/settings.md:64`（相对路径按**会话 cwd** 解析，`PI_CODING_AGENT_SESSION_DIR` / `--session-dir` 覆盖它）；`CHANGELOG:5217`（自定义目录直接当会话目录用、**无 cwd 编码**）；`CHANGELOG:2344`（settings 里的 `sessionDir` 会展开 `~`）。⇒ **未配置时等于 `<home>/.pi/agent/sessions`**，与 G3 硬编根逐字一致。
+
+**为什么相对路径 `sessionDir` 也拒绝（而不是退回默认根）**：pi 的相对路径按**会话自己的 cwd** 解析，单一扫描根在原理上不可能正确；退回默认根会返回**看起来正常但是错的**列表（配了 `sessionDir` 的机器上，自定义目录里的会话会全部消失）——这正是「发现不了比报错更糟」的直接应用。稳定码经 `scan` 的 `{ok:false,code}` 到侧栏错误态（H2 三态），不退化成空列表：`tests/remoteSessionRootResolution.test.mjs` 断言 IPC → `readScanResponse` → 侧栏文案这条链，`tests/remoteSessionScanIsolation.test.mjs` 另锁「上限/码不被吞」。
+
+**K1 的三条核对结论（第六批新增，值得单独记住）**：① 既有基线文档 `docs/remote-host-cross-store-design.md` 说「session catalog 没有写入者」**已经过期**——现在有生产写入者（`RemoteSessionScanner.register`、`ProjectStore.addRemote`），且两者都**没有磁盘 CAS / 互锁**；② INV-1 在生产是**潜伏成立**：全仓库没有任何生产调用者会 retire/disable/updateDraft 主机、没有 `HostRebindCoordinator`、`HostRebindJournal.resume` 没有生产调用者 ⇒ 今天没有悬空引用**不是机制保证，而是退役路径不可达**；③ 唯一具备**跨进程锁 + 磁盘 CAS** 的实体只有 `remote-hosts.json`（`projects.json` 是内存 revision+1，`session-catalog.json` **连 revision 字段都没有**）。
+
+**`tailDegraded` 的强度边界（如实）**：「何时渲染」由**纯判据（`isTitleTailDegraded`）+ 源码三元守卫**两层锁定，**不是真渲染快照**（仓库无 React DOM 装置、`RemoteSessionRow` 未导出；owner 拒绝为测试改动组件公开面）。要做真渲染快照需先导出该行组件或引入渲染装置。
+
+**J1 的沙箱边界（决定谁来执行）**：本执行沙箱**无法启动 Electron**——Playwright 需经**管道**从子进程取 CDP 端点，而沙箱内程序不能开命名管道；证据是仓库既有 `e2e/smoke.spec.ts` 以**完全相同的方式**失败，而 `node_modules/electron/dist/electron.exe --version` 直接运行正常。⇒ J1 的真机流程与「错指纹真红」两条**必须由用户在宿主终端执行**。
+**第六批未完成 / 未验收**：
+1. **远端进程环境不覆盖**：`PI_CODING_AGENT_DIR`（整体挪走 agent 目录）与 `PI_CODING_AGENT_SESSION_DIR`（直接指定会话目录）都是**远端进程环境**——helper 1.6.0 已冻结且没有读 env 的操作，扫描期无法观测。
+2. **project 级 `.pi/settings.json` 不覆盖**：project 作用域是 cwd 相关的（pi 加载顺序在 user 之后），读会话内容前不知道它自己的 cwd。
+3. **每操作 +1 次配置探测**：一次 scan/title/register = 1 次探测会话建立 + 1 次 `fs.stat` + 1 次 ≤64 KiB `fs.read`，再叠加本来那次会话操作；探测 root（`<home>/.pi/agent`）与会话 root 不同时，服务的 helper 会话会随之切换（现有服务语义）。若成为瓶颈，正解是**短 TTL 的按 host 缓存**（本批不做：缓存会让「改了配置看不到新会话」多一个一致性窗口）。
+4. **J1 真机执行未做——第六批唯一未验证的用户可见路径**：见上「J1 的沙箱边界」。必须在宿主终端设置 `PIDECK_E2E_REMOTE_HOST` / `_USER` / `_FINGERPRINT` 后跑 `npx playwright test e2e/remoteHostAcceptance.spec.ts`。**不得用替身证据（纯函数注入、源码级断言）冒充端到端结论。**
+5. **选择器只有源码级证据**：仓库无 DOM 基建，`aria-label` / `.project-group` / `data-remote-session-id` / `.session-row.active` 等未在真实 Electron 里命中过。首次真机跑很可能在某个选择器上失败，属**正常首次调试**；修法是改选择器或夹具，**不放宽断言**。
+6. **K1 §7 两条产品决策待拍板**：5a 是否收窄到「只保证写入侧不产生新悬空引用」；多版本并行写入同一 userData 是否允许（决定要不要真正跨进程锁，而不只是写前复查）。未拍板前 INV-5 保持「设计待评审、未实施」。
+7. `remoteSessionIpc.ts:19` 与 `remoteHostIpc` 各有一份**字面** UUID 正则（取值相同、行为一致），未收敛到同一 import。
+8. **POSIX symlink 语义未验**（本机 Windows）：J2 对越出 home 的路径做的是词法 + 规范化拒绝，真机 symlink 逃逸未验。
 
 ## 4. M1 之后如何推进
 
@@ -221,7 +249,7 @@ node --test tests/remoteHostIpc.test.mjs tests/remoteHostConnectionService.test.
 
 C 对应 `projectStoreCodec.test.mjs`、`projectStoreMigration.test.mjs`、`remoteHostReferenceSources.test.mjs`；B 需更新 `settingsTabLayout.test.mjs` 并补实际交互状态覆盖。格式化仅涉及文件（`node_modules/.bin/biome format --write <files...>`）；集成时运行 `npm run check:format`。纯文档修改检查差异、链接与命令准确性即可。
 
-**测试记录的边界（第四批实施后更新）**：Windows / Node 24.19 上跑的集成集合（remote* + projectStore* + sessionCatalog* + hostRebind* + 侧栏/面板/文案/连接管理器/locationAdapters/workspaceTree/sessionFirstRenderer）：第一批 **512 项 / 505 pass / 2 fail / 5 skip**；第二批 **689 项 / 682 pass / 2 fail / 5 skip**；第三批 **921 项 / 914 pass / 2 fail / 5 skip**；第四批 **991 项 / 984 pass / 2 fail / 5 skip**；第五批 **1040 项 / 1033 pass / 2 fail / 5 skip**。五轮 fail 的**名称与断言完全相同**，就是下面列出的**既有**失败，并已在干净基线 worktree(`f7b18947`) 上逐字复现——所以第二、三、四批均零回归。`npm run typecheck` 与 `npm run check:format`（2173 个文件，无改动）通过。全量 `npm test` 本批未跑（仓库规则：仅跨域大改动或合并前最终确认时跑），因此**没有「全量已全绿」这个结论**。
+**测试记录的边界（第四批实施后更新）**：Windows / Node 24.19 上跑的集成集合（remote* + projectStore* + sessionCatalog* + hostRebind* + 侧栏/面板/文案/连接管理器/locationAdapters/workspaceTree/sessionFirstRenderer）：第一批 **512 项 / 505 pass / 2 fail / 5 skip**；第二批 **689 项 / 682 pass / 2 fail / 5 skip**；第三批 **921 项 / 914 pass / 2 fail / 5 skip**；第四批 **991 项 / 984 pass / 2 fail / 5 skip**；第五批 **1040 项 / 1033 pass / 2 fail / 5 skip**；第六批 **1080 项 / 1072 pass / 2 fail / 6 skip**。六轮 fail 的**名称与断言完全相同**，就是下面列出的**既有**失败，并已在干净基线 worktree(`f7b18947`) 上逐字复现——所以第二、三、四批均零回归。`npm run typecheck` 与 `npm run check:format`（2173 个文件，无改动）通过。全量 `npm test` 本批未跑（仓库规则：仅跨域大改动或合并前最终确认时跑），因此**没有「全量已全绿」这个结论**。
 
 这 2 个既有失败已在**干净基线 worktree（`f7b18947`，不含本批任何改动）上逐字复现**，不是本批引入的回归，而且不能全归为平台原因：
 - `tests/remoteBootstrapSessionIntegration.test.mjs` → `BOOTSTRAP_READY_INVALID`（真实子进程 + frozen entry 握手，两侧同样失败）；

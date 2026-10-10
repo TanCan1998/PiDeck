@@ -47,15 +47,30 @@ function fakeRemote(content, options = {}) {
 		},
 	};
 	const roots = [];
+	const probeRoots = [];
+	// 配置探测阶段（root=<home>/.pi/agent）的替身：没有 settings.json ⇒ 任何请求都「读不到」。
+	const probeSession = {
+		async request() {
+			throw Object.assign(new Error("PATH_NOT_FOUND"), { code: "PATH_NOT_FOUND" });
+		},
+		async cancel() {
+			return { cancelled: true };
+		},
+	};
 	const port = {
 		remoteHome: async () => "/home/dev",
 		async withProjectSession(hostId, root, task) {
+			// J2 的配置探测不产生 frames/roots 记录：既有断言锁的是「会话阶段」的帧预算。
+			if (root === "/home/dev/.pi/agent") {
+				probeRoots.push(root);
+				return { ok: true, value: await task(probeSession) };
+			}
 			roots.push(root);
 			if (options.sessionFailure) return { ok: false, code: options.sessionFailure };
 			return { ok: true, value: await task(session) };
 		},
 	};
-	return { port, frames, roots, session };
+	return { port, frames, roots, session, probeRoots };
 }
 
 /** 把替身的 session.request 适配成 reader 的 port（hostId 在第一位）。 */
@@ -77,10 +92,15 @@ function statsOf(remote) {
 
 /** 一段真实的 JSONL 字节流：头部有首条 user 消息（弱兜底），pad 掉头部 64 KiB，最后追加权威 session_info。 */
 function tailNamedSession(name) {
+	return tailNamedSessionOfSize(name, 200 * 1024);
+}
+
+/** 同上，但可指定目标体积：用来构造 64 KiB < size < 128 KiB 的「两窗本会重叠」区间。 */
+function tailNamedSessionOfSize(name, targetBytes) {
 	const lines = [JSON.stringify({ type: "message", message: { role: "user", content: "first ask" } })];
 	let bytes = lines[0].length + 1;
-	// 必须大于两个窗口之和（128 KiB），这样头窗口与尾窗口互不重叠，能证明尾读真的读了文件末尾。
-	while (bytes < 200 * 1024) {
+	// 默认目标 > 两个窗口之和（128 KiB）：头窗口与尾窗口天然互不重叠。
+	while (bytes < targetBytes) {
 		const filler = JSON.stringify({ type: "message", message: { role: "assistant", content: "x".repeat(1000) } });
 		lines.push(filler);
 		bytes += filler.length + 1;
@@ -95,6 +115,27 @@ test("只有文件尾带权威名（/name 追加）：必须靠有界尾窗口�
 	const remote = fakeRemote(content);
 	const result = await scannerFor(remote).title({ hostId: HOST, remoteSessionId: "ws/tail-named.jsonl" });
 	assert.deepEqual(plain(result), { ok: true, title: "Tail Named", titleOrigin: "authoritative" });
+});
+
+test("头尾窗口零重叠：64 KiB < size < 128 KiB 时尾窗只读头窗没覆盖的那部分", async () => {
+	const content = tailNamedSessionOfSize("Mid Tail Named", 96 * 1024);
+	assert.ok(content.length > REMOTE_WORKSPACE_MAX_HEAD_BYTES, "fixture 必须大于头窗");
+	assert.ok(content.length < 2 * REMOTE_WORKSPACE_MAX_HEAD_BYTES, "fixture 必须落在「尾窗贴尾就会与头窗重叠」的区间");
+	const remote = fakeRemote(content);
+	const result = await scannerFor(remote).title({ hostId: HOST, remoteSessionId: "ws/mid.jsonl" });
+	assert.deepEqual(plain(result), { ok: true, title: "Mid Tail Named", titleOrigin: "authoritative" });
+	const reads = readsOf(remote);
+	assert.equal(reads.length, 2, "头读 + 尾读");
+	const head = reads[0];
+	const tail = reads[1];
+	assert.equal(head.params.offset, 0);
+	assert.equal(head.params.bytes, REMOTE_WORKSPACE_MAX_HEAD_BYTES);
+	assert.equal(tail.params.offset, head.params.offset + head.params.bytes, "尾窗从头窗结束处开始（零重叠）");
+	assert.equal(tail.params.offset + tail.params.bytes, content.length, "尾窗必须读到文件尾（权威名在那里）");
+	assert.ok(tail.params.bytes <= REMOTE_WORKSPACE_MAX_HEAD_BYTES, "每段 ≤64 KiB");
+	assert.ok(head.params.offset + head.params.bytes <= tail.params.offset, "两个区间不重叠");
+	assert.equal(head.params.bytes + tail.params.bytes, content.length, "两窗合起来恰好覆盖整个文件且不重复");
+	assert.equal(statsOf(remote).length, 1, "仍然只有 1 次 sizing stat");
 });
 
 test("尾窗口读取：头部已经有权威名时不再读尾（帧数可证）", async () => {
@@ -122,6 +163,7 @@ test("两段式仍只有 1 次 sizing stat：头读 + 尾读各自字节有界�
 	const remote = fakeRemote(content);
 	const result = await scannerFor(remote).title({ hostId: HOST, remoteSessionId: "ws/tail-named.jsonl" });
 	assert.equal(result.titleOrigin, "authoritative");
+	assert.equal(result.tailDegraded, undefined, "尾读成功时不得出现降级标记");
 	assert.equal(statsOf(remote).length, 1, "尾读复用头读的 size，不再 stat 第二次");
 	const reads = readsOf(remote);
 	assert.equal(reads.length, 2, "一次头读 + 一次尾读");
@@ -135,11 +177,20 @@ test("两段式仍只有 1 次 sizing stat：头读 + 尾读各自字节有界�
 	assert.ok(requested < content.length, "绝不整文件读");
 });
 
-test("尾读失败只降级为头部结果（增益步骤，不把可用标题变成错误）", async () => {
+test("尾读失败：降级为头部结果，但必须如实上报（tailDegraded，不再静默）", async () => {
 	const content = tailNamedSession("Tail Named");
 	const remote = fakeRemote(content, { failReadCall: 2 });
 	const result = await scannerFor(remote).title({ hostId: HOST, remoteSessionId: "ws/tail-named.jsonl" });
-	assert.deepEqual(plain(result), { ok: true, title: "first ask", titleOrigin: "inferred" });
+	// 标题与档位仍是头部那份（诚实降级，不编造），但结果里必须带上「尾读失败」这个事实。
+	assert.deepEqual(plain(result), { ok: true, title: "first ask", titleOrigin: "inferred", tailDegraded: true });
+});
+
+test("头内已有权威名（零尾读）不得带降级标记", async () => {
+	const content = Buffer.from('{"type":"session_info","name":"Head Only"}\n', "utf8");
+	const remote = fakeRemote(content);
+	const result = await scannerFor(remote).title({ hostId: HOST, remoteSessionId: "ws/head-only.jsonl" });
+	assert.deepEqual(plain(result), { ok: true, title: "Head Only", titleOrigin: "authoritative" });
+	assert.equal(readsOf(remote).length, 1, "零尾读");
 });
 
 test("readWindow：有界窗口 + 不整文件读（计数替身）", async () => {

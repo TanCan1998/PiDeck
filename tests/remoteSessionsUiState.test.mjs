@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 import { quickMessageHookHost } from "./helpers/quickMessageHookHost.mjs";
 
@@ -59,6 +60,28 @@ test("扫描失败只认稳定码，上限拒绝与普通失败可区分", () =>
 		assert.equal(REMOTE_SESSION_LIMIT_CODES.has(code), true, code + " 必须在上限码集合里");
 	}
 	assert.equal(REMOTE_SESSION_LIMIT_CODES.has("REMOTE_SESSION_SCAN_FAILED"), false);
+});
+
+test("未知/新出现的扫描失败码走错误态（不是空列表），并如实把码显示出来", () => {
+	// J2 新增 REMOTE_SESSION_SESSION_DIR_INVALID：读取方不认识它也必须按「拒绝」呈现——
+	// 退化成 empty（空列表）就等于把「整次扫描被拒绝」说成「远端没有会话」。
+	const outcome = readScanResponse({ ok: false, code: "REMOTE_SESSION_SESSION_DIR_INVALID" });
+	assert.equal(outcome.kind, "failed");
+	assert.equal(outcome.code, "REMOTE_SESSION_SESSION_DIR_INVALID");
+
+	const controller = createRemoteSessionListController();
+	const generation = controller.start("host-a");
+	assert.equal(controller.settle(generation, outcome), true);
+	assert.equal(controller.getState().phase, "error");
+	assert.notEqual(controller.getState().phase, "empty");
+	assert.equal(controller.getState().errorCode, "REMOTE_SESSION_SESSION_DIR_INVALID");
+	assert.equal([...controller.getState().entries].length, 0);
+
+	// 呈现层：错误态与空态是两段独立渲染，未知码落到带 {code} 的兜底文案里（不吞码）。
+	const section = readFileSync("src/renderer/src/components/sidebar/RemoteSessionsSection.tsx", "utf8");
+	assert.match(section, /t\("sidebar\.remoteSessions\.scanFailed", \{ code \}\)/);
+	assert.match(section, /state\.phase === "error"/);
+	assert.match(section, /state\.phase === "empty"/);
 });
 
 test("列表状态机：旧代次结果作废，切主机不回写", () => {
@@ -534,4 +557,36 @@ test("标题 hook：首帧按需请求不丢、ready 命中缓存不重取、切
 	h.resolve("ws-a/2.jsonl", { ok: true, title: "迟到", titleOrigin: "authoritative" });
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(h.render().statusOf("ws-a/2.jsonl").status, "idle");
+});
+test("K2-3 界面：降级标记与暂定标记是两个独立判据，i18n 两份都有 key", () => {
+	const section = readFileSync("src/renderer/src/components/sidebar/RemoteSessionsSection.tsx", "utf8");
+	const zh = readFileSync("src/renderer/src/i18n/rendererCopy.zh-CN.ts", "utf8");
+	const en = readFileSync("src/renderer/src/i18n/rendererCopy.en-US.ts", "utf8");
+	// i18n 两份都必须有这两个 key（标记 + tooltip），缺一份就是「另一语言静默」。
+	const valueOf = (source, key) => source.match(new RegExp('\\"' + key.replace(/\./g, "\\.") + '\\":\\s*\\"([^\\"]*)\\"'))?.[1];
+	for (const [name, source] of [
+		["zh-CN", zh],
+		["en-US", en],
+	]) {
+		for (const key of ["sidebar.remoteSessions.tailDegraded", "sidebar.remoteSessions.tailDegradedHint"]) {
+			const value = valueOf(source, key);
+			assert.ok(typeof value === "string" && value.length > 0, name + " must define " + key);
+		}
+		// 与「暂定」区分：两个判据的文案不得是同一句（合并成一个词就会红）。
+		assert.notEqual(valueOf(source, "sidebar.remoteSessions.tailDegraded"), valueOf(source, "sidebar.remoteSessions.tentative"), name + " degraded marker must differ from tentative");
+		assert.notEqual(valueOf(source, "sidebar.remoteSessions.tailDegradedHint"), valueOf(source, "sidebar.remoteSessions.tentativeHint"), name + " degraded hint must differ from the tentative hint");
+	}
+	// 判据来自状态模块的唯一出处，而不是组件里再写一遍 origin 词表。
+	assert.match(section, /const tailDegraded = isTitleTailDegraded\(title\);/, "the degraded marker must use the shared predicate");
+	// 只有 tailDegraded 为真才渲染（三元 + : null ⇒ false/缺省什么都不渲染）。
+	// 行首锚定：`title={tailDegraded ? …}` 也含同一片段，不锚定会错抓到暂定分支。
+	const degradedBranch = section.match(/\n[\t ]*\{tailDegraded \?[\s\S]{0,400}?\) : null\}/);
+	assert.ok(degradedBranch, "the degraded marker must be guarded by its own ternary");
+	assert.match(degradedBranch[0], /sidebar\.remoteSessions\.tailDegraded\"/, "the guarded branch must render the degraded marker");
+	assert.doesNotMatch(degradedBranch[0], /sidebar\.remoteSessions\.tentative/, "the degraded branch must not reuse the tentative copy");
+	assert.match(section, /title=\{tailDegraded \? t\("sidebar\.remoteSessions\.tailDegradedHint"\)/, "the tooltip must explain the degraded state");
+	// 反例（合并就红）：暂定分支仍然是 origin 驱动的那个三元，且不得渲染降级文案。
+	const tentativeBranch = section.match(/\n[\t ]*\{tentative \?[\s\S]{0,400}?\) : null\}/);
+	assert.ok(tentativeBranch, "the tentative marker must keep its own branch");
+	assert.doesNotMatch(tentativeBranch[0], /sidebar\.remoteSessions\.tailDegraded/, "the tentative branch must not render the degraded copy");
 });

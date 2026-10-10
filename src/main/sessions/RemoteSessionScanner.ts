@@ -5,6 +5,13 @@
  * 以及**按需解析一条会话的标题**（H1：有界读头部后交给本地标题管线，只读、不写 catalog）。
  * 列表级扫描仍然不做任何内容解析——标题走独立通道；不做侧栏 UI、不做 move/archive/delete（Phase 4/5）。
  *
+ * 会话根（J2）：默认 `<remote home>/.pi/agent/sessions`，但 pi 的 user-level `settings.json` 可以用
+ * `sessionDir` 把它换掉——所以每次操作先做一次**有界配置探测**（root=`<home>/.pi/agent`，读 `settings.json`
+ * ≤64 KiB），配置缺失/读不到/畸形都退回默认根（与历史行为逐字一致），配置里的 `sessionDir` 不可用则给稳定码
+ * 拒绝（理由见 resolveConfiguredSessionDir）。**边界**：`PI_CODING_AGENT_DIR` / `PI_CODING_AGENT_SESSION_DIR`
+ * 是远端进程环境（helper 1.6.0 没有读 env 的操作），project 级 `.pi/settings.json` 取决于会话自己的 cwd
+ * （读内容前不可知）——两者都只做默认根扫描，详见 docs/remote-development-handoff.md 第六批。
+ *
  * 边界与不变量（全部 fail-closed）：
  * - 远端路径**绝不进本地 fs**：本模块不 import node:fs，唯一的远端访问通道是
  *   port.withProjectSession(hostId, 会话根, task) —— 借用它做「任意 root 的受控操作边界」。
@@ -18,7 +25,9 @@
  * 正确做法是在 helper 侧加 session.list，而不是在这里把 mtime 编造出来。
  */
 
-import { REMOTE_HELPER_MAX_HOST_ID_LENGTH, type RemoteHelperListEntry } from "../remote/RemoteHelperContract";
+import { type RemoteHelperListEntry } from "../remote/RemoteHelperContract";
+// hostId 的判据只允许有一份：与持久化边界（readSshSessionLocator / 项目域）共用 shared 的权威取值域。
+import { PROJECT_HOST_ID_PATTERN } from "../../shared/projectLocation";
 import { createRemoteWorkspaceReader, REMOTE_WORKSPACE_MAX_HEAD_BYTES, REMOTE_WORKSPACE_MAX_WINDOW_BYTES, type RemoteWorkspacePort } from "../remote/RemoteWorkspaceReader";
 import { SUBAGENT_ARTIFACTS_DIR_NAME } from "../../shared/sessionIdentity";
 import type { RemoteSessionRegistration, RemoteSessionRegistrationInput } from "./SessionCatalog";
@@ -29,8 +38,21 @@ export type { RemoteSessionEntry, RemoteSessionRegisterResult, RemoteSessionScan
 // H1 新增的按需标题结果同样只转出 shared 契约（remoteSessionWiring 钉的是上一行的既有形状，不合并两行）。
 export type { RemoteSessionTitleResult } from "../../shared/types/remoteHost";
 
-/** 会话根相对远端 home 的固定后缀（冻结设计第 1 条：<remote home>/.pi/agent/sessions）。 */
+/**
+ * 会话根的**默认值**相对远端 home 的后缀（冻结设计第 1 条；pi 未配置 `sessionDir` 时就是它）。
+ * 注意它现在只是默认值：pi 的 user-level settings.json 可以把它换掉（见 REMOTE_SESSION_AGENT_DIR_SUFFIX）。
+ */
 export const REMOTE_SESSION_ROOT_SUFFIX = ".pi/agent/sessions";
+
+/**
+ * pi 的 user-level agent 目录（`<remote home>/.pi/agent`）：`settings.json` 与默认 sessions 目录都在它下面。
+ * 证据：pi 1.0.4 dist/config.js 的 `getAgentDir()`（`$PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent")`）、
+ * `getSettingsPath()` 与 `getSessionsDir()`。
+ */
+export const REMOTE_SESSION_AGENT_DIR_SUFFIX = ".pi/agent";
+
+/** pi 的 user-level 配置文件：J2 扫描期解析 `sessionDir` 的唯一可靠来源（project 作用域取决于会话 cwd）。 */
+export const REMOTE_SESSION_SETTINGS_FILE_NAME = "settings.json";
 
 /**
  * 单次扫描的硬上限（冻结设计第 7 条）。**只能下调，不能调高**（见 readLimits）：
@@ -82,6 +104,8 @@ export const REMOTE_SESSION_CODES = {
 	scanFailed: "REMOTE_SESSION_SCAN_FAILED",
 	/** 按需标题解析过程中出现了不带稳定码的异常。 */
 	titleFailed: "REMOTE_SESSION_TITLE_FAILED",
+	/** 配置里的 sessionDir 不可用（非字符串/相对路径/控制字节/逃出 home）：拒绝而不是静默扫错目录。 */
+	sessionDirInvalid: "REMOTE_SESSION_SESSION_DIR_INVALID",
 } as const;
 
 /** 一条远端会话的列表级元数据；不含任何正文。 */
@@ -139,6 +163,49 @@ export type RemoteSessionScanner = {
 	title(input: { hostId: string; remoteSessionId: string }): Promise<RemoteSessionTitleResult>;
 };
 
+/**
+ * POSIX 路径规范化：折叠空段与 `.`，解析 `..`；试图越过根（`..` 逃逸）或结果为空返回 undefined。
+ * 远端会话根必须是一个确定的绝对路径，规范化是「仍在 home 之内」判定的前提。
+ */
+function normalizePosixPath(path: string): string | undefined {
+	const segments: string[] = [];
+	for (const segment of path.split("/")) {
+		if (segment === "" || segment === ".") continue;
+		if (segment === "..") {
+			if (segments.length === 0) return undefined;
+			segments.pop();
+			continue;
+		}
+		segments.push(segment);
+	}
+	return segments.length === 0 ? undefined : "/" + segments.join("/");
+}
+
+/**
+ * 校验并规范化配置里的 `sessionDir`（返回 undefined = 不可用）。
+ *
+ * 支持 pi 的 `~` 展开语义（CHANGELOG #3514：settings.json 里的 sessionDir 会展开 `~`）；`~user` 需要远端
+ * passwd，helper 没有这个操作 ⇒ 拒绝。**拒绝而不是退回默认根**的理由：pi 的相对路径是按**会话自己的 cwd**
+ * 解析的（pi docs/settings.md:64），单一扫描根在原理上不可能正确；退回默认根会给出「看起来正常但是错的
+ * 列表」——那正是「发现不了比报错更糟」要避免的形态。越出 home 之外的目录同样拒绝（扫描边界只承诺 home 内）。
+ */
+function resolveConfiguredSessionDir(value: string, home: string): string | undefined {
+	const trimmed = value.trim();
+	if (trimmed.length === 0 || trimmed.length > REMOTE_SESSION_MAX_PATH_LENGTH || CONTROL_CHARS.test(trimmed)) return undefined;
+	const expanded = trimmed === "~" ? home : trimmed.startsWith("~/") ? home + trimmed.slice(1) : trimmed;
+	if (!expanded.startsWith("/")) return undefined;
+	const normalized = normalizePosixPath(expanded);
+	if (normalized === undefined) return undefined;
+	if (normalized !== home && !normalized.startsWith(home + "/")) return undefined;
+	return normalized;
+}
+
+/** home 判据与 G3 逐字一致（绝对 POSIX、长度受限、无控制字节），额外去掉尾部斜杠。 */
+function readRemoteHome(value: unknown): string | undefined {
+	if (typeof value !== "string" || value.length === 0 || value.length > REMOTE_SESSION_MAX_PATH_LENGTH || CONTROL_CHARS.test(value) || !value.startsWith("/")) return undefined;
+	return value === "/" ? "/" : value.replace(/\/+$/, "");
+}
+
 /** 一个码就是一个码，绝不是自由文本。 */
 const STABLE_CODE = /^[A-Z][A-Z0-9_]{2,63}$/;
 /** 远端拒绝控制字节；这里也不把它们当成词汇的一部分。 */
@@ -160,10 +227,17 @@ function stableCodeOf(error: unknown): string | undefined {
 	return undefined;
 }
 
-/** hostId 要在发帧前就能当诊断身份与传输键用；非法值不回显。 */
+/**
+ * hostId 要在发帧前就能当诊断身份与传输键用；非法值不回显。
+ *
+ * K2-1：判据收敛到 shared 的 `PROJECT_HOST_ID_PATTERN`——hostId 只可能由 `RemoteHostStore` 用
+ * `randomUUID()` 生成（持久化边界、codec、pin、诊断、IPC 全部只接受这一形状）。以前这里只要求
+ * 「非空 ≤64 无控制字节」，于是非 UUID 会先打一次远端往返，直到写 catalog 才以
+ * `REMOTE_SESSION_IDENTITY_INVALID` 拒绝：同一个坏输入在两个边界得到两种结论，且失败点更靠后。
+ * 现在两个边界同判据，稳定码仍是 `REMOTE_SESSION_HOST_ID_INVALID`。
+ */
 function readHostId(value: unknown): string | undefined {
-	if (typeof value !== "string" || value.length === 0 || value.length > REMOTE_HELPER_MAX_HOST_ID_LENGTH || CONTROL_CHARS.test(value)) return undefined;
-	return value;
+	return typeof value === "string" && PROJECT_HOST_ID_PATTERN.test(value) ? value : undefined;
 }
 
 /**
@@ -266,16 +340,65 @@ export function createRemoteSessionScanner(options: RemoteSessionScannerOptions)
 	const limits: RemoteSessionScannerLimits = parsedLimits;
 	const { port, catalog, projectIdForHost } = options;
 
-	/** 会话根 = <remote home>/.pi/agent/sessions；home 不是绝对 POSIX 路径就 fail closed。 */
-	async function resolveSessionRoot(hostId: string): Promise<string | undefined> {
+	/**
+	 * 解析会话根（J2，供 scan / title / register 共用）：
+	 * home（握手）→ <home>/.pi/agent/settings.json 的 `sessionDir`（有界读，≤64 KiB）→ 默认 <home>/.pi/agent/sessions。
+	 *
+	 * 三种结果分得很清：
+	 * - 配置**缺失 / 读不到 / 不是文件 / 畸形 JSON / 截断** ⇒ 默认根（与今天行为逐字一致，不让扫描整体失败）；
+	 * - 配置里的 `sessionDir` **不可用**（非字符串、相对路径、控制字节、逃出 home）⇒ 稳定码
+	 *   REMOTE_SESSION_SESSION_DIR_INVALID，**不退回默认根**：那会在配了自定义目录的机器上给出看起来正常但错的列表；
+	 * - 合法（含 `~` 展开与 `.`/`..` 规范化）⇒ 用它当会话根。
+	 *
+	 * 代价（如实记录）：一次操作 = 1 次配置探测（root=<home>/.pi/agent 的一次 withProjectSession + 1 stat + 1 次 ≤64 KiB read）
+	 * + 1 次真正的会话操作；两次的 root 不同会让服务的 helper 会话切换（现有服务语义）。
+	 */
+	async function resolveSessionRoot(hostId: string): Promise<{ readonly ok: true; readonly root: string } | { readonly ok: false; readonly code: string }> {
 		let home: unknown;
 		try {
 			home = await port.remoteHome(hostId);
 		} catch {
-			return undefined;
+			return { ok: false, code: REMOTE_SESSION_CODES.homeUnavailable };
 		}
-		if (typeof home !== "string" || home.length === 0 || home.length > REMOTE_SESSION_MAX_PATH_LENGTH || CONTROL_CHARS.test(home) || !home.startsWith("/")) return undefined;
-		return home.replace(/\/+$/, "") + "/" + REMOTE_SESSION_ROOT_SUFFIX;
+		const homeDir = readRemoteHome(home);
+		if (homeDir === undefined) return { ok: false, code: REMOTE_SESSION_CODES.homeUnavailable };
+		const configured = await readConfiguredSessionDir(hostId, homeDir);
+		if (!configured.ok) return configured;
+		return { ok: true, root: configured.sessionDir ?? homeDir + "/" + REMOTE_SESSION_ROOT_SUFFIX };
+	}
+
+	/**
+	 * 读 user-level `settings.json` 并取出 `sessionDir`（pi 1.0.4 证据见模块常量注释）。
+	 * 读不到/非文件/畸形/非对象 JSON 都返回 `{ ok: true }`（= 未配置 ⇒ 默认根）。
+	 */
+	async function readConfiguredSessionDir(hostId: string, home: string): Promise<{ readonly ok: true; readonly sessionDir?: string } | { readonly ok: false; readonly code: string }> {
+		let raw: string | undefined;
+		try {
+			const outcome = await port.withProjectSession(hostId, home + "/" + REMOTE_SESSION_AGENT_DIR_SUFFIX, async (session) => {
+				const reader = createRemoteWorkspaceReader({ port: sessionPort(session, hostId) });
+				const head = await reader.readHead(hostId, REMOTE_SESSION_SETTINGS_FILE_NAME, REMOTE_WORKSPACE_MAX_HEAD_BYTES);
+				// 配置可能截断多字节字符：U+FFFD 落在字符串里会让 JSON.parse 失败，于是按「未配置」处理。
+				return new TextDecoder().decode(head.content);
+			});
+			if (outcome.ok) raw = outcome.value;
+		} catch {
+			// 不存在 / 不是普通文件 / 权限 / 传输失败：一律按「未配置」处理（今天就是扫默认根）。
+			raw = undefined;
+		}
+		if (raw === undefined) return { ok: true };
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(raw);
+		} catch {
+			return { ok: true };
+		}
+		if (!isRecord(parsed)) return { ok: true };
+		const value = parsed.sessionDir;
+		// pi 的判据是 `sessionDir ? normalizePath(sessionDir) : sessionDir`：falsy（含空串）等于未配置。
+		if (value === undefined || value === null || value === "") return { ok: true };
+		if (typeof value !== "string") return { ok: false, code: REMOTE_SESSION_CODES.sessionDirInvalid };
+		const sessionDir = resolveConfiguredSessionDir(value, home);
+		return sessionDir === undefined ? { ok: false, code: REMOTE_SESSION_CODES.sessionDirInvalid } : { ok: true, sessionDir };
 	}
 
 	/**
@@ -335,8 +458,9 @@ export function createRemoteSessionScanner(options: RemoteSessionScannerOptions)
 		async scan(hostId) {
 			const host = readHostId(hostId);
 			if (host === undefined) return { ok: false, code: REMOTE_SESSION_CODES.hostIdInvalid };
-			const root = await resolveSessionRoot(host);
-			if (root === undefined) return { ok: false, code: REMOTE_SESSION_CODES.homeUnavailable };
+			const resolvedRoot = await resolveSessionRoot(host);
+			if (!resolvedRoot.ok) return { ok: false, code: resolvedRoot.code };
+			const root = resolvedRoot.root;
 			try {
 				const outcome = await port.withProjectSession(host, root, (session) => collectEntries(host, session));
 				// withProjectSession 的建立失败（未连接/已断开）原样转述它自己的稳定码。
@@ -355,8 +479,9 @@ export function createRemoteSessionScanner(options: RemoteSessionScannerOptions)
 			if (catalog === undefined) return { ok: false, code: REMOTE_SESSION_CODES.catalogUnavailable };
 			const projectId = projectIdForHost?.(host);
 			if (typeof projectId !== "string" || projectId.length === 0) return { ok: false, code: REMOTE_SESSION_CODES.projectUnresolved };
-			const root = await resolveSessionRoot(host);
-			if (root === undefined) return { ok: false, code: REMOTE_SESSION_CODES.homeUnavailable };
+			const resolvedRoot = await resolveSessionRoot(host);
+			if (!resolvedRoot.ok) return { ok: false, code: resolvedRoot.code };
+			const root = resolvedRoot.root;
 			try {
 				// 登记前先在远端确认这条 id 现在仍是一个普通文件：远端 id 不能凭空编造。
 				const outcome = await port.withProjectSession(host, root, (session) => createRemoteWorkspaceReader({ port: sessionPort(session, host) }).stat(host, remoteSessionId));
@@ -375,8 +500,9 @@ export function createRemoteSessionScanner(options: RemoteSessionScannerOptions)
 			if (host === undefined) return { ok: false, code: REMOTE_SESSION_CODES.hostIdInvalid };
 			const remoteSessionId = readRemoteSessionId(input?.remoteSessionId);
 			if (remoteSessionId === undefined) return { ok: false, code: REMOTE_SESSION_CODES.idInvalid };
-			const root = await resolveSessionRoot(host);
-			if (root === undefined) return { ok: false, code: REMOTE_SESSION_CODES.homeUnavailable };
+			const resolvedRoot = await resolveSessionRoot(host);
+			if (!resolvedRoot.ok) return { ok: false, code: resolvedRoot.code };
+			const root = resolvedRoot.root;
 			try {
 				// 只读：整次解析在受控 root 内完成。帧预算 = 1 次 sizing stat + 头读 +（仅在头不足时）尾读，
 				// 每段各自 ≤64 KiB；刻意不接收也不需要 catalog —— 标题通道不写盘（写盘仍只属于 register）。
@@ -387,31 +513,38 @@ export function createRemoteSessionScanner(options: RemoteSessionScannerOptions)
 					const headText = new TextDecoder().decode(head.content);
 					const headInference = inferSessionTitleFromHeadText(headText);
 					// 头内已经有权威名（session_info 或旧版私有 sessionName 行）就够了：不读尾。
-					if (isAuthoritativeTitle(headInference)) return headInference;
+					if (isAuthoritativeTitle(headInference)) return { inference: headInference, tailDegraded: false };
 					// 头已经覆盖整个文件（size ≤ 头上限）：尾窗口就是同一段内容，不重复读。
-					if (head.size <= REMOTE_WORKSPACE_MAX_HEAD_BYTES) return headInference;
+					if (head.size <= REMOTE_WORKSPACE_MAX_HEAD_BYTES) return { inference: headInference, tailDegraded: false };
 					// pi 的 `/name` 是**追加在文件尾**的，所以只有头不足时才补一次有界尾窗口。
 					// 尾读复用头读的 size ⇒ 全程只有 1 次 sizing stat；尾读是增益步骤：失败降级为头部结果
 					// （与本地 readHeadAndInfer 的 best-effort 口径一致），而头读失败仍然按稳定码拒绝——
 					// 那时连文件是否存在都没有证据。
 					try {
-						const offset = Math.max(0, head.size - REMOTE_WORKSPACE_MAX_WINDOW_BYTES);
+						// 零重叠（K2-2）：尾窗起点取**头窗结束处**与「贴住文件尾」两者中更靠后的一个。
+						// size > 128 KiB 时与原来一致（就是最后 ≤64 KiB）；64 KiB < size < 128 KiB 时只读头窗
+						// 没覆盖的那段，不再重复传输头窗覆盖过的字节。
+						const offset = Math.max(head.bytes, head.size - REMOTE_WORKSPACE_MAX_WINDOW_BYTES);
 						const tail = await reader.readWindow(host, remoteSessionId, { offset, maxBytes: REMOTE_WORKSPACE_MAX_WINDOW_BYTES, size: head.size });
-						if (tail.bytes === 0) return headInference;
+						if (tail.bytes === 0) return { inference: headInference, tailDegraded: false };
 						// 同一套解析器跑 head + tail（本地 readHeadAndInfer 也是把两个窗口拼起来解析一次）：
 						// 权威名优先，弱兜底仍取最早一条 user 文本（头窗口在前）。
-						return inferSessionTitleFromHeadText(headText + "\n" + new TextDecoder().decode(tail.content));
+						return { inference: inferSessionTitleFromHeadText(headText + "\n" + new TextDecoder().decode(tail.content)), tailDegraded: false };
 					} catch {
-						return headInference;
+						// 尾读失败**不再静默**（K2-3）：标题与档位仍是头部那份（诚实降级、绝不编造），
+						// 但把「尾窗没读到」这件事如实带给调用方与界面。
+						return { inference: headInference, tailDegraded: true };
 					}
 				});
 				if (!outcome.ok) return { ok: false, code: outcome.code };
-				const inferred = outcome.value;
+				const { inference, tailDegraded } = outcome.value;
+				// tailDegraded 只在**真的降级**时出现（缺省即正常）：不给 shared 契约与既有 deepEqual 加噪声。
+				const degraded = tailDegraded ? { tailDegraded: true } : {};
 				// 解析不出绝不编造：强制 fallback 到文件名 stem（与 G3 的暂定标题同一取值）。
-				if (inferred.name === undefined) return { ok: true, title: titleFromRemoteSessionId(remoteSessionId), titleOrigin: "fallback" };
+				if (inference.name === undefined) return { ok: true, title: titleFromRemoteSessionId(remoteSessionId), titleOrigin: "fallback", ...degraded };
 				// 档位如实区分（口径冻结 authoritative/inferred/fallback）：来自名字字段 = authoritative
 				// （含旧版私有 sessionName 行——本地 scannedTitleOrigin 对同一判据落 manual）；首条消息弱兜底 = inferred。
-				return { ok: true, title: inferred.name, titleOrigin: isAuthoritativeTitle(inferred) ? "authoritative" : "inferred" };
+				return { ok: true, title: inference.name, titleOrigin: isAuthoritativeTitle(inference) ? "authoritative" : "inferred", ...degraded };
 			} catch (error) {
 				return { ok: false, code: stableCodeOf(error) ?? REMOTE_SESSION_CODES.titleFailed };
 			}

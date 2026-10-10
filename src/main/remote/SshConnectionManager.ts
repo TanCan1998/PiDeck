@@ -279,6 +279,9 @@ const FATAL_CODES = new Set([
 	// A bundle that answers another protocol version and an attempt without a verified bootstrap result
 	// are both unfixable by retrying: only a fresh bootstrap or a corrected caller can change them.
 	"SSH_HELPER_PROTOCOL_MISMATCH",
+	// A helper that cannot serve a required operation was deployed from a verified content-addressed bundle,
+	// so reconnecting answers the same build with the same gap: the fix is a redeploy/upgrade, not a retry.
+	"SSH_HELPER_CAPABILITY_MISSING",
 	// A root mismatch is fixed per session: the helper resolved its boundary once at startup, so retrying
 	// the same session would produce the same answer. The user has to act (re-confirm the browse root).
 	"SSH_HELPER_ROOT_MISMATCH",

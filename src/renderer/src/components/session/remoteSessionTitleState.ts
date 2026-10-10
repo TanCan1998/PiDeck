@@ -23,16 +23,41 @@ export function isProvisionalTitleOrigin(origin: RemoteSessionTitleOrigin | null
 	return origin !== "authoritative";
 }
 
-export type RemoteSessionTitleOutcome = { kind: "ok"; title: string; origin: RemoteSessionTitleOrigin } | { kind: "unwired" } | { kind: "failed"; code: string } | { kind: "rejected" };
+/**
+ * 「尾窗口没读到」判据（K2-3），与 `isProvisionalTitleOrigin` 是**两个独立**判据，不得合并：
+ * - 暂定说的是「标题不是权威来源」（inferred/fallback/未取到）；
+ * - 降级说的是「这次没看到文件尾，权威名可能在尾部」——标题本身仍可能是 authoritative。
+ * entry 在 begin/settle/restore 都归一过 tailDegraded，所以这里只可能是 boolean。
+ */
+export function isTitleTailDegraded(entry: RemoteSessionTitleEntry): boolean {
+	return entry.tailDegraded === true;
+}
+
+export type RemoteSessionTitleOutcome =
+	| {
+			kind: "ok";
+			title: string;
+			origin: RemoteSessionTitleOrigin;
+			/**
+			 * K2-3：主进程尾窗口读取失败时会带这个标记——标题仍是头部窗口那份（诚实降级），
+			 * 但「没看到文件尾」这件事必须留在状态里，界面才有机会如实提示。缺省即正常。
+			 */
+			tailDegraded: boolean;
+	  }
+	| { kind: "unwired" }
+	| { kind: "failed"; code: string }
+	| { kind: "rejected" };
 
 export type RemoteSessionTitleEntry = {
 	status: "idle" | "loading" | "ready" | "unavailable" | "failed";
 	title: string | null;
 	origin: RemoteSessionTitleOrigin | null;
 	code: string | null;
+	/** 已降级（尾窗口没读到）：`ready` 时才有意义；其余状态恒为 false。 */
+	tailDegraded: boolean;
 };
 
-const IDLE_ENTRY: RemoteSessionTitleEntry = { status: "idle", title: null, origin: null, code: null };
+const IDLE_ENTRY: RemoteSessionTitleEntry = { status: "idle", title: null, origin: null, code: null, tailDegraded: false };
 
 /** 一个码就是一个码，绝不是自由文本。 */
 const STABLE_CODE = /^[A-Z][A-Z0-9_]{2,63}$/;
@@ -55,7 +80,10 @@ export function readTitleResponse(raw: unknown): RemoteSessionTitleOutcome {
 	if (typeof title !== "string" || title.length === 0 || title.length > MAX_TITLE_LENGTH || CONTROL_CHARS.test(title)) return { kind: "rejected" };
 	const origin = raw.titleOrigin;
 	if (origin !== "authoritative" && origin !== "inferred" && origin !== "fallback") return { kind: "rejected" };
-	return { kind: "ok", title, origin };
+	// tailDegraded 是可选布尔：缺省=false；别的类型属于读不懂（不猜、也不静默降级）。
+	const tailDegraded = raw.tailDegraded;
+	if (tailDegraded !== undefined && typeof tailDegraded !== "boolean") return { kind: "rejected" };
+	return { kind: "ok", title, origin, tailDegraded: tailDegraded === true };
 }
 
 export type RemoteSessionTitleController = {
@@ -96,15 +124,15 @@ export function createRemoteSessionTitleController(): RemoteSessionTitleControll
 			if (existing !== undefined && (existing.status === "loading" || existing.status === "ready")) return null;
 			const generation = ++sequence;
 			generations.set(remoteSessionId, generation);
-			entries.set(remoteSessionId, { status: "loading", title: null, origin: null, code: null });
+			entries.set(remoteSessionId, { status: "loading", title: null, origin: null, code: null, tailDegraded: false });
 			return generation;
 		},
 		settle(generation, nextHostId, remoteSessionId, outcome) {
 			if (nextHostId !== hostId || generations.get(remoteSessionId) !== generation) return false;
-			if (outcome.kind === "ok") entries.set(remoteSessionId, { status: "ready", title: outcome.title, origin: outcome.origin, code: null });
-			else if (outcome.kind === "unwired") entries.set(remoteSessionId, { status: "unavailable", title: null, origin: null, code: null });
-			else if (outcome.kind === "failed") entries.set(remoteSessionId, { status: "failed", title: null, origin: null, code: outcome.code });
-			else entries.set(remoteSessionId, { status: "failed", title: null, origin: null, code: null });
+			if (outcome.kind === "ok") entries.set(remoteSessionId, { status: "ready", title: outcome.title, origin: outcome.origin, code: null, tailDegraded: outcome.tailDegraded === true });
+			else if (outcome.kind === "unwired") entries.set(remoteSessionId, { status: "unavailable", title: null, origin: null, code: null, tailDegraded: false });
+			else if (outcome.kind === "failed") entries.set(remoteSessionId, { status: "failed", title: null, origin: null, code: outcome.code, tailDegraded: false });
+			else entries.set(remoteSessionId, { status: "failed", title: null, origin: null, code: null, tailDegraded: false });
 			return true;
 		},
 		reset() {
@@ -118,7 +146,8 @@ export function createRemoteSessionTitleController(): RemoteSessionTitleControll
 			entries.clear();
 			for (const [remoteSessionId, entry] of Object.entries(restored)) {
 				if (entry.status === "loading") continue;
-				entries.set(remoteSessionId, { ...entry });
+				// 快照可能来自旧版本（没有 tailDegraded 字段）：缺省归一成 false，绝不让它变成 undefined。
+				entries.set(remoteSessionId, { ...entry, tailDegraded: entry.tailDegraded === true });
 			}
 		},
 	};

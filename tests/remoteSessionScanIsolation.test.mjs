@@ -262,6 +262,20 @@ function scannerHarness(options = {}) {
 		remoteHome: async () => (typeof options.home === "function" ? options.home() : Object.hasOwn(options, "home") ? options.home : HOME),
 		async withProjectSession(hostId, root, task) {
 			sessionCalls += 1;
+			// J2：会话根解析会先用 root=<home>/.pi/agent 探测 settings.json。这份 fixture 没有该文件，
+			// 所以探测固定答 PATH_NOT_FOUND ⇒ 退回默认根；探测不记 roots/frames，下面这些「会话阶段」
+			// 断言（根来自握手 home、上限在对应 I/O 之前、不读正文）保持原意。
+			if (root === HOME + "/.pi/agent") {
+				const probe = {
+					async request() {
+						throw Object.assign(new Error("PATH_NOT_FOUND"), { code: "PATH_NOT_FOUND" });
+					},
+					async cancel() {
+						return { cancelled: true };
+					},
+				};
+				return { ok: true, value: await task(probe) };
+			}
 			roots.push(root);
 			if (options.establishFails !== undefined) return { ok: false, code: options.establishFails };
 			return { ok: true, value: await task(remote.session) };

@@ -234,7 +234,11 @@ export type RemoteSessionScanResult = { ok: true; entries: RemoteSessionEntry[] 
  * - `"fallback"`：文件名 stem 兜底（解析不出时**绝不编造**）。
  *
  * 界面据此决定是否标注「暂定」：只有 `authoritative` 是会话的真实名字。
+ *
+ * `tailDegraded`（K2-3）如实上报「尾窗口读取失败」：标题与档位仍是头部窗口那份（诚实降级、绝不编造），
+ * 但调用方/界面必须能知道「这次没有看到文件尾」——权威名可能就藏在尾窗口里。只在真的降级时出现，
+ * 缺省（undefined）即正常；旧读取方忽略这个字段也不会把它当错误。
  */
-export type RemoteSessionTitleResult = { ok: true; title: string; titleOrigin: "authoritative" | "inferred" | "fallback" } | { ok: false; code: string };
+export type RemoteSessionTitleResult = { ok: true; title: string; titleOrigin: "authoritative" | "inferred" | "fallback"; tailDegraded?: boolean } | { ok: false; code: string };
 
 export type RemoteSessionRegisterResult = { ok: true; sessionId: string; created: boolean; remoteSessionId: string; remotePath: string } | { ok: false; code: string };

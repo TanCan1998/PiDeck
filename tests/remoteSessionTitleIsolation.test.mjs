@@ -60,10 +60,25 @@ function titleHarness(options = {}) {
 			return { cancelled: true };
 		},
 	};
+	// J2 的配置探测阶段（root=<home>/.pi/agent）：这份 fixture 没有 settings.json，所以任何请求都「读不到」。
+	// 探测不产生 frames 记录，既有「会话阶段」的帧断言（1 stat + 头/尾窗口）保持原意。
+	const probeRoots = [];
+	const probeSession = {
+		async request() {
+			throw Object.assign(new Error("PATH_NOT_FOUND"), { code: "PATH_NOT_FOUND" });
+		},
+		async cancel() {
+			return { cancelled: true };
+		},
+	};
 	const port = {
 		remoteHome: async () => (Object.hasOwn(options, "home") ? options.home : HOME),
 		async withProjectSession(hostId, root, task) {
 			if (options.establishFails !== undefined) return { ok: false, code: options.establishFails };
+			if (root === HOME + "/.pi/agent") {
+				probeRoots.push(root);
+				return { ok: true, value: await task(probeSession) };
+			}
 			frames.push({ method: "withProjectSession", params: { hostId, root } });
 			return { ok: true, value: await task(session) };
 		},
@@ -92,7 +107,7 @@ function titleHarness(options = {}) {
 	// The scanner is the layer the IPC handler calls into, so the same harness drives either one. It is built
 	// WITHOUT a catalog on purpose: the title path must not need one.
 	const scanner = createRemoteSessionScanner({ port });
-	return { handlers, frames, reads, stats, catalogCalls, session, scanner, port };
+	return { handlers, frames, reads, stats, catalogCalls, session, scanner, port, probeRoots };
 }
 
 async function titleOf(harness, hostId, remoteSessionId) {
@@ -399,9 +414,12 @@ test("title fetching is lazy, per row and host-scoped", () => {
 });
 
 test("title responses are narrowed, and unwired/failed states stay distinct", () => {
-	assert.deepEqual(plain(readTitleResponse({ ok: true, title: "T", titleOrigin: "authoritative" })), { kind: "ok", title: "T", origin: "authoritative" });
-	assert.deepEqual(plain(readTitleResponse({ ok: true, title: "T", titleOrigin: "inferred" })), { kind: "ok", title: "T", origin: "inferred" });
-	assert.deepEqual(plain(readTitleResponse({ ok: true, title: "T", titleOrigin: "fallback" })), { kind: "ok", title: "T", origin: "fallback" });
+	// K2-3 之后 ok 分支多了一个**归一化的** tailDegraded（缺省=false）：三档 origin 的收窄语义一字未变。
+	assert.deepEqual(plain(readTitleResponse({ ok: true, title: "T", titleOrigin: "authoritative" })), { kind: "ok", title: "T", origin: "authoritative", tailDegraded: false });
+	assert.deepEqual(plain(readTitleResponse({ ok: true, title: "T", titleOrigin: "inferred" })), { kind: "ok", title: "T", origin: "inferred", tailDegraded: false });
+	assert.deepEqual(plain(readTitleResponse({ ok: true, title: "T", titleOrigin: "fallback" })), { kind: "ok", title: "T", origin: "fallback", tailDegraded: false });
+	assert.deepEqual(plain(readTitleResponse({ ok: true, title: "T", titleOrigin: "authoritative", tailDegraded: true })), { kind: "ok", title: "T", origin: "authoritative", tailDegraded: true }, "降级标记必须原样携带");
+	assert.equal(readTitleResponse({ ok: true, title: "T", titleOrigin: "authoritative", tailDegraded: 1 }).kind, "rejected", "非布尔 tailDegraded 是读不懂");
 	assert.deepEqual(plain(readTitleResponse({ ok: false, code: "REMOTE_SESSION_HOME_UNAVAILABLE" })), { kind: "failed", code: "REMOTE_SESSION_HOME_UNAVAILABLE" });
 	// 空标题、未知档位、已废止的旧档位字面量（"parsed"）、缺档位、坏码：全都是「读不懂」，必须拒绝。
 	for (const raw of [{ ok: true, title: "", titleOrigin: "authoritative" }, { ok: true, title: "T", titleOrigin: "guess" }, { ok: true, title: "T", titleOrigin: "parsed" }, { ok: true, title: "T" }, { ok: false, code: "boom" }, null]) {

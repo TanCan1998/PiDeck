@@ -233,7 +233,12 @@ function titleHarness(files, options = {}) {
 		remoteHome: async () => HOME,
 		async withProjectSession(hostId, root, task) {
 			void hostId;
-			assert.equal(root, options.expectedRoot ?? SESSION_ROOT);
+			// J2: the scanner probes <home>/.pi/agent for settings.json before it resolves the session root.
+			// This harness has no settings file, so the probe answers PATH_NOT_FOUND (the scanner reads that as
+			// "unconfigured") and the default session root is used - and the probe contributes no frames to the
+			// window counts asserted below.
+			if (root === HOME + "/.pi/agent") return { ok: false, code: "PATH_NOT_FOUND" };
+			assert.equal(root, options.expectedRoot ?? SESSION_ROOT, "unexpected session root");
 			return { ok: true, value: await task(session) };
 		},
 	};

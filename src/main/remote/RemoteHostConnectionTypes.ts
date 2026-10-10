@@ -35,6 +35,19 @@ export type SshProcessExit = {
 };
 
 /**
+ * How long a launched process may live, stated per request (plan §3.6 of the remote Phase 4 design).
+ *
+ * `command` (the default when the field is absent) is a one-shot: the launcher owns a wall-clock deadline
+ * (`timeoutMs`, default 30 s, clamped to SSH_LAUNCHER_MAX_TIMEOUT_MS) and force-kills at it. `session` is a
+ * control or agent session that must be able to outlive any such budget: no deadline timer is armed at all,
+ * `timeoutMs` must be omitted, and the process ends only through its paired stop path, a spawn failure, an
+ * output/line budget violation, or ssh exiting on its own (our own ServerAliveInterval/ServerAliveCountMax
+ * arguments are what notice a peer that stopped answering). Its owner - the connection machine here, a
+ * runner lease for agent sessions - is responsible for converging it.
+ */
+export type SshLauncherLifetime = "command" | "session";
+
+/**
  * A launch request always carries the freshly preflighted pinned invocation, so the process can
  * only use the absolute OpenSSH path and sanitized environment the route check approved.
  */
@@ -43,6 +56,12 @@ export type SshLauncherRequest = {
 	generation: number;
 	invocation: PinnedSshInvocation;
 	timeoutMs?: number;
+	/**
+	 * Lifetime policy of this process; absent means `command`. A `session` request must not carry
+	 * `timeoutMs`: a hidden wall-clock budget is worse than none, because the caller would believe the
+	 * session is bounded while it is not (the launcher refuses that combination outright).
+	 */
+	lifetime?: SshLauncherLifetime;
 	/** Cap for *unconsumed* output: bytes handed to a line subscriber stop counting against it. */
 	maxOutputBytes?: number;
 	/** Longest single line a stream may accumulate without a newline before the process is killed. */

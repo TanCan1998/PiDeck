@@ -162,6 +162,8 @@ export const zhCN = {
 	"sidebar.remoteSessions.catalogUnavailable": "本地会话目录不可用，无法登记。",
 	"sidebar.remoteSessions.tentative": "暂定",
 	"sidebar.remoteSessions.tentativeHint": "标题不是权威来源（可能来自首条消息的弱推断，或退回文件名），请以会话内容为准。",
+	"sidebar.remoteSessions.tailDegraded": "尾部未读取",
+	"sidebar.remoteSessions.tailDegradedHint": "本次只读到了会话文件头部：标题可能不是最新的（权威名通常追加在文件尾），也可能不完整。",
 	"sidebar.remoteSessions.titleParsing": "正在解析标题…",
 	"sidebar.remoteProject.needsAttention": "需处理",
 	"sidebar.remoteProject.needsAttentionHint": "这个远端项目的目录需要复核（打开项目查看详情）。",
