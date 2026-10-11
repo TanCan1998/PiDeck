@@ -193,6 +193,7 @@ import { shouldAutoRegisterForeignCwd } from "./projects/projectPathPolicy";
 import { defaultPathCheck } from "./projects/projectPresence";
 import { FileSystemService } from "./fs/FileSystemService";
 import { AgentManager } from "./pi/AgentManager";
+import { createRemoteRuntimePort } from "./pi/remoteRuntimePort";
 import { PiProcess } from "./pi/PiProcess";
 import { PiModelCapabilityCache, watchPiConfigDirectory } from "./pi/PiModelCapabilityCache";
 // 生图消息不走 Agent 消息流，改名前需判断标题是否仍是占位名
@@ -265,7 +266,7 @@ import { registerProjectsIpc } from "./ipc/projectsIpc";
 import { registerRemoteHostIpc } from "./ipc/remoteHostIpc";
 import { registerRemoteProjectIpc } from "./ipc/remoteProjectIpc";
 import { registerRemoteSessionIpc } from "./ipc/remoteSessionIpc";
-import { createRemoteHostConnectionService } from "./remote/RemoteHostConnectionService";
+import { createRemoteHostConnectionService, type RemoteHostConnectionService } from "./remote/RemoteHostConnectionService";
 import { createSshClientRuntime, resolvePosixSshClient } from "./remote/SshClientRuntime";
 import { matchRemoteSessionProject } from "./remote/remoteSessionProjectMatch";
 import { openRemoteHostCatalogView } from "./remote/RemoteHostCatalogView";
@@ -395,6 +396,14 @@ let resourceImportManager: ResourceImportManager;
 let webServiceManager: WebServiceManager;
 let terminalManager: TerminalSessionManager;
 let petSystem: PetSystem | null = null;
+/**
+ * 远端连接服务的按需访问器（Phase 4 P4.2）。
+ *
+ * 由 `registerIpc` 在装配远端 IPC 时登记：服务是实验门禁下的懒建单例，而 AgentManager 装配得更早，
+ * 所以远端运行时端口拿到的是「读取器」而不是实例 —— 既不会重复建第二个 client（那会用一套不同于
+ * 会话验证时的环境拉 ssh），也不会把门禁表达式抄成两份。
+ */
+let remoteHostServiceResolver: (() => Promise<RemoteHostConnectionService> | undefined) | undefined;
 /** 声音提醒服务（完成/出错/等待输入提示音）；null = 未初始化 */
 let soundAlertService: SoundAlertService | null = null;
 /** 应用公告服务（无服务器拉取模式）；null = 未初始化 */
@@ -2407,6 +2416,10 @@ function registerIpc() {
 		});
 		return remoteHostServicePending;
 	};
+	// AgentManager 比 registerIpc 更早装配（它在下面的 whenReady 里构造），拿到的远端运行时端口只能
+	// 按需回调这个解析器：门禁表达式与连接服务单例都只允许有一份（见 remoteRuntimePort 的注释）。
+	// 未登记（本函数还没跑到）/门禁关闭时，端口一律 REMOTE_FEATURE_DISABLED，绝不回退本机。
+	remoteHostServiceResolver = remoteHostServiceIfEnabled;
 	registerRemoteHostIpc({
 		enabled: remoteExperimentEnabled,
 		userDataDir: app.getPath("userData"),
@@ -3583,6 +3596,14 @@ app
 					return false;
 				}
 			},
+			// 远端运行时端口（Phase 4 P4.2）：只把「远端会话怎么起来」这件事交给 AgentManager，
+			// 事实探测/ssh/握手全留在连接服务那条已验证的通道里。缺省不注入 = 本机产品，
+			// 远端项目仍会被拒绝（见 createRemoteUnlocked）。
+			createRemoteRuntimePort({
+				// 连接服务是 registerIpc 里懒建的单例；这里的回调在真正要起远端会话时才求值。
+				resolveService: () => remoteHostServiceResolver?.(),
+				settings: () => settingsStore.get(),
+			}),
 		);
 		// C12：退出清理登记（before-quit 统一 runAll，新增资源不再改 before-quit）
 		quitCleanup.register("pi-agents", () => agentManager?.stopAll());

@@ -6,6 +6,8 @@ import { resolveRemoteBrowseRoot } from "./RemoteBrowseRoot";
 import { bootstrapPinnedHost, resolveRemoteNodeExecutable } from "./RemoteBootstrapSession";
 import { resolveRemotePiExecutable } from "./RemotePiDiscovery";
 import { deployedRunnerPath } from "./RemoteBootstrapDeployment";
+import { createSshPiRuntimeLauncher } from "./SshPiRuntimeLauncher";
+import type { PiRuntimeLauncher } from "../pi/PiSpawnHandle";
 import { createSshConnectionManager, type SshConnectionManager, type SshHelperSession } from "./SshConnectionManager";
 import { createSshProcessLauncher } from "./SshProcessLauncher";
 import { diagnosticCodeFromError } from "./SshConnectionDiagnostics";
@@ -514,6 +516,15 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 		 * client could resolve through a different environment than the one the session was verified with.
 		 */
 		client: options.client,
+		/**
+		 * 与会话配对的远端启动器：复用本服务**已验证的** client 与同一个 ssh launcher。
+		 *
+		 * 为什么在这里造而不是让调用方自己 new：第二条通道一旦用另一个 client 实例，就会用一套不同于会话
+		 * 验证时的环境/路径去拉 ssh——那正是「连得上但行为不一样」的根源；而且 launcher 的生命周期本就属于本服务。
+		 */
+		createPiRuntimeLauncher(): PiRuntimeLauncher {
+			return createSshPiRuntimeLauncher({ userDataDir: options.userDataDir, client: options.client, launcher });
+		},
 		/** Bootstrap-then-connect one host. Every failure is a stable code, never a thrown message. */
 		async connect(hostId: string): Promise<RemoteHostConnectResult> {
 			const entry = entryFor(hostId);

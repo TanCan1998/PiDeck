@@ -173,3 +173,12 @@ test("facts：会话建不起来时报 SSH_HOST_NOT_READY，而不是拿着半�
 		},
 	);
 });
+
+test("createPiRuntimeLauncher：拿到的是远端启动器（本地 plan 当场被拒，且不新起 ssh）", async () => {
+	await withService(async (service, ports) => {
+		const launcher = service.createPiRuntimeLauncher();
+		// 本地 plan 被拒 ⇒ 证明拿到的是远端实现，而不是缺省那个本地启动器（后者会把 plan 当本地跑）。
+		await assert.rejects(() => launcher.launch({ kind: "local", command: "/usr/bin/pi", args: [], cwd: "/tmp", env: {}, shell: false }), /REMOTE_RUNTIME_LAUNCH_PLAN_INVALID/);
+		assert.equal(ports.calls.bootstrap.length, 0, "拒绝必须发生在任何远端动作之前");
+	});
+});
