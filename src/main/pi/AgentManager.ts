@@ -1636,6 +1636,14 @@ export class AgentManager {
 			noSession: input.noSession,
 			createdAt: Date.now(),
 		};
+		// 远端 trust 标记的传递链很长（tab → emitState → 渲染层 runtime 视图状态 → 提示条）。真机 UI 验收
+		// 出现「提示始终不显示」、而离线看每一环都像是对的时候，这一行是唯一能从 app 日志区分
+		// 「标记没设 / 会话身份没到位」与「事件没往下走」的锚点：只建远端会话时打一次，噪音可忽。
+		void this.appLogger?.info("agent", "Remote session trust marker set", {
+			agentId: tab.id,
+			deckSessionId: tab.deckSessionId ?? null,
+			remoteTrustUnhandled: tab.remoteTrustUnhandled === true,
+		});
 
 		const t1 = Date.now();
 		let launch: { plan: RemoteSshPiRuntimeLaunchPlan; launcher: PiRuntimeLauncher };
