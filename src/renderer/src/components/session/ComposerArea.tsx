@@ -3,6 +3,7 @@ import { useAtomValue } from "jotai";
 import { ComposerBottomBar, ImagePreviewModal, PromptSuggestions } from "./ComposerParts";
 import { TipTapComposer } from "./composer";
 import { SessionReferenceModal } from "../app/SessionReferenceModal";
+import { ConfirmDialog } from "../app/AppParts";
 import { t } from "../../i18n";
 import { useSessionComposerController } from "../../hooks/useSessionComposerController";
 import { useAcpSessionConfig } from "../../hooks/useAcpSessionConfig";
@@ -128,6 +129,8 @@ export const ComposerArea = forwardRef<HTMLElement, ComposerAreaProps>(function 
 		onCreateSession: useSessionPaneServices().runCreateSessionDraft,
 		// 输入框 `/login`：桌面接管后打开登录供应商弹框（pi 的登录只在它的 CLI 层）
 		onProviderLogin: useSessionPaneServices().openProviderLogin,
+		// 「停止响应」后暂停排队消息自动投递（App 注入 queue.suppressSessionQueueAutoDrain）
+		suppressQueuedDrain: useSessionPaneServices().queueSuppressAutoDrain,
 	});
 	// ACP 会话配置(configOptions):枚举由 agent 回传,选择经 session/set_config_option 下发。
 	// agentId 未就绪/后端不符时 hook 内部自挂空,无额外成本。
@@ -340,6 +343,20 @@ export const ComposerArea = forwardRef<HTMLElement, ComposerAreaProps>(function 
 															}
 														: undefined
 												}
+												videoGenOptions={
+													composer.mode === "videogen"
+														? {
+																config: composer.delivery.videoGenConfig,
+																providerId: composer.delivery.videoGenConfig.activeProviderId,
+																modelId: composer.delivery.videoGenConfig.activeModel,
+																resolution: composer.delivery.videoGenConfig.activeParams?.resolution,
+																duration: composer.delivery.videoGenConfig.activeParams?.duration,
+																ratio: composer.delivery.videoGenConfig.activeParams?.ratio,
+																onSelectionChange: composer.delivery.setVideoGenSelection,
+																onParamChange: composer.delivery.setVideoGenParam,
+															}
+														: undefined
+												}
 												voiceControls={
 													// 总开关开启即显示录音入口；引擎未就绪时点击才提示去设置补全（见 useVoiceTranscription.start）；外观设置可隐藏入口
 													composerFeatureVisible("voice") && composer.voice.configured ? (
@@ -371,6 +388,9 @@ export const ComposerArea = forwardRef<HTMLElement, ComposerAreaProps>(function 
 							{/* GUI 扩展桥：输入区工具栏落点（ctx.gui.setComposerToolbar）。 */}
 							<BridgeGuiSlot sessionId={props.sessionId} slot="composer.toolbar" className="flex shrink-0 flex-wrap items-center gap-1 px-3 pb-1" />
 							{composer.previewImage ? <ImagePreviewModal image={composer.previewImage} onClose={composer.modals.closePreview} /> : null}
+							{composer.delivery.videoConfirmPending ? (
+								<ConfirmDialog title={t("videogen.confirm.title")} message={t("videogen.confirm.body", { model: composer.delivery.videoGenConfig.activeModel })} confirmLabel={t("videogen.confirm.ok")} onConfirm={() => composer.delivery.confirmVideoGen()} onCancel={() => composer.delivery.cancelVideoGen()} />
+							) : null}
 							{composer.sessionReference ? (
 								<SessionReferenceModal
 									session={composer.sessionReference}

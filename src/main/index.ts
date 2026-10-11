@@ -283,6 +283,7 @@ import { IdleAgentReleaser } from "./sessions/IdleAgentReleaser";
 import { StaleDraftReaper } from "./sessions/StaleDraftReaper";
 import { SessionCommandIpcError } from "./sessions/SessionCommandIpcError";
 import { appendSessionForkSuffix } from "./sessions/sessionForkTitle";
+import { createSessionForkCommands } from "./sessions/sessionForkCommands";
 import { CodexSessionImporter } from "./sessions/CodexSessionImporter";
 import { ClaudeSessionImporter } from "./sessions/ClaudeSessionImporter";
 import { QoderSessionImporter } from "./sessions/QoderSessionImporter";
@@ -358,6 +359,14 @@ import { ImageSessionStore } from "./imagegen/ImageSessionStore";
 import { ImageBlobStore } from "./imagegen/ImageBlobStore";
 import { registerImageGenImageProtocol } from "./imagegen/ImageGenImageProtocol";
 import { ImageGenConfigStore } from "./imagegen/ImageGenConfigStore";
+import { registerVideoGenIpc } from "./ipc/videogenIpc";
+import { VideoGenConfigStore } from "./videogen/VideoGenConfigStore";
+import { VideoBlobStore } from "./videogen/VideoBlobStore";
+import { VideoSessionStore } from "./videogen/VideoSessionStore";
+import { VideoJobStore } from "./videogen/VideoJobStore";
+import { VideoJobRunner } from "./videogen/VideoJobRunner";
+import { registerVideoGenProtocol } from "./videogen/VideoGenProtocol";
+import type { VideoGenJobSnapshot } from "../shared/types/videogen";
 import { registerVoiceTranscriptionIpc } from "./ipc/voiceTranscriptionIpc";
 import { VoiceTranscriptionConfigStore } from "./voice/VoiceTranscriptionConfigStore";
 import { VoiceTranscriptionService } from "./voice/VoiceTranscriptionService";
@@ -997,6 +1006,15 @@ function resolveImageGenStorageRoots(): { sessions: string; blobs: string } {
 	return { sessions: join(root, "sessions"), blobs: join(root, "blobs") };
 }
 
+/**
+ * 生视频独立存储的磁盘根：与生图同构（sessions + blobs），根目录 userData/videogen。
+ * 同样统一在此解析，避免读写漂移；任务表 jobs.json 单独放根目录（高频重写，不入 sessions）。
+ */
+function resolveVideoGenStorageRoots(): { sessions: string; blobs: string; jobs: string } {
+	const root = join(app.getPath("userData"), "videogen");
+	return { sessions: join(root, "sessions"), blobs: join(root, "blobs"), jobs: join(root, "jobs.json") };
+}
+
 async function exportCatalogSessionHtml(sessionId: string): Promise<{ path: string }> {
 	const entry = sessionCatalog.get(sessionId);
 	// G10：DSH 会话投影式导出（无活跃 runtime 时从 host 分页拉全量渲染），
@@ -1118,6 +1136,69 @@ async function replaceAgentSession(agentId: string, replace: () => Promise<unkno
 		onRestored: (binding) => emitReplacementState(binding, false),
 	});
 }
+
+// ── fork/clone 统一命令层（桌面 IPC 与 Web HTTP 共用；W1 重发/编辑 fork 化统一）──
+// DSH fork/clone：runtime 已原地换绑到新会话（agentId 不变，焦点会话 id 不变），
+// 只需把 catalog 的 dshSessionId 同步为新 fork 会话，重启后 attach 正确。
+const forkDshAgentSessionImpl = async (target: SessionRuntimeTarget, entryId: string) => {
+	const result = await dshAgentManager.forkSession(target.agentId, entryId);
+	const tab = dshAgentManager.list().find((candidate) => candidate.id === target.agentId);
+	if (tab?.sessionId) {
+		await sessionCatalog.attachRuntime({
+			sessionId: target.sessionId,
+			dshSessionId: tab.sessionId,
+			promoteToActive: true,
+		});
+	}
+	return { ...result };
+};
+// DSH clone：fork 无锚点（完整副本），runtime 换绑到新会话，语义同 fork。
+const cloneDshAgentSessionImpl = async (target: SessionRuntimeTarget) => {
+	const result = await dshAgentManager.cloneSession(target.agentId);
+	const tab = dshAgentManager.list().find((candidate) => candidate.id === target.agentId);
+	if (tab?.sessionId) {
+		await sessionCatalog.attachRuntime({
+			sessionId: target.sessionId,
+			dshSessionId: tab.sessionId,
+			promoteToActive: true,
+		});
+	}
+	return { ...result };
+};
+/** fork/clone 成功后推送 catalog 刷新：pi 新建了 catalog 条目、DSH 换绑了 dshSessionId，
+ * 侧栏只有收到 sessionsCatalogRefreshed 才会静默重拉列表（useProjectSync），否则
+ * 新建/换绑后的会话要等下次手动刷新才出现。Web 端由 /api/events SSE 快照 diff 兜底。 */
+const notifyForkCatalogRefreshed = (sessionId: string): void => {
+	const projectId = sessionCatalog.get(sessionId)?.projectId;
+	if (!projectId) return;
+	const window = mainWindow;
+	if (window && !window.isDestroyed()) {
+		window.webContents.send(ipcChannels.sessionsCatalogRefreshed, { projectId });
+	}
+};
+// 惰性初始化：装配顺序上 registerIpc/WebServiceManager 都会先拿到引用，而
+// sessionRuntimeCoordinator/agentManager 在 whenReady 里才赋值；包一层闭门工厂避免顶层直用未赋值变量。
+let sessionForkCommandsInstance: ReturnType<typeof createSessionForkCommands> | undefined;
+const getSessionForkCommands = () => {
+	if (!sessionForkCommandsInstance) {
+		sessionForkCommandsInstance = createSessionForkCommands({
+			sessionRuntimeCoordinator,
+			agentManager,
+			replaceAgentSession,
+			isDshAgent: (agentId) => dshAgentManager?.list().some((tab) => tab.id === agentId) === true,
+			forkDshAgentSession: forkDshAgentSessionImpl,
+			cloneDshAgentSession: cloneDshAgentSessionImpl,
+			logger: appLogger,
+			notifyForkCatalogRefreshed,
+		});
+	}
+	return sessionForkCommandsInstance;
+};
+/** 桌面/Web 共用的 fork/clone 命令层门面（延迟到首次调用才装配依赖）。 */
+const sessionForkCommands = {
+	forkRuntimeSession: (target: Parameters<ReturnType<typeof createSessionForkCommands>["forkRuntimeSession"]>[0], entryId: string, options?: { mutationFork?: boolean; branchMode?: boolean }) => getSessionForkCommands().forkRuntimeSession(target, entryId, options),
+	cloneRuntimeSession: (target: Parameters<ReturnType<typeof createSessionForkCommands>["cloneRuntimeSession"]>[0]) => getSessionForkCommands().cloneRuntimeSession(target),
+};
 
 function cancelUnboundUiRequest(payload: unknown): void {
 	if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
@@ -2595,15 +2676,19 @@ function registerIpc() {
 	registerScratchPadIpc({ appLogger });
 
 	// 通知历史落盘：showNotice 单点记录后推送主进程，重启可回灌（渲染层环形缓冲只服务当次会话）
-	registerNoticeHistoryIpc(
-		new NoticeHistoryStore({
-			getFilePath: () => join(app.getPath("userData"), "notice-history.json"),
-			log: (level, message, detail) => {
-				if (level === "error") void appLogger.error("notice-history", message, detail);
-				else void appLogger.info("notice-history", message, detail);
-			},
-		}),
-	);
+	const noticeHistoryStore = new NoticeHistoryStore({
+		getFilePath: () => join(app.getPath("userData"), "notice-history.json"),
+		log: (level, message, detail) => {
+			if (level === "error") void appLogger.error("notice-history", message, detail);
+			else void appLogger.info("notice-history", message, detail);
+		},
+	});
+	registerNoticeHistoryIpc(noticeHistoryStore);
+	// C12：退出前 flush 防抖窗口内的尾巴——store 写盘是防抖合并（500ms），不冲盘就退出
+	// 会丢最后几条通知历史；runAll 会 await 异步清理，写盘完成才放行退出。
+	quitCleanup.register("notice-history", async () => {
+		await noticeHistoryStore.flush();
+	});
 
 	// 粘贴大文本 → 落盘文件（受管目录，路径校验 + 启动清理）
 	cleanupPasteFiles = registerPasteFilesIpc({
@@ -2816,6 +2901,72 @@ function registerIpc() {
 		},
 	});
 
+	// ── 生视频域：与生图平行的独立信任域（userData/videogen.json），异步任务生命周期在 VideoJobRunner ──
+	const videoGenConfigStore = new VideoGenConfigStore({
+		getConfigPath: () => join(app.getPath("userData"), "videogen.json"),
+		log: (message, ...args) => appLogger.info("videogen", message, ...args),
+	});
+	const videoGenRoots = resolveVideoGenStorageRoots();
+	const videoBlobStore = new VideoBlobStore({ getBlobsPath: () => videoGenRoots.blobs });
+	void videoBlobStore.ensureDir();
+	const videoSessionStore = new VideoSessionStore({
+		getStorePath: () => videoGenRoots.sessions,
+		blobs: videoBlobStore,
+	});
+	const videoJobStore = new VideoJobStore({
+		getJobsPath: () => videoGenRoots.jobs,
+		log: (message, ...args) => appLogger.info("videogen", message, ...args),
+	});
+	// pideck-video:// 必须在 app ready 后注册；视频产物只经协议流式吐给 <video>，不进 IPC
+	registerVideoGenProtocol(videoBlobStore);
+	const sendVideoGenEvent = (snapshot: VideoGenJobSnapshot) => {
+		const window = mainWindow;
+		if (window && !window.isDestroyed()) {
+			window.webContents.send(ipcChannels.videogenEvent, snapshot);
+		}
+	};
+	const videoJobRunner = new VideoJobRunner({
+		loadJobs: () => videoJobStore.load(),
+		saveJobs: (jobs) => videoJobStore.save(jobs),
+		getCredentials: async (providerId) => {
+			const creds = await videoGenConfigStore.getCredentials(providerId);
+			if (!creds) return null;
+			return { baseUrl: creds.baseUrl, apiKey: creds.apiKey, protocol: creds.protocol, name: creds.provider.name };
+		},
+		putVideo: (response) => videoBlobStore.putFromResponse(response),
+		persistMessages: (sessionId, messages) => videoSessionStore.append(sessionId, messages),
+		emit: sendVideoGenEvent,
+		log: (message, ...args) => appLogger.info("videogen", message, ...args),
+	});
+	registerVideoGenIpc({
+		submit: async (request) => {
+			const result = await videoJobRunner.submit(request);
+			// 与生图同策略：任务受理即把会话提升为 active + 首行命名，防 staleDrafts 清理丢入口
+			if (result.ok && request.sessionId) {
+				const entry = sessionCatalog?.get(request.sessionId);
+				if (entry) {
+					const project = projectStore.get(entry.projectId);
+					if (project && isDefaultAgentTitle(entry.title, project, mainCopy as never)) {
+						const firstLine = request.prompt.split(/\r?\n/, 1)[0]?.trim() ?? "";
+						if (firstLine) {
+							await sessionCatalog.applyAutomaticTitle(request.sessionId, firstLine, "fallback");
+							mainWindow?.webContents.send(ipcChannels.sessionsCatalogRefreshed, { projectId: entry.projectId });
+						}
+					}
+					await sessionCatalog.promoteToActive(request.sessionId);
+				}
+			}
+			return result;
+		},
+		cancel: (jobId) => videoJobRunner.cancel(jobId),
+		getConfig: () => videoGenConfigStore.getConfig(),
+		saveConfig: (input) => videoGenConfigStore.saveConfig(input),
+		listJobs: (sessionId) => videoJobRunner.listJobsForSession(sessionId),
+		log: (message, ...args) => appLogger.info("videogen", message, ...args),
+	});
+	// 重启恢复：24h 窗口内未终态的任务继续轮询（终态立即结清旧任务）
+	void videoJobRunner.resume();
+
 	registerSessionIpc({
 		projectStore,
 		settingsStore,
@@ -2847,9 +2998,13 @@ function registerIpc() {
 		readCatalogSessionReferenceMessages,
 		// 无 pi 会话文件（纯生图草稿）历史读取回退：ImageSession 独立存储
 		readImageSessionMessages: (sessionId) => imageSessionStore.readMessages(sessionId),
+		// videogen 后端会话历史回退：VideoSession 独立存储（同生图策略）
+		readVideoSessionMessages: (sessionId) => videoSessionStore.readMessages(sessionId),
 		copyCatalogSession,
 		exportCatalogSessionHtml,
 		replaceAgentSession,
+		// fork/clone 统一命令层：重发/编辑 fork 化（mutationFork/branchMode）与 Web HTTP 同源
+		sessionForkCommands,
 		// C1：DSH 后端专用 IPC 依赖按后端分组（注册表化铺路；未来新增后端各自提供一份）
 		dshBackend: {
 			listDshModels: () => dshHost.listModels(),
@@ -2999,33 +3154,7 @@ function registerIpc() {
 			stopDshPlugin: (input) => dshHost.stopDynamicPlugin(input),
 			uninstallDshPlugin: (input) => dshHost.uninstallDynamicPlugin(input),
 			isDshAgent: (agentId) => dshAgentManager?.list().some((tab) => tab.id === agentId) === true,
-			forkDshAgentSession: async (target, entryId) => {
-				// DSH fork：runtime 已原地换绑到新会话（agentId 不变，焦点会话 id 不变），
-				// 这里只需把 catalog 的 dshSessionId 同步为新 fork 会话，重启后 attach 正确。
-				const result = await dshAgentManager.forkSession(target.agentId, entryId);
-				const tab = dshAgentManager.list().find((candidate) => candidate.id === target.agentId);
-				if (tab?.sessionId) {
-					await sessionCatalog.attachRuntime({
-						sessionId: target.sessionId,
-						dshSessionId: tab.sessionId,
-						promoteToActive: true,
-					});
-				}
-				return { ...result };
-			},
-			cloneDshAgentSession: async (target) => {
-				// DSH clone：fork 无锚点（完整副本），runtime 换绑到新会话，语义同 fork。
-				const result = await dshAgentManager.cloneSession(target.agentId);
-				const tab = dshAgentManager.list().find((candidate) => candidate.id === target.agentId);
-				if (tab?.sessionId) {
-					await sessionCatalog.attachRuntime({
-						sessionId: target.sessionId,
-						dshSessionId: tab.sessionId,
-						promoteToActive: true,
-					});
-				}
-				return { ...result };
-			},
+			// fork/clone 已收口 sessionForkCommands（桌面/Web 共用），这里不再单独提供
 		},
 	});
 
@@ -4322,11 +4451,13 @@ app
 				return sessionScanner.list(project?.path);
 			},
 			listCatalogSessions: async (projectId) => {
+				// 与桌面 sessionsListCatalog 同规则：重发/编辑 fork 化后被替换的旧会话
+				// （supersededBy 已打标）从列表隐藏，否则 Web 端会出现「两个重复的会话」。
 				if (!projectId) {
 					return sessionCatalog
 						.listEntries()
 						.map((entry) => sessionCatalog.getRecord(entry.id))
-						.filter((record): record is SessionRecord => Boolean(record));
+						.filter((record): record is SessionRecord => Boolean(record) && !record?.supersededBy);
 				}
 				const project = projectStore.get(projectId);
 				if (!project) throw new Error(mainCopy("project.notFound"));
@@ -4337,7 +4468,9 @@ app
 				}
 				const summaries = await sessionScanner.list(projectPath);
 				const { wslEnabled, wslDistro, wslUser } = settings;
-				const records = await sessionCatalog.mergeScanned(projectId, summaries, wslEnabled ? { wslDistro, wslUser } : {});
+				const scanned = await sessionCatalog.mergeScanned(projectId, summaries, wslEnabled ? { wslDistro, wslUser } : {});
+				// 同上：supersededBy 隐藏规则与桌面列表一致（mergeScanned 可能重新接上被打标的旧会话）
+				const records = scanned.filter((record) => !record.supersededBy);
 				const bindings = sessionRuntimeCoordinator.attachCatalogRuntimes(records);
 				for (const binding of bindings) {
 					const tab = agentManager.list().find((candidate) => candidate.id === binding.agentId);
@@ -4478,26 +4611,14 @@ app
 			setSessionRuntimeModel: (target, provider, modelId, modelName) => sessionRuntimeCoordinator.setRuntimeModel(target, provider, modelId, modelName),
 			setSessionRuntimeThinking: (target, level) => sessionRuntimeCoordinator.setRuntimeThinking(target, level),
 			setSessionRuntimePermission: (target, preset) => sessionRuntimeCoordinator.setRuntimePermission(target, preset),
-			cloneSessionRuntime: async (target) => {
-				const validated = sessionRuntimeCoordinator.validateTarget(target);
-				if (!validated.ok) return validated;
-				try {
-					return {
-						ok: true as const,
-						value: await replaceAgentSession(target.agentId, () => agentManager.cloneSession(target.agentId), { markForked: true }),
-					};
-				} catch (error) {
-					return {
-						ok: false as const,
-						error: {
-							code: "SESSION_COMMAND_FAILED" as const,
-							debugDetails: error instanceof Error ? error.message : String(error),
-						},
-					};
-				}
-			},
+			// fork/clone 与桌面 IPC 同源（sessionForkCommands 统一命令层）：
+			// 重发/编辑 fork 化（mutationFork/branchMode）、supersededBy 隐藏、
+			// catalog 刷新广播都在那一层维护，两端行为必须一致。
+			cloneSessionRuntime: (target) => sessionForkCommands.cloneRuntimeSession(target),
 			getForkMessages: (target) => sessionRuntimeCoordinator.getRuntimeForkMessages(target),
-			forkRuntimeSession: (target, entryId) => sessionRuntimeCoordinator.forkRuntimeSession(target, entryId),
+			forkRuntimeSession: (target, entryId, options) => sessionForkCommands.forkRuntimeSession(target, entryId, options),
+			// Web 重发/编辑 fork 化：冷会话（无 runtime）先激活（与桌面 activateRuntime 同源）
+			activateSessionRuntime: (sessionId) => sessionRuntimeCoordinator.activateRuntime(sessionId),
 			// 会话活动监控（第二批 strips）：与桌面 sessionIpc.ts 同源同闸门
 			listSessionFileChanges: (sessionId) => {
 				const entry = sessionCatalog.get(sessionId);
@@ -4857,6 +4978,9 @@ app
 		}
 		compositeAgentGateway = new CompositeAgentGateway(acpAgentManager ? [agentManager, dshAgentManager, acpAgentManager] : [agentManager, dshAgentManager]);
 		sessionRuntimeCoordinator = new SessionRuntimeCoordinator(sessionCatalog, compositeAgentGateway, sendAgentPromptWithIntegrations, appLogger);
+		// 终态惰性解绑（getAgentId → unbindTerminalAgent）发生在查询路径里，必须把解绑推给渲染层：
+		// 否则渲染层快照停在 error，红点常亮且「关闭 Agent」永远对不上存在的运行实例。
+		sessionRuntimeCoordinator.setDetachedNotifier((binding) => emitSessionRuntimeDetach(binding));
 		// catalog 外部删除清理的活性探针：预热激活后 pi 可能尚未写出会话文件，
 		// 有活跃绑定的记录不得被扫描当「外部删除」剔掉。
 		sessionCatalog.setSessionLivenessProbe((sessionId) => sessionRuntimeCoordinator?.hasLiveRuntime(sessionId) === true);
