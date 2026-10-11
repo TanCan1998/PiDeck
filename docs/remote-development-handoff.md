@@ -10,6 +10,18 @@
 >
 > **未完成（建议优先级）**：
 > 1. **Phase 4 P4.2 只剩两项**——协议层**已端到端验通**（真机 `scripts/verify-remote-runtime.mjs` → `RUNTIME_E2E_OK`）。已交付：`707ecb595` 冻结 runner + 远端启动器；`d919e5402` 真机验收脚本 + `remotePiRuntimeFacts`；`e9bcd19d0` `PiProcess` 远端模式；`61222cc76` `AgentManager` 路由 + 本机 fs 守卫 + catalog fail-closed；`68accdfd6` 远端会话的 catalog 身份；`b76b03dff` 远端会话**恢复（点开）**+ 恰好一条 catalog 记录；`448940ea6` **远端 trust 状态可见**（`AgentTab.remoteTrustUnhandled` + 会话视图内持续提示 + 双语 key；安全默认不变）。**剩下：** (i) **远端自动 reattach**（`reattachProcess` 目前是本地实现）；(ii) **Electron 真机 UI 验收**（这台 Linux 沙箱能跑 Electron，可直接做——这是 P4.2 进入 beta 的最后一关）。
+>    **侧栏 0 行的进一步诊断（父代理查 spec 与快照，2026-10）**：失败点其实**很靠后**——test 1 的
+>    「新建会话 → 发 prompt → 出正文 → 关闭 Agent」**全过**，失败在最后一步「关标签页 → 回侧栏点开该会话」：
+>    `projectRow(远端项目).locator('.session-row')` 得到 **0**（期望 1）。两个候选成因，判定方法已明确：
+>    (a) **组是折叠的**：失败快照里该项目组旁有「展开」按钮（`- button "展开"`）⇒ 行不在 DOM 里 ⇒ 计数必为 0。
+>        spec 侧修法：计数前先展开该组，或改成断言「组内存在这条会话」而不是计数。
+>    (b) **行在但类名不是 `.session-row`**：草稿行用的是 `draft-session-row`（`SessionTree.tsx:379`，**不带**
+>        `session-row`）⇒ 若远端会话在侧栏仍是草稿，就正好 0 命中。根因指向登记的门：
+>        `AgentManager` 里 `if (input.deckSessionId && tab.sessionPath)` 才登记（`registerRemoteSessionIdentity`）——
+>        任一为空则**静默跳过**，draft 永不被吸收（`SessionCatalog:1352` 注释说明远端是靠握手吸收 draft 的）。
+>    判定入口：失败时刻的侧栏 DOM（`projectRow(...).locator('.session-row, .draft-session-row')` 计数 + innerHTML），
+>    快照已存 `/tmp/p42-ui-acceptance-mine/`。test 2 的快照里侧栏**有**该会话标题的按钮 ⇒ 行确实存在过。
+>    另：test 2 在更早一步（`composer[data-session-id=…]` 文本）就失败 ⇒ **`6b60fcb60` 的 trust 传播修法仍未被真机确证**。
 >    **父代理自己跑的一轮真机 UI 验收（2026-10，HEAD `6b60fcb60` 之后）**：`env PIDECK_E2E_REMOTE_HOST=… npx playwright test e2e/remoteSessionAcceptance.spec.ts`
 >    ⇒ **2 failed**，但**失败点在很后面**，前半条链已经通了：加主机 + pin → 连接 ready → 登记远端项目 → **在远端项目里新建会话**
 >    （真实 UI 点击）全部成功；app 日志显示 agent 生命周期完整：`Agent create requested → Agent pi process start → Pi process spawned
