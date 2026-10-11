@@ -293,7 +293,12 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 				await window.locator('[role="tab"][data-session-id="' + sessionId + '"] button[role="tab-close"]').click();
 				await expect(window.locator('[role="tab"][data-session-id]')).toHaveCount(0, { timeout: timeouts.helperMs });
 				await expect(window.locator('.composer[data-session-id="' + sessionId + '"]')).toHaveCount(0);
-				const rows = projectRow(window, paths.projectName).locator(".session-row");
+				const group = projectRow(window, paths.projectName);
+				// 侧栏项目组折叠时不渲染会话行（真机失败快照实测：失败时刻该组旁是「展开」按钮
+				// ⇒ 行根本不在 DOM 里，`.session-row` 恒为 0）——先确保展开再计数。
+				const expander = group.getByRole("button", { name: "展开", exact: true });
+				if ((await expander.count()) > 0) await expander.first().click();
+				const rows = group.locator(".session-row");
 				await expect(rows, "远端项目下必须恰好一条会话行").toHaveCount(1, { timeout: timeouts.helperMs });
 				await rows.first().click();
 				await expect(window.locator('[role="tab"][data-session-id="' + sessionId + '"]'), "点开会话必须重新登记 Tab").toHaveCount(1, { timeout: timeouts.helperMs });
