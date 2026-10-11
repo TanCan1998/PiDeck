@@ -1627,6 +1627,11 @@ export class AgentManager {
 			sessionPath: input.sessionPath,
 			sessionEnvironment,
 			sessionSource: input.source ?? "pi",
+			// 这条路径的 runtimePlan.kind 恒为 "remote-ssh"（launch.plan 由 buildRemotePiRuntimePlan 构造）。
+			// 远端项目资源（.pi/ 的扩展/技能/提示词/项目设置）在 RPC 无 UI 下不会被信任加载，
+			// 而 PiDeck 刻意不传 trust flag（完整远端 trust 语义属 P4.4）——这里只把现状标出来，
+			// 让渲染层如实告知用户，不改任何安全边界；本机/WSL 分支不写这个字段。
+			remoteTrustUnhandled: true,
 			// 不写 wslDistro/wslUser/importedSourceId：它们是本机（WSL/导入器）身份，远端会话没有这些维度。
 			noSession: input.noSession,
 			createdAt: Date.now(),

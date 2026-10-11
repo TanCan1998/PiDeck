@@ -4274,6 +4274,9 @@ export const zhCN = {
 	"branch.next": "下一个分支",
 	"branch.children": "{count} 个子分支",
 	"branch.childrenTitle": "子分支",
+	// 远端会话 trust 现状提示（P4.2）：只如实告知资源未加载，不承诺任何 trust 语义（完整语义属 P4.4）。
+	"session.remoteTrust.title": "远端项目资源未加载",
+	"session.remoteTrust.hint": "远端项目目录里的 .pi 资源（扩展、技能、提示词、项目设置）不会被加载：无界面模式无法确认项目信任，PiDeck 也不会替你批准。安全与只读边界保持不变。",
 	"tool.copyDetail": "复制完整工具调用详情",
 	"tool.countSuffix": " 个工具",
 	"tool.done": "工具调用完成",

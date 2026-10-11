@@ -7,6 +7,7 @@ import type { SessionTimelineController } from "../../hooks/useSessionTimelineCo
 import { isLanWeb, desktopApi as api } from "../../desktopApi";
 import { SessionHeader } from "./SessionHeader";
 import { SessionBranchBar } from "./SessionBranchBar";
+import { RemoteSessionTrustNotice } from "./RemoteSessionTrustNotice";
 import { SessionFilesStrip } from "./SessionFilesStrip";
 import { SessionGoalStrip } from "./SessionGoalStrip";
 import { SessionSubagentsStrip } from "./SessionSubagentsStrip";
@@ -256,6 +257,9 @@ export function SessionView({
 			/>
 			{/* 分支导航条：仅当当前会话存在 fork 分支关系（父/兄弟/子分支）时显示 */}
 			<SessionBranchBar sessionId={sessionId} onOpenSession={onOpenBranchSession} />
+			{/* 远端会话的 trust 现状提示（P4.2）：标记存在时常驻在会话头下方；
+			  本地/WSL 会话与旧 main（无标记）不渲染任何东西。 */}
+			<RemoteSessionTrustNotice sessionId={sessionId} />
 			<ResizablePanelGroup
 				// 面板数只随终端挂载变化：输入栏在时间线列内，不再改变 Group 面板数。
 				key={`${sessionId}:${sessionResizableGroupKey(sessionPanels)}`}

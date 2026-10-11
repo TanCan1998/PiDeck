@@ -52,6 +52,13 @@ export type SessionRuntimeViewState = {
 	createdAt?: number;
 	compactionCount?: number;
 	noSession?: boolean;
+	/**
+	 * 远端会话的 trust 现状标记（agents:state 载荷透传自 `AgentTab.remoteTrustUnhandled`）：
+	 * true = 这条会话跑在「远端项目资源未加载」状态（远端 pi 不加载 .pi/ 的项目级资源）。
+	 * undefined/false = 本地/WSL/DSH/生图会话，或旧 main 的载荷没带这个字段；
+	 * 消费端（RemoteSessionTrustNotice）按「无标记 = 不显示提示」处理，不报错。
+	 */
+	remoteTrustUnhandled?: boolean;
 	/** 运行时后端（pi/dsh）：agents:state 事件透传，侧栏徽章/配对用。 */
 	backend?: AgentBackend;
 };
@@ -1148,6 +1155,9 @@ export const applySessionRuntimeEventAtom = atom(null, (get, set, event: Session
 				compactionCount: typeof payload.compactionCount === "number" ? payload.compactionCount : nextRuntime.compactionCount,
 				noSession: payload.noSession === true || nextRuntime.noSession,
 				backend: payload.backend === "dsh" ? "dsh" : (nextRuntime.backend ?? "pi"),
+				// 远端 trust 标记只在远端会话上出现；旧 main 的载荷没有这个字段（undefined）。
+				// 同一绑定内 sticky（会话身份含 hostId，不会本地↔远端跳变），避免 refresh 抖动。
+				remoteTrustUnhandled: payload.remoteTrustUnhandled === true || nextRuntime.remoteTrustUnhandled,
 			};
 		}
 	} else if (event.sourceChannel === "agents:runtime-state" && payload?.state) {
@@ -1382,7 +1392,10 @@ export const applySessionRuntimeEventAtom = atom(null, (get, set, event: Session
 		currentRuntime.sessionPath === nextRuntime.sessionPath &&
 		currentRuntime.createdAt === nextRuntime.createdAt &&
 		currentRuntime.compactionCount === nextRuntime.compactionCount &&
-		currentRuntime.noSession === nextRuntime.noSession;
+		currentRuntime.noSession === nextRuntime.noSession &&
+		// 远端 trust 标记参与「无变化」判定：它在同一绑定内首次出现时若被跳过写入，
+		// 本会话就永远看不到那条提示（本机会话两个值都是 undefined，不影响原行为）。
+		currentRuntime.remoteTrustUnhandled === nextRuntime.remoteTrustUnhandled;
 	if (!runtimeUnchanged) {
 		set(sessionRuntimeByIdAtom, {
 			...get(sessionRuntimeByIdAtom),
@@ -1485,6 +1498,10 @@ export const bindSessionRuntimeAtom = atom(
 				runtimeGeneration: input.runtimeGeneration ?? currentGeneration,
 				status: input.status ?? (bindingChanged ? "idle" : current?.status) ?? "idle",
 				state: bindingChanged ? undefined : current?.state,
+				// 这里是「只有这几个字段」的绑定刷新（send 路径），不跟随其它字段；
+				// 远端 trust 标记是会话级事实（不属于某次 agent 绑定），必须跟着会话走，
+				// 否则发一条消息就会把刚显示的「远端项目资源未加载」提示抹掉。
+				remoteTrustUnhandled: current?.remoteTrustUnhandled,
 				updatedAt: Date.now(),
 			},
 		});

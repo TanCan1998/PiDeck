@@ -4284,6 +4284,9 @@ export const enUS: Record<TranslationKey, string> = {
 	"branch.next": "Next branch",
 	"branch.children": "{count} child branches",
 	"branch.childrenTitle": "Child branches",
+	// Remote session trust status notice (P4.2): states that resources are not loaded; no trust semantics promised here (that is P4.4).
+	"session.remoteTrust.title": "Remote project resources not loaded",
+	"session.remoteTrust.hint": "The remote project's .pi resources (extensions, skills, prompts, project settings) are not loaded: project trust cannot be confirmed without a UI, and PiDeck will not approve on your behalf. Security and read-only boundaries stay unchanged.",
 	"tool.copyDetail": "Copy full tool call details",
 	"tool.countSuffix": " tools",
 	"tool.done": "Tool calls complete",

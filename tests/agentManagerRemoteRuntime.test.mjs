@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
@@ -15,7 +16,9 @@ import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
  *    也不写一条伪 catalog 记录；
  * 4. deckSessionId 的远端会话：拿到 pi 上报的会话文件后由端口登记 catalog 身份（ssh locator），
  *    登记失败落会话错误卡 + 稳定码；
- * 5. 远端 runtime 的本机专属操作（终端 cwd、checkpoint 的 git）在守卫处拒绝，本地行为不变。
+ * 5. 远端 runtime 的本机专属操作（终端 cwd、checkpoint 的 git）在守卫处拒绝，本地行为不变；
+ * 6. 远端会话如实带 `remoteTrustUnhandled` 标记（P4.2 收口第 1 项：远端项目资源未加载），
+ *    本机/WSL tab 契约上没有这个状态，且远端启动参数不含任何 trust flag（安全边界一字不改）。
  */
 
 const { AgentManager } = loadTsCommonJs("src/main/pi/AgentManager.ts");
@@ -301,6 +304,8 @@ test("服务拿不到（门禁关闭/尚未装配/建服务失败）：REMOTE_RU
 			const tab = await manager.create({ projectId: "remote", title: "远端会话" });
 			// 与本地「pi 起不来」同一条路径：tab 是终态 error + 会话内错误卡（带稳定码），不是静默成功。
 			assert.equal(tab.status, "error");
+			// 占位 runtime（错误卡宿主）也是「远端会话」：trust 现状标记同样要在。
+			assert.equal(tab.remoteTrustUnhandled, true);
 			assert.equal(
 				manager.list().some((candidate) => candidate.id === tab.id),
 				true,
@@ -420,6 +425,50 @@ test("会话身份 key 带 hostId：同路径不同主机不互相顶掉，同�
 	} finally {
 		restore();
 	}
+});
+
+test("远端会话 tab 带 remoteTrustUnhandled 标记，且远端启动参数里没有任何 trust flag", async () => {
+	const record = createRecord();
+	const harness = createHarness({ projects: new Map([["remote", remoteProject("remote", HOST_ID)]]), record, remoteRuntime: createPort(record, createFakeService(record)) });
+	const { manager, restore } = harness;
+	try {
+		const tab = await manager.create({ projectId: "remote", title: "远端会话" });
+		// 语义：这条会话跑在「远端项目资源未加载」的状态（远端 pi 不信任加载 .pi/ 的项目级资源）。
+		assert.equal(tab.remoteTrustUnhandled, true);
+		// 标记必须落在 agents:state 下发的 tab 上（渲染层只从那里读，见 sessionRemoteTrustNotice.test.mjs）。
+		assert.equal(manager.list().find((candidate) => candidate.id === tab.id).remoteTrustUnhandled, true);
+		// 安全边界一字不改：远端 plan 的参数里不出现信任覆盖 flag（也不新增别的 flag）。
+		const args = record.launches[0].args;
+		assert.equal(args.includes("--approve"), false);
+		assert.equal(args.includes("--no-approve"), false);
+	} finally {
+		restore();
+	}
+});
+
+/**
+ * 源码级守卫（本机会话的行为级断言需要 electron 桩，不引入那套装置）：
+ * - 标记**只**写在 `createRemoteUnlocked` 的 tab 字面量里；
+ * - 本机 `createUnlocked` 的 tab 字面量不带这个字段（本地/WSL 契约向后兼容）；
+ * - 远端分支不传 trustOverride，参数构造器也不认识 trust flag。
+ */
+test("只有远端分支写 remoteTrustUnhandled：本机 tab 不带、远端不传 trust flag", () => {
+	const source = readFileSync("src/main/pi/AgentManager.ts", "utf8");
+	/** 取锚点之后、下一次 `const t1 = Date.now();` 之前的那一个 `const tab: AgentTab = {…};` 字面量。 */
+	const tabLiteral = (marker) => {
+		const slice = source.slice(source.indexOf(marker));
+		return /const tab: AgentTab = \{([\s\S]*?)\n[\t ]*\};\n[\s\S]{0,80}?const t1 = Date\.now\(\);/.exec(slice)?.[1] ?? "";
+	};
+	const remoteTab = tabLiteral("private async createRemoteUnlocked(");
+	const localTab = tabLiteral("private async createUnlocked(input: CreateAgentInput)");
+	assert.match(remoteTab, /remoteTrustUnhandled: true/);
+	assert.doesNotMatch(localTab, /remoteTrustUnhandled/);
+
+	// 注释里说明「刻意不传 trustOverride」是允许的；代码里出现才是违规。
+	const remoteBody = source.slice(source.indexOf("private async createRemoteUnlocked("), source.indexOf("private async createUnlocked(input: CreateAgentInput)"));
+	assert.doesNotMatch(remoteBody.replace(/\/\/[^\n]*/g, ""), /trustOverride/);
+	assert.doesNotMatch(readFileSync("src/main/pi/piRpcArgs.ts", "utf8"), /--no-approve|--approve/);
+	assert.doesNotMatch(readFileSync("src/main/pi/piRemoteRuntimePlan.ts", "utf8"), /--no-approve|--approve|trustOverride/);
 });
 
 test("远端 runtime 的本机专属操作在守卫处拒绝；本机 runtime 行为不变", async () => {
