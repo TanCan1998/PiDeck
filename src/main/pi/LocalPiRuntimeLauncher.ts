@@ -16,7 +16,7 @@
 import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { killProcessTree } from "../git/gitProcess";
-import type { PiRuntimeExit, PiRuntimeLaunchPlan, PiRuntimeLauncher, PiSpawnHandle } from "./PiSpawnHandle";
+import type { LocalPiRuntimeLaunchPlan, PiRuntimeExit, PiRuntimeLauncher, PiSpawnHandle } from "./PiSpawnHandle";
 
 /** Unix 上给进程组补 SIGKILL 的延迟：与抽取前 `PiProcess.stop()` 的 3s 逐字一致。 */
 export const LOCAL_PI_GROUP_KILL_DELAY_MS = 3_000;
@@ -54,7 +54,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** 计划校验：宁可在这里拒绝，也不要把半个 plan 交给 spawn（错误信息就是稳定码本身）。 */
-function assertLaunchPlan(plan: unknown): asserts plan is PiRuntimeLaunchPlan {
+function assertLaunchPlan(plan: unknown): asserts plan is LocalPiRuntimeLaunchPlan {
 	if (!isRecord(plan) || plan.kind !== "local") throw new Error("PI_RUNTIME_LAUNCH_PLAN_INVALID");
 	if (typeof plan.command !== "string" || plan.command.trim().length === 0) throw new Error("PI_RUNTIME_LAUNCH_PLAN_INVALID");
 	if (!Array.isArray(plan.args) || plan.args.some((arg) => typeof arg !== "string")) throw new Error("PI_RUNTIME_LAUNCH_PLAN_INVALID");
@@ -170,7 +170,7 @@ export class LocalPiRuntimeLauncher implements PiRuntimeLauncher {
 		this.groupKill = options.groupKill ?? defaultGroupKill;
 	}
 
-	async launch(plan: PiRuntimeLaunchPlan): Promise<PiSpawnHandle> {
+	async launch(plan: LocalPiRuntimeLaunchPlan): Promise<PiSpawnHandle> {
 		assertLaunchPlan(plan);
 		const platform = this.platformOverride ?? process.platform;
 		// 同步抛错（cwd 非法等）直接 reject；异步的 spawn 失败走 handle.onSpawnError（Node 语义）。

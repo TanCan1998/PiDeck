@@ -4,6 +4,7 @@ import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { PiRpcClient } from "./PiRpcClient";
+import { basePiRpcArgs } from "./piRpcArgs";
 import { LocalPiRuntimeLauncher } from "./LocalPiRuntimeLauncher";
 import type { PiRuntimeLauncher, PiSpawnHandle } from "./PiSpawnHandle";
 import { PiLocator } from "./PiLocator";
@@ -329,11 +330,8 @@ export class PiProcess extends EventEmitter {
 
 		// 信任确认由桌面端 AgentManager.ensureProjectTrust 在启动 pi 前完成，不再静默 --approve。
 		// pi 在 RPC 模式下 project_trust 事件 hasUI 恒为 false，故信任弹窗由桌面端自行处理。
-		const args = ["--mode", "rpc"];
-		// RPC 无 TUI，不需要主题发现/加载；跳过可少扫用户/项目/package themes，加快冷启动。
-		args.push("--no-themes");
-		// 桌面端模型列表来自本地 models.json；默认 --offline 跳过 pi 启动期模型目录网络刷新。
-		if (this.settings?.piRpcOffline !== false) args.push("--offline");
+		// 基础参数与远端运行时共用一份（`piRpcArgs.basePiRpcArgs`）：同一个 pi 不能有两套基础参数。
+		const args = basePiRpcArgs(this.settings);
 
 		// 诊断开关：坏扩展/技能有时会拖垮 RPC 初始化；用户可在开发设置临时关闭后重试。
 		// piRpcNoExtensions（总开关）优先：关闭后连白名单注入也不做，保证诊断路径干净。

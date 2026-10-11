@@ -33,7 +33,16 @@ export type PiRuntimeStopReason = "abort" | "restart" | "shutdown";
  * `kind` 是位置判别式：P4.2 增加 `{ kind: "remote-ssh"; ... }`，届时该变体只允许包含远端路径与
  * 已部署 artifact 引用——任何本机绝对路径出现在远端 plan 里都是错的（契约测试会在那一批加）。
  */
-export type PiRuntimeLaunchPlan = {
+/**
+ * 启动计划：位置判别式联合。
+ *
+ * `local` 是今天的行为（逐字段对应 `PiProcess` 传给 `spawn` 的输入）；`remote-ssh` 只允许包含**远端**
+ * 路径与已部署 artifact 引用——任何本机绝对路径出现在远端 plan 里都是错的（P4.2 的契约测试会拦）。
+ */
+export type PiRuntimeLaunchPlan = LocalPiRuntimeLaunchPlan | RemoteSshPiRuntimeLaunchPlan;
+
+/** 本地启动计划：逐字段对应今天 `PiProcess` 传给 `spawn` 的输入，**不新增语义**。 */
+export type LocalPiRuntimeLaunchPlan = {
 	readonly kind: "local";
 	readonly command: string;
 	readonly args: readonly string[];
@@ -43,6 +52,27 @@ export type PiRuntimeLaunchPlan = {
 	/** Windows 上的 npm shim 需要 shell 解析（与 `PiLocator.createInvocation().shell` 同源）。 */
 	readonly shell: boolean;
 	readonly windowsVerbatimArguments?: boolean;
+};
+
+/**
+ * 远端启动计划（P4.2）：只带远端侧事实。
+ *
+ * 三个路径都是**远端**绝对 POSIX 路径：`nodePath` / `piPath` 来自 P4.1 的探测（`pi` 的入口是
+ * `#!/usr/bin/env node` shim，必须用解析出来的 node 当解释器），`runnerPath` 是内容寻址部署包里
+ * 的 `runner.mjs`。`cwd` 是远端项目根（canonical）。`args` 只含 pi 自己的参数——解释器与入口由
+ * launcher 拼成固定命令，不拼任何用户文本。
+ */
+export type RemoteSshPiRuntimeLaunchPlan = {
+	readonly kind: "remote-ssh";
+	readonly hostId: string;
+	readonly generation: number;
+	readonly nodePath: string;
+	readonly piPath: string;
+	readonly runnerPath: string;
+	readonly cwd: string;
+	readonly args: readonly string[];
+	/** 一次运行的身份：runner 用它给 lease 命名，launcher 用它就能拒绝不属于本次握手的 ready 帧。 */
+	readonly nonce: string;
 };
 
 /** 一个已经起来的 pi 运行时进程。 */

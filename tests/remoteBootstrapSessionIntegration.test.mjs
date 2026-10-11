@@ -10,6 +10,7 @@ const { runPreparedBootstrap } = loadTsCommonJs("src/main/remote/RemoteBootstrap
 const { frozenHelperBundleManifest } = loadTsCommonJs("src/main/remote/RemoteBootstrapDeployment.ts");
 const { REMOTE_BOOTSTRAP_INLINE_SOURCE, REMOTE_BOOTSTRAP_INLINE_ENTRY } = loadTsCommonJs("src/main/remote/RemoteBootstrapContract.ts");
 const { REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_HELPER_INLINE_SOURCE } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
+const { REMOTE_RUNNER_ENTRY_FILE_NAME, REMOTE_RUNNER_INLINE_SOURCE } = loadTsCommonJs("src/main/remote/RemoteRunnerEntry.ts");
 const HOST_ID = "a252b70c-ea1d-4612-90b6-af78d299894f";
 const NONCE = "noncevalue0123456789";
 const ALIAS = `pideck-${HOST_ID}`;
@@ -78,7 +79,10 @@ test("real frozen entry reaches finalized after snapshot upload through the prod
 			assert.ok(ready, "scp can only start after ready");
 			const snapshot = request.invocation.cwd;
 			assert.equal(await readFile(join(snapshot, REMOTE_HELPER_ENTRY_FILE_NAME), "utf8"), REMOTE_HELPER_INLINE_SOURCE);
-			await copyFile(join(snapshot, REMOTE_HELPER_ENTRY_FILE_NAME), join(ready.deployRoot, ready.staging, REMOTE_HELPER_ENTRY_FILE_NAME));
+			assert.equal(await readFile(join(snapshot, REMOTE_RUNNER_ENTRY_FILE_NAME), "utf8"), REMOTE_RUNNER_INLINE_SOURCE);
+			// The pinned scp transfers every declared name of the bundle, so the snapshot of both frozen entries
+			// lands in the staging directory the entry is holding.
+			for (const file of manifest.files) await copyFile(join(snapshot, file.name), join(ready.deployRoot, ready.staging, file.name));
 			return {
 				onExit(listener) {
 					queueMicrotask(() => listener({ kind: "exited", code: 0, signal: null }));
@@ -95,5 +99,6 @@ test("real frozen entry reaches finalized after snapshot upload through the prod
 	assert.equal(result.bundleSha256, manifest.bundleSha256);
 	assert.equal(result.deployRoot, ready.deployRoot);
 	assert.equal(await readFile(join(result.deployRoot, "bundles", manifest.bundleSha256, REMOTE_HELPER_ENTRY_FILE_NAME), "utf8"), REMOTE_HELPER_INLINE_SOURCE);
+	assert.equal(await readFile(join(result.deployRoot, "bundles", manifest.bundleSha256, REMOTE_RUNNER_ENTRY_FILE_NAME), "utf8"), REMOTE_RUNNER_INLINE_SOURCE);
 	assert.ok((await lstat(join(result.deployRoot, "bundles", manifest.bundleSha256))).isDirectory());
 });

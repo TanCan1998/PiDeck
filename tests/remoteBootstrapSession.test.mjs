@@ -7,6 +7,8 @@ import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
 const { runPreparedBootstrap } = loadTsCommonJs("src/main/remote/RemoteBootstrapSession.ts");
 const { frozenHelperBundleManifest } = loadTsCommonJs("src/main/remote/RemoteBootstrapDeployment.ts");
+const { REMOTE_HELPER_ENTRY_FILE_NAME } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
+const { REMOTE_RUNNER_ENTRY_FILE_NAME } = loadTsCommonJs("src/main/remote/RemoteRunnerEntry.ts");
 const HOST_ID = "b145de8c-6330-45be-8752-f20e8e270150";
 const NONCE = "abc12345678901234567";
 const SSH = { executable: "/usr/bin/ssh", args: ["-o", `HostKeyAlias=pideck-${HOST_ID}`, "-o", "BatchMode=yes"], env: { PATH: "/usr/bin" }, destination: "10.81.2.15", openSshVersion: "OpenSSH_9.5p1" };
@@ -208,7 +210,7 @@ test("ready matches nonce and helper manifest before pinned scp and finalize", a
 	assert.ok(starts[0].timeoutMs >= 270_000, "entry lifetime must cover ready, upload and finalize budgets");
 	assert.deepEqual(
 		session.written.map((frame) => frame.op),
-		["finalize-begin", "finalize-file", "finalize-commit"],
+		["finalize-begin", ...manifest.files.map(() => "finalize-file"), "finalize-commit"],
 	);
 	assert.deepEqual(session.stopped, ["shutdown"]);
 });
@@ -237,7 +239,7 @@ test("a wrong ready nonce refuses upload and stops the bootstrap entry", async (
 	await assert.rejects(runPreparedBootstrap(input), /BOOTSTRAP_READY_INVALID/);
 	assert.equal(starts.length, 1);
 	assert.deepEqual(session.stopped, ["abort"]);
-	assert.equal(manifest.files.length, 1);
+	assert.deepEqual(JSON.parse(JSON.stringify(manifest.files.map((file) => file.name))), [REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_RUNNER_ENTRY_FILE_NAME], "the fixture uploads the frozen bundle, so the refusal above happened before any of its bytes moved");
 });
 
 test("a known entry error before ready keeps its stable code without uploading", async (t) => {
