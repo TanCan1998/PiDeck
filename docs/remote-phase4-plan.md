@@ -528,3 +528,9 @@ $ ssh ... serve 'df -h ~ | tail -1'
 | D3 | helper 扩展清单是否就按"probe/artifact/session/config 有界文件 op，不含 `proc.*`"冻结 | 是（配合 D1=A） | 决定 helper build 1.7.0 的 op 面与契约 |
 | D4 | 远端 pi 兼容窗口（真机 0.85.1 如何处理） | **已拍板（2026-10）**：下限 `0.85.0`（依据 `docs/pi-compatibility.md` 当前基线，不是「写计划时的最新 release」0.87.1）；`0.85.x` 为已核验窗口；更高 ⇒ 放行 + `REMOTE_PI_VERSION_UNVERIFIED`；更低 ⇒ `REMOTE_PI_TOO_OLD` + 升级指引，不静默升级 | 已决定 P4.1 的分类行为；UI 文案随 P4.2 接线 |
 | D5 | runner 的部署形态（第二份冻结 entry vs 多文件 bundle） | **倾向：同一份 bundle 里加第二个冻结 entry（`runner.mjs`）**：现有链已经是多文件的（`buildBundleManifest(files[])`、`deployPreparedBundle({names, executableNames})`），不需要新 manifest 生成器；P4.2 落地时按此实现 | 影响 bootstrap manifest/门禁与真机重验 |
+
+## 状态（本次更新）
+
+- **P4.2**：协议/运行时/产品路真机验收**全绿**（`e2e/remoteSessionAcceptance.spec.ts` 2 passed / 真实主机）；
+  唯一剩余项＝**远端自动 reattach**（`reattachProcess` 仍本地实现，实现要点见 `remote-development-handoff.md`）。
+- P4.4（远端 trust 完整语义）仍未开始，P4.2 期间只做「如实可见」。

@@ -10,6 +10,21 @@
 >
 > **未完成（建议优先级）**：
 > 1. **Phase 4 P4.2 只剩两项**——协议层**已端到端验通**（真机 `scripts/verify-remote-runtime.mjs` → `RUNTIME_E2E_OK`）。已交付：`707ecb595` 冻结 runner + 远端启动器；`d919e5402` 真机验收脚本 + `remotePiRuntimeFacts`；`e9bcd19d0` `PiProcess` 远端模式；`61222cc76` `AgentManager` 路由 + 本机 fs 守卫 + catalog fail-closed；`68accdfd6` 远端会话的 catalog 身份；`b76b03dff` 远端会话**恢复（点开）**+ 恰好一条 catalog 记录；`448940ea6` **远端 trust 状态可见**（`AgentTab.remoteTrustUnhandled` + 会话视图内持续提示 + 双语 key；安全默认不变）。**剩下：** (i) **远端自动 reattach**（`reattachProcess` 目前是本地实现）；(ii) **Electron 真机 UI 验收**（这台 Linux 沙箱能跑 Electron，可直接做——这是 P4.2 进入 beta 的最后一关）。
+>    **🎉 P4.2 UI 验收全绿（2026-10，确认跑）**：`npx playwright test e2e/remoteSessionAcceptance.spec.ts` ⇒
+>    **2 passed (3.7m)**（真实 Electron + 真实主机；证据另存 `/tmp/p42-final/`，命令与凭据只从 env 取）。
+>    两条测试覆盖：①产品路「新建会话 → 输入出正文 → 关闭 Agent → 关标签页重开 → 历史仍在 → **远端会话文件里确有 5 行**」；
+>    ②「远端 trust 提示如实可见（常驻、非一次性 toast，发送前就在）」。至此 P4.2 的 UI 验收闭合。
+>
+>    **P4.2 唯一剩余项：远端自动 reattach**（`reattachProcess` 仍是本地实现）。实现要点（本次侦察所得，避免重走弯路）：
+>    - 现状：`AgentManager.reattachProcess`（:2662）第一件事就是 `if (!isLocalProject(project)) throw new Error("UNSUPPORTED_PROJECT_LOCATION")`；
+>      两个触发点：进程退出型压缩（:2495）、abort 期间进程退出（:4413）。
+>    - 远端分支应复用 create 的 launch 构造：`remoteRuntime.prepare({ hostId: project.locator.hostId,
+>      remoteCwd: project.locator.remotePath, sessionFile: sessionPath })` + `remoteRuntime.createLauncher()`（见 :1646）。
+>    - **不能复用 `handshakePiProcess`**（:669 的签名不接 launch/plan）⇒ 要照 create 路径的**远端内联握手**写
+>      （`PiProcess` 带 launch 起进程 + `get_state` 合并状态）。
+>    - **两处硬坑（必须按远端语义处理）**：①远端路径**不得**走 `normalizeSessionPathFromPi`（create 明确注释
+>      「原样采用」，本机规则会把它改错）；②远端**不加载历史**（本批 `historyLoading: "unsupported"`），
+>      reattach 里的 `loadMessages` 对远端会被守卫拒绝（需 `.catch` 兜住或跳过）。
 >    **✅ 已修复并通过真机验收（2026-10，`93cad060e`）**：修法是「预热激活成功后**主动回拉一次 runtime 快照**」
 >    ——渲染层首键预热走 IPC `sessionsRuntimeActivate`（`sessionIpc.ts:1456`）直接调 `coordinator.activateRuntime`
 >    后返回，**绑定成功后没有任何推送**，而 `emitSessionRuntimeEvent` 在无绑定时会把整条 tab 快照丢掉；
