@@ -123,3 +123,24 @@ test("提示用既有 Tailwind 语义 token，没有为它新增手写 CSS class
 		assert.doesNotMatch(readFileSync(join("src/renderer/src/styles", name), "utf8"), /remote-?trust/i, `${name} 不应为远端 trust 提示新增手写 class`);
 	}
 });
+
+test("标记不因绑定变化被抹掉：runtime 事件重建条目时保留会话级事实（真机 UI 验收回归）", () => {
+	const store = createStore();
+	// 先到一条带标记的 tab 快照（远端会话创建时的常态）。
+	store.set(atoms.applySessionRuntimeEventAtom, agentsStateEvent({ remoteTrustUnhandled: true }));
+	assert.equal(store.get(atoms.sessionRemoteTrustUnhandledAtomFamily(SESSION_ID)), true);
+	// 再模拟「输入首键预热 ⇒ runtime 重新绑定」：新代际 + 新 agent 会让 applySessionRuntimeEventAtom
+	// 走「bindingChanged ⇒ 全新字面量」分支，而这条 runtime-state 载荷**不带** remoteTrustUnhandled
+	// （只有 agents:state 的 tab 快照带）——此前的实现把会话级事实一起丢在这里，真机 UI 验收实测到的
+	// 现象就是「输入首键之后 trust 提示从不出现」。
+	store.set(atoms.applySessionRuntimeEventAtom, {
+		kind: "event",
+		sessionId: SESSION_ID,
+		agentId: "agent-remote-2",
+		runtimeGeneration: 2,
+		sourceChannel: "agents:runtime-state",
+		payload: { id: "agent-remote-2", state: { modelName: "remote-model" } },
+	});
+	assert.equal(store.get(atoms.sessionRuntimeByIdAtom)[SESSION_ID]?.agentId, "agent-remote-2", "绑定必须真的换到新 runtime");
+	assert.equal(store.get(atoms.sessionRemoteTrustUnhandledAtomFamily(SESSION_ID)), true, "会话级标记不得被 runtime 重建抹掉");
+});

@@ -1128,6 +1128,10 @@ export const applySessionRuntimeEventAtom = atom(null, (get, set, event: Session
 					// 新绑定不能继承旧 agent 的运行时状态：清掉残留 state，
 					// 否则底栏 state?.modelName 优先于 record 显示旧模型（模型切换后显示旧）。
 					// 真实值由后续 agents:runtime-state 事件（含 applyPreferences 后的主动推送）填充。
+					// 但**会话级事实必须留**：`remoteTrustUnhandled` 只随 `agents:state` 的 tab 快照下发，
+					// `agents:runtime-state` 载荷里没有它——在这里丢掉就再没人补，远端会话的
+					// trust 提示会永久消失（2026-10 真机 UI 验收实测：输入首键→绑定变化→提示从不出现）。
+					remoteTrustUnhandled: currentRuntime?.remoteTrustUnhandled,
 					state: undefined,
 				}
 			: currentRuntime),
