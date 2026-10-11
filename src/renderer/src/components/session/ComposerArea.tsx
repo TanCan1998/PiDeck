@@ -1,5 +1,5 @@
 import { forwardRef, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { useAtomValue } from "jotai";
+import { useAtomValue, useStore } from "jotai";
 import { ComposerBottomBar, ImagePreviewModal, PromptSuggestions } from "./ComposerParts";
 import { TipTapComposer } from "./composer";
 import { SessionReferenceModal } from "../app/SessionReferenceModal";
@@ -10,6 +10,7 @@ import { ComposerPickerHost } from "./ComposerPickerHost";
 import { SecurityControl } from "./SecurityControl";
 import { QuickMessageMenu } from "./QuickMessageMenu";
 import { modelPendingByIdAtom } from "../../atoms/composer-atoms";
+import { replaceSessionRuntimesAtom } from "../../atoms";
 import { ComposerRuntimeIntegrations } from "./ComposerRuntimeIntegrations";
 import { useSessionPaneServices } from "./SessionPaneServices";
 import { desktopApi } from "../../desktopApi";
@@ -107,6 +108,7 @@ export const ComposerArea = forwardRef<HTMLElement, ComposerAreaProps>(function 
 
 	const modelPendingMap = useAtomValue(modelPendingByIdAtom);
 
+	const store = useStore();
 	const prewarmStartedForSessionRef = useRef<string | undefined>(undefined);
 	useEffect(() => {
 		if (!props.sessionId || !window.piDesktop) return;
@@ -116,7 +118,18 @@ export const ComposerArea = forwardRef<HTMLElement, ComposerAreaProps>(function 
 
 		// 输入是比“打开会话”更可靠的发送意图信号；只在首次输入后预热一次，
 		// 避免用户仅浏览历史时创建进程，也避免每个按键重复触发 IPC。
-		void desktopApi.sessions.activateRuntime(props.sessionId).catch(() => undefined);
+		//
+		// 预热成功后**回拉一次 runtime 快照**：`emitSessionRuntimeEvent` 在「协调器还没绑定」时会把整个
+		// `agents:state`（含 tab 快照）丢掉，此后若本会话没有新的状态变化，那些只存在于早期快照里的状态就
+		// 再也到不了渲染层——远端会话的 trust 标记只搭 tab 快照（`agents:runtime-state` 不带它），真机
+		// 实测：「输入首键预热后静置」提示永不显示，而后续发过 prompt 的会话就能显示。回拉是幂等的。
+		const prewarm = desktopApi.sessions.activateRuntime(props.sessionId);
+		void prewarm
+			.then(async () => {
+				const runtimes = await desktopApi.sessions.listRuntimes().catch(() => null);
+				if (runtimes) store.set(replaceSessionRuntimesAtom, runtimes);
+			})
+			.catch(() => undefined);
 	}, [composer.attachments.length, composer.draft, composer.pasteFiles.files.length, props.sessionId]);
 
 	return (
