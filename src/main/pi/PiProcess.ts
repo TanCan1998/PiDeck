@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { PiRpcClient } from "./PiRpcClient";
 import { basePiRpcArgs } from "./piRpcArgs";
 import { LocalPiRuntimeLauncher } from "./LocalPiRuntimeLauncher";
-import type { PiRuntimeLauncher, PiSpawnHandle } from "./PiSpawnHandle";
+import type { PiRuntimeLauncher, PiRuntimeLaunchPlan, PiSpawnHandle, RemoteSshPiRuntimeLaunchPlan } from "./PiSpawnHandle";
 import { PiLocator } from "./PiLocator";
 import { createSpawnFailureError } from "./piSpawnFailure";
 import { parkBlockedExtensionsInDir, unparkBlockedExtensions, type ParkedExtension } from "./piExtensionFilter";
@@ -39,6 +39,15 @@ type PiProcessOptions = {
 	 * 远端会话（P4.2）由 coordinator 注入远端 launcher，PiProcess 本身不判断位置类型。
 	 */
 	runtimeLauncher?: PiRuntimeLauncher;
+	/**
+	 * 远端运行时计划（P4.2）。给了它就是「这条 runtime 跑在远端」：参数与 cwd 全部来自 plan，
+	 * 本地专属准备一律不参与（见 `startRemoteRuntime`）。它必须与 `runtimeLauncher` 一起注入——
+	 * 本地启动器收到远端 plan 会直接拒（`PI_RUNTIME_LAUNCH_PLAN_INVALID`），不会静默降级。
+	 *
+	 * 注意：远端模式下 `start(sessionPath, trustOverride)` 的这两个参数不适用——会话文件要写进 plan 的
+	 * `args`（`--session <远端路径>`），远端 trust 语义属 P4.4（本批不代替实现）。
+	 */
+	runtimePlan?: PiRuntimeLaunchPlan;
 	/**
 	 * 解析当前应通过 -e 注入的 PiDeck 内置扩展绝对路径。
 	 * 未提供时 RPC 不注入内置扩展（兼容测试/探针）。
@@ -159,6 +168,16 @@ function readCwdState(cwd: string): { exists: boolean; isDirectory: boolean } {
 	} catch {
 		return { exists: false, isDirectory: false };
 	}
+}
+
+/**
+ * 取错误消息（跨 realm 安全）：vm/worker 里创建的错误对象不满足 `instanceof Error`，但同样带 message，
+ * 所以按属性取而不是按原型判——否则远端路径上的错误会被降级成 `Error: <码>` 这种带前缀的字符串，
+ * 而诊断层只承认「消息即稳定码」。
+ */
+function errorMessage(error: unknown): string {
+	if (typeof error === "object" && error !== null && "message" in error && typeof error.message === "string") return error.message;
+	return String(error);
 }
 
 type VersionCacheEntry = { status: "pending"; promise: Promise<boolean> } | { status: "done"; ok: boolean; minorVersion: number | null };
@@ -309,6 +328,9 @@ export class PiProcess extends EventEmitter {
 
 	async start(sessionPath?: string, trustOverride?: "approve" | "no-approve", noSession?: boolean) {
 		if (this.handle) return this.rpc!;
+		// 远端运行时（P4.2）：进程怎么起来、在哪起来与本地完全不同，但起来之后的 RPC/事件/退出语义完全
+		// 一致——所以只在这里分叉，下面那条本地路径一字不改。
+		if (this.options.runtimePlan?.kind === "remote-ssh") return await this.startRemoteRuntime(this.options.runtimePlan);
 
 		// 预检会话文件：旧版 PiDeck 私有 sessionName 头行会让 pi 拒绝加载（exit 1）。
 		// 修复失败不阻塞启动——pi 自身的报错会进入启动诊断，比静默吞掉更有价值。
@@ -717,26 +739,9 @@ export class PiProcess extends EventEmitter {
 				throw err;
 			}
 
-			this.rpc = new PiRpcClient(this.handle.stdin, this.handle.stdout);
+			this.wireRuntime();
 
-			this.rpc.on("event", (event) => this.emit("event", event));
-			this.rpc.on("protocol-error", (line) => this.emit("protocol-error", line));
-			// 转发 RPC 日志到 AgentManager，用于前端调试面板展示
-			this.rpc.on("log", (entry) => this.emit("rpc-log", entry));
-
-			this.handle.stderr.on("data", (chunk) => {
-				const text = chunk.toString("utf8");
-				// 缓冲启动期 stderr（上限 8KB），供启动失败后诊断展示
-				if (this.diagnostics) {
-					this.diagnostics.stderr.push(text);
-					const total = this.diagnostics.stderr.reduce((s, l) => s + l.length, 0);
-					if (total > 8192) this.diagnostics.stderr = [this.diagnostics.stderr.join("").slice(-4096)];
-				}
-				// stderr 不属于 RPC 协议，单独暴露给 UI 的日志面板，避免污染 JSONL stdout。
-				this.emit("stderr", text);
-			});
-
-			// 立即绑定 error/exit：不要等 AgentManager 挂业务监听。
+			// 立即绑定 error：不要等 AgentManager 挂业务监听。
 			// macOS 上 pi 路径缺失/架构不匹配时，error 事件可能在 start() 返回后几毫秒就到。
 			this.handle.onSpawnError((error) => {
 				if (this.diagnostics) {
@@ -784,22 +789,8 @@ export class PiProcess extends EventEmitter {
 				}
 				this.emit("error", surfaced);
 			});
-			this.handle.onExit(({ code, signal }) => {
-				// 退出时更新诊断信息
-				if (this.diagnostics) {
-					this.diagnostics.exitCode = code;
-					this.diagnostics.exitSignal = signal;
-				}
-				// pi 退出后还原临时停放的扩展，保证 CLI 仍能加载 codeisland。
-				this.restoreParkedExtensions();
-				this.rpc?.close(new Error(`pi exited: code=${code ?? "null"}, signal=${signal ?? "null"}`));
-				this.emit("exit", { code, signal });
-				this.handle = undefined;
-				this.rpc = undefined;
-			});
-
 			startupComplete = true;
-			return this.rpc;
+			return this.rpc!;
 		} catch (error) {
 			// Resolver/version/WSL preparation can fail after extensions were parked but before a
 			// child exit handler owns restoration. Roll back this start attempt synchronously.
@@ -846,6 +837,94 @@ export class PiProcess extends EventEmitter {
 		// 已搬进 LocalPiRuntimeLauncher，与抽取前逐字一致。本地实现不使用 reason；远端 runner（P4.2）
 		// 用它决定 lease 回收的措辞。真正还原在 exit 回调里做；此处不提前 unpark，避免与仍在退出的 pi 竞态。
 		void this.handle.stop("shutdown");
+	}
+
+	/**
+	 * 共用的运行时接线：RPC 客户端、事件转发、stderr 诊断、退出收尾。
+	 *
+	 * 本地与远端只在这之前不同（进程怎么起来），之后完全一致——这正是 P4.0 抽出启动面的目的。
+	 * spawn 失败**不**在这里处理：本地那条在 `start()` 里就地归因（要引用本机路径事实），远端那条在
+	 * `launch()` 里 reject。
+	 */
+	private wireRuntime(): void {
+		const handle = this.handle;
+		if (handle === undefined) throw new Error("PI_RUNTIME_HANDLE_MISSING");
+		this.rpc = new PiRpcClient(handle.stdin, handle.stdout);
+
+		this.rpc.on("event", (event) => this.emit("event", event));
+		this.rpc.on("protocol-error", (line) => this.emit("protocol-error", line));
+		// 转发 RPC 日志到 AgentManager，用于前端调试面板展示
+		this.rpc.on("log", (entry) => this.emit("rpc-log", entry));
+
+		handle.stderr.on("data", (chunk) => {
+			const text = chunk.toString("utf8");
+			// 缓冲启动期 stderr（上限 8KB），供启动失败后诊断展示
+			if (this.diagnostics) {
+				this.diagnostics.stderr.push(text);
+				const total = this.diagnostics.stderr.reduce((s, l) => s + l.length, 0);
+				if (total > 8192) this.diagnostics.stderr = [this.diagnostics.stderr.join("").slice(-4096)];
+			}
+			// stderr 不属于 RPC 协议，单独暴露给 UI 的日志面板，避免污染 JSONL stdout。
+			this.emit("stderr", text);
+		});
+
+		handle.onExit(({ code, signal }) => {
+			// 退出时更新诊断信息
+			if (this.diagnostics) {
+				this.diagnostics.exitCode = code;
+				this.diagnostics.exitSignal = signal;
+			}
+			// pi 退出后还原临时停放的扩展，保证 CLI 仍能加载 codeisland。
+			this.restoreParkedExtensions();
+			this.rpc?.close(new Error(`pi exited: code=${code ?? "null"}, signal=${signal ?? "null"}`));
+			this.emit("exit", { code, signal });
+			this.handle = undefined;
+			this.rpc = undefined;
+		});
+	}
+
+	/**
+	 * 远端运行时（P4.2）：一条 pinned ssh + 冻结 runner，参数与 cwd 全部来自 plan（命令行里只有解释器
+	 * 与 runner 两段，其余走握手帧）。
+	 *
+	 * **跳过**的本地专属准备（全都带本机语义，远端照做只会把错误归因到本机）：命令定位与版本探测、
+	 * WSL 路径转换、扩展/技能/提示词白名单与停放扩展、`PIDECK_SECURITY_CONFIG` 指向的本机快照路径、
+	 * trust flag（远端 trust 属 P4.4）、本机 cwd 校验与 spawn 失败归因。
+	 *
+	 * 失败只可能是 `launch()` 的 reject（远端没有「起来了一半」的中间态）：按本地同款方式写诊断并 emit
+	 * error，让 AgentManager 能把诊断写到会话卡片上。
+	 */
+	private async startRemoteRuntime(plan: RemoteSshPiRuntimeLaunchPlan): Promise<PiRpcClient> {
+		// 诊断对象与本地同形（UI 的诊断卡片按这些字段渲染）。远端本轮**不**跑本机版本探测；
+		// 远端 pi 的版本由 P4.1 的探测给出（plan 构造时已经判过兼容窗口）。
+		this.diagnostics = {
+			command: plan.piPath,
+			args: [...plan.args],
+			cwd: plan.cwd,
+			stderr: [],
+			exitCode: null,
+			exitSignal: null,
+			customPiPath: this.settings?.customPiPath,
+			versionCheck: false,
+			versionCheckProbed: false,
+		};
+		void getAppLogger()?.debug("pi-process", "Remote pi runtime launch", { hostId: plan.hostId, cwd: plan.cwd, argsCount: plan.args.length });
+		try {
+			this.handle = await this.runtimeLauncher.launch(plan);
+		} catch (error) {
+			// 用 errorMessage 而不是 instanceof：launcher 可能来自另一个 realm，而诊断只承认「消息即稳定码」。
+			const err = new Error(errorMessage(error));
+			if (this.diagnostics) {
+				this.diagnostics.stderr.push(err.message);
+				// 与本地同款：用 -1 标记「未能真正拉起进程」。
+				if (this.diagnostics.exitCode === null) this.diagnostics.exitCode = -1;
+				this.diagnostics.spawnFailed = true;
+			}
+			this.emit("error", err);
+			throw err;
+		}
+		this.wireRuntime();
+		return this.rpc!;
 	}
 
 	/** 后台执行 pi --version：更新诊断缓存，但不阻塞 start()/spawn。 */
