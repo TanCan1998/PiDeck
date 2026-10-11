@@ -10,6 +10,13 @@
 >
 > **未完成（建议优先级）**：
 > 1. **Phase 4 P4.2 只剩两项**——协议层**已端到端验通**（真机 `scripts/verify-remote-runtime.mjs` → `RUNTIME_E2E_OK`）。已交付：`707ecb595` 冻结 runner + 远端启动器；`d919e5402` 真机验收脚本 + `remotePiRuntimeFacts`；`e9bcd19d0` `PiProcess` 远端模式；`61222cc76` `AgentManager` 路由 + 本机 fs 守卫 + catalog fail-closed；`68accdfd6` 远端会话的 catalog 身份；`b76b03dff` 远端会话**恢复（点开）**+ 恰好一条 catalog 记录；`448940ea6` **远端 trust 状态可见**（`AgentTab.remoteTrustUnhandled` + 会话视图内持续提示 + 双语 key；安全默认不变）。**剩下：** (i) **远端自动 reattach**（`reattachProcess` 目前是本地实现）；(ii) **Electron 真机 UI 验收**（这台 Linux 沙箱能跑 Electron，可直接做——这是 P4.2 进入 beta 的最后一关）。
+>    **UI 验收现状（2026-10，`3f9bff495`）**：`e2e/remoteSessionAcceptance.spec.ts` 已在真机上跑过，**产品路走到第 3 步并走通**
+>    （加主机/pin → 连接 ready → 登记远端项目 → **在远端项目里新建会话**这个 UI 入口存在且被真实点击 → 远端 runtime 被预热）；
+>    随后在「远端 trust 提示可见」上失败（`getByTestId('remote-session-trust-notice')` 240s 未找到）。**两种成因待判别**：
+>    (i) 组件没暴露 testid ⇒ 改成按文案定位（spec 侧，属允许范围）；(ii) `SessionRuntimeInfo` 不带 `remoteTrustUnhandled`
+>    ⇒ 提示要等下一次 `agents:state`（下面这条已知限制）⇒ 产品侧 1 行修法。判别入口：失败证据已另存在
+>    `/tmp/p42-ui-acceptance-run1/` 与 `test-results/**/error-context.md`，在 DOM 快照里搜「远端项目资源未加载」。
+>    第 5~7 步（prompt 出正文 / 关闭 / 重开历史仍在）**尚未确证**（lane 在这两条上 30 分钟超时）。
 >    已知限制（如实记）：`SessionRuntimeInfo` 不带 `remoteTrustUnhandled`（那要动 SessionRuntimeCoordinator），所以**只有渲染层重载且远端 runtime 空闲**时，提示要等下一次 `agents:state`（激活/attach 会发）才出现；最小修法＝`shared/types/session.ts` 加 1 字段 + `runtimeInfo()` 加 1 行。
 >    另：D5 已定（runner 作为同一份 bundle 里的**第二个冻结 entry**）；**Pi RPC 走「每 Session 独立 SSH + 固定 runner」**，**不走控制协议**，全程零新增 helper op。
 > 2. ~~**INV-5 实施**~~ —— **已在第八批完成**（见 §3 第八批）：跨 store 写入侧现在有真正的跨进程锁 + 锁内重读（权威=磁盘），门控下 CE-1…CE-5 **全绿**。剩余遗留：**跨 store 协调器与启动 `resume` 仍未装配**（遗留 journal 只能 fail-closed 阻塞，不能自动收敛）、旧版本写者靠 CAS **检测**而非阻止、主机目录锁仍无 owner。
