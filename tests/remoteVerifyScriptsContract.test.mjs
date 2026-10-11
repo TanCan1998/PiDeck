@@ -18,14 +18,18 @@ import test from "node:test";
  * 2. 指纹比对不得被删掉——脚本是给人跑的真机验收工具，少掉 `fingerprintSshHostKey` 的逐字节断言
  *    就退化成「连上了就算通过」；
  * 3. **信任路径只有一份实现**：这段「取候选 → 比对独立指纹 → 建 pin」现在住在
- *    `scripts/remoteVerifyPinnedHost.mjs`，三个脚本只能经它进入，不得自己再抄一份
+ *    `scripts/remoteVerifyPinnedHost.mjs`，各脚本只能经它进入，不得自己再抄一份
  *    （第三份拷贝正是漂移的起点：漏掉比对的脚本照样会「握手成功」）。
+ *
+ * 集合里每一份都必须逐个过同款断言：新增真机脚本要把名字加进 `scriptNames`，而不是另写一份更松的守卫
+ * ——只覆盖一部分脚本的守卫，漏掉的那个脚本就是唯一可以退化的那个。（`verify-remote-runtime.mjs`
+ * 部署 bundle 并起远端 pi，它是这批里唯一会写远端文件的脚本，更不允许有自己的信任路径。）
  * 用例不依赖真实主机、不执行脚本（真机部分由人工在宿主终端跑）。
  */
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SHARED_MODULE = "scripts/remoteVerifyPinnedHost.mjs";
-const scriptNames = ["scripts/verify-remote-host.mjs", "scripts/verify-remote-connection-service.mjs", "scripts/verify-remote-pi.mjs"];
+const scriptNames = ["scripts/verify-remote-host.mjs", "scripts/verify-remote-connection-service.mjs", "scripts/verify-remote-pi.mjs", "scripts/verify-remote-runtime.mjs"];
 
 // 空白/连字符容忍：注释或字符串里写成 "ssh-keyscan" / "ssh - keyscan" / "sshkeyscan" 都算命中。
 // 定位代码块一律用正则，不硬编码缩进（改一次格式化不该让契约测试整组失败）。
@@ -105,6 +109,7 @@ test(`${SHARED_MODULE} still fails closed on the independently verified fingerpr
 });
 
 test("every verify script reaches the verified pin through the shared module instead of its own copy", () => {
+	assert.ok(scriptNames.includes("scripts/verify-remote-runtime.mjs"), "the P4.2 runtime acceptance script must be covered by these guards");
 	for (const name of scriptNames) {
 		const code = stripComments(scriptSource(name));
 		// keyscan 不得回来（含它的旧稳定码）——这条与改动前逐字一致。

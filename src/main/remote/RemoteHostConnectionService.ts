@@ -4,6 +4,8 @@ import { RemoteHostStore } from "./RemoteHostStore";
 import { createRemoteHostOperationLock } from "./RemoteHostOperationLock";
 import { resolveRemoteBrowseRoot } from "./RemoteBrowseRoot";
 import { bootstrapPinnedHost, resolveRemoteNodeExecutable } from "./RemoteBootstrapSession";
+import { resolveRemotePiExecutable } from "./RemotePiDiscovery";
+import { deployedRunnerPath } from "./RemoteBootstrapDeployment";
 import { createSshConnectionManager, type SshConnectionManager, type SshHelperSession } from "./SshConnectionManager";
 import { createSshProcessLauncher } from "./SshProcessLauncher";
 import { diagnosticCodeFromError } from "./SshConnectionDiagnostics";
@@ -28,6 +30,8 @@ export type RemoteHostConnectionPorts = {
 	bootstrap: typeof bootstrapPinnedHost;
 	/** Resolve the host user's own node through their login shell. */
 	resolveNode: typeof resolveRemoteNodeExecutable;
+	/** Resolve the host user's own pi (login-shell PATH + 解释器形态 + 版本窗口) —— P4.1 的只读探测。 */
+	resolvePi: typeof resolveRemotePiExecutable;
 	/** Build the per-host connection manager. The manager itself owns attempt lifecycles. */
 	createManager: (options: { userDataDir: string; client: SshClientRuntime; launcher: SshProcessLauncher; helperSession: SshHelperSession; onStateChange?: (entry: { hostId: string; state: ConnectionMachineState }) => void }) => SshConnectionManager;
 	/** Mint the bootstrap nonce; injected so tests are deterministic. */
@@ -88,9 +92,30 @@ const TRANSIENT_SESSION_STATES: ReadonlySet<string> = new Set(["connecting", "pr
  * generation; this counter names the bootstrap attempt and the nonce lineage only, so the two
  * fences stay independent and neither module has to know the other's numbering.
  */
+type PiProbeFacts = { readonly revision: number; readonly generation: number; readonly piPath: string; readonly version: string; readonly warning?: string };
+
+/** 一台主机上「跑远端 pi 会话」所需的全部事实（P4.2 的启动准备消费它）。 */
+export type RemotePiRuntimeFacts = {
+	readonly nodePath: string;
+	readonly piPath: string;
+	readonly version: string;
+	/** 高于已核验窗口时的提示码（放行但不冒充已核验组合）。 */
+	readonly warning?: string;
+	/** 远端 runner.mjs 的绝对路径（内容寻址部署包内，由 held bootstrap 推出）。 */
+	readonly runnerPath: string;
+};
+
 type HostEntry = {
 	generation: number;
 	held?: HeldBootstrap;
+	/**
+	 * Cached pi probe of this host, valid exactly as long as the held bootstrap it was taken under.
+	 *
+	 * The probe costs two remote round trips (login-shell PATH, then the version command), and every new
+	 * remote session needs the answer; caching it per held session keeps session creation cheap without
+	 * inventing a TTL (a reconnect or rebind drops the held session, which drops this with it).
+	 */
+	piProbe?: PiProbeFacts;
 	manager?: SshConnectionManager;
 	/** In-flight connect, so dispose can wait for it instead of racing the spawn. */
 	inFlight?: Promise<RemoteHostConnectResult>;
@@ -137,6 +162,7 @@ function defaultPorts(): RemoteHostConnectionPorts {
 	return {
 		bootstrap: bootstrapPinnedHost,
 		resolveNode: resolveRemoteNodeExecutable,
+		resolvePi: resolveRemotePiExecutable,
 		createManager: (options) => createSshConnectionManager(options),
 		createNonce: createBootstrapNonce,
 		createSentinel: () => randomBytes(DEFAULT_NONCE_BYTES).toString("hex"),
@@ -244,6 +270,9 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 	/** Drop every resource of one host. The manager owns its attempts, so it is disposed first. */
 	function discard(entry: HostEntry): void {
 		entry.held = undefined;
+		// 同一个 held bootstrap 才代表同一台远端机器的同一份 pi 事实：一旦丢弃会话，缓存的探测也必须丢弃，
+		// 否则重连后会拿着一台已退役/已重建主机的 pi 路径去启会话。
+		entry.piProbe = undefined;
 		const manager = entry.manager;
 		entry.manager = undefined;
 		if (manager !== undefined) void manager.dispose().catch(() => undefined);
@@ -569,6 +598,46 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 		listDiagnostics(hostId?: string) {
 			if (hostId !== undefined) return hosts.get(hostId)?.manager?.listDiagnostics(hostId) ?? [];
 			return [...hosts.values()].flatMap((entry) => entry.manager?.listDiagnostics() ?? []);
+		},
+		/**
+		 * 一台主机上「跑远端 pi 会话」所需的全部事实：解释器、pi 入口、runner 路径。
+		 *
+		 * 只读，但**按需建立受管会话**（与会话扫描的 `remoteHomeEnsuring` 同一立场：调用它的路径紧接着就要
+		 * 起会话，先拿事实再单独连一次只会多一次往返）。`runnerPath` 由 held bootstrap 的
+		 * `{deployRoot, bundleSha256}` 推出（内容寻址，不存在“路径漂移”）；pi 探测按 held bootstrap 缓存
+		 * （重连/rebind 会丢掉 held，缓存随之失效——所以不需要 TTL）。
+		 *
+		 * 失败一律稳定码：`SSH_HOST_ID_INVALID`（入参）、`SSH_HOST_NOT_READY`（会话没建起来），
+		 * 其余是探测自己的 `REMOTE_PI_*` 码原样透传（调用方据此给升级指引）。
+		 */
+		async remotePiRuntimeFacts(hostId: string): Promise<RemotePiRuntimeFacts> {
+			if (typeof hostId !== "string" || !HOST_ID.test(hostId)) throw new Error("SSH_HOST_ID_INVALID");
+			return operationLock.run(hostId, async () => {
+				const entry = entryFor(hostId);
+				if (entry.held === undefined) {
+					const result = await connectLocked(hostId);
+					if (!result.ok) throw new Error("SSH_HOST_NOT_READY");
+				}
+				const held = entry.held;
+				if (held === undefined) throw new Error("SSH_HOST_NOT_READY");
+				const cached = entry.piProbe;
+				const probe =
+					cached !== undefined && cached.revision === held.revision && cached.generation === held.generation
+						? cached
+						: await (async (): Promise<PiProbeFacts> => {
+								const observation = await ports.resolvePi({ userDataDir: options.userDataDir, hostId, client: options.client, sentinel: ports.createSentinel(), nodePath: held.session.nodePath });
+								const facts: PiProbeFacts = { revision: held.revision, generation: held.generation, piPath: observation.piPath, version: observation.version, ...(observation.warning === undefined ? {} : { warning: observation.warning }) };
+								entry.piProbe = facts;
+								return facts;
+							})();
+				return {
+					nodePath: held.session.nodePath,
+					piPath: probe.piPath,
+					version: probe.version,
+					...(probe.warning === undefined ? {} : { warning: probe.warning }),
+					runnerPath: deployedRunnerPath({ bundleSha256: held.session.bundleSha256, deployRoot: held.session.deployRoot, active: `./bundles/${held.session.bundleSha256}` }),
+				};
+			});
 		},
 		/**
 		 * Send one helper request on a ready host.
