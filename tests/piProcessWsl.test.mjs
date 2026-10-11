@@ -1,35 +1,8 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { PassThrough } from "node:stream";
 import test from "node:test";
-import ts from "typescript";
-import vm from "node:vm";
-
-const require = createRequire(import.meta.url);
-
-function transpile(filePath) {
-	return ts.transpileModule(readFileSync(filePath, "utf8"), {
-		compilerOptions: {
-			module: ts.ModuleKind.CommonJS,
-			target: ts.ScriptTarget.ES2022,
-		},
-	}).outputText;
-}
-
-function loadWslPaths() {
-	const sandbox = { exports: {}, require };
-	vm.runInNewContext(transpile("src/main/wsl/WslPaths.ts"), sandbox, { filename: "WslPaths.ts" });
-	return sandbox.exports;
-}
-
-// PiProcess 拆分出的扩展隔离模块；vm 沙箱不会自动解析相对模块，需与 WslPaths 一样显式登记。
-function loadPiExtensionFilter() {
-	const sandbox = { exports: {}, require };
-	vm.runInNewContext(transpile("src/main/pi/piExtensionFilter.ts"), sandbox, { filename: "piExtensionFilter.ts" });
-	return sandbox.exports;
-}
+import { createTsSandbox } from "./helpers/createTsSandbox.mjs";
 
 function createChildProcess() {
 	const child = new EventEmitter();
@@ -41,61 +14,40 @@ function createChildProcess() {
 }
 
 function loadPiProcess(spawnCalls) {
-	const paths = loadWslPaths();
-	const extensionFilter = loadPiExtensionFilter();
 	class FakeRpcClient extends EventEmitter {
 		close() {}
 	}
 	class FakePiLocator {}
-	const sandbox = {
-		Buffer,
-		console: { log() {}, warn() {}, error() {} },
-		exports: {},
-		process,
-		require: (id) => {
-			if (id === "node:child_process") {
-				return {
-					execFile: (_command, _args, _options, callback) => {
-						callback(null, "0.81.1\n", "");
-						return new EventEmitter();
-					},
-					spawn: (command, args, options) => {
-						const child = createChildProcess();
-						spawnCalls.push({ command, args, options, child });
-						return child;
-					},
-				};
-			}
-			if (id === "./PiRpcClient") return { PiRpcClient: FakeRpcClient };
-			if (id === "./PiLocator") return { PiLocator: FakePiLocator };
-			if (id === "../wsl/WslPaths") return paths;
-			if (id === "./piExtensionFilter") return extensionFilter;
-			// PiProcess 的 spawn 失败归因模块：vm 沙箱按 tests/ 相对路径解析，需显式登记。
-			if (id === "./piSpawnFailure") return require("../src/main/pi/piSpawnFailure.ts");
-			// killProcessTree：PiProcess 一直直接 import gitProcess，但本文件没跟上登记
-			// → 整个文件报 MODULE_NOT_FOUND（既有缺口，与本次改动无关）。
-			if (id === "../git/gitProcess") return require("../src/main/git/gitProcess.ts");
-			// 25fd516 起 PiProcess 引入内置扩展参数拼接；WSL 测试只关心路径转换，
-			// mock 为原样透传，避免 vm sandbox 的 require 按 tests/ 相对路径误解析。
-			if (id === "../extensions/builtInExtensions") {
-				return { appendBuiltInExtensionArgs: (args) => [...args] };
-			}
-			if (id === "../extensions/extensionVersionGate") {
-				return require("../src/main/extensions/extensionVersionGate.ts");
-			}
-			// sharedLogger 未注册时 getAppLogger 返回 null，PiProcess 埋点静默跳过
-			if (id === "../logging/sharedLogger") {
-				return { getAppLogger: () => null };
-			}
-			// vm 沙箱按 tests/ 相对路径解析，补桩避免拉真实 sessionProxyPolicy。
-			if (id === "../sessions/sessionProxyPolicy") {
-				return { applyPiProxyMode: (env) => env };
-			}
-			return require(id);
+	// spawn 替身捕获本次调用的 command/args/options（含 child），随用例变化，
+	// 所以每次加载都新建沙箱实例。未打桩的相对 import（LocalPiRuntimeLauncher、PiSpawnHandle、
+	// WslPaths、piExtensionFilter、piSpawnFailure、gitProcess…）由加载器按**源文件目录**解析。
+	const load = createTsSandbox({
+		stubs: {
+			"node:child_process": {
+				execFile: (_command, _args, _options, callback) => {
+					callback(null, "0.81.1\n", "");
+					return new EventEmitter();
+				},
+				spawn: (command, args, options) => {
+					const child = createChildProcess();
+					// args 由沙箱 realm 的启动器复制后传入（`[...plan.args]`）：跨 realm 数组让
+					// deepStrictEqual 因原型不同而失败。在捕获点归一为本 realm 副本（内容/长度不变），
+					// 断言保持不变。
+					spawnCalls.push({ command, args: Array.from(args), options, child });
+					return child;
+				},
+			},
+			"./PiRpcClient": { PiRpcClient: FakeRpcClient },
+			"./PiLocator": { PiLocator: FakePiLocator },
+			// 25fd516 起 PiProcess 引入内置扩展参数拼接；WSL 测试只关心路径转换，按原样透传。
+			"../extensions/builtInExtensions": { appendBuiltInExtensionArgs: (args) => [...args] },
+			// sharedLogger 未注册时 getAppLogger 返回 null，PiProcess 埋点静默跳过。
+			"../logging/sharedLogger": { getAppLogger: () => null },
+			"../sessions/sessionProxyPolicy": { applyPiProxyMode: (env) => env },
 		},
-	};
-	vm.runInNewContext(transpile("src/main/pi/PiProcess.ts"), sandbox, { filename: "PiProcess.ts" });
-	return sandbox.exports;
+		globals: { console: { log() {}, warn() {}, error() {} } },
+	});
+	return load("src/main/pi/PiProcess.ts");
 }
 
 function createLocator(invocationCalls) {

@@ -59,14 +59,16 @@ export function buildLoginShellPathCommand(sentinel: string): string {
 }
 
 /**
- * 在 PATH 中定位 node 的候选绝对路径。
+ * 在 PATH 中按顺序列出工具候选的绝对路径（`<绝对目录>/<候选名>`）。
  *
- * 返回**全部**候选（按 PATH 顺序），由调用方决定是否需要探测版本后再选；本函数
- * 不做文件系统访问，因此可离线单测。只有形如 `<绝对目录>/node` 的条目才会成为
- * 候选——这正是 `requireNodeExecutable` 在引导契约里要求的形状。
+ * 返回**全部**候选（PATH 顺序，目录内按 `names` 顺序），由调用方决定探测到什么程度；不做文件系统
+ * 访问，因此可离线单测。只有绝对目录会成为候选——这正是 `requireNodeExecutable` 在引导契约里要求的形状。
+ *
+ * 为什么在这里收口：node 探测与 pi 探测共用整套目录判定，两份实现迟早漂移成「同一条 PATH 两条规则」。
  */
-export function listNodeCandidatesFromPath(pathValue: unknown): string[] {
+export function listToolCandidatesFromPath(pathValue: unknown, names: readonly string[]): string[] {
 	if (typeof pathValue !== "string" || pathValue.length === 0 || pathValue.length > MAX_PATH_LENGTH) return [];
+	if (!Array.isArray(names) || names.length === 0) return [];
 	const seen = new Set<string>();
 	const candidates: string[] = [];
 	for (const rawEntry of pathValue.split(":")) {
@@ -74,12 +76,43 @@ export function listNodeCandidatesFromPath(pathValue: unknown): string[] {
 		// 只接受绝对目录；相对或空条目在登录 shell 下的语义依赖 cwd，不可复现。
 		if (!entry.startsWith("/") || entry.endsWith("/")) continue;
 		if (entry.split("/").some((segment) => segment === "." || segment === "..")) continue;
-		const candidate = `${entry}/node`;
-		if (candidate.length > 4096 || seen.has(candidate)) continue;
-		seen.add(candidate);
-		candidates.push(candidate);
+		for (const name of names) {
+			const candidate = `${entry}/${name}`;
+			if (candidate.length > MAX_TOOL_CANDIDATE_LENGTH || seen.has(candidate)) continue;
+			seen.add(candidate);
+			candidates.push(candidate);
+		}
 	}
 	return candidates;
+}
+
+/** 单个候选路径的长度上限（与引导契约的 `requireNodeExecutable` 同值）。 */
+const MAX_TOOL_CANDIDATE_LENGTH = 4096;
+
+/**
+ * 在 PATH 中定位 node 的候选绝对路径。
+ *
+ * 只有形如 `<绝对目录>/node` 的条目才会成为候选——这正是 `requireNodeExecutable` 在引导契约里
+ * 要求的形状。保留本导出名：调用方与测试按这个符号理解语义。
+ */
+export function listNodeCandidatesFromPath(pathValue: unknown): string[] {
+	return listToolCandidatesFromPath(pathValue, ["node"]);
+}
+
+/**
+ * 从一次登录 shell 探测的 stdout 解析出 PATH，哨兵读不出来或 PATH 为空时抛调用方指定的稳定码。
+ *
+ * 泛化的原因：pi 定位（`RemotePiDiscovery`）复用同一套「登录 shell 只读 PATH + 哨兵包夹 +
+ * 失败关闭」范式——解析规则完全一致——但它必须以 `REMOTE_PI_` 前缀的码对外报告，否则「这台机器
+ * 读不到可信 PATH」会被误报成 node 的问题。空 PATH 与哨兵缺失是两个不同的失败，故各有一个码。
+ * 解析规则本身不因调用方而变：哨兵缺失/重复仍失败关闭，绝不退回非交互 PATH。
+ */
+export function parseLoginShellPathWithCode(stdout: unknown, sentinel: string, code: string, emptyCode: string = "REMOTE_NODE_SHELL_PATH_EMPTY"): string {
+	const extracted = extractSentinelValue(stdout, sentinel);
+	if (extracted === null) throw new Error(code);
+	const pathValue = extracted.trim();
+	if (pathValue.length === 0) throw new Error(emptyCode);
+	return pathValue;
 }
 
 /**
@@ -87,11 +120,7 @@ export function listNodeCandidatesFromPath(pathValue: unknown): string[] {
  * 哨兵缺失即失败关闭：拿不到可信 PATH 时绝不退回非交互 PATH（那会把旧 node 放行）。
  */
 export function parseLoginShellPath(stdout: unknown, sentinel: string): string {
-	const extracted = extractSentinelValue(stdout, sentinel);
-	if (extracted === null) throw new Error("REMOTE_NODE_SHELL_PATH_UNREADABLE");
-	const pathValue = extracted.trim();
-	if (pathValue.length === 0) throw new Error("REMOTE_NODE_SHELL_PATH_EMPTY");
-	return pathValue;
+	return parseLoginShellPathWithCode(stdout, sentinel, "REMOTE_NODE_SHELL_PATH_UNREADABLE");
 }
 
 /** 供调用方生成一次性哨兵（本地随机，不含用户可控内容）。 */

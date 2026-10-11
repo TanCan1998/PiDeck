@@ -131,7 +131,9 @@ test("AgentManager exposes listAgentPids filtered to running processes", () => {
 test("PiProcess exposes pid accessor", () => {
 	const source = readFileSync("src/main/pi/PiProcess.ts", "utf8");
 	assert.match(source, /get pid\(\): number \| undefined/);
-	assert.match(source, /return this\.proc\?\.pid;/);
+	// P4.0（Phase 4）把「进程」抽成了启动面 handle：访问器现在转发到 handle.pid，而不是不再存在的 proc。
+	// 契约意图不变（对外仍是一个转发到真实进程的 pid 访问器），只是目标符号随实现等价迁移。
+	assert.match(source, /return this\.handle\?\.pid;/);
 });
 
 test("DshHostProcess and DshHost expose host pid for process monitor", () => {

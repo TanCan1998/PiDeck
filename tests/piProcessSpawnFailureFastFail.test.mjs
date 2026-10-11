@@ -14,28 +14,16 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
-import ts from "typescript";
-import vm from "node:vm";
+import { createTsSandbox } from "./helpers/createTsSandbox.mjs";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
-const require = createRequire(import.meta.url);
 const { PiRpcClient } = loadTsCommonJs("src/main/pi/PiRpcClient.ts");
 const { describeSpawnFailure } = loadTsCommonJs("src/main/pi/piSpawnFailure.ts");
 const { decideExtensionFallback, describeExtensionFallbackSkip } = loadTsCommonJs("src/main/pi/extensionStartupFallback.ts");
-
-function transpile(filePath) {
-	return ts.transpileModule(readFileSync(filePath, "utf8"), {
-		compilerOptions: {
-			module: ts.ModuleKind.CommonJS,
-			target: ts.ScriptTarget.ES2022,
-		},
-	}).outputText;
-}
 
 /** spawn 失败形态的子进程：pid 永远是 undefined（Node 判定「从未起来」的依据）。 */
 function createFailedSpawnChild() {
@@ -50,52 +38,36 @@ function createFailedSpawnChild() {
 
 function loadPiProcess(child) {
 	const counters = { unpark: 0 };
-	const wslPathsSandbox = { exports: {}, require };
-	vm.runInNewContext(transpile("src/main/wsl/WslPaths.ts"), wslPathsSandbox, { filename: "WslPaths.ts" });
-
-	const sandbox = {
-		Buffer,
-		console: { log() {}, warn() {}, error() {} },
-		exports: {},
-		process,
-		require: (id) => {
-			if (id === "node:child_process") {
-				return {
-					execFile: (_command, _args, _options, callback) => {
-						callback(null, "0.81.1\n", "");
-						return new EventEmitter();
-					},
-					spawn: () => child,
-				};
-			}
+	// spawn 替身固定返回本用例的 child，每次加载都新建沙箱实例（实例自带模块缓存）。
+	// 未打桩的相对 import（LocalPiRuntimeLauncher、PiSpawnHandle、piSpawnFailure、WslPaths、
+	// extensionVersionGate、gitProcess…）由加载器按**源文件目录**解析。
+	const load = createTsSandbox({
+		stubs: {
+			"node:child_process": {
+				execFile: (_command, _args, _options, callback) => {
+					callback(null, "0.81.1\n", "");
+					return new EventEmitter();
+				},
+				spawn: () => child,
+			},
 			// 用真实 PiRpcClient：本用例的核心就是「spawn 失败后挂起的请求如何被终结」，
 			// fake client 会把这条链路测成空转。
-			if (id === "./PiRpcClient") return { PiRpcClient };
-			if (id === "./PiLocator") return { PiLocator: class {} };
-			if (id === "./piSpawnFailure") return require("../src/main/pi/piSpawnFailure.ts");
-			if (id === "../wsl/WslPaths") return wslPathsSandbox.exports;
-			if (id === "./piExtensionFilter") {
-				return {
-					parkBlockedExtensionsInDir: () => [{ name: "codeisland", from: "a", to: "b" }],
-					unparkBlockedExtensions: () => {
-						counters.unpark += 1;
-					},
-				};
-			}
-			if (id === "../extensions/builtInExtensions") {
-				return { appendBuiltInExtensionArgs: (args) => [...args] };
-			}
-			if (id === "../extensions/extensionVersionGate") {
-				return require("../src/main/extensions/extensionVersionGate.ts");
-			}
-			if (id === "../logging/sharedLogger") return { getAppLogger: () => null };
-			if (id === "../sessions/sessionProxyPolicy") return { applyPiProxyMode: (env) => env };
-			if (id === "../git/gitProcess") return require("../src/main/git/gitProcess.ts");
-			return require(id);
+			"./PiRpcClient": { PiRpcClient },
+			"./PiLocator": { PiLocator: class {} },
+			// 扩展停放/还原的行为替身（本用例只断言「spawn 失败路径也还原了停放项」）。
+			"./piExtensionFilter": {
+				parkBlockedExtensionsInDir: () => [{ name: "codeisland", from: "a", to: "b" }],
+				unparkBlockedExtensions: () => {
+					counters.unpark += 1;
+				},
+			},
+			"../extensions/builtInExtensions": { appendBuiltInExtensionArgs: (args) => [...args] },
+			"../logging/sharedLogger": { getAppLogger: () => null },
+			"../sessions/sessionProxyPolicy": { applyPiProxyMode: (env) => env },
 		},
-	};
-	vm.runInNewContext(transpile("src/main/pi/PiProcess.ts"), sandbox, { filename: "PiProcess.ts" });
-	return { PiProcess: sandbox.exports.PiProcess, counters };
+		globals: { console: { log() {}, warn() {}, error() {} } },
+	});
+	return { PiProcess: load("src/main/pi/PiProcess.ts").PiProcess, counters };
 }
 
 function createLocator(command = "/missing/pi", windowsLaunch) {

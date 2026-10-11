@@ -1,6 +1,6 @@
 # 远端 Phase 4 侦察与设计：远端 pi 端到端会话
 
-> 状态：**侦察 / 设计 + 两处已落地**——已实施：§3.7 的 capability gate 接线（task-32）、§3.6 的 `lifetime` 分档与强制 ServerAlive（task-33）。仍只有设计：方案 B 的 `proc.*`（§3.4）、心跳（仅诊断，留给 P4.2）。未改远端任何东西。
+> 状态：**侦察 / 设计 + 四处已落地**——已实施：§3.7 的 capability gate 接线（task-32）、§3.6 的 `lifetime` 分档与强制 ServerAlive（task-33）、**§7 P4.0 的 `PiSpawnHandle` / `PiRuntimeLauncher` 抽取（本地实现）**、**§7 P4.1 的远端 pi 定位与兼容矩阵**（同步真机只读验证）。仍只有设计：方案 B 的 `proc.*`（§3.4）、心跳（仅诊断，留给 P4.2）。下列「§2.2 真机读数」仍是对 `serve` 的只读快照；本轮未向真机写入任何东西（P4.1 的真机探测也全部只读）。
 > 侦察基线：`feat/remote-development` @ `4ba0f79f`（前五批已提交，第六批在途）。
 > 远端证据来源：已核验主机 `10.81.2.15`（本机 SSH 别名 `serve`，用户 `zhadainian`）上的**只读**命令；命令与原始输出见 §8。
 > 相关计划：`docs/remote-development-plan.md`（§4.1 两条远端通路 / §6.2 PiProcess 最小重构 / §7 Helper 协议 v1 / §10 连接状态 / §12 Phase 4 / §13 能力对照 / §15 风险）、`docs/remote-development-handoff.md:222-229`。
@@ -396,13 +396,29 @@ da66adca…→ 01a2505c7f18ac2b45cd42bfda61d16a3fe867da3995d6eb1ee6ab6eb7ceca05 
 > 原则：把"通道"与"版本门禁"这两件最容易返工的事放在最前；每一步都要求**真实子进程/真实主机**级证据，不以单测代替。
 
 **P4.0 前置与护栏（不动会话功能）**
-- 内容：**已落地** —— launcher 的 `lifetime` 分档（§3.6：command 档不变、session 档无 wall-clock、session+timeoutMs 被拒）+ capability gate（§3.7）；**剩余** —— 定义 `PiRuntimeLaunchPlan` 与 `PiSpawnHandle` 接口（先只接本地实现），以及把「卡死会话」的收敛责任交给将来的 runner/lease。
-- 验收证据：**task-32 红证**见 §3.6（当时实测 120017 ms 被强杀）；**task-33 绿灯** `tests/sshLongLivedSessionDeadline.test.mjs` 7/7 —— session 档不武装任何 deadline、配对 stop 收敛（TERM→KILL）、输出/行预算仍致命、`session + timeoutMs` 被拒、command 档三组有界断言、连接机 session 档不重发、argv keepalive 断言；opt-in 真实用例实测真实 session 进程 **150024 ms 仍存活**后被 stop 收尾（`pass 7 / fail 0`）。**capability gate** 见 §3.7（`tests/sshHelperCapabilityGate.test.mjs` 4/4）。既有 ssh/连接套件原样绿（132/132），本地 pi 启动零回归。
+- 内容：**已落地** —— launcher 的 `lifetime` 分档（§3.6）+ capability gate（§3.7）；**接口抽取（本地实现）也已落地** —— `src/main/pi/PiSpawnHandle.ts`（`PiRuntimeExit` / `PiRuntimeLaunchPlan`（含 `kind` 位置判别式）/ `PiSpawnHandle` / `PiRuntimeLauncher`）与 `src/main/pi/LocalPiRuntimeLauncher.ts`；`PiProcess` 改为 `await runtimeLauncher.launch(plan)`，`proc` → `handle`（`start/stop/isRunning/pid/退出中止` 全部转接）。**剩余**：把「卡死会话」的收敛责任交给后续 runner/lease（属 P4.2，远端侧才存在）。
+- 与计划文本的一处偏差（已记入模块注释）：计划给的接口只有 `onExit`，但 Node 的 spawn 失败**只发 error 不发 exit**，而仓库靠这个区分做启动失败归因（`diagnostics.spawnFailed`），因此 handle 额外提供 `onSpawnError`（并对晚注册者重放一次，收紧原竞态）。
+- 验收证据：`tests/piRuntimeLauncher.test.mjs` 9/9（spawn 选项逐字段、非法 plan 零 spawn、同步/异步失败、Unix/Windows 停止顺序、stop 幂等、**真实子进程**的退出码与 SIGTERM 回收）；4 个 `tests/piProcess*.test.mjs` 34/34（含把仍有手写 vm 沙箱的四个文件迁到 `createTsSandbox` 后断言逐字不变）；Electron 冒烟 `e2e/smoke.spec.ts` 1 passed；`e2e/agent-flow.spec.ts` 3 failed 在**干净基线上同样红**（既有环境/夹具问题，与本次无关）。
 - 不做：任何 helper op、任何远端 pi 启动。
 
-**P4.1 远端 pi 探测与兼容矩阵（只读）**
-- 内容：pi 定位/版本探测落地（复用 `RemoteNodeDiscovery` 范式，或按 §3.3 做成 `runtime.probePi`）；定义最低/最高兼容版本与超范围行为（真机 0.85.1 正好用来验证"低于基线时 fail-closed + 升级指引"）。
-- 验收证据：真机 `serve` 上探测输出与本次 §2.2 一致；0.85.1 被判定为 `PI_TOO_OLD`（或显式降级）并有 i18n 文案；无 pi / 多 node 候选 / 登录 shell 噪声三种 fixture。
+**P4.1 远端 pi 探测与兼容矩阵（只读）——已落地**
+- 内容：`src/main/remote/RemotePiDiscovery.ts`：登录 shell 只读 PATH（复用 `RemoteNodeDiscovery` 的哨兵范式，目录判定收口到新的 `listToolCandidatesFromPath`）→ 候选 → 逐候选 `--version`（有界，`MAX_PI_CANDIDATES = 3`）→ 数值化比较的分类。**版本命令的形态是 `'<已解析 node>' '<pi>' '--version'`**：真机实测 nvm 的 `pi` 是 `#!/usr/bin/env node` shim，非交互 SSH 的 PATH 只有系统 node v12.22.9 ⇒ 裸执行在 pi bundle 首条语句 SyntaxError（exit 1、stdout 空），登录 shell 包装能绕过但会把 `~/.bashrc` 横幅混进 stdout。**P4.2 的远端启动必须复用同一形态**（`buildRemotePiVersionCommand` 的注释里写明了）。
+- 真机证据（只读；`serve`；`scripts/verify-remote-pi.mjs`）：
+
+```text
+$ node scripts/verify-remote-pi.mjs 10.81.2.15 <user> <独立核验指纹>
+HOST_HANDSHAKE_OK HOST 10.81.2.15:22 USER <user> DIGEST <每次不同> FP SHA256:…
+SSH_CLIENT /usr/bin/ssh
+OPENSSH OpenSSH_10.0p2
+NODE_OK /home/<user>/.nvm/versions/node/v24.11.0/bin/node v24.11.0 probed=1
+PI_OK /home/<user>/.nvm/versions/node/v24.11.0/bin/pi 0.85.1 class=supported probed=1
+PI_PROBE_OK   （exit 0）
+```
+
+（负例：指纹改一位 ⇒ `HOST_FINGERPRINT_MISMATCH`、exit 1。）
+- 单测：`tests/remotePiDiscovery.test.mjs` 24/24（含用 POSIX `set --` 实际验证「怪路径各是一个参数」的行为断言、候选上限在 I/O 之前生效、探测次数上限、错误码即消息）。
+- **D4 已拍板（2026-10）**：下限 `REMOTE_PI_MIN_SUPPORTED = 0.85.0`，依据是仓库自己的兼容账本 `docs/pi-compatibility.md` 的「当前基线 pi 0.85.0」——PiDeck 与 pi 的全部通信就是 `pi --mode rpc`，那份适配矩阵就是按它核对的；计划里写的 0.87.1 是「写计划时上游最新正式 release」，不是 PiDeck 的兼容基线，用它会把真机 0.85.1 无理由判死。上限只比 `major.minor`（`0.85.x` 已核验，更高 ⇒ **放行** + `REMOTE_PI_VERSION_UNVERIFIED` 警告：远端 pi 是用户自己的软件，拒绝新版本会把「用户升级了」变成功能不可用）。低于下限 ⇒ `REMOTE_PI_TOO_OLD` + 升级指引，**不静默降级、不替用户升级远端 pi**。
+- **仍未做**：① 本模块**还没有生产调用方**（P4.2 的启动准备接线，须先 `resolveRemoteNodeExecutable` 取 `nodePath`）；② 三个码的 **i18n 文案未接线**（属 P4.2 的 UI，届时按 `REMOTE_PI_DISCOVERY_CODES` 映射）；③ 探测只在单测 + 一次性真机脚本上验过，尚未进入应用链路。
 
 **P4.2 最小端到端会话（方案 A 的核心闭环）**
 - 内容：`SshPiRuntimeLauncher` + runner（握手/进程组/lease）+ `PiProcess` 抽出 `PiSpawnHandle`；在远端项目根下新建会话 → 发送 → 流式 → 停止 → 重启恢复。
@@ -497,9 +513,9 @@ $ ssh ... serve 'df -h ~ | tail -1'
 
 ## 9. 侦察中发现的三处"计划与实现漂移"（供集成批次处理，本任务不动代码）
 
-1. **计划 §4.2 的 `resources/remote-host/` 文件化 helper 并未落地**：仓库没有该目录，`package.json` 也没有对应 `extraResources` 项（`grep remote-host package.json` = 0 命中；`glob resources/remote-host/**` = 0 文件）。现状是 **inline 冻结字符串 + 单文件 bundle manifest**（`RemoteHelperEntry.ts:56-74`、`RemoteBootstrapDeployment.ts:20-34`）。若 Phase 4 要加 runner，先决定"继续 inline"还是"改成文件化多文件 bundle"（后者需要 `generate-remote-host-manifest.mjs` 一类新门禁）。
-2. **`sanitizeSshChildEnv()` 尚不存在**：计划 §6.2 `:401` 要求它，但全仓只有 `PiLocator.sanitizePiChildEnv`（`PiLocator.ts:302-331`，清 `ELECTRON_*`/`CHROME_*`/部分 `NODE_OPTIONS`）。SSH 子进程的环境目前由 `buildPinnedSshInvocation` 决定，Phase 4 需要按计划补齐"只保留 OpenSSH/agent/代理必需变量"的白名单实现与测试。
-3. **`hello.capabilities` 无消费者**：`SshConnectionAttempt.ts:214` 只校验它是数组。Phase 4 的任何"按能力启用/禁用"都必须在 main 侧真正接线（否则新 op 的缺失会以 `METHOD_NOT_FOUND` 的形式迟发现），建议与 §3.5 的 gate 一起做。
+1. **计划 §4.2 的 `resources/remote-host/` 文件化 helper 并未落地**：仓库没有该目录，`package.json` 也没有对应 `extraResources` 项（`grep remote-host package.json` = 0 命中；`glob resources/remote-host/**` = 0 文件）。现状是 **inline 冻结字符串 + bundle manifest**（`RemoteHelperEntry.ts:56-74`、`RemoteBootstrapDeployment.ts:20-34`）。**2026-10 的 D5 决定**：继续保持 inline 冻结体，不引入 `resources/` 文件化 —— 现有部署链本来就是多文件的（`buildBundleManifest(files[])`、`deployPreparedBundle({ names, executableNames })`），runner 作为**同一份 bundle 里的第二个冻结 entry** 加入即可，不需要新的 manifest 生成器。
+2. **`sanitizeSshChildEnv()` 这条漂移已不存在（2026-10 核对）**：计划 §6.2 `:401` 要求的是「只保留 OpenSSH/agent/代理必需变量」的白名单，仓库里以 `SshClientRuntime.sanitizeSshClientEnv()` 的形式存在（POSIX/Windows 两套键、拒 NUL/空值），并且 `buildPinnedSshInvocation` 返回的 `env` 就是 `client.env` ⇒ **所有 pinned ssh 子进程（bootstrap、将来的 runner）已经在用清洗后的环境**。P4.2 不需要新模块，只需在 launch plan 里继续使用同一个 client。
+3. **`hello.capabilities` 已有消费者（2026-10 核对）**：task-32 已把必需能力门接在 `SshConnectionAttempt`（缺 `fs.stat`/`fs.list`/`fs.read` ⇒ 不进 ready、`needs-attention`、不重试，逐 op 点名稳定码）。
 
 ---
 
@@ -510,5 +526,5 @@ $ ssh ... serve 'df -h ~ | tail -1'
 | D1 | Agent 通路：独立 ssh + runner（A）还是 helper 托管（B） | A | 控制协议是否变成进程监督者；B 需改 7 项不变量（§3.4） |
 | D2 | 是否把 launcher 的 120s deadline 策略列为 Phase 4 第 0 步 | 是 | 否则长活会话/长稳门禁不成立 |
 | D3 | helper 扩展清单是否就按"probe/artifact/session/config 有界文件 op，不含 `proc.*`"冻结 | 是（配合 D1=A） | 决定 helper build 1.7.0 的 op 面与契约 |
-| D4 | 远端 pi 兼容窗口（真机 0.85.1 如何处理） | 以计划核验基线为准；低于基线 fail-closed + 升级指引；不静默升级 | 决定 P4.1 的验收与 UI 文案 |
-| D5 | runner 的部署形态（第二份冻结 entry vs 多文件 bundle） | 先与 helper 同链、独立 nonce/lease；与 §9 第 1 条一起定 | 影响 bootstrap manifest/门禁 |
+| D4 | 远端 pi 兼容窗口（真机 0.85.1 如何处理） | **已拍板（2026-10）**：下限 `0.85.0`（依据 `docs/pi-compatibility.md` 当前基线，不是「写计划时的最新 release」0.87.1）；`0.85.x` 为已核验窗口；更高 ⇒ 放行 + `REMOTE_PI_VERSION_UNVERIFIED`；更低 ⇒ `REMOTE_PI_TOO_OLD` + 升级指引，不静默升级 | 已决定 P4.1 的分类行为；UI 文案随 P4.2 接线 |
+| D5 | runner 的部署形态（第二份冻结 entry vs 多文件 bundle） | **倾向：同一份 bundle 里加第二个冻结 entry（`runner.mjs`）**：现有链已经是多文件的（`buildBundleManifest(files[])`、`deployPreparedBundle({names, executableNames})`），不需要新 manifest 生成器；P4.2 落地时按此实现 | 影响 bootstrap manifest/门禁与真机重验 |

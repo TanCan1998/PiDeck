@@ -1,22 +1,9 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { PassThrough } from "node:stream";
 import test from "node:test";
-import ts from "typescript";
-import vm from "node:vm";
-
-const require = createRequire(import.meta.url);
-
-function transpile(filePath) {
-	return ts.transpileModule(readFileSync(filePath, "utf8"), {
-		compilerOptions: {
-			module: ts.ModuleKind.CommonJS,
-			target: ts.ScriptTarget.ES2022,
-		},
-	}).outputText;
-}
+import { createTsSandbox } from "./helpers/createTsSandbox.mjs";
 
 function createChildProcess() {
 	const child = new EventEmitter();
@@ -27,71 +14,35 @@ function createChildProcess() {
 	return child;
 }
 
+class FakeRpcClient extends EventEmitter {
+	close() {}
+}
+class FakePiLocator {}
+
 function loadPiProcess(spawnImpl) {
-	// vm 沙箱内加载 transpile 后的 CommonJS 源码模块；
-	// 新增拆分出的内部依赖时需要在此同步登记，否则 require 会落到真实文件系统解析失败。
-	const loadSandboxed = (filePath, name) => {
-		const sandbox = { exports: {}, require };
-		vm.runInNewContext(transpile(filePath), sandbox, { filename: name });
-		return sandbox.exports;
-	};
-	const paths = loadSandboxed("src/main/wsl/WslPaths.ts", "WslPaths.ts");
-	const extensionFilter = loadSandboxed("src/main/pi/piExtensionFilter.ts", "piExtensionFilter.ts");
-
-	class FakeRpcClient extends EventEmitter {
-		close() {}
-	}
-	class FakePiLocator {}
-
-	const sandbox = {
-		Buffer,
-		console: { log() {}, warn() {}, error() {} },
-		exports: {},
-		process,
-		require: (id) => {
-			if (id === "node:child_process") {
-				return {
-					execFile: (_command, _args, _options, callback) => {
-						callback(null, "0.81.1\n", "");
-						return new EventEmitter();
-					},
-					spawn: spawnImpl,
-				};
-			}
-			if (id === "./PiRpcClient") return { PiRpcClient: FakeRpcClient };
-			if (id === "./PiLocator") return { PiLocator: FakePiLocator };
-			// PiProcess 的 spawn 失败归因模块（cwd 不存在会被误报成 cmd.exe ENOENT）：
-			// vm 沙箱不会自动解析相对模块，新增拆分模块必须在这里登记。
-			if (id === "./piSpawnFailure") return require("../src/main/pi/piSpawnFailure.ts");
-			if (id === "../wsl/WslPaths") return paths;
-			if (id === "./piExtensionFilter") return extensionFilter;
-			// 25fd516 起 PiProcess 引入内置扩展参数拼接；本测试只关心 spawn 错误转发，
-			// mock 为原样透传，避免 vm sandbox 的 require 按 tests/ 相对路径误解析。
-			if (id === "../extensions/builtInExtensions") {
-				return { appendBuiltInExtensionArgs: (args) => [...args] };
-			}
-			if (id === "../extensions/extensionVersionGate") {
-				return require("../src/main/extensions/extensionVersionGate.ts");
-			}
-			// 日志共享实例未注册时返回 null，PiProcess 埋点静默跳过；
-			// 这里 mock 掉 sharedLogger，避免沙箱 require 按 tests/ 相对路径误解析。
-			if (id === "../logging/sharedLogger") {
-				return { getAppLogger: () => null };
-			}
-			if (id === "../sessions/sessionProxyPolicy") {
-				return { applyPiProxyMode: (env) => env };
-			}
-			// killProcessTree（子代理整树终止）：gitProcess.ts 是纯 Node 模块，可直接加载。
-			if (id === "../git/gitProcess") {
-				return require("../src/main/git/gitProcess.ts");
-			}
-			return require(id);
+	// spawn 替身随用例变化（固定 child / 记录调用），所以每次加载都新建沙箱实例：
+	// 实例自带模块缓存，两两之间不共享求值结果。未打桩的相对 import（LocalPiRuntimeLauncher、
+	// PiSpawnHandle、piSpawnFailure、WslPaths、piExtensionFilter…）由加载器按**源文件目录**解析。
+	const load = createTsSandbox({
+		stubs: {
+			"node:child_process": {
+				execFile: (_command, _args, _options, callback) => {
+					callback(null, "0.81.1\n", "");
+					return new EventEmitter();
+				},
+				spawn: spawnImpl,
+			},
+			"./PiRpcClient": { PiRpcClient: FakeRpcClient },
+			"./PiLocator": { PiLocator: FakePiLocator },
+			// 25fd516 起 PiProcess 引入内置扩展参数拼接；本测试只关心 spawn 错误转发，按原样透传。
+			"../extensions/builtInExtensions": { appendBuiltInExtensionArgs: (args) => [...args] },
+			// 日志共享实例未注册时返回 null，PiProcess 埋点静默跳过（避免测试里拉真实日志模块）。
+			"../logging/sharedLogger": { getAppLogger: () => null },
+			"../sessions/sessionProxyPolicy": { applyPiProxyMode: (env) => env },
 		},
-	};
-	vm.runInNewContext(transpile("src/main/pi/PiProcess.ts"), sandbox, {
-		filename: "PiProcess.ts",
+		globals: { console: { log() {}, warn() {}, error() {} } },
 	});
-	return sandbox.exports;
+	return load("src/main/pi/PiProcess.ts");
 }
 
 function createLocator(command = "/opt/homebrew/bin/pi") {

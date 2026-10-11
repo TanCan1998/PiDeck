@@ -126,7 +126,8 @@ test("hostId 解析不到 profile（已退役 / 未知）⇒ 拒绝且磁盘不�
 	assert.equal(await hashFile(harness.projectsPath), projectsBefore, "被拒的写入不得改 projects.json（逐字节）");
 });
 
-test("主机目录读不出来 ⇒ 拒绝并给出与「主机不存在」不同的码（无法证明 ≠ 主机不在）", async (t) => {	const harness = await makeHarness(t);
+test("主机目录读不出来 ⇒ 拒绝并给出与「主机不存在」不同的码（无法证明 ≠ 主机不在）", async (t) => {
+	const harness = await makeHarness(t);
 	await seedReferences(harness);
 	const projectsBefore = await hashFile(harness.projectsPath);
 	await writeFile(join(harness.userData, "remote-hosts.json"), "{ not json", "utf8");

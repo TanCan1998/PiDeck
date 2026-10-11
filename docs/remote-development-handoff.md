@@ -6,10 +6,10 @@
 >
 > **现状一句话**：**Phase 3 的远端只读能力已在真实主机 + 真实 Electron 上端到端验收通过**——两次独立运行：run `e2emv3cw2x5`（13:01，1.8 分钟）与 run `e2emv3dr8xb`（13:26，1.9 分钟），均为 `1 passed`。测试覆盖九步：加主机 + pin 指纹命中 → 连接 ready → 登记两个远端项目 → 列出远端会话（含夹具）→ 惰性标题（权威名不标「暂定」、弱兜底标「暂定」）→ 导入（清单刷新 + 选中 + 「已导入」标记 + 不开新 Tab）→ 重复导入（`created=false`）→ 项目级 root 漂移（A 显示「需处理」带稳定码、同主机邻居 B 仍 ok 且仍能列目录）。真机侧已交叉验证（远端会话目录 mtime 同步更新、无夹具/项目残留）。
 >
-> **已完成（可验收）**：① 前六批实现（项目读取隔离 / 侧栏登记入口 / helper 只读搜索 / 会话建立与重连时的 root 复核 / IPC 按域拆分 / needs-attention 终态 / 远端会话发现与登记 / 按需标题 / 侧栏列表与导入 / 项目级 root 状态 / 集成）；② 第七批及其修复（pi 自定义 `sessionDir` 覆盖、头尾窗口零重叠、尾读降级上报、`readHostId` 传输边界收窄、长活会话 `lifetime` 分档、helper capability gate、跨 store 一致性**设计 + 红例**、Phase 4 **设计**）；③ **真机脚本平台修正**（此前只有 POSIX 客户端能跑，现在 Windows 客户端可跑，并修掉约 3% 的偶发连接失败）；④ 真机验收通过（上条）；⑤ **INV-5a 写侧一致性实施**（第八批：跨进程锁 + 锁内重读 CAS + 引用写入门 + 跨 store 删除补偿；含两处**判据不可满足**的如实修正）。逐条证据见 §3 各批末尾。
+> **已完成（可验收）**：① 前六批实现（项目读取隔离 / 侧栏登记入口 / helper 只读搜索 / 会话建立与重连时的 root 复核 / IPC 按域拆分 / needs-attention 终态 / 远端会话发现与登记 / 按需标题 / 侧栏列表与导入 / 项目级 root 状态 / 集成）；② 第七批及其修复（pi 自定义 `sessionDir` 覆盖、头尾窗口零重叠、尾读降级上报、`readHostId` 传输边界收窄、长活会话 `lifetime` 分档、helper capability gate、跨 store 一致性**设计 + 红例**、Phase 4 **设计**）；③ **真机脚本平台修正**（此前只有 POSIX 客户端能跑，现在 Windows 客户端可跑，并修掉约 3% 的偶发连接失败）；④ 真机验收通过（上条）；⑤ **INV-5a 写侧一致性实施**（第八批：跨进程锁 + 锁内重读 CAS + 引用写入门 + 跨 store 删除补偿；含两处**判据不可满足**的如实修正）；⑥ **Phase 4 P4.0 + P4.1**（第九批：启动面抽取 + 远端 pi 探测/兼容矩阵 + 真机只读证据脚本，含 4 个遗留手写沙箱测试的迁移）。逐条证据见 §3 各批末尾。
 >
 > **未完成（建议优先级）**：
-> 1. **Phase 4 落地**：让远端 pi 真正跑起来（新建 → 发送 → 流式 → 停止 → 重启恢复）。设计已就绪 [Phase 4 计划](remote-phase4-plan.md)；建议先做 P4.2（会话生命周期 / lease 收敛）与「心跳仅诊断」。**注意**：Pi RPC 走「每 Session 独立 SSH + 固定 runner」，**不走控制协议**，所以最小 Phase 4 可零新增 helper op 起步。
+> 1. **Phase 4 P4.2 落地**（P4.0/P4.1 已在第九批完成）：让远端 pi 真正跑起来（新建 → 发送 → 流式 → 停止 → 重启恢复）。接下来就是 P4.2 本体：`SshPiRuntimeLauncher` + runner（握手/进程组/lease）+ 把 P4.1 的探测接到启动准备。设计见 [Phase 4 计划](remote-phase4-plan.md) §7；**D5 已定**：runner 作为同一份 bundle 里的**第二个冻结 entry**（现有 manifest/upload/finalize 链本来就是多文件的）；**注意**：Pi RPC 走「每 Session 独立 SSH + 固定 runner」，**不走控制协议**，最小 Phase 4 仍可零新增 helper op 起步。
 > 2. ~~**INV-5 实施**~~ —— **已在第八批完成**（见 §3 第八批）：跨 store 写入侧现在有真正的跨进程锁 + 锁内重读（权威=磁盘），门控下 CE-1…CE-5 **全绿**。剩余遗留：**跨 store 协调器与启动 `resume` 仍未装配**（遗留 journal 只能 fail-closed 阻塞，不能自动收敛）、旧版本写者靠 CAS **检测**而非阻止、主机目录锁仍无 owner。
 > 3. **导入会话的正文读取**（远端 JSONL）：属 Phase 4。当前导入只保证「登记 + 进清单 + 选中」，打开会**如实**报「无法读取会话文件」——不是静默失败。
 > 4. **覆盖缺口**：深层嵌套 subagent 会话布局、`remotePathAliases`、`PI_CODING_AGENT_DIR`/`PI_CODING_AGENT_SESSION_DIR`（远端进程环境，helper 无读 env 的操作）与 project 级 `.pi/settings.json`（cwd 作用域）不在扫描期覆盖、POSIX symlink 语义未验。
@@ -288,6 +288,35 @@ A/B/C 可由不同开发者并行，D 随开发跟进。每块指定一个负责
 **未做（不得描述为已闭环）**：① **跨 store 协调器与启动 `resume` 未装配**：journal 收敛算法与幂等早有实现但无生产入口，遗留 journal 只能 fail-closed 阻塞引用写入；② 旧版本写者靠**磁盘 CAS 检测**而非阻止；③ 主机目录锁仍未补 owner（§1.7 第 7 条）；④ 两 store 之间仍无共同提交点，跨 store 原子性 = journal + 幂等 roll-forward + 可诊断的未收敛态。
 
 **执行方式（本轮）**：全程无需真机与 Electron（纯离线套件 + 全量基线对照）；未动 helper、未动远端。
+
+### 第九批：Phase 4 P4.0 + P4.1（已完成，2026-10）
+
+本轮把「启动面」与「远端 pi 定位」这两件不碰远端写入的前置做完，并用真机只读证据收口。
+
+| 块 | 落地位置 | 验证 |
+| --- | --- | --- |
+| P4.0 启动面抽取（本地） | `src/main/pi/PiSpawnHandle.ts`（新）、`src/main/pi/LocalPiRuntimeLauncher.ts`（新）；`PiProcess` 改为 `await runtimeLauncher.launch(plan)`、`proc` → `handle` | `tests/piRuntimeLauncher.test.mjs` 9/9（spawn 选项、非法 plan 零 spawn、同步/异步失败、Unix/Windows 停止顺序、幂等、**真实子进程**退出码与 SIGTERM 回收）；`tests/piProcess*.test.mjs` 34/34；Electron `e2e/smoke.spec.ts` 通过 |
+| 遗留测试基础设施 | 4 个仍在用手写 vm 沙箱的 PiProcess 测试 → `createTsSandbox` | 34/34，断言行数逐文件一致（未放宽） |
+| P4.1 远端 pi 探测 + 兼容矩阵 | `src/main/remote/RemotePiDiscovery.ts`（新）；`RemoteNodeDiscovery` 新增 `parseLoginShellPathWithCode` 与 `listToolCandidatesFromPath`（node/pi 共用目录判定） | `tests/remotePiDiscovery.test.mjs` 24/24（含 POSIX `set --` 行为验证、候选上限在 I/O 之前、错误码即消息） |
+| P4.1 真机证据脚本 | `scripts/verify-remote-pi.mjs`（新）+ `scripts/remoteVerifyPinnedHost.mjs`（把 pin 路径从两个脚本抽成一份，三个脚本共用） | 真机 `PI_OK …/bin/pi 0.85.1 class=supported probed=1` / `PI_PROBE_OK`（exit 0）；错指纹 ⇒ `HOST_FINGERPRINT_MISMATCH`（exit 1） |
+| 真机脚本去 `ssh-keyscan`（交接遗留项） | `scripts/verify-remote-host.mjs` / `verify-remote-connection-service.mjs` | 真机 `PINNED_PROFILE_OK` 复现；新建 `tests/remoteVerifyScriptsContract.test.mjs` 守卫（禁 keyscan、必须保留独立指纹比对） |
+
+**三条决定（已写进 `docs/remote-phase4-plan.md`）**：
+
+1. **D4 兼容窗口**：下限 `0.85.0`，依据是仓库自己的兼容账本 `docs/pi-compatibility.md`（当前基线 pi 0.85.0，通信即 `pi --mode rpc`）；计划里写的 0.87.1 是「写计划时上游最新 release」，拿它会把真机 0.85.1 无理由判死。`0.85.x` 为已核验窗口；更高 ⇒ **放行** + `REMOTE_PI_VERSION_UNVERIFIED`；更低 ⇒ `REMOTE_PI_TOO_OLD` + 升级指引（不静默降级、不替用户升级远端 pi）。
+2. **pi 版本命令的形态（真机实测逼出来的）**：必须写成 `'<已解析 node>' '<pi>' '--version'`。nvm 装出来的 `pi` 是 `#!/usr/bin/env node` shim，而非交互式 SSH 的 PATH 只有系统 node（真机 v12.22.9）⇒ 裸执行在 pi bundle 首条语句 SyntaxError（exit 1、stdout 空）；登录 shell 包装能绕过但会把 `~/.bashrc` 横幅混进 stdout。**P4.2 的远端启动必须复用同一形态**（`<node> <pi> --mode rpc …`）。
+3. **契约等价迁移**：`tests/processMetrics.test.mjs` 的源码级断言随 `proc → handle` 改名同步迁移（断言目标换成新抽象，**不放宽、不删**）——这正是「契约测试断言的源码文本会随重构过期」那条坑。
+
+**未做 / 边界（不要当成已完成）**：
+
+1. **P4.1 探测还没有生产调用方**：接线在 P4.2 的启动准备里，且必须先由 `resolveRemoteNodeExecutable` 解析出 `nodePath` 再传进来。
+2. **三个码的 i18n 文案未接线**（随 P4.2 的 UI；届时按导出的 `REMOTE_PI_DISCOVERY_CODES` 映射）。
+3. `verify-remote-connection-service.mjs` 本轮**未在真机复跑**（它会部署远端 helper，属写操作）：但它的 pin 段已与已复跑成功的 `verify-remote-host.mjs` 共用同一实现。
+4. E2E：`e2e/smoke.spec.ts` 通过；`e2e/agent-flow.spec.ts` 的 3 条失败在**干净基线同样红**（既有环境/夹具问题，非本批）。
+
+**全量基线对照（本机 Linux / Node 24.21，同一命令、同一夹具）**：有改动 **7625 项 / 7593 pass / 19 fail / 13 skip**；干净基线（stash 后）**7588 / 7556 pass / 19 fail / 13 skip** ⇒ 新增 37 项全绿、**失败集合逐条一致**。`npm run typecheck` 与 `npm run check:format` 均 exit 0。
+
+**建议下一步**：P4.2 —— `SshPiRuntimeLauncher`（复用 P4.0 的 `PiSpawnHandle` 与 P4.1 的探测）+ 冻结 runner（握手/进程组/lease，作为同一份 bundle 的第二个冻结 entry）+ 把 prompt 的 `unknown` 状态接进会话链路。
 
 ## 4. M1 之后如何推进
 

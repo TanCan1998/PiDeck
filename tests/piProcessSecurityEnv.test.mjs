@@ -1,34 +1,14 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
-import ts from "typescript";
-import vm from "node:vm";
-
-const require = createRequire(import.meta.url);
-
-function transpile(filePath) {
-	return ts.transpileModule(readFileSync(filePath, "utf8"), {
-		compilerOptions: {
-			module: ts.ModuleKind.CommonJS,
-			target: ts.ScriptTarget.ES2022,
-		},
-	}).outputText;
-}
-
-function loadWslPaths() {
-	const sandbox = { exports: {}, require };
-	vm.runInNewContext(transpile("src/main/wsl/WslPaths.ts"), sandbox, { filename: "WslPaths.ts" });
-	return sandbox.exports;
-}
+import { createTsSandbox } from "./helpers/createTsSandbox.mjs";
 
 /**
  * 沙箱加载 PiProcess：mock spawn 以捕获传入子进程的环境变量，mock locator 让 resolveCommand
  * 返回 "wsl://" 触发 WSL 分支，其余依赖（fs/extensions/logging）给最小桩，避免触碰真实文件系统。
  */
 function loadPiProcess(versionResult = { output: "0.82.1\n" }, options = { parkedExtensions: [] }) {
-	const wslPaths = loadWslPaths();
 	/** piExtensionFilter 收到的目录，用于验证 denied trust 不触碰项目资源。 */
 	const parkedDirectories = [];
 	/** spawn 收到的 env/args/windowsHide；mockSpawn 被调用时写入 */
@@ -73,64 +53,51 @@ function loadPiProcess(versionResult = { output: "0.82.1\n" }, options = { parke
 		// piLocator.test.mjs 覆盖，这里只用于驱动 PiProcess 的「超预算时跳过注入」分支。
 		resolveArgCharBudget: () => 26000,
 	};
-	const sandbox = {
-		Buffer,
-		console: { log() {}, warn() {}, error() {} },
-		exports: {},
-		process: { ...process, platform: "win32" },
-		require: (id) => {
-			if (id === "node:child_process") {
-				return {
-					spawn: mockSpawn,
-					// ensureVersionCheck 异步探针：返回 0.82.1（≥ 白名单版本门槛 0.60），
-					// 避免低版本触发白名单降级分支影响注入断言
-					execFile: (_cmd, _args, _opts, cb) => {
-						if (typeof cb !== "function") return;
-						queueMicrotask(() => {
-							if (versionResult.error) cb(versionResult.error, "");
-							else cb(null, versionResult.output);
-						});
-					},
-				};
-			}
-			if (id === "node:events") return require("node:events");
-			if (id === "node:os") return { homedir: () => "C:\\Users\\tester" };
-			if (id === "node:path") return require("node:path").win32;
-			if (id === "./PiRpcClient") return { PiRpcClient: MockRpcClient };
-			if (id === "./PiLocator") return { PiLocator: class {} };
-			if (id === "./piExtensionFilter") {
-				return {
-					parkBlockedExtensionsInDir: (directory) => {
-						parkedDirectories.push(directory);
-						return options.parkedExtensions;
-					},
-					unparkBlockedExtensions: () => {
-						unparkCalls += 1;
-					},
-				};
-			}
-			if (id === "../wsl/WslPaths") return wslPaths;
-			// PiProcess 的 spawn 失败归因模块：vm 沙箱按 tests/ 相对路径解析，需显式登记。
-			if (id === "./piSpawnFailure") return require("../src/main/pi/piSpawnFailure.ts");
-			// killProcessTree（stop() 在 Windows 上的整树强杀）：PiProcess 一直直接 import
-			// gitProcess，但本文件没跟上登记 → 整个文件报 MODULE_NOT_FOUND（既有缺口，与本次改动无关）。
-			if (id === "../git/gitProcess") return require("../src/main/git/gitProcess.ts");
-			if (id === "../extensions/builtInExtensions") {
-				return { appendBuiltInExtensionArgs: (args) => args };
-			}
-			if (id === "../extensions/extensionVersionGate") {
-				return require("../src/main/extensions/extensionVersionGate.ts");
-			}
-			if (id === "../logging/sharedLogger") return { getAppLogger: () => undefined };
-			if (id === "../sessions/sessionProxyPolicy") {
-				return { applyPiProxyMode: (env) => env };
-			}
-			return require(id);
+	const load = createTsSandbox({
+		stubs: {
+			"node:child_process": {
+				spawn: mockSpawn,
+				// ensureVersionCheck 异步探针：返回 0.82.1（≥ 白名单版本门槛 0.60），
+				// 避免低版本触发白名单降级分支影响注入断言
+				execFile: (_cmd, _args, _opts, cb) => {
+					if (typeof cb !== "function") return;
+					queueMicrotask(() => {
+						if (versionResult.error) cb(versionResult.error, "");
+						else cb(null, versionResult.output);
+					});
+				},
+			},
+			// 模拟 Windows 用户 home：停放扩展目录的断言（C:\\Users\\tester\.pi\agent\extensions）建在它上面。
+			"node:os": { homedir: () => "C:\\Users\\tester" },
+			// 本文件整个都在 Windows 语义下跑（路径拼接/盘符），所以 node:path 给 win32 实现。
+			"node:path": path.win32,
+			"./PiRpcClient": { PiRpcClient: MockRpcClient },
+			"./PiLocator": { PiLocator: class {} },
+			// 扩展停放/还原的行为替身：记录停放目录，并按用例返回预设的停放项。
+			"./piExtensionFilter": {
+				parkBlockedExtensionsInDir: (directory) => {
+					parkedDirectories.push(directory);
+					return options.parkedExtensions;
+				},
+				unparkBlockedExtensions: () => {
+					unparkCalls += 1;
+				},
+			},
+			"../extensions/builtInExtensions": { appendBuiltInExtensionArgs: (args) => args },
+			// 日志共享实例未注册时 getAppLogger 返回 undefined，PiProcess 埋点静默跳过。
+			"../logging/sharedLogger": { getAppLogger: () => undefined },
+			"../sessions/sessionProxyPolicy": { applyPiProxyMode: (env) => env },
 		},
-	};
-	vm.runInNewContext(transpile("src/main/pi/PiProcess.ts"), sandbox, { filename: "PiProcess.ts" });
+		// 本文件整篇都是 Windows 场景（cmd.exe 隐藏控制台开关、盘符/UNC 转换）。
+		globals: {
+			console: { log() {}, warn() {}, error() {} },
+			process: { ...process, platform: "win32" },
+		},
+	});
+	// 未打桩的相对 import（LocalPiRuntimeLauncher、PiSpawnHandle、PiRpcClient 的同层依赖、
+	// piSpawnFailure、WslPaths、extensionVersionGate、gitProcess…）由加载器按**源文件目录**解析。
 	return {
-		PiProcess: sandbox.exports.PiProcess,
+		PiProcess: load("src/main/pi/PiProcess.ts").PiProcess,
 		mockLocator,
 		getCaptured: () => captured,
 		getParkedDirectories: () => parkedDirectories,
