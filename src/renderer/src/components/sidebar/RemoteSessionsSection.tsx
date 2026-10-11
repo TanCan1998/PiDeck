@@ -41,6 +41,7 @@ function scanErrorText(code: string | null): string {
 /** 登记反馈文案：created 两种结果都必须说清，失败给可行动的稳定码解释。 */
 function importFeedbackText(feedback: RemoteSessionImportFeedback): string {
 	if (feedback.kind === "imported") return feedback.created ? t("sidebar.remoteSessions.imported") : t("sidebar.remoteSessions.alreadyImported");
+	if (feedback.kind === "refresh-failed") return t("sidebar.remoteSessions.refreshFailed");
 	const code = feedback.code;
 	if (code === null) return t("sidebar.remoteSessions.importRejected");
 	if (code === REMOTE_SESSION_UNWIRED_CODE) return t("sidebar.remoteSessions.unwired");
@@ -66,7 +67,7 @@ function RemoteSessionRow(props: { entry: RemoteSessionEntryView; title: RemoteS
 	return (
 		<li data-remote-session-id={entry.remoteSessionId} className="shrink-0 rounded-md px-1 py-1 hover:bg-muted/60">
 			<div className="flex items-center gap-1.5">
-				{title.status === "loading" ? <Loader2 className="size-3 shrink-0 animate-spin text-muted-foreground" aria-label={t("sidebar.remoteSessions.titleParsing")} /> : <FileText className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />}
+				{title.status === "loading" ? <Loader2 className="size-3 shrink-0 animate-pideck-spin text-muted-foreground" aria-label={t("sidebar.remoteSessions.titleParsing")} /> : <FileText className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />}
 				<span data-testid="remote-session-title" className="min-w-0 flex-1 truncate text-label" title={tailDegraded ? t("sidebar.remoteSessions.tailDegradedHint") : tentative ? t("sidebar.remoteSessions.tentativeHint") : displayTitle}>
 					{displayTitle}
 				</span>
@@ -99,7 +100,7 @@ function RemoteSessionRow(props: { entry: RemoteSessionEntryView; title: RemoteS
 					aria-label={props.importing ? t("sidebar.remoteSessions.importing") : t("sidebar.remoteSessions.import")}
 					onClick={props.onImport}
 				>
-					{props.importing ? <Loader2 className="size-3 animate-spin" /> : <ArrowDownToLine className="size-3" />}
+					{props.importing ? <Loader2 className="size-3 animate-pideck-spin" /> : <ArrowDownToLine className="size-3" />}
 				</Button>
 			</div>
 			<div className="flex items-center gap-2 pl-5 text-[10px] leading-4 text-muted-foreground">
@@ -137,14 +138,14 @@ export function RemoteSessionsSection(props: { hostId: string; importedRemoteSes
 					disabled={scanning || importing}
 					onClick={() => void sessions.scan()}
 				>
-					{scanning ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+					{scanning ? <Loader2 className="size-3.5 animate-pideck-spin" /> : <RefreshCw className="size-3.5" />}
 				</Button>
 			</div>
 			{/* 三态分开：没扫过 / 加载中 / 失败 / 空 / 有结果 各自一句，不能共用。 */}
 			{state.phase === "idle" ? <p className="px-1 py-1 text-[11px] leading-4 text-muted-foreground">{t("sidebar.remoteSessions.idleHint")}</p> : null}
 			{scanning ? (
 				<p className="flex items-center gap-1 px-1 py-1 text-[11px] leading-4 text-muted-foreground">
-					<Loader2 className="size-3 animate-spin" aria-hidden="true" />
+					<Loader2 className="size-3 animate-pideck-spin" aria-hidden="true" />
 					{t("sidebar.remoteSessions.scanning")}
 				</p>
 			) : null}

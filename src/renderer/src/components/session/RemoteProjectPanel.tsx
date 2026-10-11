@@ -216,7 +216,7 @@ export function RemoteProjectPanel(props: { projectId: string; projectName: stri
 				<div className="flex flex-col gap-1">
 					{search.phase === "searching" ? (
 						<p className="flex items-center gap-1 text-label text-muted-foreground">
-							<Loader2 className="size-3.5 animate-spin" />
+							<Loader2 className="size-3.5 animate-pideck-spin" />
 							{t("project.remote.searching")}
 						</p>
 					) : null}

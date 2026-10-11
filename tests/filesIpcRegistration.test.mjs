@@ -26,7 +26,11 @@ test("every files:* channel in shared/ipc.ts has a handler registered in filesIp
 
 test("project-scoped reads route through registered local backend boundaries", () => {
 	assert.match(filesIpc, /const resolveProjectReadBoundary = async/);
-	assert.match(filesIpc, /projectStore\.get\(rawScope\.projectId\)/);
+	// 2026-10 迁移（既有债务，非本批引入）：读边界改为经 localProject() 取项目——它内部走 projectStore.get
+	// 并额外拒绝 locator 项目（远端项目不得进入本机文件路径）。意图不变：权威根只来自 ProjectStore，renderer 不能自报。
+	assert.match(filesIpc, /const localProject = \(projectId: string\)/);
+	assert.match(filesIpc, /const project = projectStore\.get\(projectId\);/);
+	assert.match(filesIpc, /localProject\(rawScope\.projectId\)/);
 	assert.match(filesIpc, /createProjectFileReadBoundary\(toWindowsPath\(project\.path\)\)/);
 	assert.match(filesIpc, /resolveProjectFileReadPath\(boundary, hostPath\)/);
 	assert.match(filesIpc, /new LocalProjectFileBackend\(/);

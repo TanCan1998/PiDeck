@@ -1,4 +1,4 @@
-import { _electron as electron, test as base, type ElectronApplication, type Page } from "@playwright/test";
+import { _electron as electron, test as base, type ElectronApplication, type Page, type TestInfo } from "@playwright/test";
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
@@ -155,4 +155,149 @@ export const test = base.extend<RemoteAppFixture & { remoteCredentials: RemoteAc
 async function expectBootOverlayGone(window: Page): Promise<void> {
 	const overlay = window.locator("#boot-overlay");
 	await overlay.waitFor({ state: "detached", timeout: 30_000 }).catch(() => undefined);
+}
+
+/**
+ * D1 诊断导出：**只在失败路径**调用，把 App 自身的连接诊断、主机清单、项目 locator 与扫描原始码
+ * 一次性带回来。硬要求：
+ * - 不改任何断言（本函数只打印/attach，不 expect）；
+ * - 绝不能成为新的失败源：每个探针各自 try/catch，整体再包一层 try/catch，连 attach 失败也只告警；
+ * - 只走 preload 已有通道（remoteHosts.list / remoteHosts.diagnostics / remoteSessions.scan / projects.list），
+ *   不新增 IPC。
+ */
+export type RemoteDiagnosticsInput = {
+	/** 触发点说明：写进报告头，便于在 trace 里定位是第几步的失败。 */
+	reason: string;
+	/** 第 5 步 UI 上实际显示的失败文本（例如「无法确定远端会话目录…」），读不到就传 null。 */
+	uiFailureText?: string | null;
+	/** 项目 A/B 的 projectId（从项目行 DOM 的 data-sidebar-removal-id 取），用于核对 locator.hostId。 */
+	projectIds?: Array<string | null | undefined>;
+};
+
+/** 报告里每个探针的固定顺序：hosts → hostId → diagnostics → scanNow → projects。 */
+export async function attachRemoteDiagnostics(window: Page, testInfo: TestInfo, input: RemoteDiagnosticsInput): Promise<void> {
+	const report: Record<string, unknown> = {
+		reason: input.reason,
+		at: new Date().toISOString(),
+		uiFailureText: input.uiFailureText ?? null,
+	};
+	const attempt = async (label: string, run: () => Promise<unknown>): Promise<void> => {
+		try {
+			report[label] = await run();
+		} catch (error) {
+			// 诊断探针失败只记录原因，绝不向上抛。
+			report[label] = { diagnosticError: error instanceof Error ? error.message : String(error) };
+		}
+	};
+	try {
+		await attempt("hosts", () =>
+			window.evaluate(async () => {
+				const api = (window as unknown as { piDesktop: { remoteHosts: { list: () => Promise<unknown> } } }).piDesktop;
+				return api.remoteHosts.list();
+			}),
+		);
+		const hostId = readFirstHostId(report.hosts);
+		report.hostId = hostId ?? null;
+		if (hostId !== undefined) {
+			await attempt("diagnostics", () =>
+				window.evaluate(async (id: string) => {
+					const api = (window as unknown as { piDesktop: { remoteHosts: { diagnostics: (hostId: string) => Promise<unknown> } } }).piDesktop;
+					return api.remoteHosts.diagnostics(id);
+				}, hostId),
+			);
+			report.latestState = readLatestDiagnosticState(report.diagnostics);
+			// 失败路径上再扫一次，拿到主进程返回的**原始 code**（UI 文案只是它的呈现）。
+			await attempt("scanNow", () =>
+				window.evaluate(async (id: string) => {
+					const api = (window as unknown as { piDesktop: { remoteSessions: { scan: (hostId: string) => Promise<unknown> } } }).piDesktop;
+					return api.remoteSessions.scan(id);
+				}, hostId),
+			);
+			// 判别性探针（D1 追加）：同一个 hostId 再走一次项目面板的读取路径。项目读取经 withProjectSession，
+			// 需要时**按需建立**会话；而 remoteHome 只读当前状态。两者一个成功一个失败，就能区分「那一刻连接
+			// 整体不 ready」与「状态读不到、但会话仍能按需建立」。
+			const probeProjectId = (input.projectIds ?? []).find((id): id is string => typeof id === "string" && id.length > 0);
+			report.probeProjectId = probeProjectId ?? null;
+			if (probeProjectId !== undefined) {
+				await attempt("projectRead", () =>
+					window.evaluate(async (projectId: string) => {
+						const api = (window as unknown as { piDesktop: { remoteHosts: { listProject: (projectId: string, path: string) => Promise<unknown> } } }).piDesktop;
+						return api.remoteHosts.listProject(projectId, "");
+					}, probeProjectId),
+				);
+			}
+			report.discriminator = {
+				scanCode: readStableCode(report.scanNow),
+				projectReadOk: readOk(report.projectRead),
+				projectReadCode: readStableCode(report.projectRead),
+				classification: classifyProbe(report.scanNow, report.projectRead),
+			};
+		}
+		await attempt("projects", () =>
+			window.evaluate(
+				async (input: { ids: Array<string | null | undefined> }) => {
+					const api = (window as unknown as { piDesktop: { projects: { list: () => Promise<Array<{ id: string; name: string; locator?: { kind: string; hostId?: string; remotePath?: string } }>> } } }).piDesktop;
+					const all = await api.projects.list();
+					return {
+						all: all.map((project) => ({ id: project.id, name: project.name, locatorKind: project.locator?.kind ?? null, locatorHostId: project.locator?.hostId ?? null })),
+						requested: input.ids.map((id) => {
+							const found = all.find((project) => project.id === id);
+							return id === null || id === undefined ? { id: null, found: false } : { id: id, found: found !== undefined, name: found?.name ?? null, locatorKind: found?.locator?.kind ?? null, locatorHostId: found?.locator?.hostId ?? null, remotePath: found?.locator?.remotePath ?? null };
+						}),
+					};
+				},
+				{ ids: input.projectIds ?? [] },
+			),
+		);
+	} catch (error) {
+		report.collectError = error instanceof Error ? error.message : String(error);
+	}
+	try {
+		const text = JSON.stringify(report, null, 2);
+		// 打印 + attach：trace 与 CI 日志里都能读到同一份内容。
+		console.log("[remote-acceptance-diagnostics] " + text);
+		await testInfo.attach("remote-acceptance-diagnostics", { body: text, contentType: "text/plain" });
+	} catch (error) {
+		console.warn("[remote-acceptance-diagnostics] attach failed: " + (error instanceof Error ? error.message : String(error)));
+	}
+}
+
+function readFirstHostId(hosts: unknown): string | undefined {
+	const record = hosts as { ok?: boolean; hosts?: Array<{ id?: unknown }> } | undefined;
+	if (record === undefined || record === null || record.ok !== true || !Array.isArray(record.hosts)) return undefined;
+	const first = record.hosts.find((host) => typeof host?.id === "string");
+	return typeof first?.id === "string" ? first.id : undefined;
+}
+
+/** `{ ok: true|false }` 探针的 ok 位；不是对象就返回 undefined。 */
+function readOk(value: unknown): boolean | undefined {
+	if (value === null || typeof value !== "object") return undefined;
+	const ok = (value as { ok?: unknown }).ok;
+	return typeof ok === "boolean" ? ok : undefined;
+}
+
+/** 探针结果里的稳定码（`{ok:false, code}` 或 `{ok:true}` 都安全）。 */
+function readStableCode(value: unknown): string | null {
+	if (value === null || typeof value !== "object") return null;
+	const code = (value as { code?: unknown }).code;
+	return typeof code === "string" ? code : null;
+}
+
+/**
+ * 只做**事实分类**，不替产品下结论：扫描失败而项目读取成功 ⇒ 状态读不到但会话能按需建立；
+ * 两者都失败 ⇒ 那一刻连接整体不可用。
+ */
+function classifyProbe(scan: unknown, projectRead: unknown): string {
+	if (readOk(scan) === true) return "scan-succeeded-diagnostic-only";
+	const projectOk = readOk(projectRead);
+	if (projectOk === true) return "project-read-succeeded-while-scan-failed";
+	if (projectOk === false) return "both-scan-and-project-read-failed";
+	return "inconclusive-project-read-not-run";
+}
+
+function readLatestDiagnosticState(diagnostics: unknown): unknown {
+	const record = diagnostics as { ok?: boolean; entries?: Array<{ state?: unknown; phase?: unknown; code?: unknown; at?: unknown }> } | undefined;
+	if (record === undefined || record === null || record.ok !== true || !Array.isArray(record.entries) || record.entries.length === 0) return null;
+	const last = record.entries[record.entries.length - 1];
+	return { state: last?.state ?? null, phase: last?.phase ?? null, code: last?.code ?? null, at: last?.at ?? null, entryCount: record.entries.length };
 }

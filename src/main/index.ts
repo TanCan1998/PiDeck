@@ -266,6 +266,7 @@ import { registerRemoteProjectIpc } from "./ipc/remoteProjectIpc";
 import { registerRemoteSessionIpc } from "./ipc/remoteSessionIpc";
 import { createRemoteHostConnectionService } from "./remote/RemoteHostConnectionService";
 import { createSshClientRuntime, resolvePosixSshClient } from "./remote/SshClientRuntime";
+import { matchRemoteSessionProject } from "./remote/remoteSessionProjectMatch";
 import { openRemoteHostCatalogView } from "./remote/RemoteHostCatalogView";
 import { registerUsageStatsIpc } from "./ipc/usageStatsIpc";
 import { UsageStatsService } from "./usageStats/UsageStatsService";
@@ -2437,9 +2438,18 @@ function registerIpc() {
 		enabled: remoteExperimentEnabled,
 		service: remoteHostServiceIfEnabled,
 		catalog: () => sessionCatalog,
-		// 本批不解析会话正文，无法从远端会话内容推断归属：按「同主机上的远端项目」解析；
-		// 解析不出（该主机没有远端项目）就不登记，fail closed，不写半条记录。
-		projectIdForHost: (hostId) => projectStore.list().find((project) => isRemoteProject(project) && project.locator.hostId === hostId)?.id,
+		// 归属必须按**会话所在目录**判定：取该主机上的 ssh 项目作候选，用 pi 的目录编码与会话路径第一段比对。
+		// 判不出来（多候选且都没命中）⇒ undefined，由 scanner 以既有稳定码 REMOTE_SESSION_PROJECT_UNRESOLVED
+		// fail-closed —— 绝不猜。曾经的写法取「该主机上第一个 ssh 项目」，同主机两个项目时会把会话登记到
+		// 错误项目名下。列表刷新与侧栏投影另由 catalog IPC 和 sessionRecordToSummary 负责。
+		projectIdForHost: (hostId, remoteSessionId) =>
+			matchRemoteSessionProject(
+				projectStore
+					.list()
+					// 在同一回调里收窄（filter 的类型收窄不会传到 map）：只取该主机的 ssh 项目。
+					.flatMap((project) => (isRemoteProject(project) && project.locator.hostId === hostId ? [{ id: project.id, remotePath: project.locator.remotePath }] : [])),
+				remoteSessionId,
+			),
 		channels: { scan: ipcChannels.remoteSessionScan, register: ipcChannels.remoteSessionRegister, title: ipcChannels.remoteSessionTitle },
 	});
 	// 用量统计：业务在 UsageStatsService，handler 薄层只校验/适配

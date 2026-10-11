@@ -529,8 +529,29 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 	ipcMain.handle(ipcChannels.sessionsCatalogList, async (_event, projectId: string, options?: { scan?: boolean }) => {
 		const project = projectStore.get(projectId);
 		if (!project) throw new Error(mainCopy("project.notFound"));
-		// 远端项目的会话由远端 pi/helper 扫描（Phase 4）；本地 scanner 不能读远端路径。
-		if (!isLocalProject(project)) throw new Error("UNSUPPORTED_PROJECT_LOCATION");
+		// 已登记的目录元数据是本机 catalog，远端项目也必须能读取：导入后刷新依赖这条通道。
+		// 读取这些记录不等于扫描远端文件；远端分支必须在本地 scanner / WSL 转换前返回。
+		// 目录缓存中的现有记录（上次扫描/运行时创建的合并结果，启动时从磁盘加载）
+		const cachedRecords = sessionCatalog
+			.listEntries()
+			.filter((entry) => entry.projectId === projectId)
+			.map((entry) => sessionCatalog.getRecord(entry.id))
+			.filter((record): record is SessionRecord => Boolean(record));
+		if (!isLocalProject(project)) {
+			// 远端项目只有目录缓存可读，没有本机扫描可调度。渲染层靠「catalog 已刷新」推送揭开 loading，
+			// 所以这里必须主动补一次推送，否则空缓存的远端项目会一直停在「正在加载历史会话…」直到看门狗兜底。
+			// scan:false 是渲染层收到推送后的静默回拉（见 useProjectSync 的 onCatalogRefreshed），
+			// 对它再推送一次就会自激成环。
+			if (options?.scan !== false) {
+				const window = getMainWindow();
+				if (window && !window.isDestroyed()) {
+					setImmediate(() => {
+						if (!window.isDestroyed()) window.webContents.send(ipcChannels.sessionsCatalogRefreshed, { projectId });
+					});
+				}
+			}
+			return cachedRecords;
+		}
 		let projectPath = project.path;
 		const settings = settingsStore.get();
 		if (settings.wslEnabled && settings.wslDistro) {
@@ -549,13 +570,6 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			}
 			return records;
 		};
-
-		// 目录缓存中的现有记录（上次扫描/运行时创建的合并结果，启动时从磁盘加载）
-		const cachedRecords = sessionCatalog
-			.listEntries()
-			.filter((entry) => entry.projectId === projectId)
-			.map((entry) => sessionCatalog.getRecord(entry.id))
-			.filter((record): record is SessionRecord => Boolean(record));
 
 		// 纯读路径：事件回调/订阅刷新专用，不再触发扫描（防止推送-拉取循环触发）
 		if (options?.scan === false) return cachedRecords;

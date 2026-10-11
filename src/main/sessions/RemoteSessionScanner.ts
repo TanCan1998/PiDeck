@@ -125,6 +125,8 @@ export type RemoteSessionSessionPort = {
  */
 export type RemoteSessionScannerPort = {
 	remoteHome(hostId: string): Promise<string | undefined>;
+	/** 可选：缓存状态读不到时**按需建立会话**再读一次（生产端口提供；缺失时退回只读）。 */
+	remoteHomeEnsuring?(hostId: string): Promise<string | undefined>;
 	withProjectSession<T>(hostId: string, root: string, task: (session: RemoteSessionSessionPort) => Promise<T>): Promise<{ ok: true; value: T } | { ok: false; code: string }>;
 };
 
@@ -134,7 +136,7 @@ export type RemoteSessionCatalogPort = {
 };
 
 /** 远端会话归属哪个本地项目由装配决定（本批不解析正文，无法自行推断）。 */
-export type RemoteSessionProjectResolver = (hostId: string) => string | undefined;
+export type RemoteSessionProjectResolver = (hostId: string, remoteSessionId: string) => string | undefined;
 
 export type RemoteSessionScannerLimits = {
 	maxWorkspaceDirs: number;
@@ -356,7 +358,11 @@ export function createRemoteSessionScanner(options: RemoteSessionScannerOptions)
 	async function resolveSessionRoot(hostId: string): Promise<{ readonly ok: true; readonly root: string } | { readonly ok: false; readonly code: string }> {
 		let home: unknown;
 		try {
-			home = await port.remoteHome(hostId);
+			// 优先「确保式」：扫描通常紧跟登记/读取项目之后，而那条路径会在任务结束时收掉它建立的临时
+			// 会话 —— 纯读会正好落进「没有缓存状态」的窗口并报 home 不可用（真机 e2e 实测：前后状态都
+			// 是 ready，同主机稍后再扫就成功）。端口没提供确保式方法时退回只读，既有测试替身不受影响。
+			const ensureHome = port.remoteHomeEnsuring;
+			home = typeof ensureHome === "function" ? await ensureHome.call(port, hostId) : await port.remoteHome(hostId);
 		} catch {
 			return { ok: false, code: REMOTE_SESSION_CODES.homeUnavailable };
 		}
@@ -477,7 +483,8 @@ export function createRemoteSessionScanner(options: RemoteSessionScannerOptions)
 			// 非法 id 一个帧都不发：形状不合法就不可能是一次远端发现。
 			if (remoteSessionId === undefined) return { ok: false, code: REMOTE_SESSION_CODES.idInvalid };
 			if (catalog === undefined) return { ok: false, code: REMOTE_SESSION_CODES.catalogUnavailable };
-			const projectId = projectIdForHost?.(host);
+			// 归属必须按**会话所在目录**判定：同一主机上的两个项目不能靠「第一个」猜（真机 e2e 抓到过归错项目）。
+			const projectId = projectIdForHost?.(host, remoteSessionId);
 			if (typeof projectId !== "string" || projectId.length === 0) return { ok: false, code: REMOTE_SESSION_CODES.projectUnresolved };
 			const resolvedRoot = await resolveSessionRoot(host);
 			if (!resolvedRoot.ok) return { ok: false, code: resolvedRoot.code };

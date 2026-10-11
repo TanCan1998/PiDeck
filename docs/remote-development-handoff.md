@@ -1,11 +1,34 @@
 # PiDeck SSH 远程开发 — 协作与交接
 
 > 当前开发分支：`feat/remote-development`。代码核对基线：`f7b18947`（第一次协作交接点）；首次交接提交：`a663947c`。
-> 第一批（A 读取隔离 / B 侧栏入口 / C 持久化校验）与第二批（F1 helper 只读搜索 / F2 搜索链路 / F3 会话建立与重连时的 root 复核）已实施完成，落地位置、验证命令与**未验收边界**见 §3 末尾与 §5；文档里凡未在真机或 Electron 内跑过的能力都保持「未验收」标注。
-> 第三批（G1 IPC 按域拆分 / G2 needs-attention 与握手 home / G3 远端 Session 只读发现与登记 / G5 集成）已实施完成；落地位置与**未验收边界**见 §3 末。
-> 第四批（H1 按需标题 / H2 侧栏远端会话列表与导入 / H3 项目级 root 状态（设计 (i)）/ H5 集成）已实施完成；落地与未验收边界见 §3 末。
-> 下一步（第五批建议）：**真机与 Electron 验收**（需主机凭据）、pi 自定义 `sessionDir` 覆盖、`remotePathAliases` 与 move/archive 事务（Phase 4）、`ProjectTree` 插槽化、跨 store INV-5，然后进 Phase 4 的远端 pi 端到端会话。
-> 本页是协作入口：实现状态、下一批任务、验收与验证方法。架构和发布范围见 [实施计划](remote-development-plan.md)，跨 store 设计见 [事务设计](remote-host-cross-store-design.md)。
+>
+> ## 交接摘要（面向接手人，2026-10-11 收口）
+>
+> **现状一句话**：**Phase 3 的远端只读能力已在真实主机 + 真实 Electron 上端到端验收通过**——两次独立运行：run `e2emv3cw2x5`（13:01，1.8 分钟）与 run `e2emv3dr8xb`（13:26，1.9 分钟），均为 `1 passed`。测试覆盖九步：加主机 + pin 指纹命中 → 连接 ready → 登记两个远端项目 → 列出远端会话（含夹具）→ 惰性标题（权威名不标「暂定」、弱兜底标「暂定」）→ 导入（清单刷新 + 选中 + 「已导入」标记 + 不开新 Tab）→ 重复导入（`created=false`）→ 项目级 root 漂移（A 显示「需处理」带稳定码、同主机邻居 B 仍 ok 且仍能列目录）。真机侧已交叉验证（远端会话目录 mtime 同步更新、无夹具/项目残留）。
+>
+> **已完成（可验收）**：① 前六批实现（项目读取隔离 / 侧栏登记入口 / helper 只读搜索 / 会话建立与重连时的 root 复核 / IPC 按域拆分 / needs-attention 终态 / 远端会话发现与登记 / 按需标题 / 侧栏列表与导入 / 项目级 root 状态 / 集成）；② 第七批及其修复（pi 自定义 `sessionDir` 覆盖、头尾窗口零重叠、尾读降级上报、`readHostId` 传输边界收窄、长活会话 `lifetime` 分档、helper capability gate、跨 store 一致性**设计 + 红例**、Phase 4 **设计**）；③ **真机脚本平台修正**（此前只有 POSIX 客户端能跑，现在 Windows 客户端可跑，并修掉约 3% 的偶发连接失败）；④ 真机验收通过（上条）。逐条证据见 §3 各批末尾。
+>
+> **未完成（建议优先级）**：
+> 1. **Phase 4 落地**：让远端 pi 真正跑起来（新建 → 发送 → 流式 → 停止 → 重启恢复）。设计已就绪 [Phase 4 计划](remote-phase4-plan.md)；建议先做 P4.2（会话生命周期 / lease 收敛）与「心跳仅诊断」。**注意**：Pi RPC 走「每 Session 独立 SSH + 固定 runner」，**不走控制协议**，所以最小 Phase 4 可零新增 helper op 起步。
+> 2. **INV-5 实施**：跨 store 写入侧无丢失更新。用户已拍板**不把不变量收窄**、且**允许多版本并行**（⇒ 必须有真正的跨进程锁 + 磁盘 CAS，不能只做「写前复查」）。按 [跨 store 一致性计划](remote-cross-store-consistency-plan.md) §6 的合并门禁让红例 CE-1…CE-4 转绿（红例已存在，默认 skip + `PIDECK_INV5_EXPECT_RED=1` 门控复现）。
+> 3. **导入会话的正文读取**（远端 JSONL）：属 Phase 4。当前导入只保证「登记 + 进清单 + 选中」，打开会**如实**报「无法读取会话文件」——不是静默失败。
+> 4. **覆盖缺口**：深层嵌套 subagent 会话布局、`remotePathAliases`、`PI_CODING_AGENT_DIR`/`PI_CODING_AGENT_SESSION_DIR`（远端进程环境，helper 无读 env 的操作）与 project 级 `.pi/settings.json`（cwd 作用域）不在扫描期覆盖、POSIX symlink 语义未验。
+> 5. **收尾小项**：两处字面 UUID 正则（`remoteSessionIpc.ts` / `remoteHostIpc`）未收敛；两个 smoke 脚本仍用 `ssh-keyscan` 取候选，应改用产品自己的已认证握手路径；`ProjectTree.tsx` 414 行可插槽化。
+> 6. **全量 `npm test` 仍有 7 条失败**，全在**我们从未改动的文件**里（`piLocator` 的 Windows cmd shim、`quickMessages`、`securityLevelRuntimeSwitch`、`sonnerToasterMount`、`syncWorkflowChoices`），另有 3 条已知环境失败（bootstrap 集成、Windows 无 `/bin/sh`、`sshClientRuntime` 的 POSIX-only 断言）。**只做了文件级归因，未在干净基线上逐条比对**——接手后若要动，请先基线比对再改。
+>
+> **接手必读的坑**（都是实际踩过并付出过代价的）：
+> 1. `.ps1` 脚本必须 **ASCII + BOM**：Windows PowerShell 会把无 BOM 的 UTF-8 按 GBK 读，脚本里的中文会让**整个脚本解析失败**（表现为语法错误而非业务错误）。
+> 2. **Playwright 每次启动会清空 `test-results/`**：真机失败证据必须先 `Copy-Item` 另存，否则下一次跑（或任何人跑一次）就把 trace/截图冲掉。
+> 3. **夹具必须像真的**：远端会话夹具要放在项目的**编码目录** `--<encoded-cwd>--/` 下（`encodePiSessionDirectory`），否则归属判定判不出来，测的就不是真实行为。
+> 4. **契约测试断言的源码文本会随重构过期**：改实现后契约必须**等价迁移**（意图不变），**绝不放宽断言**；否则守卫会变成噪音或掩盖真问题。
+> 5. 跨 VM realm（`loadTsCommonJs` 加载的对象）**不能用 `deepEqual` 比对象**（原型不同会误判），断言字段。
+> 6. helper 是**冻结**的（1.6.0 + sha 与仓库常量逐字节一致）：改它必须 bump bundle；新增远端能力优先走 runner 路径而不是扩控制协议。
+> 7. 每个 bug 修复**红证先行**：先让旧行为变红，再修到绿（本会话有多个 bug 就是靠这条避免了「断言恒真」）。
+> 8. 给用户的命令**不要用超长单行**（易粘贴出错）；本仓库用 `%TEMP%\pideck-acceptance.ps1` 直接把凭据与步骤写进脚本。
+>
+> **怎么验证**：离线 `npm run typecheck` + 针对性套件（`node --test tests/remote*.test.mjs tests/session*.test.mjs …`）+ `npm run check:format`；真机 `& "$env:TEMP\pideck-acceptance.ps1"`（内含三个凭据，期望 `1 passed`）。**本执行沙箱无法启动 Electron**（Playwright 需经管道取 CDP 端点，沙箱内程序不能开命名管道；仓库既有 `e2e/smoke.spec.ts` 同因失败），所以**功能级真机验收必须在宿主终端**跑；而 `scripts/verify-remote-host.mjs` 与 `scripts/verify-remote-connection-service.mjs`（协议层/服务层）**可以在沙箱里跑**。
+>
+> 本页是协作入口：实现状态、下一批任务、验收与验证方法。架构和发布范围见 [实施计划](remote-development-plan.md)，跨 store 设计见 [跨 store 一致性计划](remote-cross-store-consistency-plan.md) 与 [旧事务设计](remote-host-cross-store-design.md)。
 > 文档中的任务包是待实施工作，不表示已分配给具体开发者或已创建 GitHub issue。
 
 ## 1. 当前能做什么
@@ -213,11 +236,35 @@ A/B/C 可由不同开发者并行，D 随开发跟进。每块指定一个负责
 1. **远端进程环境不覆盖**：`PI_CODING_AGENT_DIR`（整体挪走 agent 目录）与 `PI_CODING_AGENT_SESSION_DIR`（直接指定会话目录）都是**远端进程环境**——helper 1.6.0 已冻结且没有读 env 的操作，扫描期无法观测。
 2. **project 级 `.pi/settings.json` 不覆盖**：project 作用域是 cwd 相关的（pi 加载顺序在 user 之后），读会话内容前不知道它自己的 cwd。
 3. **每操作 +1 次配置探测**：一次 scan/title/register = 1 次探测会话建立 + 1 次 `fs.stat` + 1 次 ≤64 KiB `fs.read`，再叠加本来那次会话操作；探测 root（`<home>/.pi/agent`）与会话 root 不同时，服务的 helper 会话会随之切换（现有服务语义）。若成为瓶颈，正解是**短 TTL 的按 host 缓存**（本批不做：缓存会让「改了配置看不到新会话」多一个一致性窗口）。
-4. **J1 真机执行未做——第六批唯一未验证的用户可见路径**：见上「J1 的沙箱边界」。必须在宿主终端设置 `PIDECK_E2E_REMOTE_HOST` / `_USER` / `_FINGERPRINT` 后跑 `npx playwright test e2e/remoteHostAcceptance.spec.ts`。**不得用替身证据（纯函数注入、源码级断言）冒充端到端结论。**
+4. ~~**J1 真机执行未做**~~ —— **已在第七批完成并通过**：宿主终端跑 `%TEMP%\pideck-acceptance.ps1`（内含三个凭据）→ `✓ 1 passed (1.8m)`、`RESULT: passed | failedTests=0`，run `e2emv3cw2x5`（13:01:41 起）。真机侧交叉验证：远端 `~/.pi/agent/sessions` mtime 更新到 13:03:22、无夹具/项目目录残留 ⇒ 是真实运行且清理干净，不是 skip。**后续批次仍不得用替身证据冒充端到端结论。**
 5. **选择器只有源码级证据**：仓库无 DOM 基建，`aria-label` / `.project-group` / `data-remote-session-id` / `.session-row.active` 等未在真实 Electron 里命中过。首次真机跑很可能在某个选择器上失败，属**正常首次调试**；修法是改选择器或夹具，**不放宽断言**。
 6. **K1 §7 两条产品决策待拍板**：5a 是否收窄到「只保证写入侧不产生新悬空引用」；多版本并行写入同一 userData 是否允许（决定要不要真正跨进程锁，而不只是写前复查）。未拍板前 INV-5 保持「设计待评审、未实施」。
 7. `remoteSessionIpc.ts:19` 与 `remoteHostIpc` 各有一份**字面** UUID 正则（取值相同、行为一致），未收敛到同一 import。
 8. **POSIX symlink 语义未验**（本机 Windows）：J2 对越出 home 的路径做的是词法 + 规范化拒绝，真机 symlink 逃逸未验。
+
+### 第七批：真机功能级验收（Electron + 真实主机，进行中）
+
+用 Playwright + 真实 Electron 对已核验主机（`10.81.2.15` / `zhadainian`，指纹独立核验）跑完整链路。真实运行暴露了产品缺陷，也暴露了测试选择器、首启引导处理与夹具布局的问题；不能把每次失败都归为产品缺陷：
+
+| # | 现象 | 根因 | 修复与证据 |
+| --- | --- | --- | --- |
+| 1 | 首次打开被「命令面板」引导弹框盖住，后续点击全部超时 | 隔离 userData ⇒ 每次都是首启，而 spec 没处理引导 | spec 先消解引导（只在存在时点「以后再说」）；截图定位 |
+| 2 | **Windows 上「添加 SSH 主机」保存即报 `SSH_CLIENT_UNSUPPORTED_PLATFORM`**，pin 弹框永不出现 ⇒ Windows 用户没有远端功能入口 | `SshHostPinStore` 的懒解析直接调 POSIX-only 的 `resolvePosixSshClient()`（它在 win32 必抛）。历史是**故障平台反转**：更早裸调 `createSshClientRuntime()` 导致 Linux 加主机失败，改成 POSIX-only 后炸的换成 Windows | `SshClientRuntime.resolveVerifiedSshClient()` 收口平台判断；四处裸构造一并修好。红→绿 + 单测；已提交 `65bb5504` |
+| 3 | **连接偶发失败** `REMOTE_CONNECTION_NONCE_INVALID`（约 3%） | 服务**自己生成、自己校验** nonce：生成器用 base64url，而契约（与冻结 helper 共用）要求首字符为字母数字 ⇒ 约 3.1% 的生成结果被自己的校验拒掉 | 生成器改 hex（恒合契约、128 位熵不变），**不动契约**（改它要 bump helper bundle）。独立测得 66/2000 → 0/2000 |
+| 4 | **列远端会话永远显示「无法确定远端会话目录（远端 home 解析失败）」**，而主进程稍后再扫却完全成功 | `remoteHome` 只读缓存状态，而其它远端路径都**按需建立会话**；并发场景（项目面板加载 vs 扫描）里会话切换窗口内读不到状态 ⇒ 假失败，且界面不会自动重试 | 扫描路径改用 `remoteHomeEnsuring`（同一把主机锁内按需建立再读），**UI 的只读语义一行不动**。可复现探针：Q2 `UNDEFINED` → Q3 拿到 home；红证单测 |
+| 5 | 导入回执成功，但项目清单和「已导入」标记没有更新 | 先前将其直接归因于「选错项目」证据不足。即便编码匹配且登记到正确项目，`sessionsCatalogList` 仍一律拒绝远端项目；刷新异常在 App/hook 两层被吞掉。另外 `sessionRecordToSummary` 会过滤无本机 filePath 的 SSH 记录 | 远端 catalog 读取只返回已登记元数据、禁止调用本机 scanner；SSH 记录按稳定 id 投影为侧栏行，filePath 保持空；成功回执延后至刷新/选中完成，刷新失败单独说明「已登记但刷新失败」。`tests/remoteImportedCatalogList.test.mjs` 用真实 catalog + IPC handler + 刷新 hook + 侧栏投影复现并验证，另有反馈时序测试 |
+
+**阶段性真机进展**：第 6 次运行首次验通了「加主机 + pin → 连接 ready → 登记两个远端项目 → 列出远端会话（30 条，含夹具）→ 惰性标题在真实数据上正确 → 导入回执」，随后卡在导入后的显示（见下表第 5 行，已修）。
+
+**导入显示修复的证据**：新增 3 条 catalog/投影回归在修复前全部失败（2 条 `UNSUPPORTED_PROJECT_LOCATION`、1 条 SSH 行被丢弃），反馈时序回归也先失败（刷新未结束已显示成功）；修复后相关套件全绿，并在**随后的真机运行中确认**导入显示、重复导入、root 漂移全部通过。
+
+**端到端验收已于 2026-10-11 通过两次**：run `e2emv3cw2x5`（13:01:41 起，1.8 分钟）与 run `e2emv3dr8xb`（13:26:01 起，1.9 分钟，**最终构建**），均为 `1 passed`。加主机 + pin 指纹命中 → 连接 ready → 登记两个远端项目 → 列出远端会话（30 条，含两条夹具）→ 惰性标题（权威名不标「暂定」、弱兜底标「暂定」）→ **导入**（清单刷新 + 选中 + 「已导入」标记 + 不开新 Tab）→ **重复导入**（`created=false` 区分回执、仍只一条记录）→ **项目级 root 漂移**（A 显示「需处理」带稳定码、远处邻居 B 仍 ok 且仍能列目录）。夹具自带清理，远端无残留（已交叉核对）。
+
+**仍属未验证/已知边界**：① 导入的会话**打开后读不到正文**（界面如实报「无法读取会话文件」）——Phase 4 范围（导入只保证登记 + 选中）；② 真机只跑过**单次主流程**，长时间稳定性、并发多会话、多版本并行、断线重放等门禁未覆盖；③ POSIX symlink 语义与真机 symlink 逃逸未验；④ 选择器此前只有源码级证据的问题由本次真机运行消除（全部命中），但**新增步骤仍需实跑验证**。
+
+**执行方式的硬边界**：本执行沙箱**无法启动 Electron**（Playwright 需经**管道**取 CDP 端点，沙箱内程序不能开命名管道；仓库既有 `e2e/smoke.spec.ts` 以完全相同方式失败，而 `electron.exe --version` 正常）⇒ 真机功能级验收**必须由用户在宿主终端**运行。本会话提供了 `%TEMP%\pideck-acceptance.ps1`（**纯 ASCII + BOM**：Windows PowerShell 会把无 BOM 的 UTF-8 按 GBK 读，脚本里的中文会导致解析失败——这个坑已踩过）。凭据只存在于该本地脚本，不进仓库。
+
+**方法论沉淀（值得沿用）**：① 真机失败先看 `error-context.md` 的 DOM 快照与截图，往往一步定位（本次 4 个 bug 里 3 个由此定位）；② 关键失败要用**产品自己的代码在沙箱里写探针复现**——本次两个 bug 的根因都靠探针钉死，其中「并发窗口」只有把探针改成「会话切换在飞时去读」才复现；③ 修复一律**红证先行**（先让旧行为变红再改）；④ 失败证据先 `Copy-Item` 另存，注意 **Playwright 每次启动会清空 `test-results/`**（本会话误删过一次证据）。
 
 ## 4. M1 之后如何推进
 

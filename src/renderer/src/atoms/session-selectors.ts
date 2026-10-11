@@ -10,7 +10,8 @@ export function sessionRecordToSummary(session: SessionRecord): SessionSummary |
 	// 空 filePath 在显示管线走 unkeyedSessions 分支
 	// （getSummaryKey 对空串归一化为 undefined），不会与其他会话折叠成一行；
 	// 右键菜单按 hasFilePath 隐藏「复制路径/打开文件」类文件操作。
-	if (!session.filePath && session.backend !== "dsh" && session.backend !== "imagegen") return undefined;
+	// SSH 会话同样没有本机文件；用稳定 session id 展示，不可把 remotePath 塞进 filePath 来绕过过滤。
+	if (!session.filePath && session.locator?.kind !== "ssh" && session.backend !== "dsh" && session.backend !== "imagegen") return undefined;
 	return {
 		id: session.id,
 		filePath: session.filePath ?? "",

@@ -127,6 +127,7 @@ export function useRemoteSessions(
 		async (entry: RemoteSessionEntryView) => {
 			const hostId = optionsRef.current.hostId;
 			setImportingRemoteSessionId(entry.remoteSessionId);
+			setFeedbackByHost((previous) => ({ ...previous, [hostId]: undefined }));
 			try {
 				let raw: unknown;
 				try {
@@ -139,12 +140,13 @@ export function useRemoteSessions(
 					setFeedbackByHost((previous) => ({ ...previous, [hostId]: { remoteSessionId: entry.remoteSessionId, kind: "failed", code: outcome.kind === "failed" ? outcome.code : null } }));
 					return;
 				}
-				// 登记已由主进程写进本地 catalog：宿主负责刷新列表并选中（失败不在这里吞掉，也不改写登记结果）。
-				setFeedbackByHost((previous) => ({ ...previous, [hostId]: { remoteSessionId: entry.remoteSessionId, kind: "imported", sessionId: outcome.sessionId, created: outcome.created } }));
+				// 登记写盘与清单刷新是两个阶段。刷新尚未完成时，不能提前宣称「已选中」。
 				try {
 					await optionsRef.current.onImported({ sessionId: outcome.sessionId, created: outcome.created, remoteSessionId: outcome.remoteSessionId });
+					setFeedbackByHost((previous) => ({ ...previous, [hostId]: { remoteSessionId: entry.remoteSessionId, kind: "imported", sessionId: outcome.sessionId, created: outcome.created } }));
 				} catch {
-					/* 宿主刷新/选中失败不影响「已登记」这个事实 */
+					// 记录已保存，不把刷新失败误报为登记失败，也不透传异常中的本机路径。
+					setFeedbackByHost((previous) => ({ ...previous, [hostId]: { remoteSessionId: entry.remoteSessionId, kind: "refresh-failed", sessionId: outcome.sessionId, created: outcome.created } }));
 				}
 			} finally {
 				setImportingRemoteSessionId(null);

@@ -18,7 +18,7 @@ export const remoteSessionScanByHostAtom = atom<Record<string, RemoteSessionList
 export const remoteSessionTitleByHostAtom = atom<Record<string, Record<string, RemoteSessionTitleEntry>>>({});
 
 /** 每台主机最近一次登记的反馈：created=true/false 都必须能被用户看见，不能只活在一次点击里。 */
-export type RemoteSessionImportFeedback = { remoteSessionId: string; kind: "imported"; sessionId: string; created: boolean } | { remoteSessionId: string; kind: "failed"; code: string | null };
+export type RemoteSessionImportFeedback = { remoteSessionId: string; kind: "imported"; sessionId: string; created: boolean } | { remoteSessionId: string; kind: "refresh-failed"; sessionId: string; created: boolean } | { remoteSessionId: string; kind: "failed"; code: string | null };
 
 export const remoteSessionImportByHostAtom = atom<Record<string, RemoteSessionImportFeedback | undefined>>({});
 

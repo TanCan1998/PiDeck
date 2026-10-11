@@ -1,5 +1,6 @@
 import { expect, type Page } from "@playwright/test";
-import { REMOTE_ACCEPTANCE_ENV, matchesRemoteFingerprint, readRemoteAcceptanceCredentials, readRemoteAcceptanceTimeouts, runRemoteCommand, test } from "./remote-fixtures";
+import { encodePiSessionDirectory } from "../src/main/remote/remoteSessionProjectMatch";
+import { REMOTE_ACCEPTANCE_ENV, attachRemoteDiagnostics, matchesRemoteFingerprint, readRemoteAcceptanceCredentials, readRemoteAcceptanceTimeouts, runRemoteCommand, test } from "./remote-fixtures";
 
 /**
  * 远端主机功能级验收（task-25 / J1）：在真实 Electron 里跑通「加主机 → 连接 → 登记远端项目 →
@@ -60,6 +61,27 @@ async function enrollRemoteProject(window: Page, remotePath: string): Promise<vo
 	await expect(enrolledDialog).toHaveCount(0);
 }
 
+/**
+ * D1 诊断（失败路径专用，见 task-36）：读 UI 上的失败文本与项目 id。两个都自己吞掉异常并返回
+ * null —— 诊断连「读不到」都不该把测试弄挂，更不该成为新的失败源。
+ */
+async function readRemoteSessionsSectionText(window: Page, projectName: string): Promise<string | null> {
+	try {
+		const section = projectRow(window, projectName).getByTestId("remote-sessions-section");
+		return (await section.innerText()).slice(0, 4000);
+	} catch {
+		return null;
+	}
+}
+
+async function readProjectId(window: Page, projectName: string): Promise<string | null> {
+	try {
+		return await projectRow(window, projectName).getAttribute("data-sidebar-removal-id");
+	} catch {
+		return null;
+	}
+}
+
 /** 展开项目行：折叠按钮只在「收起」时点一次，避免把已展开的行又收起来。 */
 async function expandProject(window: Page, projectName: string): Promise<void> {
 	const row = projectRow(window, projectName);
@@ -103,18 +125,22 @@ test.describe("远端主机功能级验收（真机）", () => {
 		expect(/\s/.test(home), "远端 $HOME 含空白：夹具与清理脚本按既有风格不做引用，先在这里拒绝").toBe(false);
 		const e2eRoot = home + "/.pideck-e2e-" + runId;
 		const sessionRoot = home + "/.pi/agent/sessions";
-		const sessionWorkspaceDir = "pideck-e2e-" + runId;
+		const projectAName = "proj-a-" + runId;
+		const projectBName = "proj-b-" + runId;
+		const projectAPath = e2eRoot + "/" + projectAName;
+		const projectBPath = e2eRoot + "/" + projectBName;
+		const movedPath = e2eRoot + "/" + projectAName + "-moved";
+		// 会话夹具必须放在**项目 A 的 encoded-cwd 目录**下：pi 的真实布局就是
+		// `<sessions>/<encoded-cwd>/<file>.jsonl`（cwd 即项目目录），而归属性判定正是按同一编码比对。
+		// 曾经用编造的 `pideck-e2e-<runId>` 目录：归属判不出来，产品会**正确地** fail-closed
+		// （REMOTE_SESSION_PROJECT_UNRESOLVED）—— 夹具得像真的，否则测的不是真实行为。
+		const sessionWorkspaceDir = encodePiSessionDirectory(projectAPath);
 		const authStem = "e2e-auth-" + runId;
 		const weakStem = "e2e-weak-" + runId;
 		const authSessionId = sessionWorkspaceDir + "/" + authStem + ".jsonl";
 		const weakSessionId = sessionWorkspaceDir + "/" + weakStem + ".jsonl";
 		const authTitle = "E2E authoritative " + runId;
 		const weakTitle = "E2E inferred " + runId;
-		const projectAName = "proj-a-" + runId;
-		const projectBName = "proj-b-" + runId;
-		const projectAPath = e2eRoot + "/" + projectAName;
-		const projectBPath = e2eRoot + "/" + projectBName;
-		const movedPath = e2eRoot + "/" + projectAName + "-moved";
 		let movedA = false;
 		// 一条结构化日志即可（诊断 run 与目标；不含任何凭据正文，主机来自 env）。
 		console.log("[remote-acceptance] run=" + runId + " host=" + creds.host + " user=" + creds.user);
@@ -180,18 +206,33 @@ test.describe("远端主机功能级验收（真机）", () => {
 				await expect(window.getByText("远端项目（只读）")).toBeVisible({ timeout: timeouts.helperMs });
 			});
 			await test.step("展开项目 A 行：远端会话 列表按主机只读列出夹具会话", async () => {
-				// 登记项目会改变活动项目，引导理论上可能再次触发：这里再兜一次底（通常已关过，不会再出现）。
-				await dismissOnboarding(window, 0);
-				await expandProject(window, projectAName);
-				const section = projectRow(window, projectAName).getByTestId("remote-sessions-section");
-				await expect(section, "远端项目的展开区必须有「远端会话」区块").toBeVisible({ timeout: timeouts.helperMs });
-				await expect(section.getByText("远端会话", { exact: true })).toBeVisible();
-				// 扫描是显式动作（不进视口就不发远端读取）：点一次，等我们唯一命名的两条夹具会话出现。
-				await section.getByTestId("remote-sessions-scan").click();
-				const authRow = section.locator('li[data-remote-session-id="' + authSessionId + '"]');
-				const weakRow = section.locator('li[data-remote-session-id="' + weakSessionId + '"]');
-				await expect(authRow, "夹具会话（authoritative）必须出现在远端会话列表").toBeVisible({ timeout: timeouts.helperMs });
-				await expect(weakRow, "夹具会话（inferred）必须出现在远端会话列表").toBeVisible({ timeout: timeouts.helperMs });
+				try {
+					// 登记项目会改变活动项目，引导理论上可能再次触发：这里再兜一次底（通常已关过，不会再出现）。
+					await dismissOnboarding(window, 0);
+					await expandProject(window, projectAName);
+					const section = projectRow(window, projectAName).getByTestId("remote-sessions-section");
+					await expect(section, "远端项目的展开区必须有「远端会话」区块").toBeVisible({ timeout: timeouts.helperMs });
+					await expect(section.getByText("远端会话", { exact: true })).toBeVisible();
+					// 扫描是显式动作（不进视口就不发远端读取）：点一次，等我们唯一命名的两条夹具会话出现。
+					await section.getByTestId("remote-sessions-scan").click();
+					const authRow = section.locator('li[data-remote-session-id="' + authSessionId + '"]');
+					const weakRow = section.locator('li[data-remote-session-id="' + weakSessionId + '"]');
+					await expect(authRow, "夹具会话（authoritative）必须出现在远端会话列表").toBeVisible({ timeout: timeouts.helperMs });
+					await expect(weakRow, "夹具会话（inferred）必须出现在远端会话列表").toBeVisible({ timeout: timeouts.helperMs });
+				} catch (error) {
+					// D1（task-36）：**只在失败路径**导出 App 自身的诊断（含判别性探针）。诊断不参与任何断言，
+					// 自己再包一层 try/catch —— 即使诊断实现有 bug，也只能留下告警，绝不改变原有的失败结论。
+					try {
+						await attachRemoteDiagnostics(window, test.info(), {
+							reason: "step5: 远端会话列表未出现夹具会话（疑似扫描返回远端 home 解析失败）",
+							uiFailureText: await readRemoteSessionsSectionText(window, projectAName),
+							projectIds: [await readProjectId(window, projectAName), await readProjectId(window, projectBName)],
+						});
+					} catch (diagnosticError) {
+						console.warn("[remote-acceptance] diagnostics failed: " + (diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError)));
+					}
+					throw error;
+				}
 			});
 
 			await test.step("惰性标题：authoritative 显示真名，「暂定」只出现在非 authoritative 时", async () => {

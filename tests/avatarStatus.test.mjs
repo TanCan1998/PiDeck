@@ -28,8 +28,10 @@ test("no workspace projects renders an empty-state add-directory guide", () => {
 	assert.match(projectTree, /t\("sidebar\.emptyProjectsTitle"\)/);
 	assert.match(projectTree, /t\("sidebar\.emptyProjectsDesc"\)/);
 	assert.match(projectTree, /border-dashed border-border-subtle/);
-	// 空态按钮必须真正触发添加项目（与标题栏/搜索行同一 actions.projects.add）
-	assert.match(projectTree, /onClick=\{\(\) => void props\.actions\.projects\.add\(\)\}/);
+	// 2026-10 迁移：空态添加入口由裸按钮改为 AddProjectMenu（侧栏「+」同时提供本地目录与远端 SSH 两个入口）。
+	// 意图不变：空态必须仍有一个显眼入口，并且仍然接到同一个 actions.projects.add。
+	assert.match(projectTree, /<AddProjectMenu onAddLocal=\{\(\) => void props\.actions\.projects\.add\(\)\} labeled \/>/, "空态必须保留显眼的添加入口，且接到同一 actions.projects.add");
+	assert.doesNotMatch(projectTree, /onClick=\{\(\) => void props\.actions\.projects\.add\(\)\}/, "空态不得再直接绑定裸按钮的 onClick（添加入口已统一走 AddProjectMenu）");
 });
 
 test("all project rows omit aggregate running and history counts", () => {

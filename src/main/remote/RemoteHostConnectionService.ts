@@ -101,6 +101,19 @@ const HOST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 const DEFAULT_NONCE_BYTES = 16;
 /** Nonces must stay distinguishable between attempts of the same host. */
 const NONCE = /^[A-Za-z0-9][A-Za-z0-9_-]{15,63}$/;
+
+/**
+ * 生成一个**必定符合 NONCE 契约**的引导 nonce。
+ *
+ * 契约（与冻结的 helper bundle 共用）要求首字符是字母数字，而 `randomBytes(n).toString("base64url")`
+ * 的首字符有 2/64 ≈ 3.1% 的概率是 `-` 或 `_` —— 曾经的实现正好用它，于是服务**自己生成、自己校验**
+ * 时会偶发抛 `REMOTE_CONNECTION_NONCE_INVALID`，表现为「有时连得上、有时一按连接就失败」。
+ * 真机 e2e 抓到了这一次（第 5 次运行卡在连接步骤）。hex 恒满足契约，且同样不透明、同样 128 位熵。
+ * 不修契约是因为它同时约束远端 helper（改契约要 bump bundle 版本与 sha）。
+ */
+export function createBootstrapNonce(): string {
+	return randomBytes(DEFAULT_NONCE_BYTES).toString("hex");
+}
 /** Control bytes must never survive in a path handed on to another module. */
 const CONTROL_BYTES = /[\u0000-\u001f\u007f]/;
 /** Upper bound of a remote HOME, matching the helper contract's own ceiling. */
@@ -125,7 +138,7 @@ function defaultPorts(): RemoteHostConnectionPorts {
 		bootstrap: bootstrapPinnedHost,
 		resolveNode: resolveRemoteNodeExecutable,
 		createManager: (options) => createSshConnectionManager(options),
-		createNonce: () => randomBytes(DEFAULT_NONCE_BYTES).toString("base64url"),
+		createNonce: createBootstrapNonce,
 		createSentinel: () => randomBytes(DEFAULT_NONCE_BYTES).toString("hex"),
 		verifyRoot: (input) => resolveRemoteBrowseRoot(input),
 	};
@@ -420,6 +433,49 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 		};
 	}
 
+	/** 只读缓存里的 home（`remoteHome` 的实现体；抽出来让「确保式」版本复用同一套校验）。 */
+	const readCachedHome = async (hostId: string): Promise<string | undefined> => {
+		if (typeof hostId !== "string" || !HOST_ID.test(hostId)) return undefined;
+		const manager = hosts.get(hostId)?.manager;
+		if (manager === undefined) return undefined;
+		try {
+			// Only a live session whose handshake succeeded may name a home: reconnecting/offline (and a
+			// terminal needs-attention) are not "connected", and a home recorded by an earlier ready session
+			// must not outlive the session it was proven on.
+			const state = manager.getState(hostId).state;
+			if (state !== "ready" && state !== "degraded") return undefined;
+			return readRemoteHome(manager.getHome(hostId));
+		} catch {
+			return undefined;
+		}
+	};
+
+	/**
+	 * 解析某主机的已验证 HOME，**缓存状态读不到时按需建立会话**。
+	 *
+	 * `remoteHome` 是纯读：它只从「已经活着的会话」回答。这对会话扫描不够——扫描要用 HOME 推
+	 * 会话根，而它通常紧跟在「登记/读取项目」之后执行，那些路径会在任务结束时收掉自己建立的临时
+	 * 会话。于是扫描正好落进「没有缓存 manager/状态」的窗口，报「拿不到 home」，尽管那一刻完全
+	 * 可以建立会话。真机 e2e 证据：前后状态都是 ready、同主机稍后再扫就成功。
+	 *
+	 * 这里 connect 不是额外开销：扫描本来就要做远端 I/O。**UI 用的 `remoteHome` 保持只读不变**。
+	 */
+	const readHomeEnsuring = async (hostId: string): Promise<string | undefined> => {
+		const cached = await readCachedHome(hostId);
+		if (cached !== undefined) return cached;
+		const entry = entryFor(hostId);
+		const run = operationLock.run(hostId, () => connectLocked(hostId));
+		entry.inFlight = run;
+		try {
+			const result = await run;
+			if (!result.ok) return undefined;
+		} catch {
+			return undefined;
+		} finally {
+			if (entry.inFlight === run) entry.inFlight = undefined;
+		}
+		return readCachedHome(hostId);
+	};
 	return {
 		/**
 		 * The verified client this service drives.
@@ -452,21 +508,16 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 		 * manager already filtered it once.
 		 */
 		async remoteHome(hostId: string): Promise<string | undefined> {
-			if (typeof hostId !== "string" || !HOST_ID.test(hostId)) return undefined;
-			const manager = hosts.get(hostId)?.manager;
-			if (manager === undefined) return undefined;
-			try {
-				// Only a live session whose handshake succeeded may name a home: reconnecting/offline (and a
-				// terminal needs-attention) are not "connected", and a home recorded by an earlier ready session
-				// must not outlive the session it was proven on.
-				const state = manager.getState(hostId).state;
-				if (state !== "ready" && state !== "degraded") return undefined;
-				return readRemoteHome(manager.getHome(hostId));
-			} catch {
-				// A manager that cannot answer is reported as "unknown", exactly like an unknown host: this is a
-				// metadata read and must never fail a caller's read path with a raw exception.
-				return undefined;
-			}
+			return readCachedHome(hostId);
+		},
+		/**
+		 * 与 `remoteHome` 同一语义，但缓存状态读不到时**按需建立会话**再读一次。
+		 *
+		 * 会话扫描专用（`RemoteSessionScanner` 是 `remoteHome` 的唯一生产调用方）：扫描总是紧跟
+		 * 在登记/读取项目之后，而那些路径会收掉临时会话，导致纯读在那一刻拿不到 home。
+		 */
+		async remoteHomeEnsuring(hostId: string): Promise<string | undefined> {
+			return readHomeEnsuring(hostId);
 		},
 		/**
 		 * The last re-check outcome of one project's confirmed boundary, by (hostId, root).

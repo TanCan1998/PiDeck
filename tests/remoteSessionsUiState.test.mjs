@@ -365,6 +365,39 @@ test("导入：created=true / created=false 都有明确回执，且都通知宿
 	assert.equal(h.imported.length, 2);
 });
 
+test("导入回执必须等待清单刷新和选中完成，失败不能冒充成功", async () => {
+	const h = remoteSessionsHarness();
+	let releaseRefresh;
+	let started;
+	const refreshStarted = new Promise((resolve) => {
+		started = resolve;
+	});
+	const refreshDone = new Promise((resolve) => {
+		releaseRefresh = resolve;
+	});
+	h.options.onImported = async () => {
+		started();
+		await refreshDone;
+	};
+	h.render();
+	const pending = h.render().importSession(entry("ws-a/1.jsonl"));
+	await refreshStarted;
+	assert.equal(h.render().feedback, null, "刷新尚未完成时不得提前声称已经选中");
+	assert.equal(h.render().importingRemoteSessionId, "ws-a/1.jsonl");
+	releaseRefresh();
+	await pending;
+	assert.equal(h.render().feedback.kind, "imported");
+	h.options.onImported = async () => {
+		throw new Error("private local path must not leak");
+	};
+	await h.render().importSession(entry("ws-a/1.jsonl"));
+	const feedback = h.render().feedback;
+	assert.equal(feedback.kind, "refresh-failed", "记录已保存，但刷新失败必须单独报告");
+	assert.equal(feedback.sessionId, "s-1");
+	assert.equal(h.render().importingRemoteSessionId, null);
+	assert.ok(!JSON.stringify(feedback).includes("private local path"));
+});
+
 test("导入失败与回显不符都不是静默：失败带稳定码，reject 只报请求失败", async () => {
 	const h = remoteSessionsHarness();
 	h.render();
