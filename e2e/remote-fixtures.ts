@@ -1,4 +1,4 @@
-import { _electron as electron, test as base, type ElectronApplication, type Page, type TestInfo } from "@playwright/test";
+import { _electron as electron, expect, test as base, type ElectronApplication, type Page, type TestInfo } from "@playwright/test";
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
@@ -293,6 +293,43 @@ function classifyProbe(scan: unknown, projectRead: unknown): string {
 	if (projectOk === true) return "project-read-succeeded-while-scan-failed";
 	if (projectOk === false) return "both-scan-and-project-read-failed";
 	return "inconclusive-project-read-not-run";
+}
+
+/**
+ * 侧栏项目行的容器（ProjectTree 的 SidebarRemovalRow 用这个类名）。
+ *
+ * 与 `remoteHostAcceptance.spec.ts` 里的同名局部函数**逐字同款**：Phase 4 的会话验收要用同一个锚点，
+ * 而 spec 内的局部函数无法跨文件复用（那份 spec 不在本次允许改动的范围内）。放这里是为了让
+ * 「新增的远端会话入口」与既有的项目锚点只有一个来源，避免第二次实现挑选器。
+ */
+export function remoteProjectRow(window: Page, projectName: string) {
+	return window.locator(".project-group").filter({ hasText: projectName });
+}
+
+/**
+ * 在指定项目里新建会话（Phase 4 P4.2 真机 UI 验收的**新点**：远端项目的会话创建入口）。
+ *
+ * 为什么必须单独有它：既有夹具只覆盖到「登记远端项目」，而远端项目的中间空态是**只读**面板
+ * （ProjectEmptyState → RemoteProjectPanel，没有任何新建入口），所以「在该项目里新建会话」
+ * 只能从侧栏项目行的操作浮层进入。
+ *
+ * 为什么先 hover 再点：项目行右侧操作浮层是 dimmed actions（`opacity-0 pointer-events-none` +
+ * `group-hover:pointer-events-auto`，见 ProjectTree 的 dimmedActionsClass）。Playwright 的点击
+ * 命中测试跑在 hover 之前，`pointer-events:none` 的按钮收不到事件、直接 click 会超时；
+ * **不用 `force: true`**——force 跳过命中测试，点击会落到浮层下面的项目名按钮上（表现为
+ * 「点了 + 结果折叠/展开了项目」），那不是用户路径，也就不是证据。
+ *
+ * 只负责「点真实入口」这一件事：会话视图/时间线的断言留给调用方。
+ */
+export async function createRemoteSessionInProject(window: Page, projectName: string): Promise<void> {
+	const row = remoteProjectRow(window, projectName);
+	await expect(row).toBeVisible();
+	await row.hover();
+	// aria-label 来自 i18n `app.newNormalSession`（项目行「+」与 Chat 标题栏「+」共用同一文案），
+	// 所以必须限定在项目行内取，避免命中 Chat 区那个同名按钮。
+	const newSession = row.getByRole("button", { name: "普通会话", exact: true });
+	await expect(newSession).toBeVisible();
+	await newSession.click();
 }
 
 function readLatestDiagnosticState(diagnostics: unknown): unknown {
