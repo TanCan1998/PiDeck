@@ -432,6 +432,17 @@ function remoteSessionLocator(identity: RemoteSessionIdentity): SshSessionLocato
 	return { kind: "ssh", hostId: identity.hostId, remoteSessionId: identity.remoteSessionId, remotePath: identity.remotePath };
 }
 
+/**
+ * 同主机 + 同一条远端会话文件。
+ *
+ * 判据刻意只用 `remotePath`：远端 runtime 只上报这一条绝对路径（`remoteSessionId` 是相对会话根的
+ * 推导结果，属于登记侧的产物），而 `ensureRemoteSession` 命中已有条目时会把两种写法收敛成上报值 ——
+ * 所以「同一远端会话」在这里就是「同一主机上的同一个远端文件」。
+ */
+function sameRemoteSessionPath(locator: SessionLocator | undefined, hostId: string, remotePath: string): boolean {
+	return locator?.kind === "ssh" && locator.hostId === hostId && locator.remotePath === remotePath;
+}
+
 /** ssh locator 的身份字段比较（不含 alias：本批不读也不写 alias）。 */
 function sameSshLocator(left: SessionLocator | undefined, right: SshSessionLocator): boolean {
 	if (left === undefined || left.kind !== "ssh") return false;
@@ -1248,6 +1259,13 @@ export class SessionCatalog implements HostRebindStorePort {
 		return this.recordFromEntry(entry);
 	}
 
+	/**
+	 * 会话运行时身份 → catalog 写入（C9 收拢点）。**按 locator 路由**，三条互斥分支（`remoteLocator`
+	 * 优先于 `filePath`：远端路径不得被本机分支解释）：
+	 * - `remoteLocator`（远端会话，P4.2 收口）：只写 ssh 身份（见 `attachRemoteLocatorEntry`）；
+	 * - `entry.locator` 已是 ssh 且走本机 filePath 分支：拒绝（本机路径分支不得解释远端条目）；
+	 * - DSH / 通用 pi：原行为逐字不变。
+	 */
 	async attachRuntime(input: {
 		sessionId: string;
 		filePath?: string;
@@ -1259,10 +1277,25 @@ export class SessionCatalog implements HostRebindStorePort {
 		promoteToActive?: boolean;
 		/** 归档恢复等手动找回才清删除墓碑；激活/fork 回写不得把用户删过的 id 解禁。 */
 		restoreDismissed?: boolean;
+		/**
+		 * 远端会话身份（ssh locator：host 主键 + pi 上报的远端会话文件绝对路径；`remoteSessionId`
+		 * 可由调用方给，也可省略——见下面）。
+		 *
+		 * 为什么 attach 需要它：远端 pi 的会话文件在**那台机器上**（由 pi 自己选好、握手时上报）。把这条
+		 * 路径当 `filePath` 写进来，会在本机字段里留下一条读不到也不该存在的路径，并让同一远端会话出现
+		 * 两条记录（渲染层先建的 draft + 握手登记另立的那条）。相反方向——远端条目被 local 分支解释——
+		 * 同样禁止（下面仍然抛 `UNSUPPORTED_PROJECT_LOCATION`）。
+		 *
+		 * `remoteSessionId`（相对会话根的 POSIX 路径）省略时由已有记录带过来：它的推导只允许有一份实现
+		 * （`RemoteRuntimePort` 里的 `remoteSessionIdWithinRoot`），catalog 不重算、调用方（会话链路）
+		 * 也不必知道会话根在哪。
+		 */
+		remoteLocator?: SshSessionLocator;
 	}): Promise<SessionCatalogEntry> {
 		this.assertLoaded();
 		return this.enqueueMutation((entries) => {
 			const entry = this.requireEntry(entries, input.sessionId);
+			if (input.remoteLocator) return this.attachRemoteLocatorEntry(entries, entry, input.remoteLocator);
 			if (entry.locator?.kind === "ssh") throw new Error("UNSUPPORTED_PROJECT_LOCATION");
 			// pi 可能上报相对 cwd 的 sessionFile：写入 catalog 前归一化为绝对路径，
 			// 否则与扫描器绝对路径 originKey 不一致，同一文件会出现两条记录。
@@ -1310,6 +1343,55 @@ export class SessionCatalog implements HostRebindStorePort {
 			entry.updatedAt = Date.now();
 			return { value: cloneEntry(entry), changed: true };
 		});
+	}
+
+	/**
+	 * 远端会话身份的写入口（`attachRuntime` 的 ssh 分支）。语义与上面本机「文件配对」分支**一一对应**：
+	 *
+	 * - 本机：draft 拿到 filePath 后按 originKey 吸收同一文件已有的重复条目；
+	 * - 远端：draft 拿到 pi 上报的远端路径后按 (hostId, remotePath) 吸收握手登记（`ensureRemoteSession`）
+	 *   先立的那条记录。
+	 *
+	 * 两条分支的落点相同：**渲染层手上那个 sessionId 必须是唯一存活的记录**，否则侧栏出现两条。
+	 * 差别只在「身份是什么」：本机是路径 originKey，远端是 ssh 身份，因此远端分支绝不碰 filePath /
+	 * originKey / piSessionId —— 由 `normalizeEntryLocator` 的 ssh 分支统一清空本地镜像字段。
+	 *
+	 * 相对身份（remoteSessionId）由被吸收的记录带过来：会话根在哪由 `RemoteRuntimePort` 判定，catalog
+	 * 不复刻那套规则（配了自定义 `sessionDir` 的机器上会算错）；这条条目自己已有的身份同样保留
+	 * （恢复同一会话时不能因为「只回写了路径」把相对身份/别名丢掉）。
+	 */
+	private attachRemoteLocatorEntry(entries: SessionCatalogEntry[], entry: SessionCatalogEntry, remoteLocator: SshSessionLocator): { value: SessionCatalogEntry; changed: boolean } {
+		// 身份只经 shared 的唯一判据（hostId 值域与项目域/扫描/引用审计同一处）。
+		const locator = readSshSessionLocator(remoteLocator);
+		const remotePath = locator?.remotePath;
+		if (!locator || remotePath === undefined) throw new Error("REMOTE_SESSION_IDENTITY_INVALID");
+		const currentLocator = entry.locator?.kind === "ssh" ? entry.locator : undefined;
+		const duplicateIndex = entries.findIndex((candidate) => candidate.id !== entry.id && sameRemoteSessionPath(candidate.locator, locator.hostId, remotePath));
+		const duplicate = duplicateIndex >= 0 ? entries[duplicateIndex] : undefined;
+		const duplicateLocator = duplicate?.locator?.kind === "ssh" ? duplicate.locator : undefined;
+		// 已经是同一身份的条目：locator 原样保留（包括 remoteSessionId 与 remotePathAliases）——恢复同一
+		// 会话时的回写是幂等的，不能因为它没带相对身份就把已存的身份冲掉。
+		const sameIdentity = currentLocator !== undefined && sameRemoteSessionPath(currentLocator, locator.hostId, remotePath);
+		const inheritedRemoteSessionId = duplicateLocator?.remoteSessionId ?? currentLocator?.remoteSessionId;
+		const next = normalizeEntryLocator({
+			...entry,
+			locator: sameIdentity ? currentLocator : { ...locator, ...(inheritedRemoteSessionId !== undefined ? { remoteSessionId: inheritedRemoteSessionId } : {}) },
+		});
+		if (duplicate) {
+			// 补空缺顺序与本机分支一致：只填本记录没有的值，已有值（用户选择/更早的创建时间）优先。
+			next.model ??= duplicate.model;
+			next.thinkingLevel ??= duplicate.thinkingLevel;
+			next.importedSourceId ??= duplicate.importedSourceId;
+			next.createdAt = Math.min(next.createdAt, duplicate.createdAt);
+			entries.splice(duplicateIndex, 1);
+		}
+		next.status = "active";
+		next.updatedAt = Date.now();
+		// 用 id 回填：上面的 splice 会让下标整体前移，按下标写会写错条目。
+		const targetIndex = entries.findIndex((candidate) => candidate.id === entry.id);
+		if (targetIndex < 0) throw new Error("REMOTE_SESSION_IDENTITY_INVALID");
+		entries[targetIndex] = next;
+		return { value: cloneEntry(next), changed: true };
 	}
 
 	async remove(id: string): Promise<boolean> {

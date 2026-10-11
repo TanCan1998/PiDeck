@@ -90,6 +90,8 @@ function createHarness(options = {}) {
 		publishRuntimeState: 0,
 		update: 0,
 		attach: 0,
+		/** agents/catalog attach 入参（断言「远端路径不进本机 filePath」用） */
+		attachInputs: [],
 		send: 0,
 		uiResponse: 0,
 	};
@@ -123,6 +125,12 @@ function createHarness(options = {}) {
 		},
 		attachRuntime: async (input) => {
 			calls.attach += 1;
+			calls.attachInputs.push(input);
+			if (input.remoteLocator) {
+				entry.locator = { ...input.remoteLocator };
+				entry.status = "active";
+				return { ...entry };
+			}
 			entry.filePath = input.filePath;
 			entry.status = input.filePath ? "active" : entry.status;
 		},
@@ -301,22 +309,35 @@ test("session security override key = catalog session id, distinct from sessionP
 	assert.notEqual(createInput.deckSessionId, createInput.sessionPath);
 });
 
-test("SSH session locators are rejected before local runtime creation", async () => {
+test("SSH session locators activate on the remote session path and never write a local file path", async () => {
+	// 意图演进记录（P4.2 收口）：本用例原先断言「ssh locator 一律在创建本机 runtime 前被拒」——那写于
+	// 「远端会话只可能在侧栏出现、不可能有 runtime」的时期。现在 ssh 会话走远端运行时链路，这条不变量
+	// 收窄成两件**仍然成立**、而且要长期锁住的事：
+	// 1. 会话文件只能来自远端记录的 `remotePath`（ssh locator 不得交给 SessionLocatorRouter，它对 ssh 抛错）；
+	// 2. 远端路径**绝不**写进 catalog 的本机 `filePath`（写进去就是同一远端会话的第二条记录）。
 	const { SessionRuntimeCoordinator } = loadCoordinator();
+	const remotePath = "/srv/repo/session.jsonl";
 	const harness = createHarness({
 		entry: {
 			status: "active",
 			filePath: "C:/stale/local/session.jsonl",
-			locator: { kind: "ssh", hostId: "host-a", remotePath: "/srv/repo/session.jsonl", remoteSessionId: "remote-1" },
+			locator: { kind: "ssh", hostId: "host-a", remotePath, remoteSessionId: "remote-1" },
 		},
 	});
 	const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender);
 
 	const result = await coordinator.activateRuntime("session-1");
 
-	assert.equal(result.ok, false);
-	assert.match(result.error.debugDetails, /UNSUPPORTED_PROJECT_LOCATION/);
-	assert.equal(harness.calls.create, 0);
+	assert.equal(result.ok, true);
+	assert.equal(harness.calls.create, 1);
+	const createInput = harness.calls.createInputs.at(-1);
+	assert.equal(createInput.sessionPath, remotePath, "--session 用的是远端记录里的 remotePath");
+	assert.equal(createInput.sessionLocator, undefined, "ssh locator 不得进 SessionLocatorRouter");
+	assert.equal(harness.calls.attach, 1);
+	const attachInput = harness.calls.attachInputs.at(-1);
+	assert.equal(attachInput.filePath, undefined, "远端路径不得进本机 filePath");
+	assert.deepEqual({ ...attachInput.remoteLocator }, { kind: "ssh", hostId: "host-a", remotePath });
+	assert.equal(harness.catalog.get("session-1").filePath, "C:/stale/local/session.jsonl", "本机 filePath 一个字节都不许被改写");
 });
 
 test("explicit activation creates a runtime that is bound to the requested Session", async () => {
@@ -919,7 +940,11 @@ test("Session UI response requires the current binding, generation, and pending 
 	assert.equal(harness.calls.uiResponse, 1);
 });
 
-test("stale SSH locators suppress bound runtime events and UI responses", async () => {
+test("SSH locators no longer suppress a bound runtime's events and UI responses", async () => {
+	// 意图演进记录（P4.2 收口）：本用例原先锁「ssh locator ⇒ 事件与 UI 响应一律压掉」——同样是
+	// 「远端会话不可能有 runtime」时期的拦路码。远端 pi 的 Ask/UI 请求与本地走**同一条** stdio 事件桥，
+	// 压掉它会让远端会话卡在无人应答的提问上；身份校验仍然只认 binding（sessionId + agentId +
+	// runtimeGeneration），所以「旧 runtime 的迟到结果」这条真实风险仍由 generation 判据挡住。
 	const { SessionRuntimeCoordinator } = loadCoordinator();
 	const harness = createHarness({ tabs: [{ id: "agent-a", status: "idle", createdAt: 1 }] });
 	const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender);
@@ -933,21 +958,18 @@ test("stale SSH locators suppress bound runtime events and UI responses", async 
 		agentId: "agent-a",
 		runtimeGeneration,
 		sourceChannel: "agents:ui-request",
-		payload: { requestId: "request-stale", method: "confirm", title: "Continue?" },
+		payload: { requestId: "request-remote", method: "confirm", title: "Continue?" },
 	});
-	assert.equal(coordinator.listPendingUiRequests().length, 0);
-	assert.equal(coordinator.getTarget("session-1"), undefined);
-	await assert.rejects(
-		coordinator.respondToUi({
-			sessionId: "session-1",
-			requestId: "request-stale",
-			agentId: "agent-a",
-			runtimeGeneration,
-			response: { confirmed: true },
-		}),
-		/UNSUPPORTED_PROJECT_LOCATION/,
-	);
-	assert.equal(harness.calls.uiResponse, 0);
+	assert.equal(coordinator.listPendingUiRequests().length, 1);
+	assert.deepEqual({ ...coordinator.getTarget("session-1") }, { sessionId: "session-1", agentId: "agent-a", runtimeGeneration });
+	await coordinator.respondToUi({
+		sessionId: "session-1",
+		requestId: "request-remote",
+		agentId: "agent-a",
+		runtimeGeneration,
+		response: { confirmed: true },
+	});
+	assert.equal(harness.calls.uiResponse, 1);
 });
 
 test("error runtime keeps its binding until the pending Session UI request is answered", async () => {

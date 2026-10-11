@@ -21,6 +21,7 @@ import type {
 	SessionCommandResult,
 	SessionRecord,
 	SessionLocator,
+	ProjectLocator,
 	SessionModelPreference,
 	SessionRuntimeEvent,
 	SessionRuntimeInfo,
@@ -32,6 +33,8 @@ import type {
 	AgentUiBatchQuestion,
 } from "../../shared/types";
 import { buildSessionOriginKey } from "../../shared/sessionIdentity";
+// ssh locator 的窄类型只从 shared 取（与 catalog/项目域/引用审计同一份定义，不再抄一遍结构）。
+import type { SshSessionLocator } from "../../shared/projectLocation";
 import { createSessionModelPreference } from "../../shared/modelDisplayName";
 import { isRewindCheckpointId, isRewindRestoreScope } from "../../shared/types";
 import type { SessionCatalogEntry } from "./SessionCatalog";
@@ -53,8 +56,29 @@ export interface SessionCatalogGateway {
 			updatedAt?: number;
 		},
 	): Promise<SessionCatalogEntry>;
-	attachRuntime(input: { sessionId: string; filePath?: string; piSessionId?: string; dshSessionId?: string; promoteToActive?: boolean }): Promise<unknown>;
+	attachRuntime(input: {
+		sessionId: string;
+		filePath?: string;
+		piSessionId?: string;
+		dshSessionId?: string;
+		agentPreset?: string;
+		promoteToActive?: boolean;
+		/** 远端会话身份（ssh locator）：远端路径只以这个形状回写，绝不进本机 `filePath`（见 buildAttachPatch）。 */
+		remoteLocator?: SshSessionLocator;
+	}): Promise<unknown>;
 }
+
+/**
+ * 装配注入：项目位置（远端会话路由的唯一判据来源）。
+ *
+ * 为什么会话链路需要项目位置：远端会话在**新建阶段还没有 ssh 身份** —— 远端 pi 的会话文件由 pi 自己
+ * 选好并在握手时上报（`AgentManager.registerRemoteSessionIdentity`），而 catalog 里的 draft 只有
+ * projectId。要把这条 draft 收敛成 ssh locator（远端路径绝不进本机 filePath），就必须知道
+ * 「这个项目的 runtime 在哪台机器上」——这也是 `AgentManager` 路由 runtime 的判据（按项目 locator）。
+ *
+ * 缺省未注入 ⇒ 一律按本机语义处理，本地行为逐字不变。
+ */
+export type SessionProjectLocatorResolver = (projectId: string) => ProjectLocator | undefined;
 
 export interface SessionAgentGateway {
 	/** 本网关的运行时后端身份（pi/dsh）；CompositeAgentGateway 按它路由。 */
@@ -278,6 +302,7 @@ export class SessionRuntimeCoordinator {
 		private readonly agents: SessionAgentGateway,
 		private readonly sendAgentPrompt: (input: SendPromptInput) => Promise<SendPromptResult>,
 		private readonly logger?: SessionRuntimeLogger,
+		private readonly resolveProjectLocator?: SessionProjectLocatorResolver,
 	) {}
 
 	/** 渲染层在 currentSessionId 变化时汇报聚焦会话（见 sessions:set-focused-session IPC）。 */
@@ -356,10 +381,23 @@ export class SessionRuntimeCoordinator {
 		return { sessionId, sessionTitle: entry?.title };
 	}
 
+	/**
+	 * 这条会话的 runtime 在哪台机器上（undefined = 本机）。
+	 *
+	 * 判据顺序：**条目自己的 locator 优先**（有 locator 的条目，位置真相就是它 —— 与之前逐字一致，
+	 * 包括 local locator 在远端项目里这种错位形态）；没有 locator（新建草稿）才问项目位置。
+	 * 远端会话在 pi 上报会话文件之前没有任何本地字段能承载它的位置，项目位置是那个窗口里唯一可信
+	 * 的判据。
+	 */
+	private remoteHostIdForSession(projectId: string, locator: SessionLocator | undefined): string | undefined {
+		if (locator) return locator.kind === "ssh" ? locator.hostId : undefined;
+		const projectLocator = this.resolveProjectLocator?.(projectId);
+		return projectLocator?.kind === "ssh" ? projectLocator.hostId : undefined;
+	}
+
 	listRuntimes(): SessionRuntimeInfo[] {
 		const result: SessionRuntimeInfo[] = [];
 		for (const [sessionId, agentId] of this.agentIdBySession) {
-			if (this.catalog.getLocator(sessionId)?.kind === "ssh") continue;
 			const tab = this.agents.list().find((candidate) => candidate.id === agentId);
 			if (!tab || isTerminalAgent(tab)) continue;
 			result.push(this.runtimeInfo(sessionId, tab));
@@ -367,8 +405,16 @@ export class SessionRuntimeCoordinator {
 		return result.sort((left, right) => right.createdAt - left.createdAt);
 	}
 
+	/**
+	 * 会话的 runtime 目标（会话身份 ↔ 运行实例的稳定地址）。
+	 *
+	 * 这里**不再**对 ssh 条目返回 undefined：那个跳过分支写于「远端会话只存在于侧栏、不可能有 runtime」
+	 * 的时候（P4.2 协议层批次）。远端 runtime 现在是真实 runtime，把它挡在 getTarget 之外会让
+	 * `activateRuntime` 自己拿不到自己的 runtime（runtimeInfo 要求 target）、侧栏也看不到运行中的远端
+	 * 会话。本机专属操作有更精确的守卫（`SessionCatalog.getLocalFilePath` 对 ssh 抛稳定码、
+	 * `AgentManager.assertLocalRuntimeOperation` 逐操作拒绝），不需要在这里按 locator 一刀切。
+	 */
 	getTarget(sessionId: string): SessionRuntimeTarget | undefined {
-		if (this.catalog.getLocator(sessionId)?.kind === "ssh") return undefined;
 		const agentId = this.getAgentId(sessionId);
 		if (!agentId) return undefined;
 		const binding = this.getRuntimeBinding(agentId);
@@ -905,7 +951,9 @@ export class SessionRuntimeCoordinator {
 	}
 
 	observeRuntimeEvent(event: SessionRuntimeEvent): void {
-		if (this.catalog.getLocator(event.sessionId)?.kind === "ssh") return;
+		// 远端 runtime 的 Ask/UI 请求走的是**同一条**事件桥（同一个 stdio RPC 通道），所以这里不再按
+		// ssh locator 一刀切：跳过它会让远端 pi 的提问既不被记录、也无法回答（会话卡在无人应答的提问上）。
+		// 身份校验仍然只认 binding（sessionId + agentId + runtimeGeneration）。
 		const binding = this.getRuntimeBinding(event.agentId);
 		if (!binding || binding.sessionId !== event.sessionId || binding.runtimeGeneration !== event.runtimeGeneration || event.sourceChannel !== "agents:ui-request" || !isRecord(event.payload)) {
 			return;
@@ -948,8 +996,8 @@ export class SessionRuntimeCoordinator {
 	/** Web / 飞书以外的只读快照：手机端轮询后渲染确认卡片。 */
 	listPendingUiRequests(sessionId?: string): PendingUiRequestSnapshot[] {
 		const items: PendingUiRequestSnapshot[] = [];
+		// 远端 runtime 的待答请求同样属于「可回答」集合（回答只写回该 runtime 的 stdin，与位置无关）。
 		for (const pending of this.pendingUiRequests.values()) {
-			if (this.catalog.getLocator(pending.sessionId)?.kind === "ssh") continue;
 			if (sessionId && pending.sessionId !== sessionId) continue;
 			items.push({ ...pending });
 		}
@@ -957,9 +1005,8 @@ export class SessionRuntimeCoordinator {
 	}
 
 	async respondToUi(input: SessionUiResponseInput): Promise<void> {
-		if (this.catalog.getLocator(input.sessionId)?.kind === "ssh") {
-			throw new Error("UNSUPPORTED_PROJECT_LOCATION");
-		}
+		// 回答只经 `agents.sendUIResponse` 写回该 runtime 的 stdin（AgentManager 侧是纯 stdio 写，
+		// 没有本机路径参与）：远端 runtime 与本地走同一条链路，所以不再按 ssh locator 拒绝。
 		const binding = this.getRuntimeBinding(input.agentId);
 		if (!binding || binding.sessionId !== input.sessionId || binding.runtimeGeneration !== input.runtimeGeneration || this.agentIdBySession.get(input.sessionId) !== input.agentId) {
 			throw new Error("Session runtime binding changed before UI response");
@@ -1266,7 +1313,10 @@ export class SessionRuntimeCoordinator {
 		const entry = this.catalog.get(sessionId);
 		if (!entry) throw new Error(`Session not found: ${sessionId}`);
 		const locator = this.catalog.getLocator(sessionId);
-		if (locator?.kind === "ssh") throw new Error("UNSUPPORTED_PROJECT_LOCATION");
+		// 远端会话（ssh locator，或属于远端项目的草稿）走**同一条**运行时链路，不另开一套准备逻辑：
+		// 进程怎么起来、cwd/plan/launcher 怎么定全在 `AgentManager.createRemoteUnlocked` 里（它才是远端
+		// 事实与端口的消费者）。协调器多知道的那一件事只是「这条会话的 runtime 在远端」。
+		const remoteHostId = this.remoteHostIdForSession(entry.projectId, locator);
 		if (this.replacementBySession.has(sessionId)) {
 			throw new Error(`Session runtime replacement reservation conflict: ${sessionId}`);
 		}
@@ -1297,7 +1347,10 @@ export class SessionRuntimeCoordinator {
 		}
 
 		const localSessionPath = locator?.kind === "local" ? locator.filePath : undefined;
-		let tab = localSessionPath ? this.findAgentBySessionPath({ ...entry, filePath: localSessionPath }) : undefined;
+		// 远端会话文件只能来自远端记录的 `remotePath`（pi 重启同一会话的 `--session`）；草稿还没上报时
+		// 就是 undefined ⇒ 与本地新建会话同一个入参（远端 pi 会自己选一个新的会话文件并在握手时上报）。
+		const remoteSessionPath = locator?.kind === "ssh" ? locator.remotePath : undefined;
+		let tab = remoteHostId === undefined ? (localSessionPath ? this.findAgentBySessionPath({ ...entry, filePath: localSessionPath }) : undefined) : this.findAgentByRemoteSession(remoteHostId, remoteSessionPath);
 		if (tab && isTerminalAgent(tab)) {
 			// 进程仍存活的 error 终态（回复级错误标出，Issue #218）优先复活复用，
 			// 而不是停掉活进程重建——重建在扩展有问题时会触发无插件回退。
@@ -1316,8 +1369,10 @@ export class SessionRuntimeCoordinator {
 				projectId: entry.projectId,
 				title: entry.title,
 				deckSessionId: sessionId,
-				sessionLocator: locator,
-				sessionPath: localSessionPath,
+				// ssh locator **不得**交给 `SessionLocatorRouter`（它对 ssh 抛 `UNSUPPORTED_PROJECT_LOCATION`）：
+				// 远端运行时位置由项目 locator + 注入端口决定，会话文件只经 `sessionPath` 表达。
+				sessionLocator: remoteHostId === undefined ? locator : undefined,
+				sessionPath: remoteHostId === undefined ? localSessionPath : remoteSessionPath,
 				environment: entry.environment,
 				source: entry.source,
 				backend: entry.backend,
@@ -1368,18 +1423,20 @@ export class SessionRuntimeCoordinator {
 	}
 
 	/**
-	 * 会话运行时身份 → catalog attach patch（C9）：收拢 backend 特判——
+	 * 会话运行时身份 → catalog attach patch（C9 收拢点）。**按 locator 路由**，三条互斥分支：
+	 * - 远端会话（ssh 条目，或属于远端项目的会话）：只回写 ssh 身份（hostId + pi 上报的远端会话文件），
+	 *   **绝不**把远端路径写进本机 `filePath`（那会让同一远端会话在 catalog 里出现两条记录）；
 	 * - DSH：只回写 dshSessionId，**绝不写 filePath/piSessionId**（2026-08 兼容期教训：
 	 *   dsh 的 tab.sessionPath 是 host 的 zstd 会话文件，曾随文件分支落盘导致 pi 侧把
 	 *   zstd 文件当 pi 会话文件启动（pi exited code=1））；
-	 * - 通用/pi：sessionPath + piSessionId 落「文件配对」分支。
+	 * - 通用/pi 本机：sessionPath + piSessionId 落「文件配对」分支（行为与以前逐字一致）。
 	 * 返回 null 表示无需回写（匿名会话等）。
 	 */
 	private buildAttachPatch(
 		sessionId: string,
 		tab: Pick<AgentTab, "sessionPath" | "sessionId" | "backend" | "agentPreset">,
-		entry: Pick<SessionCatalogEntry, "noSession" | "backend">,
-	): { sessionId: string; filePath?: string; piSessionId?: string; dshSessionId?: string; agentPreset?: string; promoteToActive?: boolean } | null {
+		entry: Pick<SessionCatalogEntry, "noSession" | "backend" | "projectId">,
+	): { sessionId: string; filePath?: string; piSessionId?: string; dshSessionId?: string; agentPreset?: string; promoteToActive?: boolean; remoteLocator?: SshSessionLocator } | null {
 		if (entry.backend === "dsh") {
 			return tab.sessionId && !entry.noSession
 				? {
@@ -1391,6 +1448,12 @@ export class SessionRuntimeCoordinator {
 					}
 				: null;
 		}
+		// 远端路径只以 ssh 身份回写：`tab.sessionPath` 是 pi 上报的**远端**会话文件（本地规则不得改写它），
+		// 由 catalog 把这条条目收敛成 ssh locator 并吸收同身份的重复条目。
+		const remoteHostId = this.remoteHostIdForSession(entry.projectId, this.catalog.getLocator(sessionId));
+		if (remoteHostId !== undefined) {
+			return tab.sessionPath && !entry.noSession ? { sessionId, remoteLocator: { kind: "ssh", hostId: remoteHostId, remotePath: tab.sessionPath } } : null;
+		}
 		if (tab.sessionPath && !entry.noSession) {
 			return {
 				sessionId,
@@ -1401,7 +1464,21 @@ export class SessionRuntimeCoordinator {
 		return null;
 	}
 
+	/**
+	 * 远端会话的 runtime 匹配（对照 `findAgentBySessionPath`）：身份是 **(hostId, remotePath)**，
+	 * 不是本机路径。
+	 *
+	 * 为什么必须带 hostId：`sessionPath` 孤立地看只是那台机器上的一条远端路径，同一路径在两台主机上
+	 * 是两个不同的会话（测试锁住了「两个同路径不同 hostId 的记录不得互相命中」）。主机身份从 tab 的
+	 * 项目位置取 —— 与 `AgentManager` 的路由判据同源（它也按项目 locator 决定 runtime 在哪跑）。
+	 */
+	private findAgentByRemoteSession(hostId: string, remotePath: string | undefined): AgentTab | undefined {
+		if (!remotePath) return undefined;
+		return this.agents.list().find((tab) => !this.replacementByAgent.has(tab.id) && tab.sessionPath === remotePath && this.remoteHostIdForSession(tab.projectId, undefined) === hostId);
+	}
+
 	private findAgentBySessionPath(entry: SessionCatalogEntry): AgentTab | undefined {
+		// 本机 matcher：ssh 条目没有本机路径可配，也不允许拿远端路径去比本机 origin key。
 		if (this.catalog.getLocator(entry.id)?.kind === "ssh" || !entry.filePath) return undefined;
 		const target = buildSessionOriginKey({
 			source: entry.source,
@@ -1565,10 +1642,12 @@ export class SessionRuntimeCoordinator {
 		return new Error(`Failed to start session runtime (${tab.status})`);
 	}
 
+	/**
+	 * 绑定会话身份与运行实例（远端会话同样适用：`sessionId` 是 catalog 身份（远端为 ssh 条目），
+	 * `agentId` 是那个远端 pi 进程）。旧实现在这里对 ssh 抛 `UNSUPPORTED_PROJECT_LOCATION`，那是
+	 * 「远端没有 runtime」时期的拦路码，现在会让远端激活直接失败。
+	 */
 	private bind(sessionId: string, agentId: string): number {
-		if (this.catalog.getLocator(sessionId)?.kind === "ssh") {
-			throw new SessionRuntimeCommandError("SESSION_COMMAND_FAILED", "UNSUPPORTED_PROJECT_LOCATION");
-		}
 		if (this.deletingSessions.has(sessionId)) {
 			throw new Error(`Session is being deleted: ${sessionId}`);
 		}
@@ -1735,9 +1814,7 @@ export class SessionRuntimeCoordinator {
 	}
 
 	private requireTarget(target: SessionRuntimeTarget): SessionRuntimeBinding {
-		if (this.catalog.getLocator(target.sessionId)?.kind === "ssh") {
-			throw new SessionRuntimeCommandError("SESSION_COMMAND_FAILED", "UNSUPPORTED_PROJECT_LOCATION");
-		}
+		// 远端 runtime 同样是可寻址的 target（模型/派生/中断都走 stdio RPC）；本机专属命令在更底层拒绝。
 		if (!this.catalog.get(target.sessionId)) {
 			throw new SessionRuntimeCommandError("SESSION_NOT_FOUND", `Session not found: ${target.sessionId}`);
 		}
@@ -1752,9 +1829,7 @@ export class SessionRuntimeCoordinator {
 	 * 有 catalog 行但无绑定则报「运行实例不可用」，避免误导用户去刷新会话列表。
 	 */
 	private resolveStopTarget(target: SessionRuntimeTarget): SessionRuntimeTarget {
-		if (this.catalog.getLocator(target.sessionId)?.kind === "ssh") {
-			throw new SessionRuntimeCommandError("SESSION_COMMAND_FAILED", "UNSUPPORTED_PROJECT_LOCATION");
-		}
+		// 远端 runtime 必须能停（它是个真进程）；本机专属操作不在这条链路上。
 		const live = this.getRuntimeBinding(target.agentId);
 		if (live) {
 			return {

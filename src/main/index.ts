@@ -4079,7 +4079,13 @@ app
 		// 多后端网关装配：pi + dsh（DSH 在窗口创建后后台预热，失败时按需重试）。
 		// Coordinator 与事件桥接均面向合成器，新增后端只需追加网关实例。
 		compositeAgentGateway = new CompositeAgentGateway([agentManager, dshAgentManager]);
-		sessionRuntimeCoordinator = new SessionRuntimeCoordinator(sessionCatalog, compositeAgentGateway, sendAgentPromptWithIntegrations, appLogger);
+		// 项目位置注入给会话协调器：远端会话在 pi 上报会话文件之前没有 ssh 身份，"这条会话的 runtime
+		// 在哪台机器上"只能由项目 locator 回答（AgentManager 也按它路由 runtime）。位置真相同的单一
+		// 来源仍然是 projectStore，这里只给一个只读取值器。
+		sessionRuntimeCoordinator = new SessionRuntimeCoordinator(sessionCatalog, compositeAgentGateway, sendAgentPromptWithIntegrations, appLogger, (projectId) => {
+			const project = projectStore.get(projectId);
+			return project && !isLocalProject(project) ? project.locator : undefined;
+		});
 
 		// 定时任务调度器与执行编排器装配
 		automationStore = new AutomationStore(join(app.getPath("userData"), "automation.json"));
