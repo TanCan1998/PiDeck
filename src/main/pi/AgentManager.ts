@@ -58,6 +58,7 @@ import { mergeHistoryWithPreservedMessages, stabilizeProjectedIdsFromIdentities,
 import { buildAgentSessionKey, toAbsoluteSessionPath, type AgentSessionIdentityDefaults } from "./agentSessionIdentity";
 import type { PiRuntimeLauncher, RemoteSshPiRuntimeLaunchPlan } from "./PiSpawnHandle";
 import { REMOTE_RUNTIME_CODES, type RemoteRuntimePort } from "./remoteRuntimePort";
+import type { RemoteSessionRegistration } from "../sessions/SessionCatalog";
 import { SessionFileEditor, type SessionEntryTarget, type SessionFileRef } from "./SessionFileEditor";
 import { SessionHistoryReader, boundTurnWindowStart } from "./SessionHistoryReader";
 import { scanJsonlLines } from "../sessions/jsonlLineStream";
@@ -955,6 +956,23 @@ export class AgentManager {
 	}
 
 	/**
+	 * 登记远端会话的 catalog 身份（P4.2 收口）：把 pi 上报的远端会话文件交给端口，折成 ssh locator
+	 * （hostId + 相对会话根的 remoteSessionId + remotePath）并写进 catalog。
+	 *
+	 * 为什么只能在这里登记：远端会话文件是 pi 自己选好并在握手 `get_state` 里上报的，PiDeck 创建之前
+	 * 根本不知道它叫什么 —— **这是与本地流程的本质差别**（本地会话身份在创建之前就由 catalog 定好）。
+	 * 会话根解析与 catalog 写入都只允许有一份实现（scanner / `SessionCatalog.ensureRemoteSession`）。
+	 *
+	 * 失败一律抛出，由调用方落进与「pi 起不来」同一条错误卡路径：端口没有这个能力（旧装配/替身）时给
+	 * 既有稳定码 fail-closed，**绝不**写一条带本机 filePath 的伪记录，也绝不静默当成登记成功。
+	 */
+	private async registerRemoteSessionIdentity(project: RemoteProject, remotePath: string): Promise<RemoteSessionRegistration> {
+		const port = this.remoteRuntime;
+		if (!port || typeof port.registerRemoteSession !== "function") throw new Error(REMOTE_RUNTIME_CODES.catalogIdentityUnsupported);
+		return port.registerRemoteSession({ hostId: project.locator.hostId, projectId: project.id, remotePath });
+	}
+
+	/**
 	 * pi 上报的会话文件路径 → 写入 tab 的值。
 	 *
 	 * 远端会话的会话文件在远端，**不得**用本机规则归一化：`toAbsoluteSessionPath` 在 Windows 上
@@ -1565,23 +1583,11 @@ export class AgentManager {
 		// 端口缺省 = 正式包 / 未注入：远端项目在这里**没有**本机回退。用既有稳定码拒绝
 		// （与「非本地项目不得当本机路径」同一个码：语义都是「这个位置在这里跑不了」）。
 		if (!this.remoteRuntime) throw new Error("UNSUPPORTED_PROJECT_LOCATION");
-		// catalog 身份 fail-closed（P4.2 收口）：远端会话的 catalog 身份必须是 ssh locator
-		// （hostId + 相对会话根的 remoteSessionId + remotePath）。本批 AgentManager 既没有 catalog
-		// 端口，也没有远端会话根解析（`RemoteSessionScanner` 的会话根解析还没导出），手上只有一条
-		// pi 报回来的远端绝对路径 —— 而下游 `SessionRuntimeCoordinator.buildAttachPatch` →
-		// `SessionCatalog.attachRuntime` 会把它落成一条**本机 filePath** 记录（远程项目在
-		// catalog 的 resolveFilePath 里还会原样放行）。所以「要写进一条 catalog 记录」的远端会话
-		// 在此显式拒绝，绝不半对半错地落库。
-		//
-		// 下一批落点（不需要改本文件）：
-		// 1. 把 `RemoteSessionScanner` 的会话根解析（home → `<home>/.pi/agent/settings.json` 的
-		//    `sessionDir` → 默认 `<home>/.pi/agent/sessions`）导出成可复用入口，由它把 pi 报回的
-		//    远端路径折成 remoteSessionId/remotePath（**不要**在这里自己按字符串折相对路径）；
-		// 2. 经 `SessionCatalog.ensureRemoteSession` 写 ssh locator（hostId + remoteSessionId）；
-		// 3. 让 `SessionRuntimeCoordinator` 认识它：现在 ssh 条目在 `activate()` 与
-		//    `attachRuntime()` 都直接 `UNSUPPORTED_PROJECT_LOCATION`，路由打通前远端 catalog 会话
-		//    不会被激活（本批的远端运行时不依赖它）。
-		if (input.deckSessionId) throw new Error(REMOTE_RUNTIME_CODES.catalogIdentityUnsupported);
+		// 远端会话的 catalog 身份（P4.2 收口）：身份就在端口上（见 registerRemoteSession：scanner 的
+		// 会话根解析 + `SessionCatalog.ensureRemoteSession` 这一条正门）。端口没有这个能力（旧装配 /
+		// 测试替身）时与以前同一个稳定码 fail-closed——这条判据刻意留在 prepare 之前：能拒绝就不要
+		// 先拉起一个远端进程，更不写一条带本机 filePath 的伪记录。
+		if (input.deckSessionId && typeof this.remoteRuntime.registerRemoteSession !== "function") throw new Error(REMOTE_RUNTIME_CODES.catalogIdentityUnsupported);
 
 		const hostId = project.locator.hostId;
 		const remoteCwd = project.locator.remotePath;
@@ -1735,6 +1741,16 @@ export class AgentManager {
 			// pi 报回来的会话文件在远端：**原样采用**（不得用本机规则归一化），它唯一的用途是
 			// 下一次 spawn（restart）用 `--session <远端路径>` 重开同一会话。
 			tab.sessionPath = data?.sessionFile ?? input.sessionPath;
+			// catalog 身份登记（P4.2 收口）：会话文件是 pi 自己选好并在握手 `get_state` 里上报的，
+			// PiDeck 创建之前根本不知道它叫什么 —— 所以登记必然晚于 runtime 起来，**这是与本地流程的
+			// 本质差别**（本地会话身份在创建之前就由 catalog 定好）。
+			if (input.deckSessionId && tab.sessionPath) {
+				const registration = await this.registerRemoteSessionIdentity(project, tab.sessionPath);
+				const locator = registration.record.locator;
+				// record 就是这条远端会话的 catalog 身份；tab 仍说「远端路径」这一种语言
+				// （ssh locator 的 remotePath），不因登记退化成一条本机 filePath。
+				if (locator?.kind === "ssh") tab.sessionPath = locator.remotePath;
+			}
 			const piSessionName = data?.sessionName && !looksLikePiSessionFileStem(data.sessionName) ? data.sessionName : undefined;
 			tab.title = input.title || piSessionName || (input.sessionPath ? this.translate("session.historyTitle", { project: project.name }) : `${project.name} agent`);
 			tab.status = "idle";

@@ -153,9 +153,24 @@ export type RemoteSessionScannerOptions = {
 	limits?: Partial<RemoteSessionScannerLimits>;
 };
 
+/**
+ * 会话根解析结果：`ok:false` 一律带本模块的稳定码（home 不可用 / `sessionDir` 不可用），调用方原样转述。
+ * 与内部 `resolveSessionRoot` 同形：这里只是给它一个名字（别处要么沿用，要么再抄一遍）。
+ */
+export type RemoteSessionRootResolution = { readonly ok: true; readonly root: string } | { readonly ok: false; readonly code: string };
+
 export type RemoteSessionScanner = {
 	/** 只读列出远端会话；不写 catalog、不读正文。 */
 	scan(hostId: string): Promise<RemoteSessionScanResult>;
+	/**
+	 * 会话根解析（J2）：默认 `<remote home>/.pi/agent/sessions`，被 user-level `settings.json` 的
+	 * `sessionDir` 覆盖时用它。scan/register/title 内部走的就是这一个函数。
+	 *
+	 * 为什么转出：别处（远端 runtime 把 pi 上报的会话文件折成 `remoteSessionId` 时）必须用**同一份**
+	 * 会话根判定。各自再拼一次 `<home>/.pi/agent/sessions` 就会在配了自定义 `sessionDir` 的机器上
+	 * 折出看似正常但错的相对路径。
+	 */
+	resolveSessionRoot(hostId: string): Promise<RemoteSessionRootResolution>;
 	/** 在远端确认该文件仍存在后，幂等登记进 catalog 并返回稳定 sessionId。 */
 	register(input: { hostId: string; remoteSessionId: string }): Promise<RemoteSessionRegisterResult>;
 	/**
@@ -269,8 +284,12 @@ function isAuthoritativeTitle(inference: SessionTitleInference): boolean {
 	return inference.name !== undefined && inference.fromSessionInfo;
 }
 
-/** 文件名 stem（暂定标题）。时间戳 stem 由 catalog 的展示层清成 Untitled，这里不做产品判断。 */
-function titleFromRemoteSessionId(remoteSessionId: string): string {
+/**
+ * 文件名 stem（暂定标题）。时间戳 stem 由 catalog 的展示层清成 Untitled，这里不做产品判断。
+ *
+ * 转出是给别的「登记一条远端会话」的路径用的（别处再写一遍 `basename` 去后缀就会与这里漂移）。
+ */
+export function titleFromRemoteSessionId(remoteSessionId: string): string {
 	const base = remoteSessionId.slice(remoteSessionId.lastIndexOf("/") + 1);
 	const stem = base.replace(/\.jsonl$/i, "").trim();
 	return stem.length > 0 ? stem : "Untitled";
@@ -355,7 +374,7 @@ export function createRemoteSessionScanner(options: RemoteSessionScannerOptions)
 	 * 代价（如实记录）：一次操作 = 1 次配置探测（root=<home>/.pi/agent 的一次 withProjectSession + 1 stat + 1 次 ≤64 KiB read）
 	 * + 1 次真正的会话操作；两次的 root 不同会让服务的 helper 会话切换（现有服务语义）。
 	 */
-	async function resolveSessionRoot(hostId: string): Promise<{ readonly ok: true; readonly root: string } | { readonly ok: false; readonly code: string }> {
+	async function resolveSessionRoot(hostId: string): Promise<RemoteSessionRootResolution> {
 		let home: unknown;
 		try {
 			// 优先「确保式」：扫描通常紧跟登记/读取项目之后，而那条路径会在任务结束时收掉它建立的临时
@@ -461,6 +480,8 @@ export function createRemoteSessionScanner(options: RemoteSessionScannerOptions)
 	}
 
 	return {
+		// 导出物就是上面那个内部函数本身（同一个函数对象，不包一层）：语义逐字相同，没有第二条实现。
+		resolveSessionRoot,
 		async scan(hostId) {
 			const host = readHostId(hostId);
 			if (host === undefined) return { ok: false, code: REMOTE_SESSION_CODES.hostIdInvalid };

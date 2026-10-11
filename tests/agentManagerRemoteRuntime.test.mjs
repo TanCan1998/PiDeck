@@ -11,8 +11,11 @@ import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
  *    启动器来自端口、远端 pi 报回来的会话文件**不被本机规则改写**；
  * 2. 本地专属准备（项目 trust、会话文件修复、会话路径归一化）**一次都不碰**——它们被 stub 成
  *    「一调用就抛」，所以「没调用」这件事是硬的，不是靠断言调用次数的软证据；
- * 3. 缺端口 / catalog 绑定会话 ⇒ 稳定码 fail-closed，绝不把远端 cwd 当本机路径跑；
- * 4. 远端 runtime 的本机专属操作（终端 cwd、checkpoint 的 git）在守卫处拒绝，本地行为不变。
+ * 3. 缺端口 / 端口没有登记能力 ⇒ 稳定码 fail-closed，绝不把远端 cwd 当本机路径跑，
+ *    也不写一条伪 catalog 记录；
+ * 4. deckSessionId 的远端会话：拿到 pi 上报的会话文件后由端口登记 catalog 身份（ssh locator），
+ *    登记失败落会话错误卡 + 稳定码；
+ * 5. 远端 runtime 的本机专属操作（终端 cwd、checkpoint 的 git）在守卫处拒绝，本地行为不变。
  */
 
 const { AgentManager } = loadTsCommonJs("src/main/pi/AgentManager.ts");
@@ -156,7 +159,7 @@ function createHarness({ projects, record, remoteRuntime }) {
 }
 
 function createRecord() {
-	return { facts: [], launches: [], handles: [], prepares: [], forbidden: [], beforeSpawn: 0, launcherRequests: 0 };
+	return { facts: [], launches: [], handles: [], prepares: [], forbidden: [], registrations: [], beforeSpawn: 0, launcherRequests: 0 };
 }
 
 function createPort(record, service) {
@@ -164,6 +167,33 @@ function createPort(record, service) {
 		resolveService: () => service,
 		settings: () => ({}),
 	});
+}
+
+/**
+ * 端口替身：启动能力用真端口，登记方法换成「记下调用 + 返回一条 ssh locator record」。
+ * 产品路由关心的就是这两件事（登记被调用、拿到的路径是 pi 上报的那条），而 ssh locator 的
+ * 推导与幂等由 `remoteSessionCatalogIdentity.test.mjs` 用真 catalog + 真 scanner 锁住。
+ */
+function createPortWithRegistration(record, service, options = {}) {
+	const port = createPort(record, service);
+	return {
+		prepare: (input) => port.prepare(input),
+		createLauncher: () => port.createLauncher(),
+		async registerRemoteSession(input) {
+			record.registrations.push(input);
+			if (options.registrationFailure) throw new Error(options.registrationFailure);
+			return {
+				record: { id: "catalog-remote-session", projectId: input.projectId, title: "远端会话", locator: { kind: "ssh", hostId: input.hostId, remoteSessionId: "-srv-remote-app/session.jsonl", remotePath: input.remotePath } },
+				created: true,
+			};
+		},
+	};
+}
+
+/** 旧装配/替身的形状：启动能力在、登记能力不在（新增这个方法之前的端口就是这样）。 */
+function createPortWithoutRegistration(record, service) {
+	const port = createPort(record, service);
+	return { prepare: (input) => port.prepare(input), createLauncher: () => port.createLauncher() };
 }
 
 test("远端项目 + 注入端口：走远端分支（plan 用 locator.remotePath、launcher 来自端口），本机 trust/repair/normalize 一次都不碰", async () => {
@@ -253,6 +283,8 @@ test("远端项目 + 未注入端口：仍旧 UNSUPPORTED_PROJECT_LOCATION（fai
 	const { manager, restore } = harness;
 	try {
 		await assert.rejects(() => manager.create({ projectId: "remote", title: "远端会话" }), /UNSUPPORTED_PROJECT_LOCATION/);
+		// catalog 绑定的会话同样先撞「没有端口」这一关（而不是先去过 catalog 身份）。
+		await assert.rejects(() => manager.create({ projectId: "remote", title: "远端会话", deckSessionId: "11111111-2222-4333-8444-555555555555" }), /UNSUPPORTED_PROJECT_LOCATION/);
 		assert.deepEqual(record.forbidden, [], "拒绝必须发生在任何本机准备之前");
 	} finally {
 		restore();
@@ -302,15 +334,66 @@ test("准备失败的占位 runtime：不会被当成可启动 runtime 去起本
 	}
 });
 
-test("catalog 绑定的远端会话：远端身份无法表达成本批的 ssh locator ⇒ 稳定码 fail-closed，且不半启动运行", async () => {
+test("端口没有登记能力（旧装配/替身）：catalog 绑定的远端会话仍旧稳定码 fail-closed，且不半启动运行", async () => {
 	const record = createRecord();
-	const harness = createHarness({ projects: new Map([["remote", remoteProject("remote", HOST_ID)]]), record, remoteRuntime: createPort(record, createFakeService(record)) });
+	const harness = createHarness({ projects: new Map([["remote", remoteProject("remote", HOST_ID)]]), record, remoteRuntime: createPortWithoutRegistration(record, createFakeService(record)) });
 	const { manager, restore } = harness;
 	try {
 		// deckSessionId = 这条会话已经属于一条 catalog 记录（协调器随后会把 tab 身份写进 catalog）。
 		await assert.rejects(() => manager.create({ projectId: "remote", title: "远端会话", deckSessionId: "11111111-2222-4333-8444-555555555555" }), new RegExp(REMOTE_RUNTIME_CODES.catalogIdentityUnsupported));
 		assert.deepEqual(record.facts, [], "拒绝必须发生在探测/拉起之前（不留半启动的远端进程）");
 		assert.equal(record.launches.length, 0);
+		assert.deepEqual(record.registrations, [], "没有登记能力时一条记录都不能写");
+	} finally {
+		restore();
+	}
+});
+
+test("远端 + deckSessionId + 端口可登记：不再抛 catalogIdentityUnsupported，登记的就是 pi 上报的会话文件", async () => {
+	const record = createRecord();
+	const harness = createHarness({ projects: new Map([["remote", remoteProject("remote", HOST_ID)]]), record, remoteRuntime: createPortWithRegistration(record, createFakeService(record)) });
+	const { manager, restore } = harness;
+	try {
+		const tab = await manager.create({ projectId: "remote", title: "远端会话", deckSessionId: "11111111-2222-4333-8444-555555555555" });
+
+		assert.equal(tab.status, "idle", "有登记能力时这条会话必须能起来（不再是 fail-closed 错误卡）");
+		assert.equal(record.registrations.length, 1, "必须在拿到 pi 上报的会话文件之后登记一次");
+		assert.equal(record.registrations[0].hostId, HOST_ID);
+		assert.equal(record.registrations[0].projectId, "remote");
+		assert.equal(record.registrations[0].remotePath, REMOTE_SESSION_FILE);
+		// 标题不由 AgentManager 编：新会话的 input.title 是本地化占位名（"新会话"），写进远端记录会造出假标题；
+		// 缺省让端口取文件名 stem（与 scanner 的登记路径同一取值）。
+		assert.equal(record.registrations[0].title, undefined);
+		// tab 的会话文件仍是远端路径（ssh locator 的 remotePath 语义），不被本机规则改写。
+		assert.equal(tab.sessionPath, REMOTE_SESSION_FILE);
+		assert.deepEqual(record.forbidden, []);
+
+		// 没有 deckSessionId 的远端会话（不入 catalog）不登记：身份登记只属于「已有一条 catalog 记录」的会话。
+		await manager.create({ projectId: "remote", title: "另一个远端会话" });
+		assert.equal(record.registrations.length, 1);
+	} finally {
+		restore();
+	}
+});
+
+test("登记失败（身份折不出来）：落到会话错误卡 + 稳定码，不静默当作成功", async () => {
+	const record = createRecord();
+	const harness = createHarness({
+		projects: new Map([["remote", remoteProject("remote", HOST_ID)]]),
+		record,
+		remoteRuntime: createPortWithRegistration(record, createFakeService(record), { registrationFailure: REMOTE_RUNTIME_CODES.locatorUnresolved }),
+	});
+	const { manager, restore } = harness;
+	try {
+		const tab = await manager.create({ projectId: "remote", title: "远端会话", deckSessionId: "11111111-2222-4333-8444-555555555555" });
+
+		assert.equal(record.registrations.length, 1, "登记必须真的被尝试过");
+		// 与本地「pi 起不来」同一条归口：终态 error + 会话内错误卡（带稳定码），不是静默成功。
+		assert.equal(tab.status, "error");
+		const card = manager.messages.get(tab.id).at(-1);
+		assert.equal(card.role, "error");
+		assert.match(String(card.meta?.debugDetails ?? ""), new RegExp(REMOTE_RUNTIME_CODES.locatorUnresolved));
+		assert.deepEqual(record.forbidden, []);
 	} finally {
 		restore();
 	}

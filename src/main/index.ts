@@ -3602,6 +3602,8 @@ app
 			createRemoteRuntimePort({
 				// 连接服务是 registerIpc 里懒建的单例；这里的回调在真正要起远端会话时才求值。
 				resolveService: () => remoteHostServiceResolver?.(),
+				// 远端会话身份登记（P4.2 收口）的正门：catalog 也是懒取（AgentManager 比它更早装配）。
+				resolveCatalog: () => sessionCatalog,
 				settings: () => settingsStore.get(),
 			}),
 		);

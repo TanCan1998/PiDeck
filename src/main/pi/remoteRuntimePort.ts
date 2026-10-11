@@ -17,6 +17,10 @@
  */
 import { randomUUID } from "node:crypto";
 import type { RemotePiRuntimeFacts } from "../remote/RemoteHostConnectionService";
+import type { RemoteSessionRegistration } from "../sessions/SessionCatalog";
+// 会话根解析与文件名 stem 都从 scanner 转出：远端会话身份的两个既有判定（根在哪、暂定标题取什么）
+// 只允许有一份实现。
+import { createRemoteSessionScanner, REMOTE_SESSION_MAX_ID_LENGTH, REMOTE_SESSION_MAX_PATH_LENGTH, titleFromRemoteSessionId, type RemoteSessionCatalogPort, type RemoteSessionScannerPort } from "../sessions/RemoteSessionScanner";
 import type { PiRuntimeLauncher, RemoteSshPiRuntimeLaunchPlan } from "./PiSpawnHandle";
 import { buildRemotePiRuntimePlan } from "./piRemoteRuntimePlan";
 import type { PiRpcBaseArgsSettings } from "./piRpcArgs";
@@ -36,8 +40,19 @@ export const REMOTE_RUNTIME_CODES = {
 	unavailable: "REMOTE_RUNTIME_UNAVAILABLE",
 	/** `createLauncher()` 在 `prepare()` 之前被调用（端口契约错用）。 */
 	launcherUnprepared: "REMOTE_RUNTIME_LAUNCHER_UNPREPARED",
-	/** 远端会话属于一条 catalog 记录，而本批无法把它表达成 ssh locator（见 createRemoteUnlocked）。 */
+	/**
+	 * 远端会话属于一条 catalog 记录，而当前端口没有登记能力（旧装配 / 测试替身）。
+	 *
+	 * 语义收窄记录（P4.2 收口）：以前这条码表示「远端身份在本批无法表达成 ssh locator」，现在 ssh
+	 * locator 已能从 pi 上报的会话文件折出来；只剩「端口不提供这条正门」时仍 fail-closed ——
+	 * 绝不拿一条带本机 filePath 的伪记录顶上。
+	 */
 	catalogIdentityUnsupported: "REMOTE_SESSION_CATALOG_IDENTITY_UNSUPPORTED",
+	/**
+	 * pi 上报的会话文件折不成「会话根之下的 POSIX 相对路径」（非绝对 / 含 `..` 或控制字节 / 落在根外）。
+	 * 拿不到可信的远端身份就拒绝登记：猜一个 id 写进 catalog 比失败更难查（下次扫描会另立一条记录）。
+	 */
+	locatorUnresolved: "REMOTE_SESSION_LOCATOR_UNRESOLVED",
 	/** 本地专属操作（本机 fs/git/终端 cwd/会话文件读写）被要求对远端运行时执行。 */
 	localOperationUnsupported: "REMOTE_RUNTIME_LOCAL_OPERATION_UNSUPPORTED",
 } as const;
@@ -54,6 +69,21 @@ export type RemoteRuntimePrepareInput = {
 };
 
 /**
+ * 登记一条远端会话的 catalog 身份（Phase 4 P4.2 收口）。
+ *
+ * 入参只有 pi 上报回来的**远端绝对路径**：`remoteSessionId`（相对会话根的 POSIX 路径）由端口自己折，
+ * 调用方不拼——在外面拼就等于把「会话根在哪」的判断复制到第二处，而配了自定义 `sessionDir` 的机器上
+ * 那个判断是错的。`title` 缺省取文件名 stem（与 scanner 的登记路径同一取值）；`updatedAt` 未知就不传。
+ */
+export type RemoteSessionRegistrationRequest = {
+	readonly hostId: string;
+	readonly projectId: string;
+	readonly remotePath: string;
+	readonly title?: string;
+	readonly updatedAt?: number;
+};
+
+/**
  * AgentManager 看到的全部远端能力。
  *
  * `prepare()` 与 `createLauncher()` 是**配对**的两次调用：`prepare()` 负责解析出这一轮的
@@ -64,13 +94,26 @@ export type RemoteRuntimePrepareInput = {
 export type RemoteRuntimePort = {
 	prepare(input: RemoteRuntimePrepareInput): Promise<RemoteSshPiRuntimeLaunchPlan>;
 	createLauncher(): PiRuntimeLauncher;
+	/**
+	 * 把 pi 上报的远端会话文件登记成 catalog 的 ssh locator 身份，返回这条 catalog 记录。
+	 *
+	 * 与 `prepare()` 同款：**每次调用**才解析服务与 catalog（门禁/连接/装配都可能变），拿不到就
+	 * `REMOTE_RUNTIME_UNAVAILABLE`。这个方法**可选**：缺省表示这个端口没有登记能力（旧装配/替身），
+	 * 调用方据此 fail-closed，绝不用伪记录顶上。
+	 */
+	registerRemoteSession?(input: RemoteSessionRegistrationRequest): Promise<RemoteSessionRegistration>;
 };
 
-/** 端口需要的连接服务面（`RemoteHostConnectionService` 结构上满足，无需 import 具体实现）。 */
+/**
+ * 端口需要的连接服务面（`RemoteHostConnectionService` 结构上满足，无需 import 具体实现）。
+ *
+ * 除了启动事实，它还要满足 scanner 的端口面（`remoteHome` / `withProjectSession`）：会话根解析是
+ * scanner 的实现，端口只是把它接出来用，不是另起一条远端访问通道。
+ */
 export type RemoteRuntimeServicePort = {
 	remotePiRuntimeFacts(hostId: string): Promise<RemotePiRuntimeFacts>;
 	createPiRuntimeLauncher(): PiRuntimeLauncher;
-};
+} & RemoteSessionScannerPort;
 
 export type RemoteRuntimePortDeps = {
 	/**
@@ -82,6 +125,11 @@ export type RemoteRuntimePortDeps = {
 	resolveService(): Promise<RemoteRuntimeServicePort | undefined> | RemoteRuntimeServicePort | undefined;
 	/** pi 的基础参数只认这一个设置来源（与本地 `PiProcess` 同一份：`piRpcOffline`）。 */
 	settings(): PiRpcBaseArgsSettings;
+	/**
+	 * 按需解析 catalog（`SessionCatalog` 结构上满足 `ensureRemoteSession` 这一个入口）。
+	 * 与 `resolveService` 同一个立场：装配比 catalog 早，回调只在真正要登记时才求值。
+	 */
+	resolveCatalog(): Promise<RemoteSessionCatalogPort | undefined> | RemoteSessionCatalogPort | undefined;
 	/** 一次运行的身份（runner lease 命名/握手校验）；缺省随机，测试可注入固定值。 */
 	createNonce?(): string;
 };
@@ -104,6 +152,51 @@ function defaultNonce(): string {
 	return randomUUID().replace(/-/g, "");
 }
 
+/**
+ * 解析一个按需依赖（服务 / catalog）：建造失败时它自己带的稳定码更有指向性（如找不到 ssh 客户端 /
+ * 还没装配），能转述就转述；不带稳定码的异常与「解析不出来」都折叠成 `unavailable`（fail-closed）。
+ */
+async function resolveOrUnavailable<Value>(resolve: () => Value | undefined | Promise<Value | undefined>): Promise<Value> {
+	let resolved: Value | undefined;
+	try {
+		resolved = await resolve();
+	} catch (error) {
+		throw new Error(stableRemoteCode(error) ?? REMOTE_RUNTIME_CODES.unavailable);
+	}
+	if (resolved === undefined) throw new Error(REMOTE_RUNTIME_CODES.unavailable);
+	return resolved;
+}
+
+/** 远端路径里的控制字节与远端 helper 的路径域同判据（出现即拒绝，不回显）。 */
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+
+/**
+ * pi 上报的远端会话文件 → `remoteSessionId`（相对会话根的 POSIX 路径），折不出来返回 undefined。
+ *
+ * **只做一件事：去掉根前缀。** pi 的两种布局都由此得到正确的 id：默认根是
+ * `<root>/--<encoded-cwd>--/<file>.jsonl`（id 带一层工作区目录），user-level `sessionDir` 是平铺
+ * `<root>/<file>.jsonl`。所以按 `/` 切出文件名是错的（丢掉一层身份），复刻 pi 的 cwd 编码更是把它的
+ * 实现细节抄进 PiDeck——两者都明确不做。
+ *
+ * 判据是**逐段严格**而不是「规范化后再比较」：`.` / `..` / 空段 / 尾斜杠一律拒绝，于是不存在「规范化
+ * 之后才落回根内」的中间态（`<root>/../elsewhere/x.jsonl` 在这里根本不合法）。根前缀按 `root + "/"`
+ * 比，因此 `/srv/sessions-extra/x.jsonl` 不属于 `/srv/sessions` 这类误匹配不会被当成命中。
+ * 反斜杠同样拒绝：`remoteSessionId` 的既有判据（scanner 的 `readRemoteSessionId`）不接受它，
+ * 放进来会造出一条别的远端路径永远读不到的记录。
+ */
+function remoteSessionIdWithinRoot(root: string, remotePath: string): string | undefined {
+	if (typeof remotePath !== "string" || remotePath.length === 0 || remotePath.length > REMOTE_SESSION_MAX_PATH_LENGTH) return undefined;
+	if (!remotePath.startsWith("/") || remotePath.includes("\\") || CONTROL_CHARS.test(remotePath)) return undefined;
+	const prefix = root.endsWith("/") ? root : root + "/";
+	if (!remotePath.startsWith(prefix)) return undefined;
+	const relative = remotePath.slice(prefix.length);
+	if (relative.length === 0 || relative.length > REMOTE_SESSION_MAX_ID_LENGTH) return undefined;
+	for (const segment of relative.split("/")) {
+		if (segment.length === 0 || segment === "." || segment === "..") return undefined;
+	}
+	return relative;
+}
+
 export function createRemoteRuntimePort(deps: RemoteRuntimePortDeps): RemoteRuntimePort {
 	let launcher: PiRuntimeLauncher | undefined;
 	/** 计划里的 generation 是「这台主机上的第几次启动」：同一次运行内单调递增即可，不做跨重启持久化。 */
@@ -113,15 +206,7 @@ export function createRemoteRuntimePort(deps: RemoteRuntimePortDeps): RemoteRunt
 			// **每次调用**都重新解析服务：AgentManager 比连接服务先装配，门禁/连接状态也随时可能变
 			// （还没建、建失败、被 gate 关掉）。任何「构造时捕获一个当时还不存在的实例」的写法都会让
 			// 远端永远拿不到服务（那正是本批要避免的静默失败）。
-			let service: RemoteRuntimeServicePort | undefined;
-			try {
-				service = await deps.resolveService();
-			} catch (error) {
-				// 建造失败（如找不到可用的 ssh 客户端）自己带的稳定码更有指向性，能转述就转述；
-				// 不带稳定码的异常折叠成 unavailable（与远端其它模块的失败关闭口径一致）。
-				throw new Error(stableRemoteCode(error) ?? REMOTE_RUNTIME_CODES.unavailable);
-			}
-			if (!service) throw new Error(REMOTE_RUNTIME_CODES.unavailable);
+			const service = await resolveOrUnavailable(() => deps.resolveService());
 			// 事实先取（它会确保主机已连上、runner 已按内容寻址部署），再在构造点验 plan 的形状。
 			const facts = await service.remotePiRuntimeFacts(input.hostId);
 			const plan = buildRemotePiRuntimePlan({
@@ -144,6 +229,28 @@ export function createRemoteRuntimePort(deps: RemoteRuntimePortDeps): RemoteRunt
 		createLauncher(): PiRuntimeLauncher {
 			if (!launcher) throw new Error(REMOTE_RUNTIME_CODES.launcherUnprepared);
 			return launcher;
+		},
+		async registerRemoteSession(input: RemoteSessionRegistrationRequest): Promise<RemoteSessionRegistration> {
+			// 与 prepare() 同一口径：服务与 catalog 都按调用时才解析（门禁/装配状态都可能变）。
+			const service = await resolveOrUnavailable(() => deps.resolveService());
+			const catalog = await resolveOrUnavailable(() => deps.resolveCatalog());
+			// 会话根解析**复用 scanner 的导出入口**（默认 `<home>/.pi/agent/sessions` vs user-level
+			// `settings.json` 的 `sessionDir` 覆盖）：失败原样转述它的稳定码，不在这里折叠。
+			const resolvedRoot = await createRemoteSessionScanner({ port: service }).resolveSessionRoot(input.hostId);
+			if (!resolvedRoot.ok) throw new Error(resolvedRoot.code);
+			const remoteSessionId = remoteSessionIdWithinRoot(resolvedRoot.root, input.remotePath);
+			if (remoteSessionId === undefined) throw new Error(REMOTE_RUNTIME_CODES.locatorUnresolved);
+			// catalog 写入只走这一条正门（`ensureRemoteSession`：幂等、两遍匹配、稳定 id）。
+			return catalog.ensureRemoteSession({
+				projectId: input.projectId,
+				hostId: input.hostId,
+				remoteSessionId,
+				remotePath: input.remotePath,
+				// title 在 catalog 的协议形状里必填：调用方没给就用文件名 stem（与 scanner 的登记路径同一取值）。
+				title: input.title ?? titleFromRemoteSessionId(remoteSessionId),
+				// 未知 mtime 用 0（catalog 的判据是「> 0 才算已知时间」）：不拿本机 now 冒充远端文件时间。
+				updatedAt: input.updatedAt ?? 0,
+			});
 		},
 	};
 }
