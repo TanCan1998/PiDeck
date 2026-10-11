@@ -266,6 +266,29 @@ test("远端会话：能停（stop 打到远端句柄）、能重启（第二次
 	}
 });
 
+test("远端会话的自动重连（reattachProcess）：不再按本机专属拒绝，远端会话文件原样采用", async () => {
+	const record = createRecord();
+	const harness = createHarness({ projects: new Map([["remote", remoteProject("remote", HOST_ID)]]), record, remoteRuntime: createPort(record, createFakeService(record)) });
+	const { manager, restore } = harness;
+	try {
+		const tab = await manager.create({ projectId: "remote", title: "远端会话" });
+		// 进程退出型压缩 / abort 期间进程退出都会走这条路：此前第一行就是 isLocalProject 守卫直接拒绝（UNSUPPORTED_PROJECT_LOCATION）。
+		await manager.reattachProcess(tab.id, tab.sessionPath);
+		assert.equal(record.launches.length, 2, "重连必须重新拉起一次远端运行");
+		const plan = record.launches[1];
+		assert.equal(plan.cwd, REMOTE_CWD);
+		const sessionIndex = plan.args.indexOf("--session");
+		assert.notEqual(sessionIndex, -1, "重连同一会话必须带 --session");
+		assert.equal(plan.args[sessionIndex + 1], REMOTE_SESSION_FILE, "--session 用的是 pi 报回来的远端会话文件");
+		// 关键分叉：远端路径**不得**被 normalizeSessionPathFromPi 改成本机风格（改了下次 spawn 就找不到文件）。
+		assert.equal(tab.sessionPath, REMOTE_SESSION_FILE);
+		assert.equal(tab.status, "idle");
+		assert.deepEqual(record.forbidden, [], "重连不得触发任何本机准备（不得静默当本地跑）");
+	} finally {
+		restore();
+	}
+});
+
 test("匿名远端会话（noSession）：plan 追加 --no-session，且不带 --session", async () => {
 	const record = createRecord();
 	const harness = createHarness({ projects: new Map([["remote", remoteProject("remote", HOST_ID)]]), record, remoteRuntime: createPort(record, createFakeService(record)) });

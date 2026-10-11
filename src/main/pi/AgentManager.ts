@@ -2665,15 +2665,30 @@ export class AgentManager {
 
 		const project = this.getProject(runtime.tab.projectId);
 		if (!project) throw new Error("Project not found");
-		if (!isLocalProject(project)) throw new Error("UNSUPPORTED_PROJECT_LOCATION");
+		// 远端会话同样支持自动重连：launch 计划在 create 时就登记进了 `remoteLaunchByAgent`，握手直接复用它
+		// （远端没有计划时 `handshakePiProcess` 会抛 `REMOTE_RUNTIME_UNAVAILABLE`——绝不会掉进本机 pi）。
+		// 与本地只差两处语义，见下方 `isRemote` 分叉：路径不归一化、历史不加载。
+		const isRemote = !isLocalProject(project);
+		// 远端重连必须**用当前会话文件重新 prepare 计划**：create 时那份计划没有 `--session`（那时 pi 还没
+		// 报出会话文件），直接拿 map 里的旧计划重拉会开出**新会话**而不是接回原会话。`restart` 同样走这条。
+		if (isRemote) {
+			const hostId = isRemoteProject(project) ? project.locator.hostId : undefined;
+			const remoteRuntime = this.remoteRuntime;
+			if (!hostId || !remoteRuntime) throw new Error(REMOTE_RUNTIME_CODES.unavailable);
+			const plan = await remoteRuntime.prepare({ hostId, remoteCwd: runtime.tab.cwd, sessionFile: sessionPath });
+			this.remoteLaunchByAgent.set(agentId, { plan, launcher: remoteRuntime.createLauncher() });
+		}
 
 		void this.appLogger?.info("agent", "Reattaching process", {
 			agentId,
 			sessionPath,
+			location: isRemote ? "remote" : "local",
 		});
 
 		const handshake = await this.handshakePiProcess(agentId, {
-			projectPath: project.path,
+			// 远端：`projectPath` 的消费者只有日志与生命周期事件归属，不是本机文件路径——create 同样
+			// 传远端 cwd（`project.path` 在远端项目上不存在，也不再能靠 `isLocalProject` 收窄）。
+			projectPath: isRemote ? runtime.tab.cwd : project.path,
 			sessionPath,
 			deckSessionId: runtime.tab.deckSessionId,
 			onExit: (payload) => this.handleReattachProcessExit(agentId, runtime, payload),
@@ -2692,7 +2707,9 @@ export class AgentManager {
 			const stateResponse = handshake.state;
 			const data = stateResponse.data as { sessionId?: string; sessionFile?: string; sessionName?: string } | undefined;
 			runtime.tab.sessionId = data?.sessionId ?? runtime.tab.sessionId;
-			runtime.tab.sessionPath = this.normalizeSessionPathFromPi(data?.sessionFile ?? sessionPath, project.path, runtime.tab.sessionEnvironment ?? "native");
+			// 远端：pi 报回来的会话文件是**远端路径**，原样采用（create 路径同样如此）——用本机规则归一化
+			// 会把它改成本机风格路径，下一次 spawn 的 `--session` 就找不到文件了。
+			runtime.tab.sessionPath = isRemote ? (data?.sessionFile ?? sessionPath) : this.normalizeSessionPathFromPi(data?.sessionFile ?? sessionPath, project.path, runtime.tab.sessionEnvironment ?? "native");
 			runtime.tab.status = "idle";
 			// 进程退出型压缩可能来不及发 compaction_end；重连成功即表示 Pi 已可继续接收消息。
 			this.rpcCompactingAgents.delete(agentId);
@@ -2703,8 +2720,10 @@ export class AgentManager {
 			// 如果有旧的 pending abort 标记，清理掉
 			this.abortedDuringAsk.delete(agentId);
 
-			// 重连期间用户可能已发送消息（乐观上屏）：必须保护，否则替换投影时未落盘消息丢失
-			await this.loadMessages(agentId, false, undefined, { preserveMessagesAfter: Date.now() }).catch(() => undefined);
+			// 重连期间用户可能已发送消息（乐观上屏）：必须保护，否则替换投影时未落盘消息丢失。
+			// 远端跳过：本批不加载远端历史（create 同标 `historyLoading: "unsupported"`），且本机 reader
+			// 读不到远端文件——拉一次只会白跑并可能把空页写进缓存。
+			if (!isRemote) await this.loadMessages(agentId, false, undefined, { preserveMessagesAfter: Date.now() }).catch(() => undefined);
 			this.notifyExtensionsDisabled(agentId, {
 				fallbackFromExtensions: handshake.fallbackFromExtensions,
 				debugDetails: handshake.fallbackDebug,
