@@ -1810,6 +1810,9 @@ export class SessionRuntimeCoordinator {
 			createdAt: tab.createdAt,
 			compactionCount: tab.compactionCount,
 			noSession: tab.noSession,
+			// 远端 trust 现状随 runtime 快照一起给：渲染层重载/首次渲染就能显示提示，不用等下一条
+			// `agents:state`（那条推送只在该会话发生状态变化时才来）。本机会话不带该字段。
+			...(tab.remoteTrustUnhandled === true ? { remoteTrustUnhandled: true } : {}),
 		};
 	}
 

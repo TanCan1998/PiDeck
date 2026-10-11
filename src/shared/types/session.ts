@@ -412,6 +412,14 @@ export type SessionRuntimeInfo = SessionRuntimeTarget & {
 	createdAt: number;
 	compactionCount?: number;
 	noSession?: boolean;
+	/**
+	 * 远端会话的 trust 现状标记（P4.2）：`true` = 这条会话跑在「远端项目资源未加载」的状态。
+	 * 本机会话不带它；预览层按它显示常驻提示（缺失 ⇒ 不显示）。
+	 *
+	 * 放在 runtime info 里而不只走 `agents:state`：那个推送只在该会话发生状态变化时才来，
+	 * 而 runtime 快照（`sessions:runtime-info`）是渲染层重载/首次渲染时就能拿到的。
+	 */
+	remoteTrustUnhandled?: boolean;
 };
 
 export type SessionCommandErrorCode =

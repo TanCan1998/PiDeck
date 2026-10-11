@@ -447,6 +447,9 @@ export const replaceSessionRuntimesAtom = atom(null, (get, set, runtimes: Sessio
 			createdAt: runtime.createdAt,
 			compactionCount: runtime.compactionCount,
 			noSession: runtime.noSession,
+			// 与 `agents:state` 那条路径同源：远端 trust 现状在 runtime 快照里也要带，
+			// 否则「渲染层重载 + runtime 空闲」时提示要等下一次状态推送才出现。
+			remoteTrustUnhandled: runtime.remoteTrustUnhandled === true ? true : undefined,
 		};
 	}
 	set(sessionRuntimeByIdAtom, next);
