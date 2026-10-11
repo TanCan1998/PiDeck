@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { link, lstat, mkdir, open, unlink } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
+import { resolveRemoteHostPaths } from "./RemoteHostPaths";
 import { PendingConfirmationBroker } from "../security/PendingConfirmationBroker";
 import { buildSshConfigQueryArgs, type SshDraftRoute } from "./SshCommandBuilder";
 import { resolveVerifiedSshClient, type SshClientRuntime } from "./SshClientRuntime";
@@ -98,7 +99,7 @@ export class SshHostPinStore {
 
 	constructor(userDataDir: string, options: { verifier?: SshHostPinVerifier; client?: SshClientRuntime } = {}) {
 		if (typeof userDataDir !== "string" || !isAbsolute(userDataDir) || /[\x00-\x1f\x7f]/.test(userDataDir)) throw new Error("SSH_HOST_PIN_ROOT_INVALID");
-		this.root = join(userDataDir, "ssh-host-keys");
+		this.root = resolveRemoteHostPaths(userDataDir).pinRoot;
 		this.verifier = options.verifier;
 		this.client = options.client;
 	}

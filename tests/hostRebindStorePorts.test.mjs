@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -566,13 +567,25 @@ test("a store write that landed but threw is still converged by the next resume"
 	// §1.5：抛异常不等于没提交 —— 收敛结果只能是"未知"，不许当成功也不许当失败
 	assert.equal(await captureRejection(() => journal.resume({ host, projects: projectStore, sessions: catalog })), "REMOTE_HOST_REBIND_UNKNOWN_OUTCOME");
 	assert.equal(JSON.parse(await readFile(catalogPath, "utf8")).sessions[0].locator.hostId, TARGET, "这次写其实落地了");
-	assert.equal(catalog.get("s-ssh").locator.hostId, SOURCE, "内存快照没换代（store 的权威是内存，重跑会以它为准重写）");
+	assert.equal(catalog.get("s-ssh").locator.hostId, SOURCE, "写抛异常 ⇒ 内存不算提交过（既没换代，也没把失败态当成新快照）");
 	assert.equal(model.retiredHostIds.includes(SOURCE), false);
 
 	faults.mode = undefined;
+	const landedHash = createHash("sha256")
+		.update(await readFile(catalogPath))
+		.digest("hex");
 	const outcome = await journal.resume({ host, projects: projectStore, sessions: catalog });
 	assert.equal(outcome.code, "REMOTE_HOST_REBIND_COMMITTED");
-	assert.equal(outcome.migratedSessions, 1);
+	// 重跑时端口读的是**磁盘**（已经是 target）⇒ 该记录判 already-applied：不重复执行、也不重复写盘
+	// （INV-5b 幂等重放；旧实现因“权威=内存”会把它当成未应用而再写一次）。收敛终态只由磁盘内容决定。
+	assert.equal(outcome.migratedSessions, 0, "已落地的记录不得在重跑时重复执行");
+	assert.equal(
+		createHash("sha256")
+			.update(await readFile(catalogPath))
+			.digest("hex"),
+		landedHash,
+		"重跑不得改写已经正确的 catalog（逐字节）",
+	);
 	assert.equal(JSON.parse(await readFile(catalogPath, "utf8")).sessions[0].locator.hostId, TARGET);
 	assert.equal(catalog.get("s-ssh").locator.hostId, TARGET);
 	assert.equal(model.retiredHostIds.includes(SOURCE), true);

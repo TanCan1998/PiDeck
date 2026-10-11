@@ -1,6 +1,8 @@
 # 跨 store 一致性（INV-5）设计与对照计划
 
-> 状态：**设计待评审、未实施**。本文件只做设计：**不含任何 src 改动**，不改行为，不新增/修改 IPC 通道、store schema、测试或装配。
+> 状态：**INV-5a 已实施（本文件是设计 + 实施记录）；INV-5b 的实现早已存在，但跨 store 协调器与启动收敛仍未装配**。
+> 实施改动在 `feat/remote-development` 分支上；落地清单、判据修正与验证证据见 §6.3.2。
+> §1/§2/§3 保留**实施前**的基线描述（它们是设计的依据）：读到「今天」字样时请连带看 §6.3.2 的对照。
 >
 > 基线：分支 feat/remote-development，工作树 4ba0f79fe（本文所有「今天」的陈述都按该工作树的代码与测试名核对过；行号仅作定位，按符号搜索为准）。
 >
@@ -283,6 +285,34 @@ tests/remoteHostCrossStoreContract.test.mjs：every typed or decoded hostId has 
 
 > 门控复现：`$env:PIDECK_INV5_EXPECT_RED=1; node --test tests/crossStoreInv5Counterexamples.test.mjs`（默认绿：1 pass / 5 skipped / 0 fail；门控：2 pass / 4 fail）。
 
+#### 6.3.2 实施记录（2026-10，INV-5a 落地）
+
+| 块 | 落地 | 说明 |
+| --- | --- | --- |
+| 公共原语 | `src/main/persistence/StoreFileLock.ts`（跨进程锁：owner 元数据 + R6 可证陈旧才回收）、`src/main/persistence/storeFileCas.ts`（锁内重读 + `changed` 判定 + 可选 `expectedRevision` 令牌） | `HostRebindTxLock` 改为**委托**同一实现（导出名、稳定码、行为不变），三把锁共用一套 owner/回收规则 |
+| `projects.json` | `ProjectStore` 的每一处写路径改为写事务：持锁 → **重读磁盘** → 在最新内容上重放可重放意图 → 有改动才写 `revision+1`；`readHostRecordLocators` 读**磁盘**并把内存对齐到它 | 稳定码 `PROJECT_STORE_BUSY / _REVISION_CONFLICT / _LOCK_UNWRITABLE`（INV-5c）：三者不可合并，用户动作不同 |
+| `session-catalog.json` | `SessionCatalog` 同形改造；文件新增可选 `revision`（**不 bump `version`**：旧版仍能读，多版本并行不被锁死）；`load()` 的旧数据归一化改为「令牌相等才写回」的 best-effort | 稳定码 `SESSION_CATALOG_BUSY / _REVISION_CONFLICT / _LOCK_UNWRITABLE`；`revision` 值域非法 fail-closed |
+| 引用写入门 | `src/main/remote/RemoteReferenceWriteGuard.ts`：登记/登记会话前复查 host 仍可解析（读磁盘）且无 rebind 事务在跑；删除路径只要求「无事务」 | 三个码各自可行动：`..._REBIND_ACTIVE`（等收敛）、`..._HOST_UNRESOLVED`（重新加主机）、`..._STORE_UNVERIFIED`（修复磁盘）；探测 tx 锁用**真实** bootId/存活探测，不会把活锁删掉 |
+| 跨 store 删除 | `src/main/projects/projectRemoval.ts`：顺序固定为**先清引用、后删项目**，两段都不吞错；三处生产调用点（`projectsIpc` 的删除、Web 端删除、启动孤儿清理改为记日志） | 第一段失败 ⇒ 项目不删（无副作用）；第二段失败 ⇒ 引用已清（不悬空），重试即收敛 |
+| 同源磁盘根 | `src/main/remote/RemoteHostPaths.ts`：`RemoteHostStore` / `SshHostPinStore` / `HostRebindJournal` / 写入门共用一个路径解析入口 | “锁指向另一个根”这类漂移以类型/单一入口防住 |
+
+**验证**（本机 Linux / Node 24.21，工作树在 `c95d999ef` 之上）：
+
+- 门控红例：`PIDECK_INV5_EXPECT_RED=1 node --test tests/crossStoreInv5Counterexamples.test.mjs` → **6 pass / 0 fail**（实施前为 4 红）；默认（不设变量）仍为 **1 pass / 5 skipped / 0 fail**。
+- §6.2 四个新测试：`tests/projectStoreCas.test.mjs`（4）、`tests/sessionCatalogCas.test.mjs`（5）、`tests/remoteHostReferenceInterlock.test.mjs`（5）、`tests/crossStoreEnrollRetireRace.test.mjs`（2）全部绿。
+- §1 列出的全部既有套件（含 `remoteHostCrossStoreContract` / `hostRebind*` / `projectStore*` / `remoteSessionRegistration`）保持绿；定向集 1829 项 1820 pass / 2 fail / 7 skip。
+- **全量基线对照**：`npm test` 实施后 **7587 项 7555 pass / 19 fail / 13 skip**；在干净基线（stash 后同一命令）为 **7571 / 7539 pass / 19 fail / 13 skip**——测试数与通过数各多 16（就是四个新文件的 16 条用例），**失败集合逐条一致**。
+- 两处**判据修正**（§6.3 反例 2 / 3，原断言在原理上不可满足）：① CE-2 原断言同时要求「引用确实写入了」与「该 host 不在 retiredHostIds」，但 retire 会删掉 profile 并只留墓碑，引用一旦写入必然悬空——即本条要禁止的结果；按 §6.3 行 2「修复后的期望（写入在 commit 前被拒）」改写为拒绝 + 稳定码 + 磁盘逐字节不变。② CE-3 原断言在「注入主文件 rename 必失败」之后要求主文件不再残留引用：任何守规矩的整文件写都必须 rename 到那儿（不 rename 等于放弃原子替换），因此不可满足；按 §2.2「具备 5b（可补偿/可重放）的跨 store 删除」改写为「失败带稳定码 + 失败时项目不删（无悬空引用）+ 重放收敛」。两处都是**把断言指向设计自己写的修复后期望**，并补强了「磁盘逐字节不变」。
+- 另有两处**旧测试按新语义修正**（不是放宽）：`tests/remoteSessionRegistration.test.mjs` 的「第二次不写盘」改为按路径只数对 catalog 的写（锁文件 open 不算写盘）；`tests/hostRebindStorePorts.test.mjs` 的「落地但抛异常」用例改用「重跑报 already-applied、`migratedSessions=0`、且 catalog 逐字节不变」——旧断言编码的正是被替换掉的「权威=内存」语义。
+
+**仍未做（不得描述为已闭环）**：
+
+1. **跨 store 协调器与启动 `resume` 未装配**（§1.7 第 6 条、§6.4 第 4 步）：journal 的收敛算法与幂等早有实现，但没有生产入口；因此今天若盘上遗留 journal，引用写入会一直退让（fail-closed）而不会自动收敛。
+2. **旧版本写者靠检测而非阻止**（§1.7 第 10 条）：磁盘 CAS 能发现「别人推过」，但不知道协议的旧版仍会盲目整份重写。
+3. **两 store 之间没有共同提交点**：跨 store 原子性仍等于「journal + 幂等 roll-forward + 可诊断的未收敛态」。
+4. **§1.7 第 7 条（主机目录锁没有 owner）未修**：`remote-hosts.json.lock` 仍无 owner 元数据，崩溃遗留只能人工处理——本轮未动它（改动会有 needs-repair 语义的连带影响）。
+5. **范围**：本次实施未改动 helper 契约、未新增 IPC 通道、未改 renderer；远端功能仍只在开发态门禁后可见。
+
 ### 6.4 实施顺序（若评审通过 A+B）
 
 1. 同源磁盘根（既有设计文档第 25 项）：一个 resolveRemoteHostPaths 入口，避免「锁指向另一个根」；
@@ -291,9 +321,11 @@ tests/remoteHostCrossStoreContract.test.mjs：every typed or decoded hostId has 
 4. 装配协调器与启动收敛（HostRebindCoordinator + 暴露 store 前 resume）；
 5. 反例 1-5 转绿，且第 1 节所有既有测试保持绿。
 
-### 6.5 不可宣称的结论
+### 6.5 可宣称与不可宣称（实施后更新，2026-10）
 
-在第 6.2 全绿之前，任何文档、注释、提交信息不得写「跨 store 事务安全已闭环」「等价于 CAS」「不会产生悬空引用」。当前可宣称的只有：**引用扫描 fail-closed；host store 单实体有跨进程锁 + 磁盘 CAS；rebind 的收敛幂等已实现但未装配**。
+**可宣称**：引用扫描 fail-closed；host store 单实体有跨进程锁 + 磁盘 CAS；两个引用 store 的写事务**建立在锁内重读的最新磁盘内容上**（有稳定冲突码与逐字节不变的拒绝路径）；登记/登记会话/删除在有 rebind 事务或 host 不可解析时拒绝；跨 store 删除不再吞错且不会留下悬空引用（先清引用后删项目）；rebind 的收敛幂等已实现（仍有测试覆盖）。
+
+**不可宣称**（继续成立）：不写「跨 store 事务安全已闭环」；不写「等价于跨进程事务」；不写「不会产生悬空引用」——准确表述是「写入侧不再产生**新**悬空引用，且可检测旧版写入；跨 store 原子性仍等于 journal + 幂等 roll-forward + 可诊断的未收敛态」；启动收敛未装配前，遗留 journal 只能靠 fail-closed 阻塞而不是自动收敛。
 
 ---
 
@@ -307,6 +339,8 @@ tests/remoteHostCrossStoreContract.test.mjs：every typed or decoded hostId has 
 | Q4 | 删项目的两段删除改成什么？ | 保留两段但加显式补偿 + 稳定码；不新造跨 store 事务 API 去假装原子 |
 | Q5 | 是否顺带给主机目录锁补 owner（G5）？ | 建议一并做：与 tx 锁共用 owner 判定，能免掉「只能人工删锁」 |
 | Q6 | 本文与既有 remote-host-cross-store-design.md 的 INV-5 编号关系 | 既有 INV-5 = 本文 5b；本文把 handoff 未交付项定义为 5a；两份文档以本文为准补充，不推翻既有条目 |
+
+**拍板结果（2026-10）**：Q1 **不收窄**（5a 按本文件实现，不把「只保证写入侧不产生新悬空引用」当作交付）；Q2 接受两个引用 store 各自的跨进程锁与新 BUSY 语义；Q3 必须支持多版本并行 ⇒ 旧版写者靠**磁盘 CAS 检测**而不靠锁阻止；Q4 采取「**先清引用、后删被引用者** + 显式稳定码 + 可重放收敛」，而不是给两段各加一套补偿日志（同样的 INV-1 保证，机制更少）；Q5 主机目录锁 owner **本轮未补**（记为遗留，见 §6.3.2）；Q6 以本文为准。
 
 ---
 

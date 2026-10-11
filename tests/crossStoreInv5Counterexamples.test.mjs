@@ -36,6 +36,8 @@ const nodeRequire = createRequire(import.meta.url);
 const { canonicalHostLocatorJson } = loadTsCommonJs("src/main/remote/HostRebindJournal.ts");
 const { encodeProjectStoreSnapshot } = loadTsCommonJs("src/main/projects/projectStoreCodec.ts");
 const { createRemoteHostReferenceRegistry } = loadTsCommonJs("src/main/remote/RemoteHostReferenceSources.ts");
+const { createRemoteReferenceWriteGuard, REMOTE_HOST_REFERENCE_HOST_UNRESOLVED } = loadTsCommonJs("src/main/remote/RemoteReferenceWriteGuard.ts");
+const { removeProjectWithSessions, PROJECT_REMOVAL_SESSION_SWEEP_FAILED } = loadTsCommonJs("src/main/projects/projectRemoval.ts");
 const { RemoteHostStore } = loadTsCommonJs("src/main/remote/RemoteHostStore.ts");
 
 /** 跨 VM realm 的对象比较前先归一化。 */
@@ -58,10 +60,10 @@ function loadSessionCatalog(fsPromises = nodeRequire("node:fs/promises")) {
 	return loadTsCommonJs("src/main/sessions/SessionCatalog.ts", { stubs: { "node:fs/promises": fsPromises, "../logging/sharedLogger": { getAppLogger: () => null } } });
 }
 
-/** 一个真实实例 = 一个「进程」：load 到内存快照后各自 save。 */
-async function openProjectStore(userData) {
+/** 一个真实实例 = 一个「进程」：load 到内存快照后各自 save。`options` 可注入引用写入门。 */
+async function openProjectStore(userData, options = {}) {
 	const { ProjectStore } = loadProjectStore(userData);
-	const store = new ProjectStore();
+	const store = new ProjectStore(undefined, options);
 	await store.load();
 	return store;
 }
@@ -158,14 +160,21 @@ expectedRed("CE-1: a second writer overwrites the first writer's committed remot
 		.filter((project) => project.locator && project.locator.kind === "ssh")
 		.map((project) => project.locator.remotePath)
 		.sort();
-	assert.deepEqual(remotePaths, ["/srv/one", "/srv/two"], "INV-5a：后写者覆盖了先写者已提交的记录（今天预期红）");
+	// 跨 VM realm（loadTsCommonJs 加载的数组）不能用 deepStrictEqual 直接比：原型不同会误判（同文件 CE-4
+	// 的 plain() 就是这个原因）。比较前先归一化成纯 JSON 值。
+	assert.deepEqual(plain(remotePaths), ["/srv/one", "/srv/two"], "INV-5a：后写者必须建立在先写者已提交的内容之上（两条都要在）");
 });
 
 /**
  * K1 6.3 反例 2：登记 vs 退役交错 —— 读 host 存在 → retire 提交 → 写引用。
- * 期望（红）：INV-1 要求任何引用都能解析到 profile；今天 ProjectStore.addRemote 不查 host。
+ *
+ * **判据修正如实记录（2026-10，INV-5 实施时）**：原断言是「引用确实写入了」+「该 id 不在 retiredHostIds 里」。
+ * 这两条在 retire 真的删掉了 profile 之后**互斥**：墓碑只留 id、profile 已从文件里消失，引用若写进去必然
+ * 悬空 —— 那正是 INV-1 要禁止的结果。§6.3「修复后的期望」一列写的就是「写入在 commit 前被拒」，所以按
+ * 那一列改写为：拒绝 + 稳定码 + 磁盘逐字节不变 + 退役事实不被撤销。这比原断言更强：新断言看的是磁盘
+ * 与可解析性，而不是「内存里有没有那个字符串」。
  */
-expectedRed("CE-2: a reference written after the host retired leaves a dangling reference (INV-1)", async (t) => {
+expectedRed("CE-2: a reference written after the host retired is refused, and the retire stands (INV-1)", async (t) => {
 	const userData = await makeTempDir(t, "pideck-inv5-ce2-");
 	// 真 RemoteHostStore + 真引用注册表（扫描真 projects.json / session-catalog.json）。
 	const registry = createRemoteHostReferenceRegistry(join(userData, "session-catalog.json"), join(userData, "projects.json"));
@@ -179,26 +188,41 @@ expectedRed("CE-2: a reference written after the host retired leaves a dangling 
 	const disabled = await hosts.disable(draft.id, hosts.getSnapshot().revision);
 	assert.equal(typeof disabled.disabledAt, "string");
 	await hosts.retire(draft.id, hosts.getSnapshot().revision);
-	const retired = hosts.getSnapshot();
-	assert.equal(retired.retiredHostIds.includes(draft.id), true, "前置：host 已退役");
+	assert.equal(hosts.getSnapshot().retiredHostIds.includes(draft.id), true, "前置：host 已退役");
 
-	// 登记的写入落盘（生产 enroll 端口最终就是 ProjectStore.addRemote 这一句）。
-	const projects = await openProjectStore(userData);
-	await projects.addRemote({ hostId: draft.id, canonicalRemotePath: "/srv/app" });
+	// 登记的写入落盘（生产 enroll 端口最终就是 ProjectStore.addRemote 这一句）—— 门上身之后它必须被拒。
+	const guard = createRemoteReferenceWriteGuard({ userDataDir: userData });
+	const projects = await openProjectStore(userData, { referenceGuard: guard });
+	const projectsPath = join(userData, "projects.json");
+	const before = await readFile(projectsPath);
+	const failure = await captureRejection(() => projects.addRemote({ hostId: draft.id, canonicalRemotePath: "/srv/app" }));
+	assert.equal(failure, REMOTE_HOST_REFERENCE_HOST_UNRESOLVED, "引用写入必须被拒，并给出可行动的稳定码");
+	assert.deepEqual(await readFile(projectsPath), before, "被拒的写入不得改 projects.json（逐字节）");
 
-	const disk = JSON.parse(await readFile(join(userData, "projects.json"), "utf8"));
-	const reference = disk.projects.find((project) => project.locator && project.locator.kind === "ssh");
-	assert.equal(reference.locator.hostId, draft.id, "前置：引用确实写入了");
-	assert.equal(retired.retiredHostIds.includes(reference.locator.hostId), false, "INV-1：引用指向了已退役的 hostId（今天预期红）");
+	const disk = JSON.parse(await readFile(projectsPath, "utf8"));
+	assert.equal(
+		disk.projects.some((project) => project.locator && project.locator.kind === "ssh" && project.locator.hostId === draft.id),
+		false,
+		"INV-1：不得存在指向已退役 hostId 的引用",
+	);
+	assert.equal(hosts.getSnapshot().retiredHostIds.includes(draft.id), true, "退役事实不得被写入侧撤销");
 });
 
 /**
- * K1 6.3 反例 3：删项目 + 删会话，第二段失败被吞。
- * 期望（红）：删项目后不得残留指向它的 catalog 引用；今天生产序列 .catch(() => 0) 把失败变成「0 条」。
+ * K1 6.3 反例 3：删项目 + 删会话，第二段失败。
+ *
+ * **判据修正如实记录（2026-10，INV-5 实施时）**：原断言要求「注入主文件 rename 必失败」之后主文件里不再
+ * 残留该项目的 catalog 引用。这在原理上不可满足：任何守规矩的整文件写都必须 rename 到主文件（不 rename
+ * 就等于放弃原子替换与 .bak 轮换），所以「写失败」与「文件已是新内容」不能同时成立。按 §2.2「需要一个
+ * 具备 5b（可补偿/可重放）的跨 store 删除」改写为三条可判定的判据：
+ *   1. 失败必须**带稳定码抛出**（旧实现 .catch(() => 0) 把失败变成「本来就没有会话」，无警告）；
+ *   2. 失败时不得留下悬空引用：项目**不删**、projects.json 逐字节不变（顺序固定为先清引用、后删项目）；
+ *   3. 故障消失后重放同一调用收敛：catalog 记录清空、项目删除。
  */
-expectedRed("CE-3: a failed session sweep is swallowed and the catalog keeps the deleted project's reference", async (t) => {
+expectedRed("CE-3: a failed session sweep aborts the delete (no dangling reference) and the retry converges", async (t) => {
 	const userData = await makeTempDir(t, "pideck-inv5-ce3-");
 	const catalogPath = join(userData, "session-catalog.json");
+	const projectsPath = join(userData, "projects.json");
 	await writeProjectsFixture(userData, [localProjectFixture(PROJECT_ID, "local", "/srv/local")], 1);
 	await writeCatalogFixture(catalogPath, [catalogEntry()]);
 
@@ -207,14 +231,23 @@ expectedRed("CE-3: a failed session sweep is swallowed and the catalog keeps the
 	const catalog = new SessionCatalog(catalogPath);
 	await catalog.load();
 
-	// 生产序列逐字照抄（src/main/ipc/projectsIpc.ts:108-112，同型见 index.ts:3766-3768）。
-	await projects.remove(PROJECT_ID);
-	const removedSessions = await catalog.removeByProjectId(PROJECT_ID).catch(() => 0);
-	assert.equal(removedSessions, 0, "前置：被吞掉后，返回值与「本来就没有会话」无法区分（无告警）");
+	const before = await readFile(projectsPath);
+	const failure = await captureRejection(() => removeProjectWithSessions({ projects, sessions: catalog }, PROJECT_ID));
+	assert.equal(failure, PROJECT_REMOVAL_SESSION_SWEEP_FAILED, "第二段失败必须显式区分，不得被吞成「0 条」");
+	assert.deepEqual(await readFile(projectsPath), before, "失败时项目不得被删（无悬空引用的前提）");
+	assert.equal(JSON.parse(await readFile(catalogPath, "utf8")).sessions.filter((entry) => entry.projectId === PROJECT_ID).length, 1, "引用仍在，但它指向的项目也仍在 —— 状态自洽，没有悬空引用");
 
-	const durable = JSON.parse(await readFile(catalogPath, "utf8"));
-	const survivors = durable.sessions.filter((entry) => entry.projectId === PROJECT_ID);
-	assert.equal(survivors.length, 0, "INV-5：删项目后不得残留指向它的 catalog 引用（今天预期红）");
+	// 故障消失后重放同一调用：收敛到「没有引用、也没有项目」。
+	const { SessionCatalog: HealedCatalog } = loadSessionCatalog();
+	const healed = new HealedCatalog(catalogPath);
+	await healed.load();
+	await removeProjectWithSessions({ projects, sessions: healed }, PROJECT_ID);
+	assert.equal(JSON.parse(await readFile(catalogPath, "utf8")).sessions.filter((entry) => entry.projectId === PROJECT_ID).length, 0, "重放后引用必须收敛");
+	assert.equal(
+		JSON.parse(await readFile(projectsPath, "utf8")).projects.some((project) => project.id === PROJECT_ID),
+		false,
+		"重放后项目也删掉了",
+	);
 });
 
 /**

@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute } from "node:path";
 import { writeDurableJsonFile } from "../persistence/durableJsonStore";
+import { resolveRemoteHostPaths } from "./RemoteHostPaths";
 import { isHostReferenceRegistryCode } from "./RemoteHostReferenceRegistry";
 import { buildSshConfigQueryArgs, type SshDraftRoute } from "./SshCommandBuilder";
 import { SshHostPinStore, type SshPinAnswer, type SshPinOffer, type VerifiedSshEndpoint } from "./SshHostPinStore";
@@ -131,7 +132,7 @@ async function readSnapshot(filePath: string): Promise<SnapshotRead> {
 
 async function pinIssues(userDataDir: string, snapshot: DecodedRemoteHostSnapshot, pinStore: PinEnrollment, pendingActivationHostId?: string): Promise<string[]> {
 	const issues: string[] = [];
-	const root = join(userDataDir, "ssh-host-keys");
+	const root = resolveRemoteHostPaths(userDataDir).pinRoot;
 	let names: string[] = [];
 	try {
 		const stat = await lstat(root);
@@ -165,7 +166,7 @@ async function pinIssues(userDataDir: string, snapshot: DecodedRemoteHostSnapsho
 /** A held lock is a transient condition (another instance is mutating), not proof of corruption. */
 async function applyLockCheck(userDataDir: string, state: RemoteHostStoreState): Promise<void> {
 	try {
-		await lstat(join(userDataDir, "remote-hosts.json.lock"));
+		await lstat(resolveRemoteHostPaths(userDataDir).hostStoreLockFile);
 		state.status = "needs-repair";
 		state.reasons.push("REMOTE_HOST_LOCK_PRESENT");
 	} catch (error) {
@@ -189,8 +190,8 @@ async function pruneRetiredPins(userDataDir: string, snapshot: DecodedRemoteHost
 }
 
 async function loadState(userDataDir: string, pinStore: PinEnrollment, pendingActivationHostId?: string): Promise<RemoteHostStoreState> {
-	const filePath = join(userDataDir, "remote-hosts.json");
-	const [primary, backup] = await Promise.all([readSnapshot(filePath), readSnapshot(`${filePath}.bak`)]);
+	const paths = resolveRemoteHostPaths(userDataDir);
+	const [primary, backup] = await Promise.all([readSnapshot(paths.hostStoreFile), readSnapshot(paths.hostStoreBackupFile)]);
 	const reasons: string[] = [];
 	let snapshot: DecodedRemoteHostSnapshot = { revision: 0, profiles: [], retiredHostIds: [] };
 	if (primary.kind === "valid" && backup.kind === "valid") {
@@ -219,12 +220,19 @@ export class RemoteHostStore {
 	private state: RemoteHostStoreState;
 	private readonly userDataDir: string;
 	private readonly filePath: string;
+	private readonly backupFilePath: string;
+	private readonly lockPath: string;
 	private readonly pinStore: PinEnrollment;
 	private readonly references?: RemoteHostReferences;
 
 	private constructor(userDataDir: string, pinStore: PinEnrollment, state: RemoteHostStoreState, references?: RemoteHostReferences) {
 		this.userDataDir = userDataDir;
-		this.filePath = join(userDataDir, "remote-hosts.json");
+		// 同源磁盘根（`RemoteHostPaths.ts`）：store 文件 / 备份 / 锁 / pin 根只有一个出处，避免「锁指向
+		// 另一个文件」这类漂移把互斥静默失效。
+		const paths = resolveRemoteHostPaths(userDataDir);
+		this.filePath = paths.hostStoreFile;
+		this.backupFilePath = paths.hostStoreBackupFile;
+		this.lockPath = paths.hostStoreLockFile;
 		this.pinStore = pinStore;
 		this.state = state;
 		this.references = references;
@@ -523,7 +531,7 @@ export class RemoteHostStore {
 	private async mutateRepair<T>(expectedRevision: number, allowedReasons: readonly string[], change: (snapshot: DecodedRemoteHostSnapshot) => Promise<{ next: DecodedRemoteHostSnapshot; result: T; write?: boolean }>): Promise<T> {
 		if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== this.state.revision) throw new Error("REMOTE_HOST_REVISION_CONFLICT");
 		await mkdir(this.userDataDir, { recursive: true });
-		const lockPath = `${this.filePath}.lock`;
+		const lockPath = this.lockPath;
 		let lock: Awaited<ReturnType<typeof open>>;
 		try {
 			lock = await open(lockPath, "wx", 0o600);
@@ -539,7 +547,7 @@ export class RemoteHostStore {
 			if (write === false) return result;
 			const encoded = encodeRemoteHostSnapshot(next.profiles, next.retiredHostIds, expectedRevision + 1);
 			writeStarted = true;
-			await writeDurableJsonFile(this.filePath, `${JSON.stringify(encoded, null, 2)}\n`, { backupPath: `${this.filePath}.bak`, backupFailurePolicy: "throw" });
+			await writeDurableJsonFile(this.filePath, `${JSON.stringify(encoded, null, 2)}\n`, { backupPath: this.backupFilePath, backupFailurePolicy: "throw" });
 			const checked = await loadState(this.userDataDir, this.pinStore);
 			// A repair may legitimately leave reasons it does not own, so only the write landing is
 			// asserted here — claiming "ready" would be exactly the silent-trust failure mode.
@@ -567,7 +575,7 @@ export class RemoteHostStore {
 		if (this.state.status !== "ready") throw new Error("REMOTE_HOST_STORE_NEEDS_REPAIR");
 		if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== this.state.revision) throw new Error("REMOTE_HOST_REVISION_CONFLICT");
 		await mkdir(this.userDataDir, { recursive: true });
-		const lockPath = `${this.filePath}.lock`;
+		const lockPath = this.lockPath;
 		let lock: Awaited<ReturnType<typeof open>>;
 		try {
 			lock = await open(lockPath, "wx", 0o600);
@@ -583,7 +591,7 @@ export class RemoteHostStore {
 			if (write === false) return result;
 			const encoded = encodeRemoteHostSnapshot(next.profiles, next.retiredHostIds, expectedRevision + 1);
 			writeStarted = true;
-			await writeDurableJsonFile(this.filePath, `${JSON.stringify(encoded, null, 2)}\n`, { backupPath: `${this.filePath}.bak`, backupFailurePolicy: "throw" });
+			await writeDurableJsonFile(this.filePath, `${JSON.stringify(encoded, null, 2)}\n`, { backupPath: this.backupFilePath, backupFailurePolicy: "throw" });
 			const checked = await loadState(this.userDataDir, this.pinStore);
 			if (checked.status !== "ready" || checked.revision !== expectedRevision + 1) throw new Error("REMOTE_HOST_STORE_NEEDS_REPAIR");
 			this.state = checked;

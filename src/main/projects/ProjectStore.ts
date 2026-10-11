@@ -10,6 +10,9 @@ import { getAppLogger } from "../logging/sharedLogger";
 import { assertHostRebindRecordIds, canonicalHostLocatorJson, type HostRebindRecordPatch, type HostRebindRecordResult, type HostRebindRecordSnapshot, type HostRebindStorePort } from "../remote/HostRebindJournal";
 import { isEphemeralProjectPath, projectPathKey, sanitizeProjectDisplayName } from "./projectPathPolicy";
 import { loadProjectStore, writeProjectStoreSnapshot } from "./projectStorePersistence";
+import { withStoreFileCas } from "../persistence/storeFileCas";
+import { preserveUnchangedRecords } from "../persistence/preserveRecordIdentity";
+import type { RemoteReferenceWriteGuard } from "../remote/RemoteReferenceWriteGuard";
 
 const CHAT_PROJECT_ID = "builtin-chat";
 const CHAT_PROJECT_NAME = "Chat";
@@ -17,6 +20,15 @@ const CHAT_PROJECT_NAME = "Chat";
 /** 端口边界只允许稳定码（设计 §4.4）：与 codec / shared locator 判据的 ssh 读拒绝同码。 */
 const PROJECT_STORE_NEEDS_REPAIR = "PROJECT_STORE_NEEDS_REPAIR";
 const REBIND_UNKNOWN_OUTCOME = "REMOTE_HOST_REBIND_UNKNOWN_OUTCOME";
+/**
+ * 写事务的三个稳定码（INV-5c，设计 §3.2）。三者不可合并，因为用户/调用方的下一步动作不同：
+ * - BUSY：另一个活着的实例正持有本 store 的锁 ⇒ 稍后重试（不是数据错误）；
+ * - REVISION_CONFLICT：调用方持有的 revision 令牌已过期 ⇒ 重读磁盘后带新令牌重试；
+ * - LOCK_UNWRITABLE：锁文件写不出来（权限/只读盘）⇒ 需要人工处理。
+ */
+export const PROJECT_STORE_BUSY = "PROJECT_STORE_BUSY";
+export const PROJECT_STORE_REVISION_CONFLICT = "PROJECT_STORE_REVISION_CONFLICT";
+export const PROJECT_STORE_LOCK_UNWRITABLE = "PROJECT_STORE_LOCK_UNWRITABLE";
 
 /**
  * 远端项目去重键：`hostId + NUL + canonical remotePath`。
@@ -79,7 +91,10 @@ export class ProjectStore implements HostRebindStorePort {
 	 * 注册表据此对本源做真实扫描（见 `RemoteHostReferenceSources.ts`）。
 	 */
 	readonly canHoldHostReferences = true;
-	private readonly filePath = join(app.getPath("userData"), "projects.json");
+	private readonly userDataDir = app.getPath("userData");
+	private readonly filePath = join(this.userDataDir, "projects.json");
+	/** 跨进程写锁；与 projects.json 同根（同源入口见 `storeFileCas` 与 `resolveRemoteHostPaths`）。 */
+	private readonly lockPath = join(this.userDataDir, "projects.json.lock");
 	private readonly chatPathFile = join(app.getPath("userData"), "chat-path.json");
 	/** 用户从侧栏移除过的目录：启动自动导入不得再按会话 cwd 把它们加回。 */
 	private readonly dismissedFilePath = join(app.getPath("userData"), "dismissed-project-paths.json");
@@ -90,10 +105,24 @@ export class ProjectStore implements HostRebindStorePort {
 	private revision = 0;
 	private writeQueue: Promise<void> = Promise.resolve();
 	private skipNextBackup = false;
+	/** 由 `save()` 在写事务内标记：本次 mutation 需要落盘。事务外调用等于什么都不做。 */
+	private writeRequested = false;
 	private needsRepair = false;
 	private repairError: ProjectStoreNeedsRepairError | null = null;
 
-	constructor(private readonly chooseProjectTitle: () => string = () => "Choose project folder") {}
+	/**
+	 * `options.referenceGuard` 是引用写入门（INV-1，设计 §3.1 方案 A）：远端项目登记前，在写事务里
+	 * 复查 hostId 仍能解析到 profile、且没有跨 store 事务在跑。生产装配必须注入（`main/index.ts`）；
+	 * 不注入时不做该项复查 —— 只允许纯本地场景与测试这样用。
+	 */
+	constructor(
+		private readonly chooseProjectTitle: () => string = () => "Choose project folder",
+		options: { readonly referenceGuard?: RemoteReferenceWriteGuard } = {},
+	) {
+		this.referenceGuard = options.referenceGuard;
+	}
+
+	private readonly referenceGuard: RemoteReferenceWriteGuard | undefined;
 
 	async load() {
 		let persisted: Awaited<ReturnType<typeof loadProjectStore>>;
@@ -116,12 +145,16 @@ export class ProjectStore implements HostRebindStorePort {
 		// 先读取用户自定义的聊天目录（若存在），再据此修正内置聊天项目路径。
 		await this.loadChatProjectPath();
 		await this.loadDismissedPaths();
-		const chatChanged = this.ensureChatProject();
-		const orderChanged = this.ensureSortOrder();
-		const ephemeralRemoved = this.dropEphemeralProjects();
-		const changed = chatChanged || orderChanged || ephemeralRemoved.length > 0 || persisted.needsRewrite;
 		await mkdir(this.chatProjectPath, { recursive: true });
-		if (changed) await this.save();
+		// 加载期归一化（聊天项目 / 排序 / 临时目录清理）必须写在**磁盘最新内容**之上：它们整份重写
+		// 文件（含 hostId 引用），照着内存快照写就等于把另一个实例已提交的登记丢掉（INV-5a）。
+		const ephemeralRemoved = await this.commitWrite(() => {
+			const chatChanged = this.ensureChatProject();
+			const orderChanged = this.ensureSortOrder();
+			const removed = this.dropEphemeralProjects();
+			if (chatChanged || orderChanged || removed.length > 0 || persisted.needsRewrite) void this.save();
+			return removed;
+		});
 		if (ephemeralRemoved.length > 0) await this.saveDismissedPaths();
 		return this.list();
 	}
@@ -147,21 +180,23 @@ export class ProjectStore implements HostRebindStorePort {
 	 */
 	async setChatProjectPath(path: string) {
 		this.assertWritable();
-		const normalized = this.normalizeProjectPath(path);
-		// 边界保护：聊天目录不允许指向已注册的普通项目目录（issue #149）。否则聊天项目与
-		// 该项目同路径并存，重启后 ensureChatProject 曾把该项目整条吸收，且「添加项目」选
-		// 同一目录只会返回 builtin-chat，项目区永远不再出现新项目。
-		const occupied = this.projects.find((project) => !this.isChatProject(project) && isLocalProject(project) && this.sameProjectPath(project.path, normalized));
-		if (occupied) {
-			throw new Error("CHAT_PATH_OVERLAPS_PROJECT");
-		}
-		this.chatProjectPath = normalized;
-		await writeFile(this.chatPathFile, JSON.stringify({ path: normalized }), "utf8");
-		const chat = this.projects.find((project) => this.isChatProject(project) || project.id === CHAT_PROJECT_ID);
-		if (chat && isLocalProject(chat)) chat.path = normalized;
-		await mkdir(normalized, { recursive: true });
-		await this.save();
-		return chat ?? null;
+		return this.commitWrite(async () => {
+			const normalized = this.normalizeProjectPath(path);
+			// 边界保护：聊天目录不允许指向已注册的普通项目目录（issue #149）。否则聊天项目与
+			// 该项目同路径并存，重启后 ensureChatProject 曾把该项目整条吸收，且「添加项目」选
+			// 同一目录只会返回 builtin-chat，项目区永远不再出现新项目。
+			const occupied = this.projects.find((project) => !this.isChatProject(project) && isLocalProject(project) && this.sameProjectPath(project.path, normalized));
+			if (occupied) {
+				throw new Error("CHAT_PATH_OVERLAPS_PROJECT");
+			}
+			this.chatProjectPath = normalized;
+			await writeFile(this.chatPathFile, JSON.stringify({ path: normalized }), "utf8");
+			const chat = this.projects.find((project) => this.isChatProject(project) || project.id === CHAT_PROJECT_ID);
+			if (chat && isLocalProject(chat)) chat.path = normalized;
+			await mkdir(normalized, { recursive: true });
+			await this.save();
+			return chat ?? null;
+		});
 	}
 
 	private rememberDismissedPath(path: string) {
@@ -227,42 +262,44 @@ export class ProjectStore implements HostRebindStorePort {
 	/** 添加项目，可指定所属环境（缺省 windows） */
 	async add(path: string, worktreeParentId?: string, environment?: "windows" | "wsl") {
 		this.assertWritable();
-		const normalizedPath = this.normalizeProjectPath(path);
-		// 内置聊天项目不参与「同路径即已有项目」匹配（issue #149）：用户挑选的目录即使与
-		// 聊天目录相同，也必须创建真正的项目记录——否则 add() 永远返回 builtin-chat，
-		// 项目区不再出现新项目，侧栏只剩聊天区。
-		const existing = this.projects.find((project) => !this.isChatProject(project) && isLocalProject(project) && this.sameProjectPath(project.path, normalizedPath));
-		if (existing && isLocalProject(existing)) {
-			existing.path = normalizedPath;
-			existing.lastOpenedAt = Date.now();
-			// 外部已有 worktree 可能曾经作为顶级项目加入；开启工作区后需要补上父子关系。
-			if (worktreeParentId && existing.id !== worktreeParentId) {
-				existing.worktreeParentId = worktreeParentId;
-				existing.pinned = false;
+		return this.commitWrite(async () => {
+			const normalizedPath = this.normalizeProjectPath(path);
+			// 内置聊天项目不参与「同路径即已有项目」匹配（issue #149）：用户挑选的目录即使与
+			// 聊天目录相同，也必须创建真正的项目记录——否则 add() 永远返回 builtin-chat，
+			// 项目区不再出现新项目，侧栏只剩聊天区。
+			const existing = this.projects.find((project) => !this.isChatProject(project) && isLocalProject(project) && this.sameProjectPath(project.path, normalizedPath));
+			if (existing && isLocalProject(existing)) {
+				existing.path = normalizedPath;
+				existing.lastOpenedAt = Date.now();
+				// 外部已有 worktree 可能曾经作为顶级项目加入；开启工作区后需要补上父子关系。
+				if (worktreeParentId && existing.id !== worktreeParentId) {
+					existing.worktreeParentId = worktreeParentId;
+					existing.pinned = false;
+				}
+				this.forgetDismissedPath(normalizedPath);
+				await this.save();
+				await this.saveDismissedPaths();
+				return existing;
 			}
+
+			const project: LocalProject = {
+				id: randomUUID(),
+				name: basename(normalizedPath) || normalizedPath,
+				path: normalizedPath,
+				lastOpenedAt: Date.now(),
+				sortOrder: this.nextSortOrder(),
+				// 兼容旧数据：environment 缺省视为 windows
+				environment: environment || "windows",
+				...(worktreeParentId ? { worktreeParentId } : {}),
+			};
+
+			this.projects.push(project);
+			// 用户再次手动添加同一目录：从「已移除」名单拿掉，允许以后自动导入。
 			this.forgetDismissedPath(normalizedPath);
 			await this.save();
 			await this.saveDismissedPaths();
-			return existing;
-		}
-
-		const project: LocalProject = {
-			id: randomUUID(),
-			name: basename(normalizedPath) || normalizedPath,
-			path: normalizedPath,
-			lastOpenedAt: Date.now(),
-			sortOrder: this.nextSortOrder(),
-			// 兼容旧数据：environment 缺省视为 windows
-			environment: environment || "windows",
-			...(worktreeParentId ? { worktreeParentId } : {}),
-		};
-
-		this.projects.push(project);
-		// 用户再次手动添加同一目录：从「已移除」名单拿掉，允许以后自动导入。
-		this.forgetDismissedPath(normalizedPath);
-		await this.save();
-		await this.saveDismissedPaths();
-		return project;
+			return project;
+		});
 	}
 
 	/**
@@ -277,44 +314,53 @@ export class ProjectStore implements HostRebindStorePort {
 	 */
 	async addRemote(input: { hostId: string; canonicalRemotePath: string; name?: string }): Promise<Project> {
 		this.assertWritable();
-		// 写入侧即用与 codec / 引用扫描同一个纯判据（shared `readSshProjectLocator`）：非法 locator
-		// 绝不能先写盘、再等加载时被 codec 拒掉 —— 那会让整份 projects.json 进 needs-repair，
-		// 连带同一文件里的合法本地项目一起不可用。
-		const locator = readSshProjectLocator({ kind: "ssh", hostId: input?.hostId, remotePath: input?.canonicalRemotePath });
-		if (!locator) {
-			throw new Error("REMOTE_PROJECT_TARGET_INVALID");
-		}
-		const key = remoteProjectKey(locator.hostId, locator.remotePath);
-		const existing = this.projects.find((project) => isRemoteProject(project) && remoteProjectKey(project.locator.hostId, project.locator.remotePath) === key);
-		if (existing) {
-			existing.lastOpenedAt = Date.now();
+		return this.commitWrite(async () => {
+			// 写入侧即用与 codec / 引用扫描同一个纯判据（shared `readSshProjectLocator`）：非法 locator
+			// 绝不能先写盘、再等加载时被 codec 拒掉 —— 那会让整份 projects.json 进 needs-repair，
+			// 连带同一文件里的合法本地项目一起不可用。
+			const locator = readSshProjectLocator({ kind: "ssh", hostId: input?.hostId, remotePath: input?.canonicalRemotePath });
+			if (!locator) {
+				throw new Error("REMOTE_PROJECT_TARGET_INVALID");
+			}
+			// INV-1：引用落盘前复查主机仍可解析、且没有跨 store 事务在跑。检查跑在写事务内（已持锁）。
+			// 未注入门时（纯本地场景/测试）不做该项复查 —— 生产装配必须注入，见构造器注释。
+			if (this.referenceGuard) await this.referenceGuard.assertHostReferenceWritable(locator.hostId);
+			const key = remoteProjectKey(locator.hostId, locator.remotePath);
+			const existing = this.projects.find((project) => isRemoteProject(project) && remoteProjectKey(project.locator.hostId, project.locator.remotePath) === key);
+			if (existing) {
+				existing.lastOpenedAt = Date.now();
+				await this.save();
+				return existing;
+			}
+			const project: Project = {
+				id: randomUUID(),
+				name: input.name && input.name.trim() ? input.name.trim() : basename(locator.remotePath) || locator.remotePath,
+				locator,
+				lastOpenedAt: Date.now(),
+				sortOrder: this.nextSortOrder(),
+			};
+			this.projects.push(project);
 			await this.save();
-			return existing;
-		}
-		const project: Project = {
-			id: randomUUID(),
-			name: input.name && input.name.trim() ? input.name.trim() : basename(locator.remotePath) || locator.remotePath,
-			locator,
-			lastOpenedAt: Date.now(),
-			sortOrder: this.nextSortOrder(),
-		};
-		this.projects.push(project);
-		await this.save();
-		return project;
+			return project;
+		});
 	}
 
 	async remove(id: string) {
 		this.assertWritable();
-		const removed = this.projects.filter((project) => project.id === id || project.worktreeParentId === id);
-		// 删除父项目时同步移除子项目记录，避免留下不可见的孤儿 worktree 项目。
-		this.projects = this.projects.filter((project) => (project.id !== id && project.worktreeParentId !== id) || this.isChatProject(project));
-		for (const project of removed) {
-			if (!this.isChatProject(project) && isLocalProject(project) && project.path) {
-				this.rememberDismissedPath(project.path);
+		return this.commitWrite(async () => {
+			// 事务中途删记录会让收敛侧只能报 RECORD_MISSING（需人工）：有 rebind 事务在跑时退让拒绝。
+			if (this.referenceGuard) await this.referenceGuard.assertRebindIdle();
+			const removed = this.projects.filter((project) => project.id === id || project.worktreeParentId === id);
+			// 删除父项目时同步移除子项目记录，避免留下不可见的孤儿 worktree 项目。
+			this.projects = this.projects.filter((project) => (project.id !== id && project.worktreeParentId !== id) || this.isChatProject(project));
+			for (const project of removed) {
+				if (!this.isChatProject(project) && isLocalProject(project) && project.path) {
+					this.rememberDismissedPath(project.path);
+				}
 			}
-		}
-		await this.save();
-		await this.saveDismissedPaths();
+			await this.save();
+			await this.saveDismissedPaths();
+		});
 	}
 
 	/**
@@ -327,14 +373,16 @@ export class ProjectStore implements HostRebindStorePort {
 	 */
 	async rename(id: string, name: string): Promise<Project | null> {
 		this.assertWritable();
-		const project = this.get(id);
-		if (!project) return null;
-		if (this.isChatProject(project) || (isLocalProject(project) && project.worktreeParentId) || isRemoteProject(project)) {
-			throw new Error("PROJECT_RENAME_NOT_ALLOWED");
-		}
-		project.name = sanitizeProjectDisplayName(name);
-		await this.save();
-		return project;
+		return this.commitWrite(async () => {
+			const project = this.get(id);
+			if (!project) return null;
+			if (this.isChatProject(project) || (isLocalProject(project) && project.worktreeParentId) || isRemoteProject(project)) {
+				throw new Error("PROJECT_RENAME_NOT_ALLOWED");
+			}
+			project.name = sanitizeProjectDisplayName(name);
+			await this.save();
+			return project;
+		});
 	}
 
 	/** 用户已从侧栏移除的目录（供启动自动导入判断是否按 cwd 重建项目）。 */
@@ -366,24 +414,26 @@ export class ProjectStore implements HostRebindStorePort {
 
 	async reorder(projectIds: string[]) {
 		this.assertWritable();
-		const movableProjectIds = projectIds.filter((id) => id !== CHAT_PROJECT_ID);
-		const orderById = new Map(movableProjectIds.map((id, index) => [id, index]));
-		const tailStart = movableProjectIds.length;
-		const currentOrder = this.list()
-			.filter((project) => !this.isChatProject(project))
-			.map((project) => project.id);
+		return this.commitWrite(async () => {
+			const movableProjectIds = projectIds.filter((id) => id !== CHAT_PROJECT_ID);
+			const orderById = new Map(movableProjectIds.map((id, index) => [id, index]));
+			const tailStart = movableProjectIds.length;
+			const currentOrder = this.list()
+				.filter((project) => !this.isChatProject(project))
+				.map((project) => project.id);
 
-		this.projects.forEach((project) => {
-			if (this.isChatProject(project)) {
-				project.sortOrder = -1;
-				return;
-			}
-			const explicitOrder = orderById.get(project.id);
-			project.sortOrder = explicitOrder ?? tailStart + currentOrder.indexOf(project.id);
+			this.projects.forEach((project) => {
+				if (this.isChatProject(project)) {
+					project.sortOrder = -1;
+					return;
+				}
+				const explicitOrder = orderById.get(project.id);
+				project.sortOrder = explicitOrder ?? tailStart + currentOrder.indexOf(project.id);
+			});
+
+			await this.save();
+			return this.list();
 		});
-
-		await this.save();
-		return this.list();
 	}
 
 	private ensureChatProject() {
@@ -463,41 +513,45 @@ export class ProjectStore implements HostRebindStorePort {
 	 */
 	async ensureExternalSessionsProject(name: string): Promise<Project> {
 		this.assertWritable();
-		const existing = this.projects.find((project) => project.id === ProjectStore.EXTERNAL_PROJECT_ID);
-		if (existing) {
-			// 语言切换等场景下名称可能变化：就地更新，保持 id 稳定（catalog 引用不失效）。
-			const changed = existing.name !== name || existing.pinned !== true;
-			existing.name = name;
-			existing.pinned = true;
-			if (changed) await this.save();
-			return existing;
-		}
-		const project: LocalProject = {
-			id: ProjectStore.EXTERNAL_PROJECT_ID,
-			name,
-			path: join(app.getPath("userData"), "external-sessions"),
-			lastOpenedAt: Date.now(),
-			pinned: true,
-			sortOrder: this.nextSortOrder(),
-		};
-		await mkdir(project.path, { recursive: true });
-		this.projects.push(project);
-		await this.save();
-		return project;
+		return this.commitWrite(async () => {
+			const existing = this.projects.find((project) => project.id === ProjectStore.EXTERNAL_PROJECT_ID);
+			if (existing) {
+				// 语言切换等场景下名称可能变化：就地更新，保持 id 稳定（catalog 引用不失效）。
+				const changed = existing.name !== name || existing.pinned !== true;
+				existing.name = name;
+				existing.pinned = true;
+				if (changed) await this.save();
+				return existing;
+			}
+			const project: LocalProject = {
+				id: ProjectStore.EXTERNAL_PROJECT_ID,
+				name,
+				path: join(app.getPath("userData"), "external-sessions"),
+				lastOpenedAt: Date.now(),
+				pinned: true,
+				sortOrder: this.nextSortOrder(),
+			};
+			await mkdir(project.path, { recursive: true });
+			this.projects.push(project);
+			await this.save();
+			return project;
+		});
 	}
 
 	async toggleWorktreeEnabled(id: string) {
 		this.assertWritable();
-		const project = this.get(id);
-		if (!project) return null;
-		project.worktreeEnabled = !project.worktreeEnabled;
-		// 关闭工作区模式时，清除已注册的 worktree 子项目记录，避免侧栏不再展示它们后
-		// 仍残留在 projects.json 中成为孤儿数据。仅移除项目记录，不删除物理 worktree 目录。
-		if (!project.worktreeEnabled) {
-			this.clearWorktreeChildren(id);
-		}
-		await this.save();
-		return project;
+		return this.commitWrite(async () => {
+			const project = this.get(id);
+			if (!project) return null;
+			project.worktreeEnabled = !project.worktreeEnabled;
+			// 关闭工作区模式时，清除已注册的 worktree 子项目记录，避免侧栏不再展示它们后
+			// 仍残留在 projects.json 中成为孤儿数据。仅移除项目记录，不删除物理 worktree 目录。
+			if (!project.worktreeEnabled) {
+				this.clearWorktreeChildren(id);
+			}
+			await this.save();
+			return project;
+		});
 	}
 
 	/** 移除指定父项目下的所有 worktree 子项目记录（不删除物理目录） */
@@ -517,13 +571,32 @@ export class ProjectStore implements HostRebindStorePort {
 	async readHostRecordLocators(recordIds: readonly string[]): Promise<readonly HostRebindRecordSnapshot[]> {
 		this.assertHostRebindUsable();
 		assertHostRebindRecordIds(recordIds);
-		// 同步走一趟内存快照：整批读是同一个一致性视图（本函数内没有 await）。
-		return recordIds.map((recordId) => {
-			const project = this.projects.find((candidate) => candidate.id === recordId);
-			if (!project) return { recordId };
-			const locator = isRemoteProject(project) ? project.locator : projectLocatorFromLegacy({ path: project.path, environment: project.environment, wslDistro: project.wslDistro });
-			return { recordId, locator: canonicalHostLocatorJson(locator) };
-		});
+		// 权威是**磁盘**（INV-5a / §1.7 第 8 条）：内存快照可能落后于另一个实例（或本进程那次“写抛异常但已落地”）
+		// 已提交的写入，拿它声明 before/after 会让写端口“看不见”别人改过的记录并把它整份覆盖（CE-4）。
+		// 读与写走同一个进程内队列，并把内存对齐到刚读到的内容：读不能与在飞的写事务交错，
+		// 也不能让旧快照继续当权威。
+		const operation = this.writeQueue
+			.catch(() => undefined)
+			.then(async () => {
+				let fresh: Project[];
+				try {
+					fresh = (await this.readFreshSnapshot()).state;
+				} catch {
+					throw new Error(PROJECT_STORE_NEEDS_REPAIR);
+				}
+				// 同步走一趟刚读到的快照：整批读是同一个一致性视图（本回调内没有 await）。
+				return recordIds.map((recordId) => {
+					const project = fresh.find((candidate) => candidate.id === recordId);
+					if (!project) return { recordId };
+					const locator = isRemoteProject(project) ? project.locator : projectLocatorFromLegacy({ path: project.path, environment: project.environment, wslDistro: project.wslDistro });
+					return { recordId, locator: canonicalHostLocatorJson(locator) };
+				});
+			});
+		this.writeQueue = operation.then(
+			() => undefined,
+			() => undefined,
+		);
+		return operation;
 	}
 
 	/**
@@ -537,39 +610,41 @@ export class ProjectStore implements HostRebindStorePort {
 		this.assertHostRebindUsable();
 		if (!Array.isArray(patches)) throw new Error(REBIND_UNKNOWN_OUTCOME);
 		if (patches.length === 0) return [];
-		const outcomes: HostRebindRecordResult["outcome"][] = [];
-		const pending: { project: Project; hostId: string }[] = [];
-		for (const [index, patch] of patches.entries()) {
-			const project = this.projects.find((candidate) => candidate.id === patch.recordId);
-			if (!project || !isRemoteProject(project)) {
-				outcomes.push("changed");
-				continue;
+		return this.commitWrite(async () => {
+			const outcomes: HostRebindRecordResult["outcome"][] = [];
+			const pending: { project: Project; hostId: string }[] = [];
+			for (const [index, patch] of patches.entries()) {
+				const project = this.projects.find((candidate) => candidate.id === patch.recordId);
+				if (!project || !isRemoteProject(project)) {
+					outcomes.push("changed");
+					continue;
+				}
+				const current = canonicalHostLocatorJson(project.locator);
+				if (current === patch.afterLocator) {
+					outcomes.push("already-applied");
+					continue;
+				}
+				if (current !== patch.beforeLocator) {
+					outcomes.push("changed");
+					continue;
+				}
+				const target = rebindTargetLocator(patch.beforeLocator, patch.afterLocator);
+				if (!target) {
+					outcomes.push("changed");
+					continue;
+				}
+				outcomes.push("applied");
+				pending.push({ project, hostId: target.hostId });
 			}
-			const current = canonicalHostLocatorJson(project.locator);
-			if (current === patch.afterLocator) {
-				outcomes.push("already-applied");
-				continue;
+			if (outcomes.some((outcome) => outcome !== "applied" && outcome !== "already-applied")) {
+				return patches.map((patch, index) => ({ recordId: patch.recordId, outcome: outcomes[index] === "applied" ? "changed" : outcomes[index] }));
 			}
-			if (current !== patch.beforeLocator) {
-				outcomes.push("changed");
-				continue;
+			for (const item of pending) {
+				if (isRemoteProject(item.project)) item.project.locator = { ...item.project.locator, hostId: item.hostId };
 			}
-			const target = rebindTargetLocator(patch.beforeLocator, patch.afterLocator);
-			if (!target) {
-				outcomes.push("changed");
-				continue;
-			}
-			outcomes.push("applied");
-			pending.push({ project, hostId: target.hostId });
-		}
-		if (outcomes.some((outcome) => outcome !== "applied" && outcome !== "already-applied")) {
-			return patches.map((patch, index) => ({ recordId: patch.recordId, outcome: outcomes[index] === "applied" ? "changed" : outcomes[index] }));
-		}
-		for (const item of pending) {
-			if (isRemoteProject(item.project)) item.project.locator = { ...item.project.locator, hostId: item.hostId };
-		}
-		await this.save();
-		return patches.map((patch, index) => ({ recordId: patch.recordId, outcome: outcomes[index] === "applied" ? "applied" : "already-applied" }));
+			await this.save();
+			return patches.map((patch, index) => ({ recordId: patch.recordId, outcome: outcomes[index] === "applied" ? "applied" : "already-applied" }));
+		});
 	}
 
 	/** 端口边界只允许稳定码：needs-repair 时读写都必须 fail closed，不能答成"没有记录"或"没有补丁"。 */
@@ -613,22 +688,65 @@ export class ProjectStore implements HostRebindStorePort {
 		return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
 	}
 
-	private save(): Promise<void> {
-		this.assertWritable();
-		const snapshot = this.projects.map((project) => ({ ...project }));
+	/**
+	 * 事务内的“需要落盘”标记：真正的写入由外层 `commitWrite` 在取得锁、重读磁盘之后执行。
+	 * 方法名与返回值保持不变，让各 mutator 里既有的 `await this.save()` 保持字面语义。
+	 */
+	private async save(): Promise<void> {
+		this.writeRequested = true;
+	}
+
+	/**
+	 * 一次写事务（INV-5a）：取得跨进程锁 → 重读磁盘最新快照（顺带把内存对齐到它）→ 在最新状态上执行
+	 * `body`（body 照旧直接改 `this.projects`，需要落盘时调 `this.save()`）→ 有改动才写 revision+1。
+	 *
+	 * 为什么不是“比一下 revision 不合就拒绝”：`addRemote` / `add` / `remove` 这类操作本身是**可重放的
+	 * 意图**（“把这个远端目录登记为项目”），在最新内容上重放既保住并发写者的记录，又不需要调用方重试。
+	 * 需要严格令牌的写法（`expectedRevision`）由 `storeFileCas` 提供，两者共用同一把锁与同一套码。
+	 *
+	 * 事务内的 `body` 持有锁：不得等待用户输入或长时间 I/O（选目录弹框在事务外）。
+	 */
+	private commitWrite<T>(body: () => T | Promise<T>): Promise<T> {
 		const operation = this.writeQueue
 			.catch(() => undefined)
 			.then(async () => {
 				this.assertWritable();
-				const nextRevision = this.revision + 1;
-				await writeProjectStoreSnapshot(this.filePath, snapshot, nextRevision, { skipBackup: this.skipNextBackup });
-				this.revision = nextRevision;
-				this.skipNextBackup = false;
+				return withStoreFileCas<Project[], T>({
+					rootDir: this.userDataDir,
+					lockPath: this.lockPath,
+					unwritableCode: PROJECT_STORE_LOCK_UNWRITABLE,
+					busyCode: PROJECT_STORE_BUSY,
+					conflictCode: PROJECT_STORE_REVISION_CONFLICT,
+					readFresh: () => this.readFreshSnapshot(),
+					mutate: async () => {
+						this.writeRequested = false;
+						const value = await body();
+						return { state: this.projects, changed: this.writeRequested, value };
+					},
+					write: (state, revision) => this.writeSnapshot(state, revision),
+				});
 			});
 		this.writeQueue = operation.then(
 			() => undefined,
 			() => undefined,
 		);
 		return operation;
+	}
+
+	/** 锁内重读磁盘并把内存对齐到它（另一个实例可能刚提交过）。读不出来就 fail closed，不猜。 */
+	private async readFreshSnapshot(): Promise<{ state: Project[]; revision: number }> {
+		const persisted = await loadProjectStore(this.filePath);
+		// 内容未变的记录保留原对象：写事务重读磁盘会重建对象图，而调用方（与旧行为）依赖“同一记录还是
+		// 同一个对象/同一组键”。见 preserveUnchangedRecords 的说明。
+		this.projects = preserveUnchangedRecords(this.projects, persisted.projects);
+		this.revision = persisted.revision;
+		this.skipNextBackup = persisted.skipNextBackup;
+		return { state: this.projects, revision: persisted.revision };
+	}
+
+	private async writeSnapshot(state: Project[], revision: number): Promise<void> {
+		await writeProjectStoreSnapshot(this.filePath, state, revision, { skipBackup: this.skipNextBackup });
+		this.revision = revision;
+		this.skipNextBackup = false;
 	}
 }

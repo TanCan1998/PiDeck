@@ -13,6 +13,7 @@ import type { AppLogger } from "../logging/AppLogger";
 import type { ProjectResourceManager } from "../projects/ProjectResourceManager";
 import type { SessionCatalog } from "../sessions/SessionCatalog";
 import { attachProjectPresence } from "../projects/projectPresence";
+import { removeProjectWithSessions } from "../projects/projectRemoval";
 import { registerProjectResourceIpc } from "./projectResourceIpc";
 import { normalizeSelectedWslProjectPath, toWindowsHostPath, type WslEnvironment } from "../wsl/WslPaths";
 
@@ -105,13 +106,9 @@ export function registerProjectsIpc({ projectStore, settingsStore, gitService, w
 		}
 		const removed = projectStore.get(id);
 		const childIds = removed ? projectStore.listWorktreeChildren(removed.id).map((child) => child.id) : [];
-		await projectStore.remove(id);
-		// 侧栏项目删了，catalog 映射也必须走：否则启动 DSH 自动导入按 cwd 再把项目/会话加回来。
-		if (sessionCatalog) {
-			for (const projectId of [id, ...childIds]) {
-				await sessionCatalog.removeByProjectId(projectId).catch(() => 0);
-			}
-		}
+		// 先清 catalog 引用、再删项目（顺序与理由见 removeProjectWithSessions）：两个 store 没有共同
+		// 提交点，只有这个顺序保证任一段失败时都不会留下指向已删项目的倒挂引用；失败不再被吞成“0 条”。
+		await removeProjectWithSessions({ projects: projectStore, sessions: sessionCatalog }, id, { childProjectIds: childIds });
 		void appLogger.info("project", "Project removed", { projectId: id, path: removed?.path });
 		return getVisibleProjects();
 	});

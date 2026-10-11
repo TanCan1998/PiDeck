@@ -188,6 +188,7 @@ import type {
 } from "../shared/types";
 import { msUntilNextThemeBoundary, resolveAppColorScheme } from "../shared/themeSchedule";
 import { ProjectStore } from "./projects/ProjectStore";
+import { removeProjectWithSessions } from "./projects/projectRemoval";
 import { shouldAutoRegisterForeignCwd } from "./projects/projectPathPolicy";
 import { defaultPathCheck } from "./projects/projectPresence";
 import { FileSystemService } from "./fs/FileSystemService";
@@ -268,6 +269,7 @@ import { createRemoteHostConnectionService } from "./remote/RemoteHostConnection
 import { createSshClientRuntime, resolvePosixSshClient } from "./remote/SshClientRuntime";
 import { matchRemoteSessionProject } from "./remote/remoteSessionProjectMatch";
 import { openRemoteHostCatalogView } from "./remote/RemoteHostCatalogView";
+import { createRemoteReferenceWriteGuard } from "./remote/RemoteReferenceWriteGuard";
 import { registerUsageStatsIpc } from "./ipc/usageStatsIpc";
 import { UsageStatsService } from "./usageStats/UsageStatsService";
 import { constrainWindowBoundsToWorkArea, type LastWindowBounds, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, readLastWindowBounds, saveLastWindowBounds } from "./windowState";
@@ -3268,7 +3270,10 @@ app
 		// 未拿到同版本主实例锁时不要继续初始化，避免第二进程短暂闪窗。
 		if (singleInstanceEnabled && !gotSingleInstanceLock) return;
 
-		projectStore = new ProjectStore(() => mainCopy("dialog.chooseProjectFolder"));
+		// 引用写入门（INV-1 / INV-12 写入侧）：远端项目与会话登记前复查 hostId 仍能解析到 profile、
+		// 且没有跨 store rebind 事务在跑。门自己读 remote-hosts.json，不依赖主进程缓存；构造本身不做 I/O。
+		const remoteReferenceWriteGuard = createRemoteReferenceWriteGuard({ userDataDir: app.getPath("userData") });
+		projectStore = new ProjectStore(() => mainCopy("dialog.chooseProjectFolder"), { referenceGuard: remoteReferenceWriteGuard });
 		fileSystemService = new FileSystemService();
 		sessionScanner = new SessionScanner(mainCopy);
 		codexSessionImporter = new CodexSessionImporter(mainCopy);
@@ -3773,10 +3778,8 @@ app
 			deleteProject: async (projectId) => {
 				if (!projectStore.get(projectId) || projectStore.get(projectId)?.kind === "chat") return false;
 				const childIds = projectStore.listWorktreeChildren(projectId).map((child) => child.id);
-				await projectStore.remove(projectId);
-				for (const id of [projectId, ...childIds]) {
-					await sessionCatalog.removeByProjectId(id).catch(() => 0);
-				}
+				// 与 IPC 同一顺序：先清 catalog 引用再删项目（见 removeProjectWithSessions）。
+				await removeProjectWithSessions({ projects: projectStore, sessions: sessionCatalog }, projectId, { childProjectIds: childIds });
 				return true;
 			},
 			listModels: async (force?: boolean) => {
@@ -4046,6 +4049,8 @@ app
 			// （不再永远 Untitled）；同一次有界读头部顺带校验首条记录是否带 type 头，
 			// 把 pi-subagents transcript 等无 type 头的产物挡在 catalog 之外（#168）。
 			(filePath, options) => sessionScanner.inferSessionNameAndValidity(filePath, options),
+			// 远端会话登记（ensureRemoteSession）也写 hostId 引用，用同一道门。
+			{ referenceGuard: remoteReferenceWriteGuard },
 		);
 		await sessionCatalog.load();
 		// 多后端网关装配：pi + dsh（DSH 在窗口创建后后台预热，失败时按需重试）。
@@ -4346,7 +4351,10 @@ app
 						.filter((projectId) => !knownProjectIds.has(projectId)),
 				);
 				for (const projectId of orphanProjectIds) {
-					await sessionCatalog.removeByProjectId(projectId).catch(() => 0);
+					// 启动期孤儿清理是 best-effort（下一次启动会重试），但不能静默：失败必须留一条可见日志。
+					await sessionCatalog.removeByProjectId(projectId).catch((error: unknown) => {
+						appLogger.warn("project", "Orphan session catalog sweep failed", { projectId, cause: error instanceof Error ? error.message : String(error) });
+					});
 				}
 				broadcastVisibleProjects();
 				// 项目表就绪后再扫 DSH_HOME：cwd 才能匹配已注册项目；不启动 host。

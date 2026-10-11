@@ -17,9 +17,10 @@
  * lists stay defined here, once.
  */
 import { lstat, readFile, unlink } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute } from "node:path";
 import { convergeRebindJournal, isRebindLocator, isRebindRecordId } from "./HostRebindConvergence";
 import { REBIND_TX_LOCK_UNWRITABLE, acquireRebindTxLock, currentBootId, defaultIsProcessAlive } from "./HostRebindTxLock";
+import { resolveRemoteHostPaths } from "./RemoteHostPaths";
 import { writeDurableJsonFile } from "../persistence/durableJsonStore";
 
 export const REBIND_STAGES = ["prepared", "source-disabled", "projects-written", "sessions-written", "source-retired", "committed"] as const;
@@ -277,8 +278,9 @@ export class HostRebindJournal {
 	constructor(options: HostRebindJournalOptions) {
 		if (typeof options?.userDataDir !== "string" || !isAbsolute(options.userDataDir) || /[\x00-\x1f\x7f]/.test(options.userDataDir)) throw new Error("REMOTE_HOST_REBIND_JOURNAL_INVALID");
 		this.userDataDir = options.userDataDir;
-		this.filePath = join(options.userDataDir, "remote-host-rebind.json");
-		this.lockPath = join(options.userDataDir, "remote-host-rebind.lock");
+		const paths = resolveRemoteHostPaths(options.userDataDir);
+		this.filePath = paths.rebindJournalFile;
+		this.lockPath = paths.rebindJournalLockFile;
 		this.isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive;
 		this.bootId = options.bootId ?? currentBootId();
 		this.now = options.now ?? Date.now;

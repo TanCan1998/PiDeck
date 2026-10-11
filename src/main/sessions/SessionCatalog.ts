@@ -7,6 +7,10 @@ import type { AgentBackend, AgentTab, SessionEnvironment, SessionLocator, Sessio
 import type { SessionProxyOverride } from "../../shared/types/session";
 import { SessionLocatorRouter } from "./SessionLocatorRouter";
 import { getAppLogger } from "../logging/sharedLogger";
+import { withStoreFileCas } from "../persistence/storeFileCas";
+import { acquireStoreFileLock, currentBootId, defaultIsProcessAlive } from "../persistence/StoreFileLock";
+import { preserveUnchangedRecords } from "../persistence/preserveRecordIdentity";
+import type { RemoteReferenceWriteGuard } from "../remote/RemoteReferenceWriteGuard";
 import { assertHostRebindRecordIds, canonicalHostLocatorJson, isHostRebindRecordId, type HostRebindRecordOutcome, type HostRebindRecordPatch, type HostRebindRecordResult, type HostRebindRecordSnapshot, type HostRebindStorePort } from "../remote/HostRebindJournal";
 import { renameWithRetry } from "../utils/fsRetry";
 import { buildSessionOriginKey, buildSummaryOriginKey, canonicalizeSessionPath, collectSessionSubtreeIds, getImportedSessionSourceId, getSessionEnvironment, isInSubagentArtifactsDir, looksLikeCodexSessionFileStem, looksLikePiSessionFileStem } from "../../shared/sessionIdentity";
@@ -16,6 +20,13 @@ import { createSessionModelPreference } from "../../shared/modelDisplayName";
 /** 端口边界只允许稳定码（设计 §4.4）：recorder 自己的 needs-repair 码 + 收敛侧的"结果未知"。 */
 const SESSION_CATALOG_NEEDS_REPAIR = "SESSION_CATALOG_NEEDS_REPAIR";
 const REBIND_UNKNOWN_OUTCOME = "REMOTE_HOST_REBIND_UNKNOWN_OUTCOME";
+/**
+ * 写事务的三个稳定码（INV-5c，设计 §3.2）：busy / 令牌过期 / 锁不可写各自可行动，不合并。
+ * 与 `PROJECT_STORE_*` 同形（两处的实现共用 `storeFileCas`）。
+ */
+export const SESSION_CATALOG_BUSY = "SESSION_CATALOG_BUSY";
+export const SESSION_CATALOG_REVISION_CONFLICT = "SESSION_CATALOG_REVISION_CONFLICT";
+export const SESSION_CATALOG_LOCK_UNWRITABLE = "SESSION_CATALOG_LOCK_UNWRITABLE";
 /** 单次 rebind 的补丁上限：与 journal 解码器的 records 上限一致。 */
 const MAX_REBIND_PATCHES = 10_000;
 
@@ -91,10 +102,33 @@ export type SessionCatalogEntry = {
 
 type SessionCatalogFile = {
 	version: 1;
+	/**
+	 * 写版本（INV-5a）：每次写事务 +1；旧版文件没有该字段，读成 0。
+	 * **不 bump `version`**：多版本并行是产品既有行为，旧版遇到未知字段会忽略，而把 version 改成 2
+	 * 会让旧版完全读不出 catalog（把「可检测」变成「不可用」）。
+	 */
+	revision?: number;
 	sessions: SessionCatalogEntry[];
 	/** 用户主动删除过的 DSH host 会话。host 目录可能还在，自动同步不得再导入。 */
 	dismissedDshSessionIds?: string[];
 };
+
+/** `readCatalogState` 的结果：ok/empty 是正常形态，另两种由调用方决定怎么 fail closed。 */
+type CatalogStateRead =
+	| { kind: "ok"; entries: SessionCatalogEntry[]; dismissedDshSessionIds: Set<string>; revision: number; locatorNormalizationNeeded: boolean; skipNextBackup: boolean }
+	| { kind: "empty" }
+	| { kind: "unsupported"; error: UnsupportedSessionCatalogVersionError | UnsupportedSessionCatalogLocatorError }
+	| { kind: "unreadable"; primary: string; backup: string };
+
+/**
+ * 磁盘上的 revision（INV-5a）：旧版（v1）文件没有这个字段 ⇒ 0；字段存在但值域非法 ⇒ 整份拒绝
+ * （fail closed：把损坏的版本号当 0 会让下一次重写静默地把别人的更新归零）。
+ */
+function readCatalogRevision(value: unknown): number {
+	if (value === undefined) return 0;
+	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error("SESSION_CATALOG_INVALID_REVISION");
+	return value;
+}
 
 type SessionCatalogContext = {
 	wslDistro?: string;
@@ -562,17 +596,31 @@ export class SessionCatalog implements HostRebindStorePort {
 	private loaded = false;
 	private writeQueue: Promise<void> = Promise.resolve();
 	private skipNextBackup = false;
+	/** 磁盘快照的 revision（INV-5a）：v1 文件没有该字段 ⇒ 读成 0；每次写事务后等于刚写入的值。 */
+	private revision = 0;
 	private needsRepair = false;
+	private readonly referenceGuard: RemoteReferenceWriteGuard | undefined;
 
 	private identityContext: SessionCatalogContext;
+
+	/** 跨进程写锁：与 catalog 同一个根（`filePath` 是注入的，用 getter 派生以免字段初始化顺序踩坑）。 */
+	private get rootDir(): string {
+		return dirname(this.filePath);
+	}
+
+	private get lockPath(): string {
+		return `${this.filePath}.lock`;
+	}
 
 	constructor(
 		private readonly filePath: string,
 		identityContext: SessionCatalogContext = {},
 		private readonly resolveFilePath?: SessionFilePathResolver,
 		private readonly fetchTitle?: SessionTitleFetcher,
+		options: { readonly referenceGuard?: RemoteReferenceWriteGuard } = {},
 	) {
 		this.identityContext = { ...identityContext };
+		this.referenceGuard = options.referenceGuard;
 	}
 
 	setIdentityContext(context: SessionCatalogContext): void {
@@ -581,41 +629,27 @@ export class SessionCatalog implements HostRebindStorePort {
 
 	async load(): Promise<void> {
 		if (this.loaded) return;
-		let primaryError: unknown;
+		const read = await this.readCatalogState();
 		let locatorNormalizationNeeded = false;
-		try {
-			const snapshot = await this.readCatalogFile(this.filePath);
-			this.entries = snapshot.entries;
-			this.dismissedDshSessionIds = snapshot.dismissedDshSessionIds;
-			locatorNormalizationNeeded = snapshot.locatorNormalizationNeeded;
-		} catch (error) {
-			primaryError = error;
-			if (error instanceof UnsupportedSessionCatalogVersionError || error instanceof UnsupportedSessionCatalogLocatorError) {
-				// A previous-version backup cannot authorize replacing an incompatible primary snapshot.
-				this.needsRepair = true;
-				void getAppLogger()?.error("session-catalog", "Catalog format is unsupported", { primary: error.message });
+		if (read.kind === "ok") {
+			this.entries = read.entries;
+			this.dismissedDshSessionIds = read.dismissedDshSessionIds;
+			this.revision = read.revision;
+			this.skipNextBackup = read.skipNextBackup;
+			locatorNormalizationNeeded = read.locatorNormalizationNeeded;
+		} else if (read.kind === "empty") {
+			// 首次运行：两个文件都不存在，不是损坏。
+			this.entries = [];
+			this.dismissedDshSessionIds = new Set();
+		} else {
+			// unsupported / unreadable：启动仍可用，但绝不把读不出来的快照当成"空 catalog"写回去。
+			this.needsRepair = true;
+			this.entries = [];
+			this.dismissedDshSessionIds = new Set();
+			if (read.kind === "unsupported") {
+				void getAppLogger()?.error("session-catalog", "Catalog format is unsupported", { primary: read.error.message });
 			} else {
-				try {
-					const snapshot = await this.readCatalogFile(this.backupFilePath());
-					this.entries = snapshot.entries;
-					this.dismissedDshSessionIds = snapshot.dismissedDshSessionIds;
-					locatorNormalizationNeeded = snapshot.locatorNormalizationNeeded;
-					this.skipNextBackup = true;
-				} catch (backupError) {
-					if (isMissingFileError(primaryError) && isMissingFileError(backupError)) {
-						this.entries = [];
-						this.dismissedDshSessionIds = new Set();
-					} else {
-						// Keep startup available, but never replace unreadable snapshots with an empty catalog.
-						this.needsRepair = true;
-						void getAppLogger()?.error("session-catalog", "Catalog and backup both failed to load", {
-							primary: primaryError instanceof Error ? primaryError.message : String(primaryError),
-							backup: backupError instanceof Error ? backupError.message : String(backupError),
-						});
-						this.entries = [];
-						this.dismissedDshSessionIds = new Set();
-					}
-				}
+				void getAppLogger()?.error("session-catalog", "Catalog and backup both failed to load", { primary: read.primary, backup: read.backup });
 			}
 		}
 		// Draft 只代表当前进程中的“尚未发送”编辑面：没有用户消息就没有
@@ -625,14 +659,12 @@ export class SessionCatalog implements HostRebindStorePort {
 		// catalog 只是 id 映射；即使“创建后激活链路未走完”（attachRuntime 未把
 		// status 置 active），重启后用户仍应在侧栏看到并重新激活它。若在此清掉，
 		// host 侧会话会变成孤儿且无法从侧栏访问。带 dshSessionId 的异常中间态同样保留。
+		/** 本次加载是否改动了内容：决定要不要走一次归一化写事务（没改就一个字节都不写）。 */
+		let migrated = false;
 		const staleDrafts = this.entries.filter((entry) => entry.status === "draft" && entry.backend !== "dsh");
 		if (staleDrafts.length > 0) {
 			this.entries = this.entries.filter((entry) => entry.status !== "draft" || entry.backend === "dsh");
-			try {
-				await this.writeSnapshot(this.entries);
-			} catch {
-				// 启动清理是 best-effort；内存已经不再暴露草稿，下一次启动仍会重试清理。
-			}
+			migrated = true;
 		}
 
 		// 兼容旧数据：pi 默认 sessionName（JSONL 文件名时间戳）曾被 onTitleChanged 写进 catalog。
@@ -640,11 +672,7 @@ export class SessionCatalog implements HostRebindStorePort {
 		const timestampTitles = this.entries.filter((entry) => looksLikePiSessionFileStem(entry.title));
 		if (timestampTitles.length > 0) {
 			for (const entry of timestampTitles) entry.title = "Untitled";
-			try {
-				await this.writeSnapshot(this.entries);
-			} catch {
-				// 修复是 best-effort；内存已生效，下一次启动仍会重试。
-			}
+			migrated = true;
 		}
 
 		// 旧 catalog 没有 titleLocked/titleOrigin：已有真实标题视为 PiDeck 已确认，避免升级后被
@@ -657,11 +685,7 @@ export class SessionCatalog implements HostRebindStorePort {
 				if (typeof entry.titleLocked !== "boolean") entry.titleLocked = !isPlaceholderCatalogTitle(entry.title);
 				if (entry.titleOrigin === undefined && entry.titleLocked === true) entry.titleOrigin = "legacy";
 			}
-			try {
-				await this.writeSnapshot(this.entries);
-			} catch {
-				// 迁移失败不影响内存中的所有权规则；下次启动会继续写回。
-			}
+			migrated = true;
 		}
 
 		// 兼容旧数据：早期版本可能存有相对 filePath（pi 返回相对 cwd 的 sessionFile，
@@ -671,11 +695,7 @@ export class SessionCatalog implements HostRebindStorePort {
 		const repaired = this.repairRelativeFilePaths(this.entries);
 		if (repaired) {
 			this.entries = repaired;
-			try {
-				await this.writeSnapshot(this.entries);
-			} catch {
-				// 修复是 best-effort；内存已生效，下一次启动仍会重试。
-			}
+			migrated = true;
 		}
 
 		// 兼容旧数据：DSH 会话曾只按文件分支 attach（filePath/piSessionId 落盘，
@@ -689,11 +709,7 @@ export class SessionCatalog implements HostRebindStorePort {
 					entry.dshSessionId = entry.piSessionId;
 				}
 			}
-			try {
-				await this.writeSnapshot(this.entries);
-			} catch {
-				// 迁移是 best-effort；内存已生效，下一次启动仍会重试。
-			}
+			migrated = true;
 		}
 
 		// 兼容旧数据：早期版本把 DSH 会话当 pi 会话 attach（filePath=host zstd 文件、
@@ -708,22 +724,21 @@ export class SessionCatalog implements HostRebindStorePort {
 				delete entry.piSessionId;
 				entry.originKey = undefined;
 			}
-			try {
-				await this.writeSnapshot(this.entries);
-			} catch {
-				// 迁移是 best-effort；内存已生效，下一次启动仍会重试。
-			}
+			migrated = true;
 		}
-		if (locatorNormalizationNeeded && !this.skipNextBackup) {
-			try {
-				await this.writeSnapshot(this.entries);
-			} catch {
-				// Canonical locator cleanup is best-effort; in-memory routing already fails closed.
-			}
-		}
+		// 以上归一化只在内存里做完了；**落盘**交给下面这一次写事务：它只在磁盘仍是我们读到的那一版
+		// （revision 令牌相等）时才把内存结果写回，否则放弃本次写（下次启动重试）。若照内存快照直接
+		// 整份重写，就会把另一个实例刚提交的记录一起丢掉（INV-5a）。
 		this.loaded = true;
-		if (this.skipNextBackup) {
-			await this.writeSnapshot(this.entries);
+		if (migrated || locatorNormalizationNeeded || this.skipNextBackup) {
+			try {
+				await this.persistLoadedNormalization();
+			} catch (error) {
+				// 修复是 best-effort：内存已生效，下一次启动仍会重试；写不进去不能挡住启动。
+				void getAppLogger()?.warn("session-catalog", "Catalog normalization write skipped", {
+					cause: error instanceof Error ? error.message : String(error),
+				});
+			}
 		}
 	}
 
@@ -814,18 +829,39 @@ export class SessionCatalog implements HostRebindStorePort {
 	 * Host-rebind read port（设计 §4.4）：逐条返回记录的当前 locator（规范 JSON）；记录不存在、
 	 * 或该记录本来就没有位置（无文件草稿 / dsh / imagegen / 运行期 transient）时按契约返回缺省 locator。
 	 *
-	 * 读的是**内存快照**：catalog 从不重读磁盘（见设计 1.1），而内存就是下一次写盘的权威内容；
-	 * 本函数内没有 await，整批读是同一个一致性视图。needs-repair / 未加载都不能答成"没有记录"
-	 * （那会被收敛侧读成"记录已删除"）⇒ 直接抛稳定码，fail closed。
+	 * 权威是**磁盘**（INV-5a / §1.7 第 8 条）：内存快照可能落后于另一个实例已提交的写入，拿它声明
+	 * before/after 会让写端口“看不见”别人改过的记录并把它整份覆盖（CE-4）。这里刻意不碰内存：读端口
+	 * 无副作用，内存对齐由写事务（enqueueMutation）完成。本函数内没有 await 到内部状态，整批读仍是
+	 * 同一个一致性视图。needs-repair / 未加载都不能答成“没有记录”（那会被收敛侧读成“记录已删除”）
+	 * ⇒ 直接抛稳定码，fail closed。
 	 */
 	async readHostRecordLocators(recordIds: readonly string[]): Promise<readonly HostRebindRecordSnapshot[]> {
 		this.assertHostRebindUsable();
 		assertHostRebindRecordIds(recordIds);
-		return recordIds.map((recordId) => {
-			const entry = this.entries.find((candidate) => candidate.id === recordId);
-			const locator = entry ? this.sessionLocatorForEntry(entry) : undefined;
-			return locator ? { recordId, locator: canonicalHostLocatorJson(locator) } : { recordId };
-		});
+		// 权威是**磁盘**（INV-5a / §1.7 第 8 条）：内存快照可能落后于另一个实例（或本进程那次“写抛异常但已落地”）
+		// 已提交的写入，拿它声明 before/after 会让写端口“看不见”别人改过的记录并把它整份覆盖（CE-4）。
+		// 读与写走同一个进程内队列，并把内存对齐到刚读到的内容：读不能与在飞的写事务交错，
+		// 也不能让旧快照继续当权威。
+		const operation = this.writeQueue
+			.catch(() => undefined)
+			.then(async () => {
+				let entries: SessionCatalogEntry[];
+				try {
+					entries = (await this.readFreshSnapshot()).state;
+				} catch {
+					throw new Error(SESSION_CATALOG_NEEDS_REPAIR);
+				}
+				return recordIds.map((recordId) => {
+					const entry = entries.find((candidate) => candidate.id === recordId);
+					const locator = entry ? this.sessionLocatorForEntry(entry) : undefined;
+					return locator ? { recordId, locator: canonicalHostLocatorJson(locator) } : { recordId };
+				});
+			});
+		this.writeQueue = operation.then(
+			() => undefined,
+			() => undefined,
+		);
+		return operation;
 	}
 
 	/**
@@ -1348,6 +1384,8 @@ export class SessionCatalog implements HostRebindStorePort {
 	 */
 	async removeByProjectId(projectId: string): Promise<number> {
 		this.assertLoaded();
+		// 引用写入与引用删除都必须在有 rebind 事务时退让（设计 §3.1 方案 A 的 advisory interlock）。
+		if (this.referenceGuard) await this.referenceGuard.assertRebindIdle();
 		for (const [id, entry] of this.transientEntries) {
 			if (entry.projectId === projectId) this.transientEntries.delete(id);
 		}
@@ -1390,6 +1428,9 @@ export class SessionCatalog implements HostRebindStorePort {
 		this.assertLoaded();
 		if (!isRemoteSessionRegistrationInput(input)) throw new Error("REMOTE_SESSION_IDENTITY_INVALID");
 		const identity = remoteSessionIdentity(input);
+		// INV-1：写入一条 hostId 引用前必须能证明主机可解析且没有跨 store 事务在跑（门自己读磁盘，
+		// 不看内存）。未注入门时不复查 —— 生产装配必须注入，仓库契约侧有装配断言。
+		if (this.referenceGuard) await this.referenceGuard.assertHostReferenceWritable(identity.hostId);
 		const updatedAt = Number.isFinite(input.updatedAt) && input.updatedAt > 0 ? input.updatedAt : undefined;
 		return this.enqueueMutation<RemoteSessionRegistration>((entries) => {
 			const locator = remoteSessionLocator(identity);
@@ -1830,23 +1871,108 @@ export class SessionCatalog implements HostRebindStorePort {
 	}
 
 	private enqueueMutation<T>(mutate: (entries: SessionCatalogEntry[]) => { value: T; changed: boolean }): Promise<T> {
+		// 写事务（INV-5a）：持锁 → **重读磁盘**（顺带把内存对齐到它）→ 把 mutate 施加在最新内容上 →
+		// 有改动才写 revision+1。mutate 的入参仍是“副本”，所以各调用点的闭包无需改变；
+		// 它们对 dismissedDshSessionIds 的改动落在刚刚从磁盘同步回来的集合上（readFreshSnapshot）。
 		const operation = this.writeQueue
 			.catch(() => undefined)
 			.then(async () => {
 				this.assertWritable();
-				const nextEntries = this.entries.map(cloneEntry);
-				const result = mutate(nextEntries);
-				if (result.changed) {
-					await this.writeSnapshot(nextEntries);
-					this.entries = nextEntries;
-				}
-				return result.value;
+				return withStoreFileCas<SessionCatalogEntry[], T>({
+					rootDir: this.rootDir,
+					lockPath: this.lockPath,
+					unwritableCode: SESSION_CATALOG_LOCK_UNWRITABLE,
+					busyCode: SESSION_CATALOG_BUSY,
+					conflictCode: SESSION_CATALOG_REVISION_CONFLICT,
+					readFresh: () => this.readFreshSnapshot(),
+					mutate: (fresh) => {
+						const nextEntries = fresh.map(cloneEntry);
+						const result = mutate(nextEntries);
+						return result.changed ? { state: nextEntries, changed: true, value: result.value } : { state: fresh, changed: false, value: result.value };
+					},
+					write: (state, revision) => this.writeSnapshot(state, revision),
+				});
 			});
 		this.writeQueue = operation.then(
 			() => undefined,
 			() => undefined,
 		);
 		return operation;
+	}
+
+	/**
+	 * 读**磁盘**上的最新 catalog（primary → backup → 首次运行的空状态），与 load 的既有选择规则逐条一致：
+	 * primary 能读就不看 backup；primary 是“版本/locator 不认识”就停（旧版备份无权授权替换不兼容的主文件）；
+	 * primary 读不出来才退到 backup（并置 skipNextBackup）；两个都不存在 = 首次运行；两个都读不出来 = unreadable
+	 * （绝不把读不出来的快照当成“空 catalog”）。
+	 */
+	private async readCatalogState(): Promise<CatalogStateRead> {
+		let primaryError: unknown;
+		try {
+			const snapshot = await this.readCatalogFile(this.filePath);
+			return { kind: "ok", entries: snapshot.entries, dismissedDshSessionIds: snapshot.dismissedDshSessionIds, revision: snapshot.revision, locatorNormalizationNeeded: snapshot.locatorNormalizationNeeded, skipNextBackup: false };
+		} catch (error) {
+			primaryError = error;
+			if (error instanceof UnsupportedSessionCatalogVersionError || error instanceof UnsupportedSessionCatalogLocatorError) {
+				return { kind: "unsupported", error };
+			}
+		}
+		let backupError: unknown;
+		try {
+			const snapshot = await this.readCatalogFile(this.backupFilePath());
+			return { kind: "ok", entries: snapshot.entries, dismissedDshSessionIds: snapshot.dismissedDshSessionIds, revision: snapshot.revision, locatorNormalizationNeeded: snapshot.locatorNormalizationNeeded, skipNextBackup: true };
+		} catch (error) {
+			backupError = error;
+		}
+		if (isMissingFileError(primaryError) && isMissingFileError(backupError)) return { kind: "empty" };
+		return { kind: "unreadable", primary: primaryError instanceof Error ? primaryError.message : String(primaryError), backup: backupError instanceof Error ? backupError.message : String(backupError) };
+	}
+
+	/** 写事务的读步：重读磁盘并把内存对齐到它。读不出来就 fail closed，绝不猜成“空 catalog”。 */
+	private async readFreshSnapshot(): Promise<{ state: SessionCatalogEntry[]; revision: number }> {
+		const read = await this.readCatalogState();
+		if (read.kind === "unsupported") throw read.error;
+		if (read.kind === "unreadable") throw new Error(SESSION_CATALOG_NEEDS_REPAIR);
+		if (read.kind === "empty") {
+			this.entries = [];
+			this.dismissedDshSessionIds = new Set();
+			this.revision = 0;
+			this.skipNextBackup = false;
+			return { state: this.entries, revision: 0 };
+		}
+		this.entries = preserveUnchangedRecords(this.entries, read.entries);
+		this.dismissedDshSessionIds = read.dismissedDshSessionIds;
+		this.revision = read.revision;
+		this.skipNextBackup = read.skipNextBackup;
+		return { state: this.entries, revision: read.revision };
+	}
+
+	/**
+	 * 加载期归一化的落盘（best-effort）：只在磁盘仍是我们读到的那一版（revision 令牌相等）时才把内存里的
+	 * 归一化结果写回；令牌不等 ⇒ 另一个实例已提交更新 ⇒ 放弃本次写（下次启动重试归一化）。
+	 *
+	 * 为什么不用 enqueueMutation：那里会把磁盘内容读回内存，而本方法的**写的是内存里的归一化结果**；
+	 * 两者共用同一套锁与稳定码。跳过的代价只是一次重叠合并/清理延后一次启动，而错写的代价是丢别人的记录。
+	 */
+	private async persistLoadedNormalization(): Promise<void> {
+		const expected = this.revision;
+		const lock = await acquireStoreFileLock({
+			rootDir: this.rootDir,
+			lockPath: this.lockPath,
+			unwritableCode: SESSION_CATALOG_LOCK_UNWRITABLE,
+			bootId: currentBootId(),
+			isProcessAlive: defaultIsProcessAlive,
+			now: Date.now,
+		});
+		if (!lock) throw new Error(SESSION_CATALOG_BUSY);
+		try {
+			const fresh = await this.readCatalogState();
+			const freshRevision = fresh.kind === "ok" ? fresh.revision : fresh.kind === "empty" ? 0 : -1;
+			if (freshRevision !== expected) throw new Error(SESSION_CATALOG_REVISION_CONFLICT);
+			await this.writeSnapshot(this.entries, expected + 1);
+		} finally {
+			await lock.release();
+		}
 	}
 
 	private backupFilePath(): string {
@@ -1857,11 +1983,13 @@ export class SessionCatalog implements HostRebindStorePort {
 		entries: SessionCatalogEntry[];
 		dismissedDshSessionIds: Set<string>;
 		locatorNormalizationNeeded: boolean;
+		revision: number;
 	}> {
 		const parsed = JSON.parse(await readFile(filePath, "utf8")) as Partial<SessionCatalogFile>;
 		if (parsed.version !== undefined && parsed.version !== 1) {
 			throw new UnsupportedSessionCatalogVersionError();
 		}
+		const revision = readCatalogRevision(parsed.revision);
 		if (!Array.isArray(parsed.sessions)) {
 			throw new Error(`Invalid Session catalog: ${filePath}`);
 		}
@@ -1887,13 +2015,16 @@ export class SessionCatalog implements HostRebindStorePort {
 			entries: entries.map(normalizeEntryLocator),
 			dismissedDshSessionIds: new Set(dismissed),
 			locatorNormalizationNeeded,
+			revision,
 		};
 	}
 
-	private async writeSnapshot(entries: SessionCatalogEntry[]): Promise<void> {
+	private async writeSnapshot(entries: SessionCatalogEntry[], revision: number): Promise<void> {
 		this.assertWritable();
 		const snapshot: SessionCatalogFile = {
 			version: 1,
+			// 单调递增的写版本（INV-5a）：写者必须先读过同一版本才能提交，见 enqueueMutation。
+			revision,
 			sessions: entries.map(cloneEntry),
 			// 旧 catalog 没有该字段；空数组也写出，重启后删除墓碑不丢。
 			dismissedDshSessionIds: [...this.dismissedDshSessionIds],
@@ -1931,6 +2062,9 @@ export class SessionCatalog implements HostRebindStorePort {
 			}
 			await renameWithRetry(tempPath, this.filePath);
 			this.skipNextBackup = false;
+			// 写成功才算提交：内存状态与 revision 一起前进（与磁盘同源）。
+			this.revision = revision;
+			this.entries = entries;
 		} finally {
 			await unlink(tempPath).catch(() => undefined);
 			await unlink(backupTempPath).catch(() => undefined);

@@ -77,15 +77,18 @@ test("稳定 id 匹配顺序：先按 remoteSessionId 命中整表，再按 remo
 });
 
 test("登记：重复登记命中同一条记录、同一个 stable id，且第二次不写盘", async (t) => {
-	const { catalog, openCalls } = await makeCatalog(t);
+	const { catalog, catalogPath, openCalls } = await makeCatalog(t);
 	const input = { projectId: "p-1", hostId: HOST, remoteSessionId: "ws/2026-02-03T10-00-00_abc.jsonl", remotePath: "ws/2026-02-03T10-00-00_abc.jsonl", title: "2026-02-03T10-00-00_abc", updatedAt: 1000 };
 	const first = await catalog.ensureRemoteSession(input);
 	assert.equal(first.created, true);
-	const writesAfterFirst = openCalls.length;
+	// 只数对 catalog 的**写**（临时文件 open）。写事务还会为跨进程锁 open 一次锁文件 —— 那不是写盘，
+	// 而是 INV-5a 必需的互斥，所以按路径过滤而不是数所有 open。
+	const catalogWrites = () => openCalls.filter((target) => String(target).startsWith(`${catalogPath}.`) && String(target).endsWith(".tmp")).length;
+	const writesAfterFirst = catalogWrites();
 	const second = await catalog.ensureRemoteSession(input);
 	assert.equal(second.created, false);
 	assert.equal(second.record.id, first.record.id);
-	assert.equal(openCalls.length, writesAfterFirst, "完全相同的重复登记不能再写一次 catalog");
+	assert.equal(catalogWrites(), writesAfterFirst, "完全相同的重复登记不能再写一次 catalog");
 	assert.equal(catalog.listEntries().length, 1);
 
 	const entry = catalog.listEntries()[0];
@@ -110,12 +113,12 @@ test("登记：重复登记命中同一条记录、同一个 stable id，且第�
 	// 三个不同的远端文件 = 三条记录，一个都不能合并。
 	assert.equal(catalog.listEntries().length, 3);
 
-	// mtime 变化要落盘（最后活动时间/排序），并保持同一条记录。
-	const writesBeforeTick = openCalls.length;
+	// mtime 变化要落盘（最后活动时间/排序），并保持同一条记录。计数同样只看对 catalog 的写（锁文件 open 不算）。
+	const writesBeforeTick = catalogWrites();
 	const touched = await catalog.ensureRemoteSession({ ...input, updatedAt: 2000 });
 	assert.equal(touched.record.id, first.record.id);
 	assert.equal(touched.record.updatedAt, 2000);
-	assert.equal(openCalls.length, writesBeforeTick + 1);
+	assert.equal(catalogWrites(), writesBeforeTick + 1);
 });
 
 test("登记：stable id 跨重启稳定（重新加载同一条目）", async (t) => {

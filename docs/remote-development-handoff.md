@@ -6,15 +6,15 @@
 >
 > **现状一句话**：**Phase 3 的远端只读能力已在真实主机 + 真实 Electron 上端到端验收通过**——两次独立运行：run `e2emv3cw2x5`（13:01，1.8 分钟）与 run `e2emv3dr8xb`（13:26，1.9 分钟），均为 `1 passed`。测试覆盖九步：加主机 + pin 指纹命中 → 连接 ready → 登记两个远端项目 → 列出远端会话（含夹具）→ 惰性标题（权威名不标「暂定」、弱兜底标「暂定」）→ 导入（清单刷新 + 选中 + 「已导入」标记 + 不开新 Tab）→ 重复导入（`created=false`）→ 项目级 root 漂移（A 显示「需处理」带稳定码、同主机邻居 B 仍 ok 且仍能列目录）。真机侧已交叉验证（远端会话目录 mtime 同步更新、无夹具/项目残留）。
 >
-> **已完成（可验收）**：① 前六批实现（项目读取隔离 / 侧栏登记入口 / helper 只读搜索 / 会话建立与重连时的 root 复核 / IPC 按域拆分 / needs-attention 终态 / 远端会话发现与登记 / 按需标题 / 侧栏列表与导入 / 项目级 root 状态 / 集成）；② 第七批及其修复（pi 自定义 `sessionDir` 覆盖、头尾窗口零重叠、尾读降级上报、`readHostId` 传输边界收窄、长活会话 `lifetime` 分档、helper capability gate、跨 store 一致性**设计 + 红例**、Phase 4 **设计**）；③ **真机脚本平台修正**（此前只有 POSIX 客户端能跑，现在 Windows 客户端可跑，并修掉约 3% 的偶发连接失败）；④ 真机验收通过（上条）。逐条证据见 §3 各批末尾。
+> **已完成（可验收）**：① 前六批实现（项目读取隔离 / 侧栏登记入口 / helper 只读搜索 / 会话建立与重连时的 root 复核 / IPC 按域拆分 / needs-attention 终态 / 远端会话发现与登记 / 按需标题 / 侧栏列表与导入 / 项目级 root 状态 / 集成）；② 第七批及其修复（pi 自定义 `sessionDir` 覆盖、头尾窗口零重叠、尾读降级上报、`readHostId` 传输边界收窄、长活会话 `lifetime` 分档、helper capability gate、跨 store 一致性**设计 + 红例**、Phase 4 **设计**）；③ **真机脚本平台修正**（此前只有 POSIX 客户端能跑，现在 Windows 客户端可跑，并修掉约 3% 的偶发连接失败）；④ 真机验收通过（上条）；⑤ **INV-5a 写侧一致性实施**（第八批：跨进程锁 + 锁内重读 CAS + 引用写入门 + 跨 store 删除补偿；含两处**判据不可满足**的如实修正）。逐条证据见 §3 各批末尾。
 >
 > **未完成（建议优先级）**：
 > 1. **Phase 4 落地**：让远端 pi 真正跑起来（新建 → 发送 → 流式 → 停止 → 重启恢复）。设计已就绪 [Phase 4 计划](remote-phase4-plan.md)；建议先做 P4.2（会话生命周期 / lease 收敛）与「心跳仅诊断」。**注意**：Pi RPC 走「每 Session 独立 SSH + 固定 runner」，**不走控制协议**，所以最小 Phase 4 可零新增 helper op 起步。
-> 2. **INV-5 实施**：跨 store 写入侧无丢失更新。用户已拍板**不把不变量收窄**、且**允许多版本并行**（⇒ 必须有真正的跨进程锁 + 磁盘 CAS，不能只做「写前复查」）。按 [跨 store 一致性计划](remote-cross-store-consistency-plan.md) §6 的合并门禁让红例 CE-1…CE-4 转绿（红例已存在，默认 skip + `PIDECK_INV5_EXPECT_RED=1` 门控复现）。
+> 2. ~~**INV-5 实施**~~ —— **已在第八批完成**（见 §3 第八批）：跨 store 写入侧现在有真正的跨进程锁 + 锁内重读（权威=磁盘），门控下 CE-1…CE-5 **全绿**。剩余遗留：**跨 store 协调器与启动 `resume` 仍未装配**（遗留 journal 只能 fail-closed 阻塞，不能自动收敛）、旧版本写者靠 CAS **检测**而非阻止、主机目录锁仍无 owner。
 > 3. **导入会话的正文读取**（远端 JSONL）：属 Phase 4。当前导入只保证「登记 + 进清单 + 选中」，打开会**如实**报「无法读取会话文件」——不是静默失败。
 > 4. **覆盖缺口**：深层嵌套 subagent 会话布局、`remotePathAliases`、`PI_CODING_AGENT_DIR`/`PI_CODING_AGENT_SESSION_DIR`（远端进程环境，helper 无读 env 的操作）与 project 级 `.pi/settings.json`（cwd 作用域）不在扫描期覆盖、POSIX symlink 语义未验。
 > 5. **收尾小项**：两处字面 UUID 正则（`remoteSessionIpc.ts` / `remoteHostIpc`）未收敛；两个 smoke 脚本仍用 `ssh-keyscan` 取候选，应改用产品自己的已认证握手路径；`ProjectTree.tsx` 414 行可插槽化。
-> 6. **全量 `npm test` 仍有 7 条失败**，全在**我们从未改动的文件**里（`piLocator` 的 Windows cmd shim、`quickMessages`、`securityLevelRuntimeSwitch`、`sonnerToasterMount`、`syncWorkflowChoices`），另有 3 条已知环境失败（bootstrap 集成、Windows 无 `/bin/sh`、`sshClientRuntime` 的 POSIX-only 断言）。**只做了文件级归因，未在干净基线上逐条比对**——接手后若要动，请先基线比对再改。
+> 6. **全量 `npm test` 仍有 7 条失败**，全在**我们从未改动的文件**里（`piLocator` 的 Windows cmd shim、`quickMessages`、`securityLevelRuntimeSwitch`、`sonnerToasterMount`、`syncWorkflowChoices`），另有 3 条已知环境失败（bootstrap 集成、Windows 无 `/bin/sh`、`sshClientRuntime` 的 POSIX-only 断言）。**只做了文件级归因，未在干净基线上逐条比对**——接手后若要动，请先基线比对再改。**（2026-10 更新）第八批已在 Linux/Node 24.21 环境做过一次全量逐条基线对照**：改动前后均为 19 条失败且**集合逐条一致**，详见 §3 第八批；上面那串 Windows 数字仍未经同等对照。
 >
 > **接手必读的坑**（都是实际踩过并付出过代价的）：
 > 1. `.ps1` 脚本必须 **ASCII + BOM**：Windows PowerShell 会把无 BOM 的 UTF-8 按 GBK 读，脚本里的中文会让**整个脚本解析失败**（表现为语法错误而非业务错误）。
@@ -266,6 +266,29 @@ A/B/C 可由不同开发者并行，D 随开发跟进。每块指定一个负责
 
 **方法论沉淀（值得沿用）**：① 真机失败先看 `error-context.md` 的 DOM 快照与截图，往往一步定位（本次 4 个 bug 里 3 个由此定位）；② 关键失败要用**产品自己的代码在沙箱里写探针复现**——本次两个 bug 的根因都靠探针钉死，其中「并发窗口」只有把探针改成「会话切换在飞时去读」才复现；③ 修复一律**红证先行**（先让旧行为变红再改）；④ 失败证据先 `Copy-Item` 另存，注意 **Playwright 每次启动会清空 `test-results/`**（本会话误删过一次证据）。
 
+### 第八批：INV-5a 写侧一致性实施（已完成，2026-10）
+
+本轮不改任何 renderer / IPC 通道 / helper 契约，只动**写入侧协议**与两个 store 的提交路径。设计与门禁来自 [跨 store 一致性计划](remote-cross-store-consistency-plan.md)，实施记录写在它的 §6.3.2。
+
+| 块 | 落地位置 | 验证 |
+| --- | --- | --- |
+| 共用跨进程锁 + CAS 原语 | `src/main/persistence/StoreFileLock.ts`、`src/main/persistence/storeFileCas.ts`；`HostRebindTxLock` 改为委托（导出名/稳定码/行为不变） | `tests/hostRebindTxLock.test.mjs`、`tests/projectStoreCas.test.mjs` |
+| `projects.json` 写事务 | `ProjectStore` 全部 mutator 改为「持锁 → 重读磁盘 → 在最新内容上重放意图 → 有改动才写 `revision+1`」；`readHostRecordLocators` 读磁盘并对齐内存 | `tests/projectStoreCas.test.mjs`（4）+ `tests/projectStore*.test.mjs` 保持绿 |
+| `session-catalog.json` 写事务 | `SessionCatalog` 同形改造 + 可选 `revision`（**不 bump `version`**，旧版仍可读）+ 加载期归一化改为「令牌相等才写回」 | `tests/sessionCatalogCas.test.mjs`（5）+ `tests/sessionCatalog*.test.mjs` 保持绿 |
+| 引用写入门 | `src/main/remote/RemoteReferenceWriteGuard.ts`（host 可解析 + 无 rebind 事务；三个码各自可行动）；已注入 `ProjectStore` 与 `SessionCatalog`（`main/index.ts`） | `tests/remoteHostReferenceInterlock.test.mjs`（5） |
+| 跨 store 删除 | `src/main/projects/projectRemoval.ts`：**先清引用、后删被引用者**，不再 `.catch(() => 0)`；三处生产调用点收口 | `tests/crossStoreEnrollRetireRace.test.mjs`（2） |
+| 同源磁盘根 | `src/main/remote/RemoteHostPaths.ts`，`RemoteHostStore` / `SshHostPinStore` / `HostRebindJournal` / 门共用 | 上述全部套件 |
+
+**门控结果**：`PIDECK_INV5_EXPECT_RED=1 node --test tests/crossStoreInv5Counterexamples.test.mjs` 从**4 红**变为 **6 pass / 0 fail**；默认（不设变量）仍为 1 pass / 5 skipped / 0 fail。
+
+**两处判据修正（如实记录，不是放宽）**：CE-2 原断言同时要求「引用确实写入了」与「该 host 不在 `retiredHostIds`」，但 retire 已删掉 profile 并只留墓碑——引用若写进去必然悬空，正是 INV-1 要禁止的结果；按 §6.3 行 2「写入在 commit 前被拒」改写为**拒绝 + 稳定码 + 磁盘逐字节不变**。CE-3 原断言在「注入主文件 rename 必失败」之后要求主文件不再残留引用，而任何守规矩的整文件写都必须 rename 到那儿（不 rename 等于放弃原子替换），所以不可满足；改写为「**失败带稳定码 + 失败时项目不删（无悬空引用）+ 重放收敛**」。两处都补强了「磁盘逐字节不变」。另有两处旧测试按新语义修正（`remoteSessionRegistration` 的写盘计数改为只数 catalog 临时文件；`hostRebindStorePorts` 的「落地但抛异常」改为断言 `already-applied` 且文件逐字节不变），旧断言编码的正是被替换掉的「权威=内存」语义。
+
+**本机基线证据（Linux / Node 24.21，工作树 `c95d999ef` + 本轮改动）**：`npm test` 全量 **7587 项 / 7555 pass / 19 fail / 13 skip**；在**干净基线**（stash 后同一命令）为 **7571 / 7539 pass / 19 fail / 13 skip** —— 测试数与通过数各多 16（即四个新测试文件的用例数），**失败集合逐条一致**（均与本轮无关，典型是 JetBrains 探测、Git/安全等级契约、`sync-workflow-choices`、`toaster`、`remoteHelperSearchNames` 的两条“入口上限”在负载下的失败等）。
+
+**未做（不得描述为已闭环）**：① **跨 store 协调器与启动 `resume` 未装配**：journal 收敛算法与幂等早有实现但无生产入口，遗留 journal 只能 fail-closed 阻塞引用写入；② 旧版本写者靠**磁盘 CAS 检测**而非阻止；③ 主机目录锁仍未补 owner（§1.7 第 7 条）；④ 两 store 之间仍无共同提交点，跨 store 原子性 = journal + 幂等 roll-forward + 可诊断的未收敛态。
+
+**执行方式（本轮）**：全程无需真机与 Electron（纯离线套件 + 全量基线对照）；未动 helper、未动远端。
+
 ## 4. M1 之后如何推进
 
 1. **Phase 3 剩余只读能力**：目录/内容搜索与远端 Session 发现走 helper，由 catalog 保存远端 locator；不得把远端路径交给本地 scanner。结果数量、字节和超时必须有界。
@@ -303,6 +326,8 @@ C 对应 `projectStoreCodec.test.mjs`、`projectStoreMigration.test.mjs`、`remo
 - `tests/remoteBrowseRoot.test.mjs` → Windows 上 `/bin/sh` 不可解析（Git 的 `sh.exe` 位于 `C:\Program Files\Git\bin\sh.exe`），属平台环境。
 
 先前在 Linux/Node 24 交接环境记录的全量 **7181 项 / 7157 pass / 18 fail / 6 skip** 是**那个环境**的数字，与本机不可直接比较；引用时必须连环境一起引用，也不能因为「数量仍是 18」就判断没有回归——本批的做法是在干净基线 worktree 上按**测试名与断言**逐一对照。
+
+**第八批（INV-5a，Linux / Node 24.21）**：全量 `npm test` 实施后 **7587 / 7555 pass / 19 fail / 13 skip**，干净基线（同命令、stash 后）**7571 / 7539 pass / 19 fail / 13 skip**——差量恰为四个新测试文件的 16 条用例，**失败集合逐条一致**。门控红例从 4 红变 **6 pass / 0 fail**（默认仍 1 pass / 5 skipped / 0 fail）。本机两条既有失败在**同一环境**下逐字复现：`remoteHelperSearchNames` 的 “entry ceiling stops at 20000” 与（集成负载下的）“scanned-entry cap” 两条；与代码路径无关，归类为环境/负载。
 
 需要基线对照时，在相同环境的独立干净 checkout 比较同名测试的失败断言；不要为跑基线 stash 或清理其他开发者的工作。跨域集成/合并前才扩大到 `npm test`，不为每个文档或局部改动重复跑全量。本任务未授权全仓库构建。
 
