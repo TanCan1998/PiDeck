@@ -10,6 +10,17 @@
 >
 > **未完成（建议优先级）**：
 > 1. **Phase 4 P4.2 只剩两项**——协议层**已端到端验通**（真机 `scripts/verify-remote-runtime.mjs` → `RUNTIME_E2E_OK`）。已交付：`707ecb595` 冻结 runner + 远端启动器；`d919e5402` 真机验收脚本 + `remotePiRuntimeFacts`；`e9bcd19d0` `PiProcess` 远端模式；`61222cc76` `AgentManager` 路由 + 本机 fs 守卫 + catalog fail-closed；`68accdfd6` 远端会话的 catalog 身份；`b76b03dff` 远端会话**恢复（点开）**+ 恰好一条 catalog 记录；`448940ea6` **远端 trust 状态可见**（`AgentTab.remoteTrustUnhandled` + 会话视图内持续提示 + 双语 key；安全默认不变）。**剩下：** (i) **远端自动 reattach**（`reattachProcess` 目前是本地实现）；(ii) **Electron 真机 UI 验收**（这台 Linux 沙箱能跑 Electron，可直接做——这是 P4.2 进入 beta 的最后一关）。
+>    **父代理自己跑的一轮真机 UI 验收（2026-10，HEAD `6b60fcb60` 之后）**：`env PIDECK_E2E_REMOTE_HOST=… npx playwright test e2e/remoteSessionAcceptance.spec.ts`
+>    ⇒ **2 failed**，但**失败点在很后面**，前半条链已经通了：加主机 + pin → 连接 ready → 登记远端项目 → **在远端项目里新建会话**
+>    （真实 UI 点击）全部成功；app 日志显示 agent 生命周期完整：`Agent create requested → Agent pi process start → Pi process spawned
+>    → Agent get_state completed → Agent stopped → Pi process exit`，且**没有任何 `REMOTE_*`/`SSH_*` 稳定码**
+>    ⇒ **真实应用里的远端 pi 会话确实起来了、`get_state` 也回来了**。
+>    **两个待修点（下一轮）**：
+>    (1) **侧栏不显示这条远端会话**：断言「远端项目下恰好一条会话行」拿到 `Expected: 1 / Received: 0`。runtime 层是好的
+>        ⇒ 属渲染层/刷新链（登记成功后没有让侧栏刷新，或侧栏对 ssh-located 记录的列表路径没覆盖）——这是**当前最实的缺口**；
+>    (2) spec 第二步在 `composer[data-session-id=…]` 上断言输入框含 prompt 失败（输入没落进 composer 或选择器不对），
+>        trust 提示那条断言因此还没跑到 ⇒ **`6b60fcb60` 那条传播修法尚未被真机确证**。
+>    失败证据已另存 `/tmp/p42-ui-acceptance-mine/`（含 `error-context.md` 与截图）。
 >    **UI 验收现状（2026-10，`3f9bff495`）**：`e2e/remoteSessionAcceptance.spec.ts` 已在真机上跑过，**产品路走到第 3 步并走通**
 >    （加主机/pin → 连接 ready → 登记远端项目 → **在远端项目里新建会话**这个 UI 入口存在且被真实点击 → 远端 runtime 被预热）；
 >    随后在「远端 trust 提示可见」上失败（`getByTestId('remote-session-trust-notice')` 240s 未找到）。
