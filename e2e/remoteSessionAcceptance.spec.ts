@@ -310,7 +310,10 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 				// 独立佐证：历史真的在**远端 pi 自己写的会话文件**里（不是渲染层内存残影）。
 				// 通配符按本项目编码目录限定（唯一）；命令末尾 `true` 保证「查不到」也回得到 stdout 而不是非零退出。
 				remoteSessionEvidence = (await runRemoteCommand(creds, "ls -1 " + paths.sessionEvidenceDir + " 2>/dev/null; wc -l " + paths.sessionEvidenceDir + "/*.jsonl 2>/dev/null; true", 30_000)).stdout;
-				const totalLines = Number((remoteSessionEvidence.match(/^\s*(\d+)\s+total\s*$/m) ?? [])[1] ?? 0);
+				// 按**每个文件的行数求和**，不要认 `total` 行：`wc -l` 只在给出 ≥2 个文件时才打 `total`，
+				// 单个会话文件时永远没有它——曾经因此恒为 0，把「远端文件里明明有 5 行（一问一答都在）」
+				// 误报成产品缺口（真机实测）。求和同时覆盖多文件情形，判据仍然「≥2 行＝至少一问一答」。
+				const totalLines = [...remoteSessionEvidence.matchAll(/^\s*(\d+)\s+\S+$/gm)].reduce((sum, match) => sum + Number(match[1]), 0);
 				expect(totalLines, "远端会话文件必须至少有一问一答两行：\n" + remoteSessionEvidence).toBeGreaterThanOrEqual(2);
 			});
 			if (process.env[GAP_PROBE_ENV] === "1") {
