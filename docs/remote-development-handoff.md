@@ -10,6 +10,15 @@
 >
 > **未完成（建议优先级）**：
 > 1. **Phase 4 P4.2 只剩两项**——协议层**已端到端验通**（真机 `scripts/verify-remote-runtime.mjs` → `RUNTIME_E2E_OK`）。已交付：`707ecb595` 冻结 runner + 远端启动器；`d919e5402` 真机验收脚本 + `remotePiRuntimeFacts`；`e9bcd19d0` `PiProcess` 远端模式；`61222cc76` `AgentManager` 路由 + 本机 fs 守卫 + catalog fail-closed；`68accdfd6` 远端会话的 catalog 身份；`b76b03dff` 远端会话**恢复（点开）**+ 恰好一条 catalog 记录；`448940ea6` **远端 trust 状态可见**（`AgentTab.remoteTrustUnhandled` + 会话视图内持续提示 + 双语 key；安全默认不变）。**剩下：** (i) **远端自动 reattach**（`reattachProcess` 目前是本地实现）；(ii) **Electron 真机 UI 验收**（这台 Linux 沙箱能跑 Electron，可直接做——这是 P4.2 进入 beta 的最后一关）。
+>    **第三轮真机 UI 验收（2026-10，含 `31394947a` + `a05f66352`）**：仍 2 failed，但**失败点又各推进了一步**。
+>    - test 1（产品路）：失败点从「侧栏 0 行」推进到 `spec.ts:314` —— 「**远端会话文件必须至少有一问一答两行**」
+>      `Expected >= 2 / Received 0`。即：**侧栏行找到了、点开重开了、历史断言可能已过**，卡在「去远端读会话文件核验」这一步
+>      （下一手要看 spec 那条 ssh 读取命令是否真的取到文件：路径用的是 locator.remotePath 还是别的）。
+>    - test 2（trust 提示）：**仍然不出现**（`spec.ts:372` 240s 超时）⇒ `31394947a` 的渲染层修法**不是全部原因**。
+>      已排除的：组件挂载是**无条件**的（`SessionView.tsx:262`，其后无分支/早退）、组件根**已带** `data-testid`、
+>      主进程给远端 tab 恒写标记、`emitState()` 发**全量 tab 快照**（无字段白名单）⇒ 剩下唯一可能是
+>      **标记没进渲染层 `sessionRuntimeByIdAtom[该会话]`**。下一步诊断建议：临时在渲染层读该 atom（或让 spec dump
+>      该会话的 runtime 条目键位），确认是「事件没到」还是「键位/会话 id 不匹配」。
 >    **侧栏 0 行的进一步诊断（父代理查 spec 与快照，2026-10）**：失败点其实**很靠后**——test 1 的
 >    「新建会话 → 发 prompt → 出正文 → 关闭 Agent」**全过**，失败在最后一步「关标签页 → 回侧栏点开该会话」：
 >    `projectRow(远端项目).locator('.session-row')` 得到 **0**（期望 1）。两个候选成因，判定方法已明确：
