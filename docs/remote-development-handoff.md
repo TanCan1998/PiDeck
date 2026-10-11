@@ -12,10 +12,15 @@
 > 1. **Phase 4 P4.2 只剩两项**——协议层**已端到端验通**（真机 `scripts/verify-remote-runtime.mjs` → `RUNTIME_E2E_OK`）。已交付：`707ecb595` 冻结 runner + 远端启动器；`d919e5402` 真机验收脚本 + `remotePiRuntimeFacts`；`e9bcd19d0` `PiProcess` 远端模式；`61222cc76` `AgentManager` 路由 + 本机 fs 守卫 + catalog fail-closed；`68accdfd6` 远端会话的 catalog 身份；`b76b03dff` 远端会话**恢复（点开）**+ 恰好一条 catalog 记录；`448940ea6` **远端 trust 状态可见**（`AgentTab.remoteTrustUnhandled` + 会话视图内持续提示 + 双语 key；安全默认不变）。**剩下：** (i) **远端自动 reattach**（`reattachProcess` 目前是本地实现）；(ii) **Electron 真机 UI 验收**（这台 Linux 沙箱能跑 Electron，可直接做——这是 P4.2 进入 beta 的最后一关）。
 >    **UI 验收现状（2026-10，`3f9bff495`）**：`e2e/remoteSessionAcceptance.spec.ts` 已在真机上跑过，**产品路走到第 3 步并走通**
 >    （加主机/pin → 连接 ready → 登记远端项目 → **在远端项目里新建会话**这个 UI 入口存在且被真实点击 → 远端 runtime 被预热）；
->    随后在「远端 trust 提示可见」上失败（`getByTestId('remote-session-trust-notice')` 240s 未找到）。**两种成因待判别**：
->    (i) 组件没暴露 testid ⇒ 改成按文案定位（spec 侧，属允许范围）；(ii) `SessionRuntimeInfo` 不带 `remoteTrustUnhandled`
->    ⇒ 提示要等下一次 `agents:state`（下面这条已知限制）⇒ 产品侧 1 行修法。判别入口：失败证据已另存在
->    `/tmp/p42-ui-acceptance-run1/` 与 `test-results/**/error-context.md`，在 DOM 快照里搜「远端项目资源未加载」。
+>    随后在「远端 trust 提示可见」上失败（`getByTestId('remote-session-trust-notice')` 240s 未找到）。
+>    **成因判别（父代理看过 DOM 证据，2026-10）**：组件**已经带** `data-testid="remote-session-trust-notice"`
+>    （part 7 就加了），所以「缺 testid」这一支**排除**；而最近一次留下的快照是**超时污染**的
+>    （`Error: Channel closed`，页面只剩空壳）⇒ 不可用作判据。因此**最可能的成因是已知限制那一支**：
+>    `SessionRuntimeInfo` 不携带 `remoteTrustUnhandled`，提示要等**下一条 `agents:state` 事件**才出现，
+>    而 spec 的「输入首键预热 runtime」那一步在断言时刻还没产生该事件。
+>    **下一步（最小修法）**：`shared/types/session.ts` 的运行时信息加 1 个可选字段 + `SessionRuntimeCoordinator.runtimeInfo()`
+>    透出它（渲染层已按 runtime-info 组装状态）⇒ 重载/无事件也能显示。修完再跑一轮**只做执行与取证**的真机
+>    验收（把第 5~7 步一并确证）。
 >    第 5~7 步（prompt 出正文 / 关闭 / 重开历史仍在）**尚未确证**（lane 在这两条上 30 分钟超时）。
 >    已知限制（如实记）：`SessionRuntimeInfo` 不带 `remoteTrustUnhandled`（那要动 SessionRuntimeCoordinator），所以**只有渲染层重载且远端 runtime 空闲**时，提示要等下一次 `agents:state`（激活/attach 会发）才出现；最小修法＝`shared/types/session.ts` 加 1 字段 + `runtimeInfo()` 加 1 行。
 >    另：D5 已定（runner 作为同一份 bundle 里的**第二个冻结 entry**）；**Pi RPC 走「每 Session 独立 SSH + 固定 runner」**，**不走控制协议**，全程零新增 helper op。
