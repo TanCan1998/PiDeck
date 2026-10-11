@@ -10,6 +10,14 @@
 >
 > **未完成（建议优先级）**：
 > 1. **Phase 4 P4.2 只剩两项**——协议层**已端到端验通**（真机 `scripts/verify-remote-runtime.mjs` → `RUNTIME_E2E_OK`）。已交付：`707ecb595` 冻结 runner + 远端启动器；`d919e5402` 真机验收脚本 + `remotePiRuntimeFacts`；`e9bcd19d0` `PiProcess` 远端模式；`61222cc76` `AgentManager` 路由 + 本机 fs 守卫 + catalog fail-closed；`68accdfd6` 远端会话的 catalog 身份；`b76b03dff` 远端会话**恢复（点开）**+ 恰好一条 catalog 记录；`448940ea6` **远端 trust 状态可见**（`AgentTab.remoteTrustUnhandled` + 会话视图内持续提示 + 双语 key；安全默认不变）。**剩下：** (i) **远端自动 reattach**（`reattachProcess` 目前是本地实现）；(ii) **Electron 真机 UI 验收**（这台 Linux 沙箱能跑 Electron，可直接做——这是 P4.2 进入 beta 的最后一关）。
+>    **trust 提示不显示＝真产品 bug（探针定案，2026-10）**：两处 app 日志探针给出确凿序列——
+>    `emitSessionRuntimeEvent`（`main/index.ts:537`）在「协调器无绑定」时 `return false`，**整条事件（含 tab 快照）
+>    被丢弃**；而 trust 标记**只搭 `agents:state` 的 tab 快照**（`agents:runtime-state` 载荷不带它）。真机实测：
+>    test 2 的会话 3 次广播**全部 `forwarded:false`**（绑定建立前发出），此后该会话**再无状态变化** ⇒ 标记永远到不了
+>    渲染层 ⇒ 提示不显示；test 1 的会话 8 次广播里 3 次 false、5 次 true（后续 prompt/流式补上了车）。
+>    **最小修法（下一步）**：绑定建立后必须**补一次 `agents:state` 推送**（否则绑定前丢的 tab 快照里的一切状态——
+>    不只 trust 标记——渲染层都拿不到）。落点：协调器绑定成功后发一次状态（`main/index.ts` 已把「解绑 + 推送」
+>    的通道接好，绑定侧对称补上即可），或让广播侧在被丢时记下 agentId、绑定后重放一次。修完删掉两处探针。
 >    **第三轮真机 UI 验收（2026-10，含 `31394947a` + `a05f66352`）**：仍 2 failed，但**失败点又各推进了一步**。
 >    - test 1（产品路）：失败点从「侧栏 0 行」推进到 `spec.ts:314` —— 「**远端会话文件必须至少有一问一答两行**」
 >      `Expected >= 2 / Received 0`。即：**侧栏行找到了、点开重开了、历史断言可能已过**，卡在「去远端读会话文件核验」这一步
