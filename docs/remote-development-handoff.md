@@ -15,100 +15,14 @@
 >    两条测试覆盖：①产品路「新建会话 → 输入出正文 → 关闭 Agent → 关标签页重开 → 历史仍在 → **远端会话文件里确有 5 行**」；
 >    ②「远端 trust 提示如实可见（常驻、非一次性 toast，发送前就在）」。至此 P4.2 的 UI 验收闭合。
 >
->    **P4.2 唯一剩余项：远端自动 reattach**（`reattachProcess` 仍是本地实现）。实现要点（本次侦察所得，避免重走弯路）：
->    - 现状：`AgentManager.reattachProcess`（:2662）第一件事就是 `if (!isLocalProject(project)) throw new Error("UNSUPPORTED_PROJECT_LOCATION")`；
->      两个触发点：进程退出型压缩（:2495）、abort 期间进程退出（:4413）。
->    - 远端分支应复用 create 的 launch 构造：`remoteRuntime.prepare({ hostId: project.locator.hostId,
->      remoteCwd: project.locator.remotePath, sessionFile: sessionPath })` + `remoteRuntime.createLauncher()`（见 :1646）。
->    - **不能复用 `handshakePiProcess`**（:669 的签名不接 launch/plan）⇒ 要照 create 路径的**远端内联握手**写
->      （`PiProcess` 带 launch 起进程 + `get_state` 合并状态）。
->    - **两处硬坑（必须按远端语义处理）**：①远端路径**不得**走 `normalizeSessionPathFromPi`（create 明确注释
->      「原样采用」，本机规则会把它改错）；②远端**不加载历史**（本批 `historyLoading: "unsupported"`），
->      reattach 里的 `loadMessages` 对远端会被守卫拒绝（需 `.catch` 兜住或跳过）。
->    **✅ 已修复并通过真机验收（2026-10，`93cad060e`）**：修法是「预热激活成功后**主动回拉一次 runtime 快照**」
->    ——渲染层首键预热走 IPC `sessionsRuntimeActivate`（`sessionIpc.ts:1456`）直接调 `coordinator.activateRuntime`
->    后返回，**绑定成功后没有任何推送**，而 `emitSessionRuntimeEvent` 在无绑定时会把整条 tab 快照丢掉；
->    `useSessionRuntimeBridge` 又只在挂载时拉一次 `listRuntimes()` ⇒ 静置的会话永远收不到标记。回拉走 `SessionRuntimeInfo`
->    （已带 `remoteTrustUnhandled`）这条**拉**的路径，绕开被丢的事件。真机复跑：**test 2（trust 提示）转绿**、
->    整份 spec 从 2 failed 变 1 failed（1 passed / 1 failed，2.4 分钟）。两处临时探针已在该提交后删除。
->    **P4.2 UI 验收只剩最后一项**：test 1 的「SSH 读远端会话文件核验历史」拿到 `Expected >= 2 / Received 0`
->    ——下一步要判：spec 用的远端路径是否等于 `locator.remotePath` / 那条 ssh 命令的 stderr 是否被吞 / 文件确实为空。
->    **trust 提示不显示＝真产品 bug（探针定案，2026-10）**：两处 app 日志探针给出确凿序列——
->    `emitSessionRuntimeEvent`（`main/index.ts:537`）在「协调器无绑定」时 `return false`，**整条事件（含 tab 快照）
->    被丢弃**；而 trust 标记**只搭 `agents:state` 的 tab 快照**（`agents:runtime-state` 载荷不带它）。真机实测：
->    test 2 的会话 3 次广播**全部 `forwarded:false`**（绑定建立前发出），此后该会话**再无状态变化** ⇒ 标记永远到不了
->    渲染层 ⇒ 提示不显示；test 1 的会话 8 次广播里 3 次 false、5 次 true（后续 prompt/流式补上了车）。
->    **最小修法（下一步）**：绑定建立后必须**补一次 `agents:state` 推送**（否则绑定前丢的 tab 快照里的一切状态——
->    不只 trust 标记——渲染层都拿不到）。落点：协调器绑定成功后发一次状态（`main/index.ts` 已把「解绑 + 推送」
->    的通道接好，绑定侧对称补上即可），或让广播侧在被丢时记下 agentId、绑定后重放一次。修完删掉两处探针。
->    **第三轮真机 UI 验收（2026-10，含 `31394947a` + `a05f66352`）**：仍 2 failed，但**失败点又各推进了一步**。
->    - test 1（产品路）：失败点从「侧栏 0 行」推进到 `spec.ts:314` —— 「**远端会话文件必须至少有一问一答两行**」
->      `Expected >= 2 / Received 0`。即：**侧栏行找到了、点开重开了、历史断言可能已过**，卡在「去远端读会话文件核验」这一步
->      （下一手要看 spec 那条 ssh 读取命令是否真的取到文件：路径用的是 locator.remotePath 还是别的）。
->    - test 2（trust 提示）：**仍然不出现**（`spec.ts:372` 240s 超时）⇒ `31394947a` 的渲染层修法**不是全部原因**。
->      已排除的：组件挂载是**无条件**的（`SessionView.tsx:262`，其后无分支/早退）、组件根**已带** `data-testid`、
->      主进程给远端 tab 恒写标记、`emitState()` 发**全量 tab 快照**（无字段白名单）⇒ 剩下唯一可能是
->      **标记没进渲染层 `sessionRuntimeByIdAtom[该会话]`**。下一步诊断建议：临时在渲染层读该 atom（或让 spec dump
->      该会话的 runtime 条目键位），确认是「事件没到」还是「键位/会话 id 不匹配」。
->    **侧栏 0 行的进一步诊断（父代理查 spec 与快照，2026-10）**：失败点其实**很靠后**——test 1 的
->    「新建会话 → 发 prompt → 出正文 → 关闭 Agent」**全过**，失败在最后一步「关标签页 → 回侧栏点开该会话」：
->    `projectRow(远端项目).locator('.session-row')` 得到 **0**（期望 1）。两个候选成因，判定方法已明确：
->    (a) **组是折叠的**：失败快照里该项目组旁有「展开」按钮（`- button "展开"`）⇒ 行不在 DOM 里 ⇒ 计数必为 0。
->        spec 侧修法：计数前先展开该组，或改成断言「组内存在这条会话」而不是计数。
->    (b) **行在但类名不是 `.session-row`**：草稿行用的是 `draft-session-row`（`SessionTree.tsx:379`，**不带**
->        `session-row`）⇒ 若远端会话在侧栏仍是草稿，就正好 0 命中。根因指向登记的门：
->        `AgentManager` 里 `if (input.deckSessionId && tab.sessionPath)` 才登记（`registerRemoteSessionIdentity`）——
->        任一为空则**静默跳过**，draft 永不被吸收（`SessionCatalog:1352` 注释说明远端是靠握手吸收 draft 的）。
->    判定入口：失败时刻的侧栏 DOM（`projectRow(...).locator('.session-row, .draft-session-row')` 计数 + innerHTML），
->    快照已存 `/tmp/p42-ui-acceptance-mine/`。test 2 的快照里侧栏**有**该会话标题的按钮 ⇒ 行确实存在过。
->    另：test 2 在更早一步（`composer[data-session-id=…]` 文本）就失败 ⇒ **`6b60fcb60` 的 trust 传播修法仍未被真机确证**。
->    **父代理自己跑的一轮真机 UI 验收（2026-10，HEAD `6b60fcb60` 之后）**：`env PIDECK_E2E_REMOTE_HOST=… npx playwright test e2e/remoteSessionAcceptance.spec.ts`
->    ⇒ **2 failed**，但**失败点在很后面**，前半条链已经通了：加主机 + pin → 连接 ready → 登记远端项目 → **在远端项目里新建会话**
->    （真实 UI 点击）全部成功；app 日志显示 agent 生命周期完整：`Agent create requested → Agent pi process start → Pi process spawned
->    → Agent get_state completed → Agent stopped → Pi process exit`，且**没有任何 `REMOTE_*`/`SSH_*` 稳定码**
->    ⇒ **真实应用里的远端 pi 会话确实起来了、`get_state` 也回来了**。
->    **两个待修点（下一轮）**：
->    (1) **侧栏不显示这条远端会话**：断言「远端项目下恰好一条会话行」拿到 `Expected: 1 / Received: 0`。runtime 层是好的
->        ⇒ 属渲染层/刷新链（登记成功后没有让侧栏刷新，或侧栏对 ssh-located 记录的列表路径没覆盖）——这是**当前最实的缺口**；
->    (2) spec 第二步在 `composer[data-session-id=…]` 上断言输入框含 prompt 失败（输入没落进 composer 或选择器不对），
->        trust 提示那条断言因此还没跑到 ⇒ **`6b60fcb60` 那条传播修法尚未被真机确证**。
->    失败证据已另存 `/tmp/p42-ui-acceptance-mine/`（含 `error-context.md` 与截图）。
->    **UI 验收现状（2026-10，`3f9bff495`）**：`e2e/remoteSessionAcceptance.spec.ts` 已在真机上跑过，**产品路走到第 3 步并走通**
->    （加主机/pin → 连接 ready → 登记远端项目 → **在远端项目里新建会话**这个 UI 入口存在且被真实点击 → 远端 runtime 被预热）；
->    随后在「远端 trust 提示可见」上失败（`getByTestId('remote-session-trust-notice')` 240s 未找到）。
->    **成因判别（父代理看过 DOM 证据，2026-10）**：组件**已经带** `data-testid="remote-session-trust-notice"`
->    （part 7 就加了），所以「缺 testid」这一支**排除**；而最近一次留下的快照是**超时污染**的
->    （`Error: Channel closed`，页面只剩空壳）⇒ 不可用作判据。因此**最可能的成因是已知限制那一支**：
->    `SessionRuntimeInfo` 不携带 `remoteTrustUnhandled`，提示要等**下一条 `agents:state` 事件**才出现，
->    而 spec 的「输入首键预热 runtime」那一步在断言时刻还没产生该事件。
->    **下一步（最小修法）**：`shared/types/session.ts` 的运行时信息加 1 个可选字段 + `SessionRuntimeCoordinator.runtimeInfo()`
->    透出它（渲染层已按 runtime-info 组装状态）⇒ 重载/无事件也能显示。修完再跑一轮**只做执行与取证**的真机
->    验收（把第 5~7 步一并确证）。
->    第 5~7 步（prompt 出正文 / 关闭 / 重开历史仍在）**尚未确证**（lane 在这两条上 30 分钟超时）。
->    已知限制（如实记）：`SessionRuntimeInfo` 不带 `remoteTrustUnhandled`（那要动 SessionRuntimeCoordinator），所以**只有渲染层重载且远端 runtime 空闲**时，提示要等下一次 `agents:state`（激活/attach 会发）才出现；最小修法＝`shared/types/session.ts` 加 1 字段 + `runtimeInfo()` 加 1 行。
->    另：D5 已定（runner 作为同一份 bundle 里的**第二个冻结 entry**）；**Pi RPC 走「每 Session 独立 SSH + 固定 runner」**，**不走控制协议**，全程零新增 helper op。
-> 2. ~~**INV-5 实施**~~ —— **已在第八批完成**（见 §3 第八批）：跨 store 写入侧现在有真正的跨进程锁 + 锁内重读（权威=磁盘），门控下 CE-1…CE-5 **全绿**。剩余遗留：**跨 store 协调器与启动 `resume` 仍未装配**（遗留 journal 只能 fail-closed 阻塞，不能自动收敛）、旧版本写者靠 CAS **检测**而非阻止、主机目录锁仍无 owner。
-> 3. **导入会话的正文读取**（远端 JSONL）：属 Phase 4。当前导入只保证「登记 + 进清单 + 选中」，打开会**如实**报「无法读取会话文件」——不是静默失败。
-> 4. **覆盖缺口**：深层嵌套 subagent 会话布局、`remotePathAliases`、`PI_CODING_AGENT_DIR`/`PI_CODING_AGENT_SESSION_DIR`（远端进程环境，helper 无读 env 的操作）与 project 级 `.pi/settings.json`（cwd 作用域）不在扫描期覆盖、POSIX symlink 语义未验。
-> 5. **收尾小项**：两处字面 UUID 正则（`remoteSessionIpc.ts` / `remoteHostIpc`）未收敛；两个 smoke 脚本仍用 `ssh-keyscan` 取候选，应改用产品自己的已认证握手路径；`ProjectTree.tsx` 414 行可插槽化。
-> 6. **全量 `npm test` 仍有 7 条失败**，全在**我们从未改动的文件**里（`piLocator` 的 Windows cmd shim、`quickMessages`、`securityLevelRuntimeSwitch`、`sonnerToasterMount`、`syncWorkflowChoices`），另有 3 条已知环境失败（bootstrap 集成、Windows 无 `/bin/sh`、`sshClientRuntime` 的 POSIX-only 断言）。**只做了文件级归因，未在干净基线上逐条比对**——接手后若要动，请先基线比对再改。**（2026-10 更新）第八批已在 Linux/Node 24.21 环境做过一次全量逐条基线对照**：改动前后均为 19 条失败且**集合逐条一致**，详见 §3 第八批；上面那串 Windows 数字仍未经同等对照。
->
-> **接手必读的坑**（都是实际踩过并付出过代价的）：
-> 1. `.ps1` 脚本必须 **ASCII + BOM**：Windows PowerShell 会把无 BOM 的 UTF-8 按 GBK 读，脚本里的中文会让**整个脚本解析失败**（表现为语法错误而非业务错误）。
-> 2. **Playwright 每次启动会清空 `test-results/`**：真机失败证据必须先 `Copy-Item` 另存，否则下一次跑（或任何人跑一次）就把 trace/截图冲掉。
-> 3. **夹具必须像真的**：远端会话夹具要放在项目的**编码目录** `--<encoded-cwd>--/` 下（`encodePiSessionDirectory`），否则归属判定判不出来，测的就不是真实行为。
-> 4. **契约测试断言的源码文本会随重构过期**：改实现后契约必须**等价迁移**（意图不变），**绝不放宽断言**；否则守卫会变成噪音或掩盖真问题。
-> 5. 跨 VM realm（`loadTsCommonJs` 加载的对象）**不能用 `deepEqual` 比对象**（原型不同会误判），断言字段。
-> 6. helper 是**冻结**的（1.6.0 + sha 与仓库常量逐字节一致）：改它必须 bump bundle；新增远端能力优先走 runner 路径而不是扩控制协议。
-> 7. 每个 bug 修复**红证先行**：先让旧行为变红，再修到绿（本会话有多个 bug 就是靠这条避免了「断言恒真」）。
-> 8. 给用户的命令**不要用超长单行**（易粘贴出错）；本仓库用 `%TEMP%\pideck-acceptance.ps1` 直接把凭据与步骤写进脚本。
->
-> **怎么验证**：离线 `npm run typecheck` + 针对性套件（`node --test tests/remote*.test.mjs tests/session*.test.mjs …`）+ `npm run check:format`；真机 `& "$env:TEMP\pideck-acceptance.ps1"`（内含三个凭据，期望 `1 passed`）。**本执行沙箱无法启动 Electron**（Playwright 需经管道取 CDP 端点，沙箱内程序不能开命名管道；仓库既有 `e2e/smoke.spec.ts` 同因失败），所以**功能级真机验收必须在宿主终端**跑；而 `scripts/verify-remote-host.mjs` 与 `scripts/verify-remote-connection-service.mjs`（协议层/服务层）**可以在沙箱里跑**。
->
-> 本页是协作入口：实现状态、下一批任务、验收与验证方法。架构和发布范围见 [实施计划](remote-development-plan.md)，跨 store 设计见 [跨 store 一致性计划](remote-cross-store-consistency-plan.md) 与 [旧事务设计](remote-host-cross-store-design.md)。
-> 文档中的任务包是待实施工作，不表示已分配给具体开发者或已创建 GitHub issue。
-
-## 1. 当前能做什么
+>    **✅ 远端自动 reattach 已实现（2026-10）**：`reattachProcess` 现在对远端会话走同一套握手，三处远端语义已处理
+>    ——① 重连前**用当前会话文件重新 prepare 计划**（create 那份没有 `--session`，复用会开出新会话；单元测试先抓到这条）；
+>    ② 路径原样采用（不走本机归一化）；③ 不加载历史；无端口/无 hostId 抛 `REMOTE_RUNTIME_UNAVAILABLE`，绝不掉进本机 pi。
+>    回归测试：`tests/agentManagerRemoteRuntime.test.mjs`「远端会话的自动重连（reattachProcess）」（断言第二次 plan 带
+>    `--session` 且用 pi 报回的远端文件、路径未被归一化、`record.forbidden` 为空）。
+>    **尚未覆盖**：真机演练「远端 pi 中途死掉 → 自动接回」这场景（spec 没做，避免在共享主机上 pkill 误杀）。
+>    要做时的安全做法：从**该会话自己的远端 runtime** 拿 pid（不用 `pkill -f pi`），kill 后断言会话自动恢复且历史仍在。
+>    ⇒ **P4.2 至此闭合**（协议/运行时/产品路/trust 可见/re-attach）；下一期是 P4.4（远端 trust 完整语义）。## 1. 当前能做什么
 
 远端功能仍限定为开发构建且显式设置 `PIDECK_REMOTE_EXPERIMENTAL=1`。正式包不开放这些能力。
 

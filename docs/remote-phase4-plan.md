@@ -531,6 +531,7 @@ $ ssh ... serve 'df -h ~ | tail -1'
 
 ## 状态（本次更新）
 
-- **P4.2**：协议/运行时/产品路真机验收**全绿**（`e2e/remoteSessionAcceptance.spec.ts` 2 passed / 真实主机）；
-  唯一剩余项＝**远端自动 reattach**（`reattachProcess` 仍本地实现，实现要点见 `remote-development-handoff.md`）。
+- **P4.2：已闭合**。协议/运行时/产品路真机验收**全绿**（`e2e/remoteSessionAcceptance.spec.ts` 2 passed / 真实主机）；
+  远端自动 reattach 已实现（`reattachProcess` 远端分支 + 回归测试）；唯一未做的只是「真机演练远端 pi 中途死掉→自动接回」
+  （安全做法写在 `remote-development-handoff.md`）。
 - P4.4（远端 trust 完整语义）仍未开始，P4.2 期间只做「如实可见」。
