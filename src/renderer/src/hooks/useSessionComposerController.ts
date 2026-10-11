@@ -7,12 +7,14 @@ import { FILE_TREE_ABSOLUTE_MAX_DEPTH } from "../../../shared/fileTree";
 import { classifyCompactError, compactOwnerReason, compactRoutedCommand, type CompactNoticeKind } from "../../../shared/compactFeedback";
 import { findImageGenProvider } from "../../../shared/imageGenConfig";
 import { resolveEnhanceTargetModel } from "../../../shared/enhanceModelPreference";
+import { collectPromptEnhanceContext } from "../utils/promptEnhanceContext";
 import type { ImageGenMeta } from "../../../shared/types/imagegen";
 import {
 	busySendDeliveryAtom,
 	cacheSessionMessagesAtom,
 	effectiveAgentBackendAtom,
 	enhanceModelAtom,
+	enhanceIncludeContextAtom,
 	imageGenConfigAtom,
 	projectByIdAtomFamily,
 	sessionAttachmentsBySessionIdAtomFamily,
@@ -23,6 +25,7 @@ import {
 	sessionMessagesCacheAtom,
 	sessionPasteFilesBySessionIdAtomFamily,
 	sessionRecordByIdAtomFamily,
+	sessionRecordsAtom,
 	sessionRuntimeBySessionIdAtomFamily,
 	sessionRuntimeUiBySessionIdAtomFamily,
 	sessionQuotesBySessionIdAtomFamily,
@@ -34,6 +37,9 @@ import {
 	setSessionPasteFilesAtom,
 	setSessionSendStateAtom,
 	upsertSessionAtom,
+	promoteSessionComposerStateAtom,
+	removeSessionStateAtom,
+	currentSessionIdAtom,
 	acpToolsAtom,
 	type PastedTextFile,
 } from "../atoms";
@@ -66,7 +72,7 @@ import { t } from "../i18n";
 import { COMPOSER_IMAGE_MAX_BYTES, ComposerImageError, dataUrlToFile, getClipboardImageFiles, getDroppedImageFiles, imageMimeTypeFromPath, isImageFilePath, processComposerImageFile } from "../utils/composerImages";
 import { PASTE_TO_FILE_MIN_CHARS } from "../rendererUtils";
 import { resolveBackendSwitchDefaults } from "../utils/backendSwitchDefaults";
-import { GUIDE_BOOTSTRAP_SESSION_ID, readWelcomeBackendPreference, readWelcomeDshModelPreference, readWelcomeModelPreference, resolveGuidePageBackend, WELCOME_BACKEND_KEY } from "../utils/chatSessionBootstrap";
+import { GUIDE_BOOTSTRAP_SESSION_ID, readWelcomeAcpToolPreference, readWelcomeBackendPreference, readWelcomeDshModelPreference, readWelcomeModelPreference, resolveGuidePageBackend, WELCOME_BACKEND_KEY } from "../utils/chatSessionBootstrap";
 import { showNotice } from "../utils/notice";
 import { requireSessionCommand, toSessionRuntimeTarget } from "../utils/sessionCommands";
 import { buildDraftResourceCommands, draftResourceCommandsForProject, selectComposerSuggestionCommands, standbyPreviewCommandsForProject, type DraftResourceCommandSnapshot, type StandbyPreviewCommandSnapshot } from "../utils/draftResourceCommands";
@@ -272,6 +278,7 @@ export function useSessionComposerController(options: UseSessionComposerControll
 	const store = useStore();
 	const record = useAtomValue(sessionRecordByIdAtomFamily(sessionId));
 	const enhanceModelConfig = useAtomValue(enhanceModelAtom);
+	const enhanceIncludeContext = useAtomValue(enhanceIncludeContextAtom);
 	// 引导页虚拟会话没有 record：文件树/@ 引用回退到引导页选中的项目，
 	// 否则 files 恒为空、@ 输入永远匹配不到任何文件。
 	const effectiveProjectId = record?.projectId ?? options.bootstrapProjectId;
@@ -315,6 +322,10 @@ export function useSessionComposerController(options: UseSessionComposerControll
 	// 真实会话（record 短暂未就绪）不受 localStorage 残留影响。
 	const isGuideBootstrapSession = sessionId === GUIDE_BOOTSTRAP_SESSION_ID;
 	const [guideBackendOverride, setGuideBackendOverride] = useState<AgentBackend | undefined>(() => (isGuideBootstrapSession ? readWelcomeBackendPreference() : undefined));
+	// 引导页 ACP 工具预选单独入 state：acp→acp 换工具时后端名不变，
+	// setGuideBackendOverride("acp") 同值不触发重渲染，trigger 回显会停在旧工具；
+	// 工具 id 必须自己有 state 才能让受控 Select 刷新。
+	const [guideAcpToolOverride, setGuideAcpToolOverride] = useState<string | undefined>(() => (isGuideBootstrapSession ? readWelcomeAcpToolPreference() : undefined));
 	const isDshBackend = record?.backend === "dsh" || runtime?.backend === "dsh" || (isGuideBootstrapSession && guideBackendOverride === "dsh");
 	const hasImageGenHistory = (messageCache?.messages ?? []).some((message) => Boolean(message.meta?.imageGen));
 	// 生图供应商/模型来自独立 imagegen.json，与会话 LLM 模型无关。
@@ -1081,6 +1092,24 @@ export function useSessionComposerController(options: UseSessionComposerControll
 		},
 		showError: (message, duration) => showNotice(message, duration),
 		showUnknown: () => showNotice(t("app.queuedUnknown"), 6000),
+		// ACP 首启失败回收：激活从未成功（draft + 拒收）的 acp 会话没有任何可恢复内容
+		// （agent 侧会话未建、无消息），删除后把回填的草稿搬回引导页，不留在历史列表。
+		pruneFailedAcpDraft: async (failedSessionId) => {
+			const failed = store.get(sessionRecordsAtom)[failedSessionId];
+			if (!failed || failed.backend !== "acp" || failed.status !== "draft") return false;
+			// 先搬草稿（restoreRejectedPrompt 已把输入回填到该会话 composer），再删会话——
+			// 反序会让 promote 读不到源会话状态，用户输入丢失。
+			store.set(promoteSessionComposerStateAtom, { fromSessionId: failedSessionId, toSessionId: GUIDE_BOOTSTRAP_SESSION_ID });
+			await desktopApi.sessions.deleteRecord(failedSessionId).catch(() => undefined);
+			// 先切回引导页再删会话：removeSessionStateAtom 发现删的是当前会话会把
+			// currentSessionId 置 undefined，App 会渲染一帧空态引导页再被下一行设回 GUIDE，
+			// 视觉上就是「闪一下」（与用户报的首启闪烁同源）——先设 GUIDE 则 remove 判定不命中不清空。
+			if (store.get(currentSessionIdAtom) === failedSessionId) {
+				store.set(currentSessionIdAtom, GUIDE_BOOTSTRAP_SESSION_ID);
+			}
+			store.set(removeSessionStateAtom, failedSessionId);
+			return true;
+		},
 		enqueue,
 	});
 
@@ -1523,20 +1552,19 @@ export function useSessionComposerController(options: UseSessionComposerControll
 	// 目标模型优先级（resolveEnhanceTargetModel）：设置页指定的固定增强模型 >
 	// 会话记录 > 引导页点选 > 部署/主进程默认；引导页的 welcomeModel 存 localStorage，
 	// 这里不走 catalog 存在性校验——模型被删的边缘情况由主进程报 model-not-found，toast 可见。
+	const enhanceTarget = resolveEnhanceTargetModel({
+		configured: enhanceModelConfig,
+		recordModel: record?.model,
+		welcomeModel: (isDshBackend ? readWelcomeDshModelPreference() : readWelcomeModelPreference())?.model,
+		fallback: isDshBackend && dshDefault ? { provider: dshDefault.provider, modelId: dshDefault.model } : bootstrapDefaults?.model,
+	});
 	const captureEnhanceRequest = useCallback((): PromptEnhanceRequest | null => {
+		if (!enhanceTarget) return null;
 		const draftSnapshot = liveDomDraftRef.current.sessionId === sessionId ? liveDomDraftRef.current.value : draft;
-		const welcome = (isDshBackend ? readWelcomeDshModelPreference() : readWelcomeModelPreference())?.model;
-		// 与底栏 liveModel 同一組底：dsh 取部署默认（settings.yaml agent-default-model），
-		// pi 取主进程解析的启动默认（显式默认 > 切换列表 > 上次使用）。
-		const fallback = isDshBackend && dshDefault ? { provider: dshDefault.provider, modelId: dshDefault.model } : bootstrapDefaults?.model;
-		const resolved = resolveEnhanceTargetModel({
-			configured: enhanceModelConfig,
-			recordModel: record?.model,
-			welcomeModel: welcome,
-			fallback,
-		});
-		return resolved ? { ...resolved, draft: draftSnapshot } : null;
-	}, [bootstrapDefaults, dshDefault, draft, enhanceModelConfig, isDshBackend, record?.model, sessionId]);
+		// 按发起会话读取已加载快照，既不跨分屏取 currentSession，也不为增强额外加载历史。
+		const context = enhanceIncludeContext ? collectPromptEnhanceContext(store.get(sessionMessageCacheBySessionIdAtomFamily(sessionId))?.messages ?? []) : [];
+		return { ...enhanceTarget, draft: draftSnapshot, ...(context.length ? { context } : {}) };
+	}, [draft, enhanceTarget, enhanceIncludeContext, sessionId, store]);
 
 	// 回填 = 整体替换草稿（与语音插入不同：增强是对全文的改写，没有「插入位置」语义）。
 	const applyEnhancedText = useCallback(
@@ -1552,6 +1580,7 @@ export function useSessionComposerController(options: UseSessionComposerControll
 
 	const enhance = usePromptEnhance({
 		scopeKey: sessionId,
+		modelLabel: enhanceTarget ? `${enhanceTarget.provider}/${enhanceTarget.modelId}` : undefined,
 		captureRequest: captureEnhanceRequest,
 		applyText: applyEnhancedText,
 	});
@@ -1854,9 +1883,24 @@ export function useSessionComposerController(options: UseSessionComposerControll
 			// 报「会话不存在，请刷新会话列表后重试」（2026-09 用户反馈的新建页切 DSH 报错）。
 			// 首次发送时 App.ensureSessionForSend 读取同一份偏好创建真实会话，选择不丢失。
 			if (isGuideBootstrapSession) {
+				// acp 偏好携带工具 id（"acp:<toolId>"）；工具表为空/未选时不切也不存
+				let stored: string = next;
+				let guideToolId: string | undefined;
+				if (next === "acp") {
+					const tools = store.get(acpToolsAtom);
+					const toolId = explicitAcpToolId ?? tools[0]?.id;
+					if (!toolId) {
+						showNotice(t("app.acpNoTools"), 4000);
+						return;
+					}
+					stored = `acp:${toolId}`;
+					guideToolId = toolId;
+				}
 				setGuideBackendOverride(next);
+				// acp→acp 换工具：后端同值不触发重渲染，工具 id 单独 set（见 state 声明处注释）
+				if (guideToolId) setGuideAcpToolOverride(guideToolId);
 				try {
-					localStorage.setItem(WELCOME_BACKEND_KEY, next);
+					localStorage.setItem(WELCOME_BACKEND_KEY, stored);
 				} catch {
 					// localStorage 不可用时静默；本次页面内仍由 guideBackendOverride 即时生效
 				}
@@ -2013,7 +2057,13 @@ export function useSessionComposerController(options: UseSessionComposerControll
 		/** 草稿期可切换后端；激活后锁定（undefined → UI 隐藏切换器）。 */
 		changeBackend: backendLocked ? undefined : changeBackend,
 		// ACP 工具二级选择（草稿期；激活后 UI 不再渲染选择器）
-		acpTool: record?.backend === "acp" ? { toolId: record.acpToolId, onChange: backendLocked ? undefined : changeAcpTool } : undefined,
+		acpTool:
+			record?.backend === "acp"
+				? { toolId: record.acpToolId, onChange: backendLocked ? undefined : changeAcpTool }
+				: // 引导页（无 record）：工具 id 从 localStorage 偏好读，picker 组内高亮当前工具
+					isGuideBootstrapSession && guideBackendOverride === "acp"
+					? { toolId: guideAcpToolOverride, onChange: backendLocked ? undefined : changeAcpTool }
+					: undefined,
 		/** DSH 部署默认模型（settings.yaml agent-default-model）；仅 dsh 后端时展示，
 		 *  离开 dsh 时清空（否则残留值会随 defaultModel 泄漏到 pi 会话底栏）。 */
 		dshDefaultModel: isDshBackend && dshDefault ? { provider: dshDefault.provider, modelId: dshDefault.model, modelName: dshDefault.model } : undefined,

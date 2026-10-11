@@ -28,7 +28,7 @@ import { isShortcutInput, refreshShortcutBindings } from "./appShortcuts";
 // 主进程复用共享的接管型扩展识别规则（与渲染层横幅单一来源；纯函数无依赖）。
 import { detectThirdPartyMcpExtensions } from "../shared/mcpThirdParty";
 import { PiResourceConfigService } from "./config/PiResourceConfigService";
-import { isPackageSource, projectExtensionEnabled } from "./config/PiResourceConfigService";
+import { isPackageSource, projectExtensionEnabled, projectExtensionFiltered } from "./config/PiResourceConfigService";
 import { runPackageRootRuleRepair, type PackageRootRuleRepairDeps } from "./config/piPackageRootRuleRepair";
 import { projectResourceEnabled } from "./config/piResourceRules";
 import { PiResourceStateStore } from "./config/PiResourceStateStore";
@@ -338,6 +338,9 @@ import { registerBackgroundImageProtocol, registerBackgroundsIpc } from "./ipc/b
 import { registerThemesIpc } from "./ipc/themesIpc";
 import { registerPluginDevIpc } from "./ipc/pluginDevIpc";
 import { registerHostPluginsIpc } from "./ipc/hostPluginsIpc";
+import { registerPiDeckMcpIpc } from "./ipc/piDeckMcpIpc";
+import { PiDeckMcpService } from "./mcp/PiDeckMcpService";
+import { HostPluginSessions } from "./plugins/HostPluginSessions";
 import { HostPluginService } from "./plugins/HostPluginService";
 import { HOST_PLUGIN_SCHEME } from "./plugins/hostPluginPolicy";
 import { hostPluginPartitionId, hostPluginWebviewBridge } from "./plugins/hostPluginWebviewPolicy";
@@ -2445,6 +2448,9 @@ function registerIpc() {
 	// quitApp 先置 isQuitting，与托盘「退出」菜单同一写法，避免 closeToTray 把退出吞成隐藏到托盘。
 	registerAcpIpc({
 		settingsStore,
+		// 会话级配置桥惰性取 manager:注册时(此处)尚未实例化(4786 行 opt-in 段),
+		// 与生命周期依赖同一条惰性模式。
+		getSessionManager: () => acpAgentManager,
 		// 生命周期命令编排惰性取 piLocator:注册时(2361 行附近)它尚未实例化(3484 行)。
 		// createInvocation 复用 AcpAgentManager 同一入口(Windows .cmd 垫片),spawn 带 timeout 兜底。
 		getLifecycleDeps: () => ({
@@ -2540,6 +2546,20 @@ function registerIpc() {
 	// 项目显示名闭包在面板挂载时才求值：此处 projectStore 尚未装配。
 	const hostPlugins = new HostPluginService(app.getPath("userData"), sessionCatalog, join(__dirname, "../preload/hostPlugin.js"), (projectId) => projectStore?.get(projectId)?.name);
 	const unregisterHostPlugins = registerHostPluginsIpc(hostPlugins, () => mainWindow);
+	const mcpWarning = (code: string) => {
+		void appLogger.warn("pideck-mcp", "Optional MCP operation rejected", { code });
+	};
+	const piDeckMcp = new PiDeckMcpService({
+		configPath: join(app.getPath("userData"), "pideck-mcp.json"),
+		projects: () => projectStore.list().map(({ id, name }) => ({ id, name })),
+		sessions: new HostPluginSessions(sessionCatalog),
+		warn: mcpWarning,
+	});
+	const unregisterPiDeckMcp = registerPiDeckMcpIpc(piDeckMcp, () => mainWindow, mcpWarning);
+	quitCleanup.register("pideck-mcp", async () => {
+		unregisterPiDeckMcp();
+		await piDeckMcp.dispose();
+	});
 	quitCleanup.register("host-plugins", () => {
 		unregisterHostPlugins();
 		hostPlugins.dispose();
@@ -3036,6 +3056,14 @@ function registerIpc() {
 			}, index * 1500);
 			timer.unref?.();
 		});
+		// 扩展页关键路径预热：提前探测 pi 版本（--no-approve 判定依赖该缓存），把
+		// `pi --version` 子进程移出首次 extensions:list。尽力而为——warmPiVersionProbe
+		// 内部已吞错记日志，此处再兜一层同步异常，失败绝不会影响启动与 catalog 预热。
+		try {
+			void extensionManager?.warmPiVersionProbe();
+		} catch (error) {
+			void appLogger.warn("extension", "pi version prewarm failed", { error: error instanceof Error ? error.message : String(error) });
+		}
 	}, 3000);
 	prewarmTimer.unref?.();
 
@@ -3799,7 +3827,12 @@ app
 			if (!entries) return undefined;
 			// 包安装的扩展真值在 packages 条目的过滤里，顶层 extensions 的路径规则对它无效
 			// （历史迁移残留的 `-<包目录>` 会让开关写成功后弹回，见 projectExtensionEnabled）。
-			return projectExtensionEnabled({ source: extension.source, path: extension.path, entries, packages: extensionManagerNativePackages });
+			const enabled = projectExtensionEnabled({ source: extension.source, path: extension.path, entries, packages: extensionManagerNativePackages });
+			if (enabled === undefined) return undefined;
+			// filtered 也按 packages 条目重算：pi list 只按「条目是不是对象」打标，
+			// 整包停用（四类空数组）与历史空对象会被误标成过滤式安装。
+			const filtered = projectExtensionFiltered({ source: extension.source, packages: extensionManagerNativePackages });
+			return filtered === undefined ? { enabled } : { enabled, filtered };
 		});
 		// 项目侧资源开关写项目 `.pi/settings.json` 的原生过滤规则（A4）。
 		// 项目自有资源用精确 `-path`；继承全局资源写「绝对路径 plain + +/-」，与 pi config 一致。
@@ -4791,6 +4824,11 @@ app
 				piLocator,
 				getProject: (projectId) => projectStore.get(projectId),
 				getTools: () => settingsStore.get().acpTools ?? [],
+				// configOptions 变更推送：set_config_option 响应/config_option_update 通知都走同一事件,
+				// 渲染层按 agentId 隔离(旧 agent 迟到事件写旧 atom,不再被读)。
+				onConfigOptionsChanged: (tab, options) => {
+					if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(ipcChannels.acpSessionConfigChanged, { agentId: tab.id, options });
+				},
 				// 图片物化落盘：ACP 消息里的 base64 图复用生图 blob 存储（ref 形态回填消息；
 				// imagegen 装配在另一段完成，经模块级 ref 延迟取实例）。
 				imageStore: {

@@ -40,6 +40,7 @@ import {
 	hiddenModulesAtom,
 	imageGenConfigAtom,
 	enhanceModelAtom,
+	enhanceIncludeContextAtom,
 	dshRuntimeStatusAtom,
 	openSettingsAtom,
 	openAutomationModalAtom,
@@ -80,13 +81,14 @@ import { activeAgentIdAtom } from "./hooks/useSessionRuntimeController";
 import { useSessionHistoryMutations } from "./hooks/useSessionHistoryMutations";
 import { useUserMessageEditReplay } from "./hooks/useUserMessageEditReplay";
 import { isLiveRuntimeStatus, sessionCommandFailureToast, type SessionRunCapabilities, type SessionRunAction } from "./utils/sessionCommands";
-import { GUIDE_BOOTSTRAP_SESSION_ID, readWelcomeBackendPreference, readWelcomeDshModelPreference, readWelcomeModelPreference, readWelcomeThinkingPreference, resolveChatSessionBootstrap, resolveGuidePageBackend } from "./utils/chatSessionBootstrap";
+import { GUIDE_BOOTSTRAP_SESSION_ID, readWelcomeAcpToolPreference, readWelcomeBackendPreference, readWelcomeDshModelPreference, readWelcomeModelPreference, readWelcomeThinkingPreference, resolveChatSessionBootstrap, resolveGuidePageBackend } from "./utils/chatSessionBootstrap";
 import { useAppAppearance } from "./hooks/appearance/useAppAppearance";
 import { useAppBootstrapInfo } from "./hooks/app/useAppBootstrapInfo";
 import { useBootOverlayReady } from "./hooks/app/useBootOverlayReady";
 import { useCommandPalette } from "./hooks/app/useCommandPalette";
 import { useSidebarArchiveActions } from "./hooks/sidebar/useSidebarArchiveActions";
 import { useSettingsUpdater } from "./hooks/settings/useSettingsUpdater";
+import { useTpsDisplayMode } from "./hooks/settings/useTpsDisplayMode";
 import { useSessionRunControl } from "./hooks/session/useSessionRunControl";
 import { useProjectFileTreeController } from "./hooks/files/useProjectFileTreeController";
 import { useSessionDurationTracking } from "./hooks/session/useSessionDurationTracking";
@@ -152,6 +154,7 @@ import { SessionSplitStage } from "./components/session/SessionSplitStage";
 import { splitLayoutSessionIds } from "./utils/sessionSplitEdge";
 import { SessionTabsBar, type SessionTabsBarProps, type SessionToolAction } from "./components/session/SessionTabsBar";
 import { SessionPaneServicesProvider, type SessionFileOpenContext } from "./components/session/SessionPaneServices";
+import { SessionStatusPanel } from "./components/session/statusPanel/SessionStatusPanel";
 import { ProjectEmptyState } from "./components/session/ProjectEmptyState";
 import { FileLinkBaseProvider } from "./components/session/FileLinkBase";
 import { useSessionWorkspaceChrome } from "./hooks/useSessionWorkspaceChrome";
@@ -185,6 +188,7 @@ import { flattenFiles, fileNodeDragPayloadToRef, mergeCommands, getToolFilePath,
 const ProjectResourcesModal = lazy(() => import("./components/app/ProjectResourcesModal").then((m) => ({ default: m.ProjectResourcesModal })));
 import { createDefaultAppSettings } from "../../shared/types";
 import { hydrateImageContents } from "../../shared/imageContentSrc";
+import { parseSessionStatusPlacement, placementShowsSidebarPanel } from "../../shared/sessionStatusPlacement";
 import type {
 	AgentRuntimeState,
 	AgentTab,
@@ -265,6 +269,7 @@ export function App() {
 	const removeSessionComposerState = useSetAtom(removeSessionComposerStateAtom);
 	const setImageGenConfig = useSetAtom(imageGenConfigAtom);
 	const setEnhanceModel = useSetAtom(enhanceModelAtom);
+	const setEnhanceIncludeContext = useSetAtom(enhanceIncludeContextAtom);
 	const currentSessionIdRef = useRef<string | undefined>(currentSessionId);
 	currentSessionIdRef.current = currentSessionId;
 	const openSessionRequestRef = useRef(0);
@@ -886,6 +891,7 @@ export function App() {
 	});
 	// 激活 Agent 数量告警：受设置 agentCountReminderEnabled 控制（默认开启），每个启动周期提示一次
 	useAgentLoadNotice(settings.agentCountReminderEnabled);
+	useTpsDisplayMode(settings.tpsDisplayMode);
 
 	// 架构错包检测：x64 包跑在 Apple Silicon（Rosetta）下时提示换装 arm64 原生包（可永久关闭）
 	useArchMismatchNotice();
@@ -1312,7 +1318,7 @@ export function App() {
 				// 选了 dsh 但 DSH runtime 不可用时按 effectiveAgentBackendAtom 同一条
 				// 钳制规则回落 pi，避免首次发送才在 createDraft 门控上抛错。
 				// 与 ComposerArea 的展示用同一纯函数：展示的后端和创建的后端必须一致。
-				const draftBackend = resolveGuidePageBackend({ override: readWelcomeBackendPreference(), effectiveDefault: effectiveAgentBackend });
+				const draftBackend = resolveGuidePageBackend({ override: readWelcomeBackendPreference(), acpToolId: readWelcomeAcpToolPreference(), effectiveDefault: effectiveAgentBackend });
 				// 模型偏好按后端分开取（issue #253）：DSH 的模型是 host route 名，不在 models.json，
 				// 必须作为显式 model 直接带给 host；pi 的偏好走 welcomeModel（launchDefaults 会按
 				// models.json 校验存在性）。历史上 DSH 侧不读偏好，点选因此永远不生效。
@@ -1329,6 +1335,7 @@ export function App() {
 					projectId: project.id,
 					title: draftBackend === "dsh" ? `${project.name} DSH` : `${project.name} agent`,
 					backend: draftBackend,
+					...(draftBackend === "acp" ? { acpToolId: readWelcomeAcpToolPreference() } : {}),
 					...(welcomeModel ? (draftBackend === "dsh" ? { model: welcomeModel } : { welcomeModel }) : {}),
 					...(welcomeThinking ? { thinkingLevel: welcomeThinking } : {}),
 				});
@@ -1426,6 +1433,7 @@ export function App() {
 				setSettings(next);
 				setSettingsLoaded(true);
 				setEnhanceModel(next.enhanceModel ?? null);
+				setEnhanceIncludeContext(next.enhanceIncludeContext === true);
 				piUpdate.setCustomPiPath(next.customPiPath ?? "");
 				if (!Object.values(next.externalEditors).some((editor) => editor.command)) {
 					void api.editors
@@ -2603,6 +2611,8 @@ export function App() {
 		);
 	}, []);
 	const simpleMode = settings.navigationMode === "simple";
+	// 会话状态显示位置：首屏设置未拉到 / 预览环境缺字段时按默认值处理
+	const sessionStatusPlacement = parseSessionStatusPlacement(settings.sessionStatusPlacement);
 	const [simpleContentExpanded, setSimpleContentExpanded] = useState(false);
 	useEffect(() => setSimpleContentExpanded(false), [activeTabId, gitDrawerDiff?.filePath, simpleMode]);
 	const workbenchLayout = simpleMode ? (simpleContentExpanded ? "maximize" : "split") : workbenchHasGitDiff ? gitDiffDisplayMode : editorMode;
@@ -3051,6 +3061,13 @@ export function App() {
 									: []),
 							]}
 						/>
+					}
+					drawerFooter={
+						placementShowsSidebarPanel(sessionStatusPlacement) ? (
+							<SessionPaneServicesProvider value={sessionPaneServices}>
+								<SessionStatusPanel sessionId={currentSessionId} />
+							</SessionPaneServicesProvider>
+						) : undefined
 					}
 					drawerContent={(visibleDrawerPanel) => (
 						<DrawerSurface

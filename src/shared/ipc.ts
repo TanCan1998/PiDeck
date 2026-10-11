@@ -909,6 +909,9 @@ export const ipcChannels = {
 	// ===== 插件开发（~/.pi/agent/extensions/ 目录） =====
 	/** 插件开发支持状态：目录路径 + demo/指南是否已就位 */
 	// Independent desktop plugins use their own capability broker, never pi RPC.
+	piDeckMcpState: "pideck-mcp:state",
+	piDeckMcpSetAccess: "pideck-mcp:set-access",
+	piDeckMcpConnection: "pideck-mcp:connection",
 	hostPluginsList: "host-plugins:list",
 	hostPluginsRescan: "host-plugins:rescan",
 	hostPluginsInstall: "host-plugins:install",
@@ -1126,4 +1129,10 @@ export const ipcChannels = {
 	acpToolUninstall: "acp:tool-uninstall",
 	/** 主→渲染：安装/卸载进度行与结算（webContents 推送）。 */
 	acpLifecycleEvent: "acp:lifecycle-event",
+	/** 查询 acp 会话的配置枚举（模型/思考档/模式；agent 未提供时 null）。 */
+	acpSessionConfigGet: "acp:session-config-get",
+	/** 下发 session/set_config_option 并返回 agent 回传的整表。 */
+	acpSessionConfigSet: "acp:session-config-set",
+	/** 主→渲染：configOptions 变更（set 响应/config_option_update 通知）。 */
+	acpSessionConfigChanged: "acp:session-config-changed",
 } as const;

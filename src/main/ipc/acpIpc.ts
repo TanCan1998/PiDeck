@@ -12,13 +12,17 @@
  */
 import { ipcMain } from "electron";
 import { ipcChannels } from "../../shared/ipc";
-import type { AcpToolConfig } from "../../shared/types/acp";
+import type { AcpSessionConfigOption, AcpToolConfig } from "../../shared/types/acp";
 import { sanitizeAcpTools, validateAcpTool } from "../acp/acpToolConfig";
 import { detectAcpPreset, findPresetById, runNpmGlobalAction, type AcpToolLifecycleDeps } from "../acp/acpToolLifecycle";
 import type { AcpLifecycleEvent, AcpToolStatus } from "../../shared/types/acp";
 import type { SettingsStore } from "../settings/SettingsStore";
 
-export function registerAcpIpc(deps: { settingsStore: SettingsStore; getLifecycleDeps?: () => AcpToolLifecycleDeps }): void {
+export function registerAcpIpc(deps: {
+	settingsStore: SettingsStore;
+	getLifecycleDeps?: () => AcpToolLifecycleDeps;
+	getSessionManager?: () => { getSessionConfigOptions(agentId: string): AcpSessionConfigOption[] | undefined; applyConfigOption(agentId: string, optionId: string, value: string | boolean): Promise<AcpSessionConfigOption[]> };
+}): void {
 	const { settingsStore } = deps;
 
 	ipcMain.handle(ipcChannels.acpToolsList, () => settingsStore.get().acpTools ?? []);
@@ -88,4 +92,29 @@ export function registerAcpIpc(deps: { settingsStore: SettingsStore; getLifecycl
 
 	ipcMain.handle(ipcChannels.acpToolInstall, (event, presetId: unknown) => runAction(presetId, "install", event.sender));
 	ipcMain.handle(ipcChannels.acpToolUninstall, (event, presetId: unknown) => runAction(presetId, "uninstall", event.sender));
+
+	// ── 会话级配置(configOptions 规范路径):查询/下发,变更经 acpSessionConfigChanged 推送 ──
+	// manager 惰性取:开关关闭时未实例化,直接报未启用而不是 undefined 崩溃。
+	const requireSessionManager = () => {
+		const manager = deps.getSessionManager?.();
+		if (!manager) throw new Error("acp: session config not enabled");
+		return manager;
+	};
+
+	ipcMain.handle(ipcChannels.acpSessionConfigGet, (_event, agentId: unknown): AcpSessionConfigOption[] | null => {
+		if (typeof agentId !== "string" || !agentId.trim()) throw new Error("acp: expects an agentId string");
+		return requireSessionManager().getSessionConfigOptions(agentId) ?? null;
+	});
+
+	ipcMain.handle(ipcChannels.acpSessionConfigSet, (_event, input: unknown): Promise<AcpSessionConfigOption[]> => {
+		// 入参不可信:agentId/optionId 只收非空字符串;value 限 string(≤256)/boolean,
+		// 枚举合法性由 agent 侧裁决(客户端不维护模型清单,避免手写表漂移)。
+		if (!input || typeof input !== "object") throw new Error("acp: expects a config payload");
+		const record = input as Record<string, unknown>;
+		if (typeof record.agentId !== "string" || !record.agentId.trim()) throw new Error("acp: expects an agentId string");
+		if (typeof record.optionId !== "string" || !record.optionId.trim()) throw new Error("acp: expects an optionId string");
+		const value = record.value;
+		if (typeof value !== "boolean" && (typeof value !== "string" || value.length > 256 || /[\x00-\x1f]/.test(value))) throw new Error("acp: invalid config value");
+		return requireSessionManager().applyConfigOption(record.agentId, record.optionId, value);
+	});
 }

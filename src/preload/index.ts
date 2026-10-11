@@ -4,6 +4,7 @@ import type { TokendanceAuthMode, TokendancePaymentSessionResult } from "../shar
 import type { AcpToolConfig, AcpToolInput, AcpToolValidation } from "../shared/types/acp";
 import type { AnnouncementState } from "../shared/types/announcement";
 import type { HostPluginContext, HostPluginDesktopApi } from "../shared/types/hostPlugin";
+import type { PiDeckMcpDesktopApi } from "../shared/types/piDeckMcp";
 import type { RpcLogBatch, RpcLogEntry } from "../shared/types/rpcLog";
 import type { ModelTraceRecord } from "../shared/types/bridge";
 import type { DshRuntimeStatus, DshRuntimeInstallProgress } from "../shared/types/dshRuntime";
@@ -229,7 +230,14 @@ const hostPlugins: HostPluginDesktopApi = {
 	onNavigate: (callback) => subscribe(ipcChannels.hostPluginNavigate, callback),
 };
 
+const piDeckMcp: PiDeckMcpDesktopApi = {
+	getState: () => ipcRenderer.invoke(ipcChannels.piDeckMcpState),
+	setAccess: (input) => ipcRenderer.invoke(ipcChannels.piDeckMcpSetAccess, input),
+	connection: () => ipcRenderer.invoke(ipcChannels.piDeckMcpConnection),
+};
+
 const api = {
+	piDeckMcp,
 	hostPlugins,
 	clipboard: {
 		// 同步读取必须走主进程 sendSync：Electron 38 已废弃渲染进程/preload 直连 clipboard。
@@ -1130,7 +1138,7 @@ const api = {
 	},
 	extensions: {
 		list: (forceRefresh?: boolean) => ipcRenderer.invoke(ipcChannels.extensionsList, forceRefresh) as Promise<PiExtensionListResult>,
-		uninstall: (source: string, scope?: "user" | "project" | "unknown") => ipcRenderer.invoke(ipcChannels.extensionsUninstall, source, scope) as Promise<void>,
+		uninstall: (source: string, scope?: "user" | "project" | "unknown", projectId?: string) => ipcRenderer.invoke(ipcChannels.extensionsUninstall, source, scope, projectId) as Promise<void>,
 		install: (source: string, projectId?: string) => ipcRenderer.invoke(ipcChannels.extensionsInstall, source, projectId) as Promise<string>,
 		toggle: (source: string, enabled: boolean, scope?: "user" | "project" | "unknown", path?: string, projectId?: string) => ipcRenderer.invoke(ipcChannels.extensionsToggle, source, enabled, scope, path, projectId) as Promise<void>,
 		removeBuiltIn: (source: string) => ipcRenderer.invoke(ipcChannels.extensionsRemoveBuiltIn, source) as Promise<void>,
@@ -1179,6 +1187,12 @@ const api = {
 		uninstallTool: (presetId: import("../shared/acpToolPresets").AcpToolPresetId) => ipcRenderer.invoke(ipcChannels.acpToolUninstall, presetId) as Promise<{ ok: boolean; output: string }>,
 		/** 安装/卸载进度行与结算推送；返回退订函数。 */
 		onLifecycleEvent: (callback: (event: import("../shared/types/acp").AcpLifecycleEvent) => void) => subscribe(ipcChannels.acpLifecycleEvent, callback),
+		/** 查询 acp 会话的配置枚举（模型/思考档/模式；agent 未提供时 null）。 */
+		getSessionConfig: (agentId: string) => ipcRenderer.invoke(ipcChannels.acpSessionConfigGet, agentId) as Promise<import("../shared/types/acp").AcpSessionConfigOption[] | null>,
+		/** 下发 session/set_config_option，返回 agent 回传的整表。 */
+		setSessionConfig: (agentId: string, optionId: string, value: string | boolean) => ipcRenderer.invoke(ipcChannels.acpSessionConfigSet, { agentId, optionId, value }) as Promise<import("../shared/types/acp").AcpSessionConfigOption[]>,
+		/** configOptions 变更推送（按 agentId 隔离）；返回退订函数。 */
+		onSessionConfigChanged: (callback: (event: import("../shared/types/acp").AcpSessionConfigChangedEvent) => void) => subscribe(ipcChannels.acpSessionConfigChanged, callback),
 	},
 	settings: {
 		get: () => ipcRenderer.invoke(ipcChannels.settingsGet) as Promise<AppSettings>,
