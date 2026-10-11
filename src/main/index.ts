@@ -4188,18 +4188,7 @@ app
 			if (sourceChannel === ipcChannels.agentsState && Array.isArray(payload)) {
 				for (const tab of payload) {
 					if (tab && typeof tab === "object" && typeof tab.id === "string") {
-						const forwarded = emitSessionRuntimeEvent(tab.id, sourceChannel, tab);
-						// 带 trust 标记的 tab 才能走到这里（只有远端会话有），所以这行几乎只在远端流程出现。
-						// 用途：`emitSessionRuntimeEvent` 在「协调器无绑定」时会 return false 整条丢弃——
-						// 而标记只搭 agents:state 的 tab 快照（agents:runtime-state 不带它），被丢掉渲染层
-						// 就再也无从得知。真机 UI 验收的「提示始终不显示」靠这一行定调。
-						if ((tab as { remoteTrustUnhandled?: unknown }).remoteTrustUnhandled === true) {
-							void appLogger.info("session-runtime", "Remote trust tab broadcast", {
-								agentId: tab.id,
-								deckSessionId: (tab as { deckSessionId?: unknown }).deckSessionId ?? null,
-								forwarded,
-							});
-						}
+						emitSessionRuntimeEvent(tab.id, sourceChannel, tab);
 					}
 				}
 				return;

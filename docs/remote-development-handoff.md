@@ -10,6 +10,14 @@
 >
 > **未完成（建议优先级）**：
 > 1. **Phase 4 P4.2 只剩两项**——协议层**已端到端验通**（真机 `scripts/verify-remote-runtime.mjs` → `RUNTIME_E2E_OK`）。已交付：`707ecb595` 冻结 runner + 远端启动器；`d919e5402` 真机验收脚本 + `remotePiRuntimeFacts`；`e9bcd19d0` `PiProcess` 远端模式；`61222cc76` `AgentManager` 路由 + 本机 fs 守卫 + catalog fail-closed；`68accdfd6` 远端会话的 catalog 身份；`b76b03dff` 远端会话**恢复（点开）**+ 恰好一条 catalog 记录；`448940ea6` **远端 trust 状态可见**（`AgentTab.remoteTrustUnhandled` + 会话视图内持续提示 + 双语 key；安全默认不变）。**剩下：** (i) **远端自动 reattach**（`reattachProcess` 目前是本地实现）；(ii) **Electron 真机 UI 验收**（这台 Linux 沙箱能跑 Electron，可直接做——这是 P4.2 进入 beta 的最后一关）。
+>    **✅ 已修复并通过真机验收（2026-10，`93cad060e`）**：修法是「预热激活成功后**主动回拉一次 runtime 快照**」
+>    ——渲染层首键预热走 IPC `sessionsRuntimeActivate`（`sessionIpc.ts:1456`）直接调 `coordinator.activateRuntime`
+>    后返回，**绑定成功后没有任何推送**，而 `emitSessionRuntimeEvent` 在无绑定时会把整条 tab 快照丢掉；
+>    `useSessionRuntimeBridge` 又只在挂载时拉一次 `listRuntimes()` ⇒ 静置的会话永远收不到标记。回拉走 `SessionRuntimeInfo`
+>    （已带 `remoteTrustUnhandled`）这条**拉**的路径，绕开被丢的事件。真机复跑：**test 2（trust 提示）转绿**、
+>    整份 spec 从 2 failed 变 1 failed（1 passed / 1 failed，2.4 分钟）。两处临时探针已在该提交后删除。
+>    **P4.2 UI 验收只剩最后一项**：test 1 的「SSH 读远端会话文件核验历史」拿到 `Expected >= 2 / Received 0`
+>    ——下一步要判：spec 用的远端路径是否等于 `locator.remotePath` / 那条 ssh 命令的 stderr 是否被吞 / 文件确实为空。
 >    **trust 提示不显示＝真产品 bug（探针定案，2026-10）**：两处 app 日志探针给出确凿序列——
 >    `emitSessionRuntimeEvent`（`main/index.ts:537`）在「协调器无绑定」时 `return false`，**整条事件（含 tab 快照）
 >    被丢弃**；而 trust 标记**只搭 `agents:state` 的 tab 快照**（`agents:runtime-state` 载荷不带它）。真机实测：
