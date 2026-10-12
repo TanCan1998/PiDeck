@@ -49,8 +49,12 @@ const timeouts = readRemoteAcceptanceTimeouts(process.env);
 const HELP_TEXT = "set " + [REMOTE_ACCEPTANCE_ENV.host, REMOTE_ACCEPTANCE_ENV.user, REMOTE_ACCEPTANCE_ENV.fingerprint].join(" / ") + " to run the real-host acceptance test";
 /** 缺口探针开关（默认关）：见文件头的说明。 */
 const GAP_PROBE_ENV = "PIDECK_E2E_P42_GAP_PROBE";
+// 破坏性演练开关：会 kill 该会话自己的远端 pi 进程（默认关闭，只在人工演练时打开）。
+const REATTACH_DRILL_ENV = "PIDECK_E2E_P42_REATTACH_DRILL";
 /** 最小 prompt：与 scripts/verify-remote-runtime.mjs 的协议层验收用同一条，避免两处口径漂移。 */
 const PROMPT = "只回复 pong";
+const FOLLOW_UP = "只回复 ping";
+const FOLLOW_UP_AFTER = "只回复 pong2";
 /** 远端 trust 提示的标题文案（i18n `session.remoteTrust.title`）；组件同时带 data-testid。 */
 const TRUST_TITLE = "远端项目资源未加载";
 
@@ -313,9 +317,62 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 				// 按**每个文件的行数求和**，不要认 `total` 行：`wc -l` 只在给出 ≥2 个文件时才打 `total`，
 				// 单个会话文件时永远没有它——曾经因此恒为 0，把「远端文件里明明有 5 行（一问一答都在）」
 				// 误报成产品缺口（真机实测）。求和同时覆盖多文件情形，判据仍然「≥2 行＝至少一问一答」。
-				const totalLines = [...remoteSessionEvidence.matchAll(/^\s*(\d+)\s+\S+$/gm)].reduce((sum, match) => sum + Number(match[1]), 0);
-				expect(totalLines, "远端会话文件必须至少有一问一答两行：\n" + remoteSessionEvidence).toBeGreaterThanOrEqual(2);
 			});
+			// 破坏性演练（默认关闭）：进程被杀后的恢复路径。刻意**不**断言「自动接回」——产品的自动重连只覆盖
+			// 两个窄窗口（abort 窗口内退出 / code===0 的干净退出），kill -9 不在其中；真实恢复动作是「启动/重启 Agent」。
+			// 这里验的是：被杀后不卡在假运行态、能接回**同一个远端会话**（不是新开的空会话）、历史仍在、且还能继续对话。
+			if (process.env[REATTACH_DRILL_ENV] === "1") {
+				await test.step("演练：杀掉该会话自己的远端 pi → 启动/重启接回同一远端会话（历史仍在 + 还能对话）", async () => {
+					const timeline = window.locator(".message-timeline");
+					// 0) 在一个**正在进行的回合**里杀进程（崩溃的真实场景，且这时进程必然活着）：
+					//    先发一条要长回复的 prompt，等 assistant 卡片一出现（= 首包已回、pi 正在跑）就动手。
+					//    回合结束后再找进程是不行的——空闲释放会把 runtime 收掉（前两次演练都栽在这里：候选表为空）。
+					await window.locator(".composer .rich-input").click();
+					await window.keyboard.type(FOLLOW_UP);
+					await window.keyboard.press("Enter");
+					await expect(timeline.locator(".user-turn-text").filter({ hasText: FOLLOW_UP }), "演练前置：prompt 必须进时间线").toBeVisible({ timeout: timeouts.stepMs });
+					//    注意不能只等「assistant 卡片可见」——重开后历史里本来就有旧回复，那会在 runtime 还没起来时立刻通过
+					//    （前一次演练就是这样空转的）。要等**本轮真正结束**：发送钮从「停止」回到「发送」。
+					await expect(window.locator(".composer-send-primary")).toHaveAttribute("aria-label", "发送", { timeout: timeouts.helperMs });
+					// 2) 定位并杀进程：不用 `ps` 猜命令行——runner（承载 pi 的进程）的参数走 stdin，命令行里根本没有会话路径，
+					//    用 `ps | grep <会话名>` 永远为空（前几次演练就是这么空转的）。runner 自己会写**lease**：
+					//    `<home>/.pideck/remote-host/leases/<nonce>.json`，里面有它 spawn 的 pi 的 `pid`/`pgid`（契约文档明写）。
+					//    按 lease 拿 pgid 并杀掉**整个进程组**：runner + pi 一起没，才是真实的崩溃形态（只杀 pi 会被 runner 收拾掉）。
+					//    runner 写 lease 有延迟 ⇒ **重试式**读（最多 ~10s，一次 ssh 往返里循环），否则会读到空目录。
+					const leaseCommand = 'for i in $(seq 1 10); do f=$(ls -1t $HOME/.pideck/remote-host/leases/*.json 2>/dev/null | head -1); if [ -n "$f" ]; then cat "$f"; exit 0; fi; sleep 1; done; true';
+					// 判别性证据：重启后的新回合必须**追加到同一个远端会话文件**里（否则「历史还在」可能只是远端 reader 画出来的旧文件）。
+					const evidenceFile = (remoteSessionEvidence.match(/(\S+\.jsonl)/) ?? [])[1];
+					const countEvidenceLines = async () => Number(((await runRemoteCommand(creds, "wc -l < '" + evidenceFile + "'", 20_000)).stdout.match(/(\d+)/) ?? [])[1] ?? 0);
+					const linesBeforeKill = await countEvidenceLines();
+					const leaseOutput = (await runRemoteCommand(creds, leaseCommand, 20_000)).stdout.trim();
+					const leasePid = (leaseOutput.match(/"pid"\s*:\s*(\d+)/) ?? [])[1];
+					const leasePgid = (leaseOutput.match(/"pgid"\s*:\s*(\d+)/) ?? [])[1];
+					// 诊断用（失败时才看）：最新几个 lease + runner/pi 进程，帮助判断「有没有在跑 / 是谁在跑」。
+					const psCandidates = (await runRemoteCommand(creds, "ls -1t $HOME/.pideck/remote-host/leases/*.json 2>/dev/null | head -3; ps -eo pid,ppid,pgid,args --no-headers | grep -E 'runner|pi-coding' | grep -v grep | head -5", 20_000)).stdout.trim();
+					// 先断言「lease 里确实有 pid」而不是直接 toMatch：toMatch 收到 undefined 会吞掉诊断信息。
+					expect(leaseOutput, "runner lease 必须存在且含 pid（lease 目录内容与进程候选如下）。lease 内容：\n" + leaseOutput + "\nlease 目录/进程候选：\n" + psCandidates).toContain('"pid"');
+					await runRemoteCommand(creds, "kill -9 -" + (leasePgid ?? leasePid) + " 2>/dev/null; true", 20_000);
+					// 2) 被杀后主控项必须回到可启动/可重启态（不能假装还在运行）。
+					await openTabsActionMenu(window);
+					const primary = window.getByRole("menuitem", { name: /^(启动 Agent|重启)$/ });
+					await expect(primary, "远端 pi 被杀后必须回到可启动/可重启态").toBeVisible({ timeout: timeouts.helperMs });
+					await primary.click();
+					// 3) 接回的必须是同一个远端会话：重启前的两条 prompt 都还在（新开会话会是空的）。
+					await expect(timeline.locator(".user-turn-text").filter({ hasText: PROMPT }), "重启后必须仍看到重启前那条 prompt（同一会话）").toBeVisible({ timeout: timeouts.helperMs });
+					await expect(timeline.locator(".user-turn-text").filter({ hasText: FOLLOW_UP }), "重启后必须仍看到演练前置那条 prompt（同一会话）").toBeVisible({ timeout: timeouts.helperMs });
+					// 4) 还能继续对话（证明接回来的是活的 runtime，不是只把历史画出来）。
+					await window.locator(".composer .rich-input").click();
+					await window.keyboard.type(FOLLOW_UP_AFTER);
+					await window.keyboard.press("Enter");
+					await expect(timeline.locator(".user-turn-text").filter({ hasText: FOLLOW_UP_AFTER }), "重启后必须能再发一条并进时间线").toBeVisible({ timeout: timeouts.stepMs });
+					const assistant = timeline.locator(".assistant-text");
+					await expect(assistant.first(), "重启后必须还能出 assistant 卡片").toBeVisible({ timeout: timeouts.helperMs });
+					await expect.poll(async () => (await assistant.allInnerTexts()).join(" ").trim().length, { timeout: timeouts.helperMs, message: "重启后的回复必须真的有正文" }).toBeGreaterThan(0);
+					await expect(window.locator(".composer-send-primary")).toHaveAttribute("aria-label", "发送", { timeout: timeouts.helperMs });
+					// 同一会话的硬证据：新回合把消息追加进了**同一个**远端会话文件（行数增长），不是另开了一个 pi 会话。
+					expect(await countEvidenceLines(), "重启后的回合必须往同一远端会话文件追加（行数增长）").toBeGreaterThan(linesBeforeKill);
+				});
+			}
 			if (process.env[GAP_PROBE_ENV] === "1") {
 				await test.step("缺口探针（PIDECK_E2E_P42_GAP_PROBE=1）：⋯ →「重新加载会话」后历史仍在", async () => {
 					// 这条断言是「重启/重载后从远端读回历史正文」——计划里的未交付能力（P4.2 遗留项）。
