@@ -32,6 +32,15 @@
   `(hostId, endpoint 身份, 规范项目根)` 的纯函数实现：路径必须规范成无歧义绝对根（相对/含引号一律拒绝）、
   endpoint 身份只认 pin 的密码学事实（缺即 undefined = 不可判定，fail-closed）、任一材料变化即换 key。
   **零 schema、零行为变更**（不读配置、不改传给 pi 的参数）。提交见 `a86cab491`。
+- **另加契约门禁**：`tests/remoteTrustFlagContract.test.mjs` —— 远端 plan/launcher 源码或 plan 类型里出现
+  `--approve/--no-approve/trustOverride` 字样即红。目的是把「悄悄开始给远端传 trust flag」变成一个**必须显式改测试**
+  的可见动作（测试注释里写明：那是 P4.4b，需授权）。顺手确认了现状：`buildRemotePiArgs` 与 launcher 里没有任何
+  trust 字样，plan 类型（`PiSpawnHandle.RemoteSshPiRuntimeLaunchPlan`）里也没有 trust 字段 ⇒ 结构上就传不出去。
+- **安全边界（实施时必须遵守）**：渲染层**不得**出现 fingerprint —— 共享类型里已明文规定
+  （`RemoteHostDiagnosticEntry` 注释：脱敏诊断"结构上无法携带 fingerprint……这些都不该出现在渲染层"），
+  渲染层主机 DTO 只有 `{id,label,sshHost,verified,disabled}`。所以 P4.4a/b 的 UI 只能显示「主机 label + 已验证 +
+  决策状态」，**不能**显示指纹/known_hosts 摘要；trust key 里的 endpoint 身份只留在主进程与配置里。
+
 - **刻意未做（并说明理由）**：P4.4a 里的「存储 + 设置页清单 + 提示条显示状态」在本期**没有决策入口**
   （决策 UX 属 P4.4b），做出来就是「无人可写、永远显示『未决策』」的空壳 ⇒ 按仓库纪律（不为假设中的未来需求
   增加抽象/配置项）暂不实现。**建议**：把「存储 + 决策 UX + 传递 flag」放进同一批（P4.4b，需授权），
