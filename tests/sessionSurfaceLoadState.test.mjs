@@ -113,6 +113,14 @@ test("known-empty drafts stay on the start surface instead of flashing history l
 	assert.equal(history.isLoading, true);
 });
 
+test("restored SSH sessions with unknown message counts are not known-empty and must load remote history", () => {
+	const { isKnownEmptySessionRecord } = timeline;
+	const locator = { kind: "ssh", hostId: "11111111-1111-4111-8111-111111111111", remoteSessionId: "ws/session.jsonl" };
+	assert.equal(isKnownEmptySessionRecord({ status: "active", messageCount: 0, locator }), false);
+	assert.equal(isKnownEmptySessionRecord({ status: "draft", messageCount: 0, locator }), true);
+	assert.equal(isKnownEmptySessionRecord({ status: "active", messageCount: 0, locator: { kind: "ssh", hostId: locator.hostId } }), true);
+});
+
 test("isKnownEmptySessionRecord only treats drafts and file-less empty sessions as empty", () => {
 	const { isKnownEmptySessionRecord } = timeline;
 	assert.equal(isKnownEmptySessionRecord(undefined), false);

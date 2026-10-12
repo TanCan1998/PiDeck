@@ -79,6 +79,15 @@ async function openTabsActionMenu(window: Page): Promise<void> {
 	await window.locator(".session-tabs-actions").getByRole("button", { name: "更多操作" }).click();
 }
 
+/** 会话管理入口锚定项目标题行，不右键整个含会话正文的项目组。 */
+async function openRemoteSessionManager(window: Page, projectName: string): Promise<Locator> {
+	await projectRow(window, projectName).locator(".project-draggable").click({ button: "right" });
+	await window.getByRole("menuitem", { name: "会话管理", exact: true }).click();
+	const dialog = window.getByRole("dialog").filter({ hasText: "会话管理" });
+	await expect(dialog).toBeVisible();
+	return dialog;
+}
+
 /** 本次运行的远端夹具路径：runId 唯一命名 ⇒ 清理只可能命中本次运行造出来的东西。 */
 type RemoteRunPaths = {
 	runId: string;
@@ -277,6 +286,13 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 				// 回合结束（发送钮回归）再进「停止会话」：这一条验的是会话停止，不是流式中途中断。
 				await expect(window.locator(".composer-send-primary")).toHaveAttribute("aria-label", "发送", { timeout: timeouts.helperMs });
 			});
+			await test.step("运行中的远端会话拒绝归档，记录保留并显示先停 Agent 的提示", async () => {
+				const dialog = await openRemoteSessionManager(window, paths.projectName);
+				await dialog.getByRole("button", { name: "归档", exact: true }).click();
+				await expect(window.getByText(/该会话正在运行：请先停止它的 Agent/)).toBeVisible({ timeout: timeouts.helperMs });
+				await expect(dialog.getByRole("button", { name: "归档", exact: true })).toHaveCount(1);
+				await dialog.getByRole("button", { name: "关闭", exact: true }).click();
+			});
 			await test.step("⋯ →「关闭 Agent」停止会话：主控文案回到「启动 Agent」（可重启）", async () => {
 				await openTabsActionMenu(window);
 				await expect(window.getByRole("menuitem", { name: "关闭 Agent", exact: true }), "运行控制菜单必须有「关闭 Agent」").toBeVisible();
@@ -394,6 +410,40 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 				console.log("[p42-acceptance] after reload: userTurns=" + (await timeline.locator(".user-turn-text").count()) + " assistant=" + (await timeline.locator(".assistant-text").count()) + " textLength=" + (await timeline.innerText()).trim().length);
 				await expect(timeline.locator(".user-turn-text").filter({ hasText: PROMPT }), "重载后必须仍能看到 prompt（远端正文读取）").toBeVisible({ timeout: timeouts.helperMs });
 				await expect(timeline.locator(".assistant-text").first(), "重载后必须仍能看到回复正文（远端正文读取）").toBeVisible({ timeout: timeouts.helperMs });
+			});
+			await test.step("远端归档 → 归档弹窗可见且无删除动作 → 按 ID 恢复 → 文件与历史原样返回", async () => {
+				const evidenceFile = (remoteSessionEvidence.match(/(\/\S+\.jsonl)/) ?? [])[1];
+				expect(evidenceFile, "归档前必须定位到本次会话的远端文件").toBeTruthy();
+				if (!evidenceFile) throw new Error("REMOTE_ARCHIVE_EVIDENCE_FILE_MISSING");
+				const archiveFile = evidenceFile.replace(/\/([^/]+)$/, "/.pideck-archive/$1");
+				const checksum = async (path: string) => (await runRemoteCommand(creds, "sha256sum '" + path + "'", 20_000)).stdout.trim().split(/\s+/)[0];
+				const before = await checksum(evidenceFile);
+				let dialog = await openRemoteSessionManager(window, paths.projectName);
+				const activeRow = dialog.locator("tbody tr").filter({ has: window.getByRole("button", { name: "归档", exact: true }) });
+				await expect(activeRow, "远端会话必须出现在普通管理列表").toHaveCount(1);
+				await activeRow.getByRole("button", { name: "归档", exact: true }).click();
+				await expect(dialog).toHaveCount(0, { timeout: timeouts.helperMs });
+				expect((await runRemoteCommand(creds, "[ ! -e '" + evidenceFile + "' ] && [ -f '" + archiveFile + "' ] && printf moved", 20_000)).stdout.trim()).toBe("moved");
+				expect(await checksum(archiveFile)).toBe(before);
+				dialog = await openRemoteSessionManager(window, paths.projectName);
+				await dialog.getByRole("button", { name: "已归档", exact: true }).click();
+				const archivedRow = dialog.locator("tbody tr").filter({ has: window.getByRole("button", { name: "恢复", exact: true }) });
+				await expect(archivedRow).toHaveCount(1, { timeout: timeouts.helperMs });
+				await expect(archivedRow.getByRole("button", { name: "删除", exact: true })).toHaveCount(0);
+				await expect(archivedRow.getByRole("checkbox")).toBeDisabled();
+				await expect(dialog.getByRole("checkbox").first()).toBeDisabled();
+				await archivedRow.getByRole("button", { name: "恢复", exact: true }).click();
+				await expect(archivedRow).toHaveCount(0, { timeout: timeouts.helperMs });
+				expect((await runRemoteCommand(creds, "[ -f '" + evidenceFile + "' ] && [ ! -e '" + archiveFile + "' ] && printf restored", 20_000)).stdout.trim()).toBe("restored");
+				expect(await checksum(evidenceFile)).toBe(before);
+				await dialog.getByRole("button", { name: "已归档", exact: true }).click();
+				await expect(dialog.getByRole("button", { name: "归档", exact: true })).toHaveCount(1, { timeout: timeouts.helperMs });
+				await dialog.getByRole("button", { name: "关闭", exact: true }).click();
+				const rows = projectRow(window, paths.projectName).locator(".session-row");
+				await expect(rows).toHaveCount(1, { timeout: timeouts.helperMs });
+				await rows.first().click();
+				await expect(window.locator(".message-timeline .user-turn-text").filter({ hasText: PROMPT }), "恢复后必须重新从远端读回 prompt").toBeVisible({ timeout: timeouts.helperMs });
+				await expect(window.locator(".message-timeline .assistant-text").first()).toBeVisible({ timeout: timeouts.helperMs });
 			});
 		} finally {
 			if (consoleErrors.length > 0) console.log("[p42-acceptance] renderer console errors:\n" + consoleErrors.join("\n"));

@@ -54,7 +54,20 @@ import { Checkbox } from "../ui-shadcn/checkbox";
 import { Input } from "../ui-shadcn/input";
 import { Label } from "../../components/ui-shadcn/label";
 import { SESSION_FILTER_PILLS, filterSessionsByPills, pillsPresentIn, type SessionFilterPill } from "../../sessionFilterPills";
-import { archivedDshWorkspaceLabel, archivedPiWorkspaceLabel, filterArchivedDshByFamily, filterArchivedPiByFamily, managerArchivedDshLabel, managerArchivedRowKey, mergeManagerArchived, sessionManagerRowKey, sessionWorkspaceLabel, worktreeFamilyProjects, type ManagerArchivedRow } from "../../sessionManagerModel";
+import {
+	archivedDshWorkspaceLabel,
+	archivedPiWorkspaceLabel,
+	canDeleteManagerArchivedRow,
+	filterArchivedDshByFamily,
+	filterArchivedPiByFamily,
+	managerArchivedDshLabel,
+	managerArchivedRowKey,
+	mergeManagerArchived,
+	sessionManagerRowKey,
+	sessionWorkspaceLabel,
+	worktreeFamilyProjects,
+	type ManagerArchivedRow,
+} from "../../sessionManagerModel";
 
 /**
  * 工作区标签（会话管理弹窗内复用）：worktree 家族聚合后，非主工作区会话
@@ -82,7 +95,7 @@ export function SessionManagerModal(props: {
 	/** 归档会话（可恢复）；运行中的会话由主进程拒绝并抛错 */
 	onArchive: (sessions: SessionSummary[]) => void;
 	/** 恢复归档会话 */
-	onUnarchive: (session: SessionSummary) => Promise<void>;
+	onUnarchive: (session: ArchivedPiSession) => Promise<void>;
 	/** 列出已归档会话（含归档前原始路径，供按家族归属过滤） */
 	listArchived: () => Promise<ArchivedPiSession[]>;
 	/** 永久删除已归档会话（pi 文件归档：移入回收站并移出索引） */
@@ -107,6 +120,8 @@ export function SessionManagerModal(props: {
 	// 已归档视图选中集合（行身份 = managerArchivedRowKey，与主列表 selected 独立）。
 	const [archivedSelected, setArchivedSelected] = useState<Set<string>>(new Set());
 	const [archivedSelectAll, setArchivedSelectAll] = useState(false);
+	// 选中仅用于删除：远端归档行不得进入单行、全选或批量删除集合。
+	const deletableArchivedRows = useMemo(() => (archivedRows ?? []).filter(canDeleteManagerArchivedRow), [archivedRows]);
 	// 已归档行待删除确认：单行/批量均收敛到这里（数组）；确认后调主进程删除并刷新归档列表。
 	const [pendingDeleteArchived, setPendingDeleteArchived] = useState<ManagerArchivedRow[] | null>(null);
 
@@ -174,24 +189,25 @@ export function SessionManagerModal(props: {
 		if (archivedSelectAll) {
 			setArchivedSelected(new Set());
 		} else {
-			setArchivedSelected(new Set((archivedRows ?? []).map(managerArchivedRowKey)));
+			setArchivedSelected(new Set(deletableArchivedRows.map(managerArchivedRowKey)));
 		}
 		setArchivedSelectAll(!archivedSelectAll);
 	};
 
 	const handleToggleArchived = (key: string) => {
+		if (!deletableArchivedRows.some((row) => managerArchivedRowKey(row) === key)) return;
 		setArchivedSelected((prev) => {
 			const next = new Set(prev);
 			if (next.has(key)) next.delete(key);
 			else next.add(key);
-			setArchivedSelectAll(next.size === (archivedRows?.length ?? 0));
+			setArchivedSelectAll(next.size === deletableArchivedRows.length);
 			return next;
 		});
 	};
 
 	// 批量删除已归档行：把选中的行收敛到确认弹窗（单行删除也走这里，数组长度 1）。
 	const handleDeleteArchivedSelected = () => {
-		const rows = (archivedRows ?? []).filter((row) => archivedSelected.has(managerArchivedRowKey(row)));
+		const rows = deletableArchivedRows.filter((row) => archivedSelected.has(managerArchivedRowKey(row)));
 		if (rows.length === 0) return;
 		setPendingDeleteArchived(rows);
 	};
@@ -239,7 +255,7 @@ export function SessionManagerModal(props: {
 							)}
 							{showArchived && (
 								<Label className="flex cursor-pointer items-center gap-2 text-control text-text-secondary select-none">
-									<Checkbox checked={archivedSelectAll} onCheckedChange={handleToggleAllArchived} className="m-0 size-[15px] cursor-pointer accent-[var(--color-accent)]" />
+									<Checkbox checked={archivedSelectAll} disabled={deletableArchivedRows.length === 0} onCheckedChange={handleToggleAllArchived} className="m-0 size-[15px] cursor-pointer accent-[var(--color-accent)]" />
 									{t("common.selectAll")}
 								</Label>
 							)}
@@ -335,7 +351,7 @@ export function SessionManagerModal(props: {
 												<TableRow key={rowKey} className="group bg-bg-panel" data-state={isChecked ? "selected" : undefined}>
 													<TableCell className="w-10">
 														<Label className="flex shrink-0 cursor-pointer items-center">
-															<Checkbox checked={isChecked} onCheckedChange={() => handleToggleArchived(rowKey)} className="m-0 size-[15px] cursor-pointer accent-[var(--color-accent)]" />
+															<Checkbox checked={isChecked} disabled={!canDeleteManagerArchivedRow(row)} onCheckedChange={() => handleToggleArchived(rowKey)} className="m-0 size-[15px] cursor-pointer accent-[var(--color-accent)]" />
 														</Label>
 													</TableCell>
 													<TableCell className="w-full max-w-0">
@@ -365,17 +381,19 @@ export function SessionManagerModal(props: {
 																className="h-auto gap-[3px] rounded-[4px] px-2 text-caption text-text-tertiary transition-all duration-150 hover:bg-bg-hover hover:text-[var(--color-accent)]"
 																onClick={() => {
 																	// 恢复后重新拉取归档列表（主列表由 catalog refresh 自动更新）
-																	const restored = row.kind === "pi" ? props.onUnarchive(row.item.summary) : props.onUnarchiveDsh(row.item.dshSessionId);
-																	void restored.then(loadArchivedRows);
+																	const restored = row.kind === "pi" ? props.onUnarchive(row.item) : props.onUnarchiveDsh(row.item.dshSessionId);
+																	void restored.then(loadArchivedRows).catch(loadArchivedRows);
 																}}
 																title={t("sessionManager.restore")}
 															>
 																{t("sessionManager.restore")}
 															</Button>
-															<Button variant="ghost" size="sm" className="h-auto gap-[3px] rounded-[4px] px-2 text-caption text-text-tertiary transition-all duration-150 hover:bg-[var(--color-danger-soft)] hover:text-[var(--color-danger)]" onClick={() => setPendingDeleteArchived([row])} title={t("common.delete")}>
-																<Trash2 size={12} aria-hidden="true" />
-																{t("common.delete")}
-															</Button>
+															{canDeleteManagerArchivedRow(row) && (
+																<Button variant="ghost" size="sm" className="h-auto gap-[3px] rounded-[4px] px-2 text-caption text-text-tertiary transition-all duration-150 hover:bg-[var(--color-danger-soft)] hover:text-[var(--color-danger)]" onClick={() => setPendingDeleteArchived([row])} title={t("common.delete")}>
+																	<Trash2 size={12} aria-hidden="true" />
+																	{t("common.delete")}
+																</Button>
+															)}
 														</div>
 													</TableCell>
 												</TableRow>
@@ -474,7 +492,7 @@ export function SessionManagerModal(props: {
 								const pending = pendingDeleteArchived;
 								setPendingDeleteArchived(null);
 								if (!pending || pending.length === 0) return;
-								const deleting = Promise.all(pending.map((row) => (row.kind === "pi" ? props.deleteArchived(row.item.summary.filePath) : props.deleteArchivedDsh(row.item.dshSessionId))));
+								const deleting = Promise.all(pending.filter(canDeleteManagerArchivedRow).map((row) => (row.kind === "pi" ? props.deleteArchived(row.item.summary.filePath) : props.deleteArchivedDsh(row.item.dshSessionId))));
 								void deleting.then(loadArchivedRows).catch(() => loadArchivedRows());
 							}}
 						>

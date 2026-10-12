@@ -17,6 +17,7 @@ import type { ArchivedDshSession, ArchivedPiSession, Project, SessionSummary } f
  */
 export function isManagerSessionSummary(summary: SessionSummary): boolean {
 	if (summary.backend === "dsh") return Boolean(summary.dshSessionId);
+	if (summary.locator?.kind === "ssh") return Boolean(summary.locator.remoteSessionId || summary.locator.remotePath);
 	return Boolean(summary.filePath);
 }
 
@@ -104,7 +105,9 @@ export function filterArchivedPiByFamily(items: readonly ArchivedPiSession[], fa
 	const wslMembers = familyPathSet(family, true);
 	return items.filter((item) => {
 		const projectPath = item.summary.projectPath;
-		// 缺少恢复索引的归档不能恢复；缺少 cwd 的归档不能可靠归属，均不展示在项目页。
+		// 远端恢复按 catalog ID，不使用本机路径；项目 ID 也避免两台机器同路径串组。
+		if (item.archivedRemoteSessionId) return family.some((project) => project.id === item.summary.projectId);
+		// 本机缺少恢复索引或 cwd 时仍不展示；SSH 项目不参与本机路径归属。
 		if (!item.originalPath || !projectPath) return false;
 		const wsl = item.summary.wsl === true || isWslLikePath(projectPath);
 		const members = wsl ? wslMembers : nativeMembers;
@@ -145,6 +148,7 @@ function workspaceMemberForPath(canonical: string, wsl: boolean, family: readonl
 
 /** pi 归档行工作区标签：以 JSONL cwd/projectPath 判断归属；主工作区不标记。 */
 export function archivedPiWorkspaceLabel(item: ArchivedPiSession, family: readonly Project[]): string | undefined {
+	if (item.archivedRemoteSessionId) return sessionWorkspaceLabel(item.summary.projectId, family);
 	const projectPath = item.summary.projectPath;
 	if (!item.originalPath || !projectPath) return undefined;
 	const wsl = item.summary.wsl === true || isWslLikePath(projectPath);
@@ -174,6 +178,11 @@ export function managerArchivedDshLabel(row: Extract<ManagerArchivedRow, { kind:
 
 /** 归档视图合并行：pi 会话按文件恢复；DSH 会话按 host id 恢复。 */
 export type ManagerArchivedRow = { kind: "pi"; item: ArchivedPiSession } | { kind: "dsh"; item: ArchivedDshSession };
+
+/** 远端无回收站：归档行可以恢复，但不能进入单行或批量永久删除链路。 */
+export function canDeleteManagerArchivedRow(row: ManagerArchivedRow): boolean {
+	return row.kind !== "pi" || !row.item.archivedRemoteSessionId;
+}
 
 /**
  * 归档行身份（弹窗选中集合用）：pi 行用会话记录 id，DSH 行用 host 会话 id。

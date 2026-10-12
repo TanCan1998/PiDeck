@@ -90,7 +90,7 @@ export type SidebarActions = {
 		/** 归档会话（可恢复） */
 		archive: (projectId: string, session: SessionSummary) => Promise<void>;
 		/** 恢复归档会话 */
-		unarchive: (session: SessionSummary, projectId?: string) => Promise<void>;
+		unarchive: (session: ArchivedPiSession, projectId?: string) => Promise<void>;
 		/** 列出已归档会话（恢复 UI 用；带原始路径，弹窗按项目归属过滤） */
 		listArchived: () => Promise<ArchivedPiSession[]>;
 		/** 永久删除已归档会话（pi 文件归档；移入回收站并移出索引） */
@@ -775,7 +775,11 @@ export function SidebarContent(props: SidebarContentProps) {
 					onRename={(session) => actions.sessions.rename(managerProject.id, session)}
 					onExport={(session) => void actions.sessions.export(managerProject.id, session)}
 					onDelete={(sessions) => Promise.all(sessions.map((session) => actions.sessions.delete(managerProject.id, session))).then(controller.closeSessionManager)}
-					onArchive={(sessions) => Promise.all(sessions.map((session) => actions.sessions.archive(managerProject.id, session))).then(controller.closeSessionManager)}
+					onArchive={(sessions) =>
+						Promise.all(sessions.map((session) => actions.sessions.archive(managerProject.id, session)))
+							.then(controller.closeSessionManager)
+							.catch((error: unknown) => showNotice(error instanceof Error ? error.message : String(error), 5000, "error"))
+					}
 					onUnarchive={(archived) => actions.sessions.unarchive(archived, managerProject.id)}
 					listArchived={actions.sessions.listArchived}
 					deleteArchived={(archivedPath) => actions.sessions.deleteArchived(archivedPath)}

@@ -24,6 +24,8 @@ import {
 } from "lucide-react";
 import { showNotice, type NoticeKind } from "./utils/notice";
 import { copyTextWithCopiedNotice } from "./utils/clipboardNotice";
+import { restoreArchivedPiSession } from "./utils/sessionArchiveActions";
+import type { ArchivedPiSession } from "../../shared/types";
 import { sessionHistoryUnavailableState } from "./utils/sessionHistoryAvailability";
 import { buildSettingsCommands, type PaletteCommand } from "./utils/commandPaletteCommands";
 import { CommandPalette } from "./components/overlays/CommandPalette";
@@ -2891,8 +2893,13 @@ export function App() {
 	}
 
 	/** 恢复归档会话：文件移回原路径并重新扫描 */
-	async function unarchiveSidebarSession(archivedPath: string, projectId = activeProjectId) {
-		await api.sessions.unarchiveRecord(archivedPath);
+	async function unarchiveSidebarSession(archived: ArchivedPiSession, projectId = activeProjectId) {
+		try {
+			await restoreArchivedPiSession(archived, api.sessions);
+		} catch (error) {
+			showToast(error instanceof Error ? error.message : String(error), 5000, "error");
+			throw error;
+		}
 		showToast(t("app.sessionRestored"), 2200);
 		// 归档管理弹窗可以从非当前项目打开；必须刷新弹窗所属项目，否则文件已恢复但侧栏仍沿用旧目录快照。
 		if (projectId) await refreshProjectSessions(projectId);
@@ -3114,7 +3121,7 @@ export function App() {
 				await archiveSidebarSession(projectId, session);
 			},
 			unarchive: async (archived, projectId) => {
-				await unarchiveSidebarSession(archived.filePath, projectId);
+				await unarchiveSidebarSession(archived, projectId);
 			},
 			listArchived: () => listArchivedSidebarSessions(),
 			deleteArchived: async (archivedPath) => {

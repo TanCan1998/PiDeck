@@ -180,11 +180,14 @@ export function isUserFacingSessionStart(sendStatus: string | undefined): boolea
 
 /** catalog 已确认无磁盘历史：空草稿、从未落文件的 pi 会话、尚无 host id 的新 DSH。
  * 预热会写 filePath / dshSessionId，但草稿在真正开聊前仍算空——见控制器 sticky。 */
-export function isKnownEmptySessionRecord(record: Pick<SessionRecord, "status" | "filePath" | "messageCount" | "backend" | "dshSessionId"> | undefined): boolean {
+export function isKnownEmptySessionRecord(record: Pick<SessionRecord, "status" | "filePath" | "messageCount" | "backend" | "dshSessionId" | "locator"> | undefined): boolean {
 	if (!record) return false;
 	if (record.status === "draft") return true;
 	if ((record.messageCount ?? 0) > 0) return false;
 	if (record.filePath) return false;
+	// SSH 的 messageCount=0 是未读取摘要，不是磁盘无历史；归档恢复的新记录没有内存缓存。
+	// 只要已有远端文件身份就必须读页。草稿仍由上面的 draft 分支保留空态。
+	if (record.locator?.kind === "ssh" && (record.locator.remoteSessionId || record.locator.remotePath)) return false;
 	if (record.backend === "dsh" && record.dshSessionId) return false;
 	// imagegen 会话历史独立存 ImageSessionStore，不体现在 filePath/messageCount：
 	// 已 promote 为 active 的生图会话不能判为空，否则重启后打开会跳过历史加载显示空引导页。

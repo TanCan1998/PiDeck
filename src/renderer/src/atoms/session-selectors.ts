@@ -15,6 +15,8 @@ export function sessionRecordToSummary(session: SessionRecord): SessionSummary |
 	return {
 		id: session.id,
 		filePath: session.filePath ?? "",
+		// 管理列表与移除动作依赖 SSH 身份；摘要不能丢掉 locator 后伪装成本机无文件草稿。
+		locator: session.locator,
 		// 会话归属项目 id：会话管理弹窗 worktree 家族聚合后按它打工作区标签。
 		projectId: session.projectId,
 		projectPath: session.projectPath,
