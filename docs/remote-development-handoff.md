@@ -486,7 +486,10 @@ trust-flag 门禁）上重跑完整真机验收 `e2e/remoteSessionAcceptance.spe
    ② 临时文件沿用远端 umask（典型 0644）⇒ **不改权限位**，0600 的会话文件改写后会放宽；
    ③ 并发判据只有「本会话有无运行实例」⇒ 远端 pi **之外**的写者（另一台机器上的 TUI、手工编辑）发现不了，读写之间也没有版本复核；
    ④ 运行中拒绝复用本机同一条 `SESSION_RUNTIME_BUSY`（渲染层既有文案 + debugDetails），没有 P4.5b 那种「先停止 Agent」专用 key；
-   ⑤ **真机未跑**：`base64 -d` 的存在性、以及三条链路在真实远端文件上的端到端行为都还只是本地行为测试（按真实 shell 语义的假 exec）。
+   ⑤ 真机证据分层：**命令形状已在真实主机验证**（2026-10-12 探针：分块写 `base64 -d >`/`>>`、`wc -c <`、
+      分块读 `tail -c +N -- | head -c M | base64`、`mv --` 原子替换四种形状逐条通过，base64 折行往返 200B→200B）⇒
+      worker 原先列的「`base64 -d` 可能不存在」风险已关闭；**仍未验证**的是三条链路在真实远端会话文件上的端到端行为
+      （需要一次真实回合，远端 pi 模型配额恢复后再跑）。
 4. fork / clone：远端 pi 会落盘**新**会话文件（经 pi 的写）。live-runtime 身份链已实现（见上表）：
    替换策略唯一 owner 是 `src/main/sessions/agentSessionReplacement.ts`（`main/index.ts` 只留依赖注入转发），
    本机与 SSH 走同一个 `replaceBoundRuntime` 状态机。**停态 clone**（本机临时 pi 进程那条）与远端 edit/resend 仍不做。
