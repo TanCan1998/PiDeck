@@ -798,14 +798,20 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		if (!entry) return false;
 		// 远端会话（ssh locator）没有本机会话文件，删除的语义只能是**纯本机记录操作**：
 		// 移出 catalog 记录 + 记墓碑（下次远端扫描不再列为「可导入」）。本机语义是「删文件 + 移出记录」，
-		// 这里只保留与它一致的那一半——
-		// 1. **不删远端数据**（远端文件与远端 pi 会话原样保留，UI 文案也是「从列表移除」而不是「已删除」）；
-		// 2. 不调 `localSessionFilePath`（它对 ssh locator 抛稳定码，会让整个移除失败——就是今天的行为）；
-		// 3. 不发任何 SSH/远端命令，也不动本机回收站；
-		// 4. 不碰运行实例：停 Agent 是用户自己的动作（这条路径只移除记录，不代表用户要求终止远端会话）。
+		// 这里只保留与它一致的那部分——
+		// 1. 不调 `localSessionFilePath`（它对 ssh locator 抛稳定码，会让整个移除失败——就是今天的行为）；
+		// 2. 不动本机回收站、不删/改任何本机文件；
+		// 3. **零远端数据写入**：不改写远端 JSONL、不 move、不删除；
+		// 4. 但“停进程 ≠ 改数据”：有运行实例时照本机「先杀后删」的先例先停掉它（见下）。
 		// 真删远端文件是**另一个显式动作**（需二次确认），不在本批（见 docs/remote-write-plan.md §0）。
 		const remoteLocator = entry.locator?.kind === "ssh" ? entry.locator : undefined;
 		if (remoteLocator) {
+			// 先停后摘记录（与本机删除同序）：留一个 `sessionId` 已不存在却仍绑定 runtime 的悬空会话会漏事件、
+			// 生成幽灵条目，而且用户再也找不到停它的入口。这条链路是既有的「关闭 Agent」路径
+			// （releaseRuntimeForDelete → agents.stop → 远端 runner 的停止信号 / 本地 ssh launcher 收尾），
+			// **只终止进程，不做任何远端数据写入**——「停进程」与「改数据」是两件事，前者不碰任何会话文件。
+			// 没有绑定/卡在 error 的中间态也走它：它先解绑再停，失败一次卡在 bound 的会话同样能移除。
+			await sessionRuntimeCoordinator.releaseRuntimeForDelete(sessionId);
 			// 墓碑的键是**扫描侧的会话身份**（remoteSessionId，与 scan 的条目同值域）。G3 早期的远端记录
 			// 可能只有 remotePath（同一个相对会话根的身份，见 readSshSessionLocator 的注释），所以按这个
 			// 顺序取；两者都没有的历史记录（只有 hostId）本就永远匹配不上一次扫描，无需墓碑。
