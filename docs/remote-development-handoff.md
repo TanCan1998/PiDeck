@@ -385,3 +385,27 @@ node scripts/verify-remote-connection-service.mjs '<IPv4>' '<user>' '<independen
 - 所有未验收能力继续受开发态门禁约束；失败必须显式呈现，不能通过删断言或回落本地掩盖。
 
 更多背景：[项目位置 ADR](project-location-architecture.md)、[WSL 位置基线](wsl-location-baseline.md)。
+
+## 远端历史窗口读取（已交付 `de769e460`，父代理已真机复跑）
+
+- **能力**：`sessions:read-messages` 按 locator 路由——ssh locator 记录不再落进「没有本机会话文件」分支
+  （那会返回空页并被渲染层 force 写进缓存，正是「应用重启后点开远端会话没历史」的成因）。
+- **传输**：既有 pinned SSH 短命令（`buildPinnedSshInvocation` + `SshClientRuntime.run`，每次读取复查 pin/指纹/
+  路由摘要/严格配置），**零新增 helper op**；命令只带窗口上界，**永不把文件大小写进命令**。
+- **真机证据（父代理复跑）**：`HOST_HANDSHAKE_OK` → `REMOTE_HISTORY_BOUND WINDOW 131072 TRANSPORT 262144`
+  → `REMOTE_HISTORY_PAGE MESSAGES 2 NEXT_BEFORE none` → `REMOTE_HISTORY_ROLES user,assistant` → `…_PAGE_OK`；
+  指纹当场核对与既定值一致。脚本 `scripts/verify-remote-history.mjs`（只读，凭据只从 env 取）。
+- **注意**：验收 spec 收尾会删掉它自己造的 `*pideck-e2e*` 远端会话目录 ⇒ 拿那些路径复跑脚本会 `COMMAND_FAILED`
+  （文件已不存在），不是实现问题；用该主机上任何真实存在的会话文件即可复跑。
+
+### 已知偏差（待专门契约，不在本项范围）
+
+- 远端 `nextBefore` 是**字节偏移**（本地是活动分支消息下标）：页边界只对齐行、不对齐完整轮次；`total` 是窗口
+  消息数（下界）；`options.beforeEntryId` 对远端不适用；窗口内才可回溯 parentId ⇒ 窗口首条之后的分支归属可能
+  与本地整文件索引不同；单行超过整个窗口时该行永不显示（该页 `nextBefore=null`，不循环）。
+- **渲染层游标语义风险**：`cacheMessages` 在「页 + 内存超限裁剪」分支对数值游标做算术（`nextBefore + dropCount`），
+  按 `source === "disk"` 生效，而远端页目前也走 `source:"disk"`。触发面窄（长会话 + 远端记录），后果是下一次
+  「加载更早」起点偏移、可能跳内容。**修法**：给远端页独立 `source`（联合类型加 `"remote"`，`page` 一并带上，
+  只让 disk 走那条算术）或改成不透明游标契约；修完再加一条针对性测试。
+- 投影按 `{id, parentId, type:"message", message:{…}}` 处理是**推断**（无真实远端文件样本前的读码推断）；
+  真机复跑已读到 `user,assistant` 两条，形态与推断一致。
