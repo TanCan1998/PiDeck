@@ -54,6 +54,7 @@ import { formatExtensionErrorReason } from "./extensionError";
 import type { RpcResponse } from "./PiRpcClient";
 import { formatBashToolMessage } from "./bashResult";
 import type { MainProcessTranslationKey } from "../../shared/i18n/mainProcessCopy";
+import { remotePiDiscoveryCopyKey } from "../remote/remotePiDiscoveryCopy";
 import { mergeHistoryWithPreservedMessages, stabilizeProjectedIdsFromIdentities, stabilizeReloadedMessageIds } from "./historyMessages";
 import { buildAgentSessionKey, toAbsoluteSessionPath, type AgentSessionIdentityDefaults } from "./agentSessionIdentity";
 import type { PiRuntimeLauncher, RemoteSshPiRuntimeLaunchPlan } from "./PiSpawnHandle";
@@ -1666,7 +1667,9 @@ export class AgentManager {
 			// ——不注入任何本地专属准备、从未也绝不会被 start()（见 spawnAndGetState 的远端守卫）。
 			this.agents.set(id, { tab, process: new PiProcess(remoteCwd, this.settingsStore.get()) });
 			this.messages.set(id, []);
-			this.addLocalizedMessage(id, "error", "diagnostic.agentStartFailed", "Pi RPC 启动失败。", {
+			// 远端环境没准备好（pi/node/shell PATH 三类）时说清具体原因与下一步，而不是只丢一个稳定码。
+			const discoveryKey = remotePiDiscoveryCopyKey(rawMessage);
+			this.addLocalizedMessage(id, "error", discoveryKey ?? "diagnostic.agentStartFailed", discoveryKey ? this.translate(discoveryKey) : "Pi RPC 启动失败。", {
 				debugDetails: this.buildStartupFailureMessage(rawMessage, null),
 			});
 			this.emitState();
