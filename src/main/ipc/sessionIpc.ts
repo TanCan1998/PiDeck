@@ -125,6 +125,7 @@ import type { ZCodeSessionImporter } from "../sessions/ZCodeSessionImporter";
 import type { WorkBuddySessionImporter } from "../sessions/WorkBuddySessionImporter";
 import type { CursorSessionImporter } from "../sessions/CursorSessionImporter";
 import type { AppLogger } from "../logging/AppLogger";
+import { REMOTE_SESSION_EXPORT_CODES } from "../remote/RemoteSessionHtmlExport";
 
 /**
  * DSH 后端专用 IPC 依赖（C1 分组）：按后端收敛可选注入，为「后端注册表」铺路——
@@ -356,6 +357,12 @@ export type SessionIpcDeps = {
 	readRemoteSessionHistoryPage?: (input: { hostId: string; locator: import("../../shared/projectLocation").SshSessionLocator; before?: number }) => Promise<import("../../shared/types").SessionMessagePage>;
 	copyCatalogSession: (sessionId: string) => Promise<{ cancelled: boolean; targetSessionId?: string }>;
 	exportCatalogSessionHtml: (sessionId: string) => Promise<Record<string, unknown> & { path: string }>;
+	/**
+	 * 远端会话（ssh locator）HTML 导出：远端有界分页读 + 本机写文件，渲染复用同一套投影式导出渲染器。
+	 * 未装配（远端实验开关关闭 / 旧装配）= 抛稳定码 `REMOTE_SESSION_EXPORT_UNAVAILABLE`，
+	 * **绝不**回退成本机导出。
+	 */
+	exportRemoteCatalogSessionHtml?: (sessionId: string) => Promise<Record<string, unknown> & { path: string }>;
 	replaceAgentSession: (agentId: string, fn: () => Promise<any>, options?: { markForked?: boolean }) => Promise<any>;
 	/** DSH 后端专用 IPC 依赖（C1 分组；未装配 = 无 DSH 后端）。 */
 	dshBackend?: DshBackendIpcDeps;
@@ -423,6 +430,7 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		readImageSessionMessages,
 		copyCatalogSession,
 		exportCatalogSessionHtml,
+		exportRemoteCatalogSessionHtml,
 		replaceAgentSession,
 		dshBackend,
 		readRemoteSessionHistoryPage,
@@ -973,23 +981,9 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		const pageSize = parseSessionPageSize(rawPageSize);
 		const options = parseSessionPageOptions(rawOptions);
 		const entry = sessionCatalog.get(sessionId);
-		const sessionFilePath = localSessionFilePath(sessionId);
-		// DSH 会话没有 pi 会话文件：历史浏览走 host 的 session.history 事件流翻页
-		// （游标 = 事件 seq），与 pi 的磁盘分页同形状（messages/total/nextBefore）；
-		// 第三条参数在 pi 路径是「轮数」，所以 DSH 这里按 turnCount 传（main 侧换算消息预算）。
-		if (entry?.backend === "dsh" && entry.dshSessionId && readDshHistoryPage) {
-			try {
-				return await readDshHistoryPage(entry.dshSessionId, before, { turnCount: pageSize });
-			} catch (error) {
-				// 手动停止态下历史读取必然失败且不会自愈（预热/按需兜底/崩溃重启全被门控）：
-				// 转成带原因的空页，让渲染层出「运行时已停止 + 启动 host」专态，而不是把
-				// host 未运行报成「会话文件已删除/路径失效」——DSH 会话没有 pi 会话文件。
-				// 其余错误（host 崩溃 / 文件损坏）继续抛，渲染层按普通失败处理。
-				const unavailable = dshUnavailablePageFor(error);
-				if (unavailable) return unavailable;
-				throw error;
-			}
-		}
+		// 顺序要求（2026-10 修复）：远端分流必须在 `localSessionFilePath(sessionId)` **之前**——那一步对 ssh locator
+		// 抛稳定码，放在前面会让整个远端分支变成不可达的死代码（重启后打开远端会话读不到历史的真因；运行中会话走
+		// runtime 内存消息，所以真机验收当时没抓到）。
 		// 远端会话的 catalog 记录是 ssh locator（`normalizeEntryLocator` 已清空 filePath）：本地路径读取对它
 		// 永远不存在，落到下面的「无会话文件」分支会把远端历史读成空页并被 force 写进缓存。这里按 locator
 		// 路由到远端有界读取（同一个 SessionMessagePage 契约，渲染层无需分叉）。
@@ -1008,6 +1002,23 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 					hostId: remoteLocator.hostId,
 					error: error instanceof Error ? error.message : String(error),
 				});
+				throw error;
+			}
+		}
+		const sessionFilePath = localSessionFilePath(sessionId);
+		// DSH 会话没有 pi 会话文件：历史浏览走 host 的 session.history 事件流翻页
+		// （游标 = 事件 seq），与 pi 的磁盘分页同形状（messages/total/nextBefore）；
+		// 第三条参数在 pi 路径是「轮数」，所以 DSH 这里按 turnCount 传（main 侧换算消息预算）。
+		if (entry?.backend === "dsh" && entry.dshSessionId && readDshHistoryPage) {
+			try {
+				return await readDshHistoryPage(entry.dshSessionId, before, { turnCount: pageSize });
+			} catch (error) {
+				// 手动停止态下历史读取必然失败且不会自愈（预热/按需兜底/崩溃重启全被门控）：
+				// 转成带原因的空页，让渲染层出「运行时已停止 + 启动 host」专态，而不是把
+				// host 未运行报成「会话文件已删除/路径失效」——DSH 会话没有 pi 会话文件。
+				// 其余错误（host 崩溃 / 文件损坏）继续抛，渲染层按普通失败处理。
+				const unavailable = dshUnavailablePageFor(error);
+				if (unavailable) return unavailable;
 				throw error;
 			}
 		}
@@ -1359,6 +1370,20 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 	});
 	ipcMain.handle(ipcChannels.sessionsCatalogExportHtml, async (_event, rawSessionId: unknown) => {
 		const sessionId = parseSessionId(rawSessionId);
+		// 远端会话是 ssh locator：`localSessionFilePath` 对它抛 UNSUPPORTED_PROJECT_LOCATION，所以**不能**先过
+		// 本机守卫再导出。远端导出 = 远端有界窗口分页读（RemoteSessionHistoryReader）+ 本机写文件，HTML 渲染复用
+		// DSH 投影式导出的同一个渲染器（不为远端再造模板）；端口未装配（远端实验开关关闭）时只抛稳定码，
+		// 不回退成本机导出（那会把远端历史导成一份本机路径读不到的失败，或更糟：导出别人的本机会话）。
+		if (sessionCatalog.getLocator(sessionId)?.kind === "ssh") {
+			if (!exportRemoteCatalogSessionHtml) throw new Error(REMOTE_SESSION_EXPORT_CODES.unavailable);
+			const remoteResult = await exportRemoteCatalogSessionHtml(sessionId);
+			void appLogger.info("session", "Session exported (remote catalog HTML)", {
+				sessionId,
+				path: remoteResult.path,
+				truncated: remoteResult.truncated,
+			});
+			return remoteResult;
+		}
 		localSessionFilePath(sessionId);
 		const result = await exportCatalogSessionHtml(sessionId);
 		void appLogger.info("session", "Session exported (catalog HTML)", {

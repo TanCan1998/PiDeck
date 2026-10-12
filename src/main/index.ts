@@ -270,6 +270,7 @@ import { createRemoteHostConnectionService, type RemoteHostConnectionService } f
 import { createSshClientRuntime, resolvePosixSshClient, type SshClientRuntime } from "./remote/SshClientRuntime";
 import { buildPinnedSshInvocation } from "./remote/SshVerifiedConnection";
 import { createRemoteSessionHistoryReader } from "./remote/RemoteSessionHistoryReader";
+import { exportRemoteSessionHtml, REMOTE_SESSION_EXPORT_LIMITS } from "./remote/RemoteSessionHtmlExport";
 import { createRemoteSessionScanner } from "./sessions/RemoteSessionScanner";
 import type { SshSessionLocator } from "../shared/projectLocation";
 import { matchRemoteSessionProject } from "./remote/remoteSessionProjectMatch";
@@ -812,6 +813,16 @@ async function copyCatalogSession(sessionId: string) {
 function resolveImageGenStorageRoots(): { sessions: string; blobs: string } {
 	const root = join(app.getPath("userData"), "imagegen");
 	return { sessions: join(root, "sessions"), blobs: join(root, "blobs") };
+}
+
+/**
+ * 会话 HTML 导出的本机目录（应用数据目录内，AGENTS.md 路径安全约束）。
+ *
+ * 单一数据源：DSH 投影式导出与远端会话导出必须是同一个目录；各拼一次路径迟早漂移成
+ * 「导出成功但用户在另一个目录找不到文件」。
+ */
+function resolveSessionExportDir(): string {
+	return join(app.getPath("userData"), "exports");
 }
 
 async function exportCatalogSessionHtml(sessionId: string): Promise<{ path: string }> {
@@ -2739,6 +2750,45 @@ function registerIpc() {
 			}
 		: undefined;
 
+	/**
+	 * 远端会话的 HTML 导出（**只读远端 + 本机写文件**）。
+	 *
+	 * 与 `readRemoteSessionHistoryPage` 同一个读端口、同一个实验开关：开关关掉时这条链整体不装配，
+	 * ssh 记录的导出因此得到稳定码 `REMOTE_SESSION_EXPORT_UNAVAILABLE`，而不是落回本机导出（本机导出
+	 * 需要本机会话文件 + 一个临时本机 pi 进程，对远端记录两样都不成立）。
+	 *
+	 * 上游 `sessions:catalog-export-html` 必须在 `getLocalFilePath` 守卫**之前**分流到本函数：那个守卫对
+	 * ssh locator 抛 UNSUPPORTED_PROJECT_LOCATION，先调它则远端导出一律失败。
+	 */
+	const exportRemoteCatalogSessionHtml = readRemoteSessionHistoryPage
+		? async (sessionId: string): Promise<Record<string, unknown> & { path: string }> => {
+				const entry = sessionCatalog.get(sessionId);
+				const locator = sessionCatalog.getLocator(sessionId);
+				// 走到这里却没有 ssh locator（记录被并发删掉/换位置）= 稳定码，不猜路径。
+				if (!entry || locator?.kind !== "ssh") throw new Error(mainCopy("session.notFound"));
+				return await exportRemoteSessionHtml({
+					sessionId,
+					title: entry.title,
+					hostId: locator.hostId,
+					locator,
+					readPage: readRemoteSessionHistoryPage,
+					resolveExportDir: resolveSessionExportDir,
+					copy: {
+						footer: mainCopy("session.exportRemoteFooter"),
+						partialNotice: mainCopy("session.exportRemotePartialNotice", { pages: REMOTE_SESSION_EXPORT_LIMITS.maxPages, messages: REMOTE_SESSION_EXPORT_LIMITS.maxMessages }),
+					},
+					logger: {
+						info: (message, details) => {
+							void appLogger.info("session", message, details);
+						},
+						warn: (message, details) => {
+							void appLogger.warn("session", message, details);
+						},
+					},
+				});
+			}
+		: undefined;
+
 	registerSessionIpc({
 		projectStore,
 		settingsStore,
@@ -2769,6 +2819,7 @@ function registerIpc() {
 		readRemoteSessionHistoryPage,
 		copyCatalogSession,
 		exportCatalogSessionHtml,
+		exportRemoteCatalogSessionHtml,
 		replaceAgentSession,
 		// C1：DSH 后端专用 IPC 依赖按后端分组（注册表化铺路；未来新增后端各自提供一份）
 		dshBackend: {
@@ -3830,8 +3881,8 @@ app
 			},
 			// G17：DSH RPC 日志复用 RpcLogger（按 agentId=dsh:<sessionId> 分文件）
 			rpcLogger,
-			// G10：DSH 会话 HTML 导出目录（应用数据目录内，AGENTS.md 路径安全约束）
-			() => join(app.getPath("userData"), "exports"),
+			// G10：DSH 会话 HTML 导出目录（与远端会话导出同源：resolveSessionExportDir）
+			resolveSessionExportDir,
 			// 新会话无标题时的兜底标题（i18n；与外部会话导入兜底一致）
 			() => mainCopy("session.dshUntitled"),
 		);

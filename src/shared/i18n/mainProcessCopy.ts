@@ -80,6 +80,9 @@ export const mainProcessZhCN = {
 	"session.fileNotFound": "会话文件不存在，请刷新会话列表后重试。",
 	"session.copyDshUnsupported": "DSH 历史会话暂不支持直接复制，请打开会话后使用运行中 Agent 的「复制会话」。",
 	"session.exportFailed": "会话导出失败，请重试。",
+	// 远端会话导出（只读远端 + 本机写文件）：页脚与「上限命中」提示都由装配注入，模块内不硬编码文案。
+	"session.exportRemoteFooter": "由 PiDeck 导出（SSH 远端会话，历史按窗口分页读取）",
+	"session.exportRemotePartialNotice": "这是部分历史：远端会话按 128 KiB 窗口分页读取，本次导出已达上限（最多 {pages} 页 / {messages} 条消息），更早的消息未包含。需要完整历史请在该远端主机上导出。",
 	"session.inUseDeleteBlocked": "会话“{title}”正在使用中，请先关闭 Agent 后再删除。",
 	"session.stopBeforeDelete": "请先停止会话运行实例，再删除会话。",
 	"session.invalidArchivePath": "无效的归档会话路径。",
@@ -332,6 +335,8 @@ export const mainProcessEnUS: Record<MainProcessTranslationKey, string> = {
 	"session.fileNotFound": "The session file no longer exists. Refresh the session list and try again.",
 	"session.copyDshUnsupported": 'DSH history sessions cannot be copied directly yet; open the session and use "Copy session" from the running agent\'s menu.',
 	"session.exportFailed": "Failed to export the session. Try again.",
+	"session.exportRemoteFooter": "Exported from PiDeck (SSH remote session, history read in bounded windows)",
+	"session.exportRemotePartialNotice": "Partial history: a remote session is read page by page in 128 KiB windows and this export hit the limit ({pages} pages / {messages} messages), so earlier messages are not included. Export on the remote host for the full history.",
 	"session.inUseDeleteBlocked": 'Session "{title}" is in use. Close its Agent before deleting it.',
 	"session.stopBeforeDelete": "Stop the session runtime before deleting the session.",
 	"session.invalidArchivePath": "Invalid archived session path.",

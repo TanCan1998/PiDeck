@@ -16,6 +16,18 @@ export type DshSessionExportMeta = {
 	cwd?: string;
 	dshSessionId?: string;
 	exportedAt?: number;
+	/**
+	 * 页脚整句（本地化文案由调用方注入）。缺省保持 DSH 原文案。
+	 *
+	 * 为什么可注入：远端 pi 会话导出（`RemoteSessionHtmlExport`）复用同一个模板，把它的页脚也写成
+	 * “DeepSeek Harness session” 就是一句假话；而另建模板会让两次样式修正开始分叉。
+	 */
+	footerText?: string;
+	/**
+	 * 部分导出说明：非空时在页头下渲染一条可见提示（远端有界分页读命中上限时用）。
+	 * 截断的导出必须是**看得出来**的截断，不能伪装成完整历史。
+	 */
+	partialNotice?: string;
 };
 
 /** 单张图片内联 data URL 的最大长度（超过则跳过并注明，防超大 HTML）。 */
@@ -197,12 +209,17 @@ pre.code-block {
 .tool-args summary { cursor: pointer; padding: 6px 12px; font-size: 12px; color: var(--text-3); }
 .tool-args pre { margin: 0; padding: 0 12px 10px; font-size: 12px; color: var(--text-2); overflow-x: auto; }
 .footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--border); color: var(--text-3); font-size: 12px; }
+.partial-notice {
+  border: 1px solid var(--warn); border-radius: 8px; background: rgba(251, 191, 36, 0.08);
+  color: var(--warn); font-size: 13px; padding: 10px 14px; margin: 0 0 20px;
+}
 `;
 
 /** 全量渲染：messages → 自包含 HTML 文档。 */
 export function renderDshSessionHtml(messages: ChatMessage[], meta: DshSessionExportMeta): string {
 	const exportedAt = new Date(meta.exportedAt ?? Date.now()).toLocaleString();
 	const subItems = [meta.dshSessionId ? `session ${escapeHtml(meta.dshSessionId)}` : "", meta.cwd ? `workspace ${escapeHtml(meta.cwd)}` : "", `exported ${escapeHtml(exportedAt)}`].filter(Boolean);
+	const footerText = meta.footerText ?? "Exported from PiDeck (DeepSeek Harness session)";
 	return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -217,8 +234,9 @@ export function renderDshSessionHtml(messages: ChatMessage[], meta: DshSessionEx
     <h1>${escapeHtml(meta.title)}</h1>
     <div class="sub">${subItems.map((item) => `<span>${item}</span>`).join("")}</div>
   </header>
+  ${meta.partialNotice ? `<div class="partial-notice">${escapeHtml(meta.partialNotice)}</div>` : ""}
   <main>${messages.map(renderMessage).join("\n")}</main>
-  <footer class="footer">Exported from PiDeck (DeepSeek Harness session)</footer>
+  <footer class="footer">${escapeHtml(footerText)}</footer>
 </div>
 </body>
 </html>
