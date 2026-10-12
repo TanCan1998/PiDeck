@@ -29,7 +29,7 @@ import test from "node:test";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SHARED_MODULE = "scripts/remoteVerifyPinnedHost.mjs";
-const scriptNames = ["scripts/verify-remote-host.mjs", "scripts/verify-remote-connection-service.mjs", "scripts/verify-remote-pi.mjs", "scripts/verify-remote-runtime.mjs"];
+const scriptNames = ["scripts/verify-remote-host.mjs", "scripts/verify-remote-connection-service.mjs", "scripts/verify-remote-pi.mjs", "scripts/verify-remote-runtime.mjs", "scripts/verify-remote-history.mjs"];
 
 // 空白/连字符容忍：注释或字符串里写成 "ssh-keyscan" / "ssh - keyscan" / "sshkeyscan" 都算命中。
 // 定位代码块一律用正则，不硬编码缩进（改一次格式化不该让契约测试整组失败）。

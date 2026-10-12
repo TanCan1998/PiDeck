@@ -6224,6 +6224,17 @@ export class AgentManager {
 	}
 
 	/**
+	 * 远端历史消息投影（远端分页读到的原始 pi 消息 → 渲染层消息）。
+	 *
+	 * 必须走与本地历史**同一条**投影管线：远端会话若自建一份投影，工具卡/thinking/生图元数据/停止态
+	 * 的形状迟早与本地漂移，渲染层就成了「两条渲染链」。agentId 用 `_viewer`，与本地磁盘历史页一致
+	 * （历史页没有运行时身份）。
+	 */
+	projectRemoteHistoryMessages(rawMessages: unknown[], activeEntryIds?: string[]): ChatMessage[] {
+		return this.convertAgentMessages("_viewer", rawMessages, activeEntryIds);
+	}
+
+	/**
 	 * The bundled ask_question extension wraps batch questions in one input request
 	 * because Pi RPC dialogs are otherwise strictly sequential. Validate the shape
 	 * before forwarding it so malformed extension data falls back to normal input.

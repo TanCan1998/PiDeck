@@ -267,7 +267,11 @@ import { registerRemoteHostIpc } from "./ipc/remoteHostIpc";
 import { registerRemoteProjectIpc } from "./ipc/remoteProjectIpc";
 import { registerRemoteSessionIpc } from "./ipc/remoteSessionIpc";
 import { createRemoteHostConnectionService, type RemoteHostConnectionService } from "./remote/RemoteHostConnectionService";
-import { createSshClientRuntime, resolvePosixSshClient } from "./remote/SshClientRuntime";
+import { createSshClientRuntime, resolvePosixSshClient, type SshClientRuntime } from "./remote/SshClientRuntime";
+import { buildPinnedSshInvocation } from "./remote/SshVerifiedConnection";
+import { createRemoteSessionHistoryReader } from "./remote/RemoteSessionHistoryReader";
+import { createRemoteSessionScanner } from "./sessions/RemoteSessionScanner";
+import type { SshSessionLocator } from "../shared/projectLocation";
 import { matchRemoteSessionProject } from "./remote/remoteSessionProjectMatch";
 import { openRemoteHostCatalogView } from "./remote/RemoteHostCatalogView";
 import { createRemoteReferenceWriteGuard } from "./remote/RemoteReferenceWriteGuard";
@@ -2380,6 +2384,20 @@ function registerIpc() {
 	const remoteExperimentEnabled = !app.isPackaged && process.env.PIDECK_REMOTE_EXPERIMENTAL === "1";
 	let remoteHostService: import("./remote/RemoteHostConnectionService").RemoteHostConnectionService | undefined;
 	/**
+	 * 已解析的 OpenSSH 客户端（SSH 路由校验与每个 ssh/scp 子进程共用同一份）。
+	 *
+	 * 懒且单实例：`ssh -G` 形状自检把「我们用的是哪个客户端」当成整条连接的信锚，
+	 * 两处各自发现一次就有可能与实际启动的进程不是同一个客户端。失败不缓存（用户可能刚装好客户端）。
+	 */
+	let remoteSshClientPending: Promise<SshClientRuntime> | undefined;
+	const remoteSshClientIfEnabled = (): Promise<SshClientRuntime> => {
+		remoteSshClientPending ??= process.platform === "win32" ? Promise.resolve(createSshClientRuntime()) : resolvePosixSshClient();
+		remoteSshClientPending.catch(() => {
+			remoteSshClientPending = undefined;
+		});
+		return remoteSshClientPending;
+	};
+	/**
 	 * Build the connection service, discovering and verifying the client first.
 	 *
 	 * Discovery is async (it probes the client), so this returns a promise; the IPC boundary awaits it
@@ -2392,7 +2410,7 @@ function registerIpc() {
 		remoteHostServicePending ??= (async () => {
 			// Windows resolves its client internally; elsewhere the client must be discovered and proven
 			// capable before we let it answer route checks. Failing here is a stable code, not a crash.
-			const client = process.platform === "win32" ? createSshClientRuntime() : await resolvePosixSshClient();
+			const client = await remoteSshClientIfEnabled();
 			// The service resolves the host's own node itself (login shell), so no nodePath is pinned here.
 			const service = createRemoteHostConnectionService({
 				userDataDir: app.getPath("userData"),
@@ -2684,6 +2702,43 @@ function registerIpc() {
 		},
 	});
 
+	/**
+	 * 远端会话历史的有界窗口读取（Phase 4 远端历史）。
+	 *
+	 * 传输是既有 **pinned SSH 短命令**：每次读取都重新过 `buildPinnedSshInvocation`（pin 文件/指纹、路由
+	 * 摘要、严格配置复查），命令里只有窗口上界与已校验的绝对路径——没有 helper op、没有第二条控制通道。
+	 * 实验开关关掉时端口不装配：ssh locator 记录会得到稳定码 `REMOTE_SESSION_HISTORY_UNAVAILABLE`，
+	 * 而不是落回本机路径读出一个空页。
+	 *
+	 * 相对身份（扫描登记时 `remotePath` 就是相对会话根路径）走**与扫描/登记同一份**会话根判定：
+	 * pi 的 user-level `settings.json` 可以把会话根换掉，这里再拼一次 `<home>/.pi/agent/sessions` 就会在
+	 * 那些机器上读错文件。
+	 */
+	const readRemoteSessionHistoryPage = remoteExperimentEnabled
+		? async (input: { hostId: string; locator: SshSessionLocator; before?: number }) => {
+				const client = await remoteSshClientIfEnabled();
+				const reader = createRemoteSessionHistoryReader({
+					transport: {
+						// 超时归传输层：`SshClientRuntime.run` 的 execFile 自带 30 s 上限与 256 KiB 输出上限，
+						// 窗口上界（128 KiB）就是为它留出的余量。
+						readRemoteWindow: async ({ hostId, remoteCommand }) => {
+							const invocation = await buildPinnedSshInvocation(app.getPath("userData"), hostId, "ssh-batch", { client, remoteCommand });
+							const result = await client.run(invocation.executable, invocation.args);
+							return { exitCode: result.exitCode, stdout: result.stdout };
+						},
+					},
+					resolveSessionRoot: async (hostId) => {
+						const port = await remoteHostServiceIfEnabled();
+						if (port === undefined) return { ok: false as const, code: "REMOTE_CONNECTION_SERVICE_UNAVAILABLE" };
+						return await createRemoteSessionScanner({ port, catalog: sessionCatalog }).resolveSessionRoot(hostId);
+					},
+					project: (rawMessages, activeEntryIds) => agentManager.projectRemoteHistoryMessages(rawMessages, activeEntryIds),
+					logger: { warn: (message, details) => appLogger.warn("session", message, details) },
+				});
+				return await reader.readPage(input);
+			}
+		: undefined;
+
 	registerSessionIpc({
 		projectStore,
 		settingsStore,
@@ -2711,6 +2766,7 @@ function registerIpc() {
 		readCatalogSessionReferenceMessages,
 		// 无 pi 会话文件（纯生图草稿）历史读取回退：ImageSession 独立存储
 		readImageSessionMessages: (sessionId) => imageSessionStore.readMessages(sessionId),
+		readRemoteSessionHistoryPage,
 		copyCatalogSession,
 		exportCatalogSessionHtml,
 		replaceAgentSession,

@@ -348,6 +348,12 @@ export type SessionIpcDeps = {
 	 * 未装配（单测/无生图域）时 undefined；调用处 `?? []` 兜底空页。
 	 */
 	readImageSessionMessages?: (sessionId: string) => Promise<import("../../shared/types").ChatMessage[]>;
+	/**
+	 * 远端会话历史分页（ssh locator 记录）。未装配 = 远端历史读不了，按稳定码拒绝，
+	 * **绝不**落回本机/生图那条「没有会话文件」的分支——那条分支会把远端历史读成一个空页，
+	 * 再被渲染层 force 写进缓存（重启后点开远端会话看不到历史）。
+	 */
+	readRemoteSessionHistoryPage?: (input: { hostId: string; locator: import("../../shared/projectLocation").SshSessionLocator; before?: number }) => Promise<import("../../shared/types").SessionMessagePage>;
 	copyCatalogSession: (sessionId: string) => Promise<{ cancelled: boolean; targetSessionId?: string }>;
 	exportCatalogSessionHtml: (sessionId: string) => Promise<Record<string, unknown> & { path: string }>;
 	replaceAgentSession: (agentId: string, fn: () => Promise<any>, options?: { markForked?: boolean }) => Promise<any>;
@@ -419,6 +425,7 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		exportCatalogSessionHtml,
 		replaceAgentSession,
 		dshBackend,
+		readRemoteSessionHistoryPage,
 	} = deps;
 	const localSessionFilePath = (sessionId: string) => sessionCatalog.getLocalFilePath(sessionId);
 	// C1：DSH 后端依赖从 dshBackend 分组解构（未装配 = 空对象，相关通道降级）。
@@ -969,6 +976,27 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 				// 其余错误（host 崩溃 / 文件损坏）继续抛，渲染层按普通失败处理。
 				const unavailable = dshUnavailablePageFor(error);
 				if (unavailable) return unavailable;
+				throw error;
+			}
+		}
+		// 远端会话的 catalog 记录是 ssh locator（`normalizeEntryLocator` 已清空 filePath）：本地路径读取对它
+		// 永远不存在，落到下面的「无会话文件」分支会把远端历史读成空页并被 force 写进缓存。这里按 locator
+		// 路由到远端有界读取（同一个 SessionMessagePage 契约，渲染层无需分叉）。
+		const remoteLocator = entry?.locator?.kind === "ssh" ? entry.locator : undefined;
+		if (remoteLocator) {
+			// 游标含义：本地页是「活动分支消息下标」，这里是**远端文件字节偏移**（上一个窗口首行的偏移）；
+			// 两者都是 number|null 的同一契约字段。`options.beforeEntryId` 是本地缓存路径的锚点，对远端不适用。
+			if (!readRemoteSessionHistoryPage) throw new Error("REMOTE_SESSION_HISTORY_UNAVAILABLE");
+			try {
+				return await readRemoteSessionHistoryPage({ hostId: remoteLocator.hostId, locator: remoteLocator, ...(typeof before === "number" ? { before } : {}) });
+			} catch (error) {
+				// 失败必须是**可见的结构化失败**：渲染层靠 reject 显示明确错误态，而不是拿到空页
+				// 当成「这个会话没有历史」（远端路径/命令行/远端 stderr 都不进日志，只记稳定码与身份）。
+				appLogger.warn("session", "Read remote session history page failed", {
+					sessionId,
+					hostId: remoteLocator.hostId,
+					error: error instanceof Error ? error.message : String(error),
+				});
 				throw error;
 			}
 		}
