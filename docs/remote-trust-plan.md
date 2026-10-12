@@ -1,0 +1,65 @@
+# 远端 trust 完整语义（P4.4）实施计划
+
+> 状态：**待授权**。本文档是门禁产物——「公共契约 / 安全语义变更」必须先出 Implementation Plan 并取得确认，
+> 而 P4.4b 会改变传给远端 pi 的 trust flag（= 远端项目 `.pi` 资源是否被执行）⇒ 属该门禁范围。
+> P4.2 收口时的明确边界：PiDeck **刻意不传任何 trust flag**，只把现状如实告知（见
+> `docs/remote-development-handoff.md` 与 `RemoteSessionTrustNotice.tsx` 头注释）。
+
+## 1. 为什么需要这一期
+
+- **现状**：远端 pi 的 `project_trust` 事件 `hasUI=false`，项目 `.pi` 资源（扩展/技能/提示词/项目设置）是否加载
+  由远端 `~/.pi/agent/settings.json` 的 `defaultProjectTrust` 决定；PiDeck 既不决定也不传递，只显示
+  「远端项目资源未加载」的常驻提示（`AgentTab.remoteTrustUnhandled`）。
+- **缺口**：用户**无法在 PiDeck 里决定**信任某个远端项目 ⇒ 远端项目的 `.pi` 资源永远不生效，也没有撤销/审计入口。
+- **本地对照**：本地由 PiDeck 处理（`AgentManager.ensureProjectTrust` + spawn 时 `--approve/--no-approve`）；
+  远端没有对应物 ⇒ 这是「能力 parity」里最后一块明显缺口。
+
+## 2. trust key（本期的核心定义）
+
+**`(hostId, endpointIdentity, canonicalRemotePath)`**
+
+- `hostId`：`RemoteHostStore` 的主机 id（显示名可改 ⇒ **不参与** key）。
+- `endpointIdentity`：pin 的指纹（`SshHostPinStore`）+ `user` + `port` ⇒ 三者任一变化都视为**不同 endpoint**，
+  旧 trust 一律作废（**fail-closed，不自动继承、不自动重信任**）。
+- `canonicalRemotePath`：**项目根**的规范化远端绝对路径。注意 `SessionCatalog` 远端记录的 `remotePath` 有
+  「pi 上报的绝对路径」与「相对会话根的路径」两种形态（见 `RemoteSessionHistoryReader` 的说明）⇒ key 必须走
+  与读取侧**同源**的规范化（`RemoteSessionScanner.resolveSessionRoot` 一系），**禁止**在 trust 侧另写一套归一化。
+- 粒度：**项目级**（信任的是「该项目根的 `.pi` 资源」），不是会话级。
+
+## 3. 需要决策的点（授权门禁）
+
+| # | 决策 | 选项 | 倾向 |
+|---|------|------|------|
+| 1 | **是否传 flag**（P4.4b） | 传 `--approve`/`--no-approve` / 维持不传 | 授权后才传；未授权则只做 P4.4a |
+| 2 | 未决策时的默认 | A 维持现状（不传 flag）/ B 显式 `--no-approve` / C 首次进入时询问 | **A**（零行为变更，最保守） |
+| 3 | 粒度 | 项目根 / 主机级一次信任 | **项目根** |
+| 4 | 存储 | `SettingsStore` 新段 / 随 `RemoteHostStore` / 独立 store | `SettingsStore`（随配置备份；host 删除时清理该 host 的条目） |
+| 5 | 撤销与审计 | 设置页「远端信任」清单 + 项目右键「不再信任」；指纹变更自动作废并**写明原因** | 两者都要 |
+
+## 4. 分期
+
+- **P4.4a（只读，不改安全语义）**：key 计算 + 存储 + 状态（未决策 / 已信任 / 已拒绝 / 因 endpoint 变更作废）；
+  UI 可见（提示条与设置页）；**不传任何 flag** ⇒ 行为与今天完全一致。单测覆盖 key 与状态机。
+- **P4.4b（改安全语义，需授权）**：按状态传 `--approve`/`--no-approve`（落点：`piRemoteRuntimePlan` 的 args，
+  与本地 `trustOverride` 对称）；提示条从「如实告知」变成「可决策 + 可撤销」；文档与迁移。
+- **P4.4c**：与主机重绑（`HostRebindJournal`）联动——重绑后按 `endpointIdentity` 判定 trust 是否保留。
+
+## 5. 验证计划
+
+- **单测**：key 计算（相对/绝对路径归一、单引号/大小写/尾斜杠、指纹与 user/port 变化 ⇒ 作废）、存储迁移、
+  状态机（未决策 → 信任 → 撤销）、host 删除时清理。
+- **真机**：
+  1. P4.4a：状态可见且**远端行为不变**——用已有的诊断日志 `Remote pi runtime plan prepared { args }` 断言
+     args 里**没有** trust flag（这条日志是 P4.2 收口时加的，正好可作判据）。
+  2. P4.4b：`--approve` 后远端 `.pi` 资源**确实生效**（用「只在信任时加载的项目扩展/提示词」当探针），
+     `--no-approve` 时明确不加载；两次都要看远端 pi 的 `project_trust` 事件/日志作为佐证。
+- **回归**：现有 `remoteTrustUnhandled` 提示条语义不得退化；`e2e/remoteSessionAcceptance.spec.ts`（含
+  trust 提示断言）与 `tests/remoteSessionAcceptanceSpecGuard.test.mjs` 保持绿。
+
+## 6. 风险与安全底线
+
+- **禁止**为「让资源生效」而默认传 `--approve`：那等于静默信任任意远端项目 ⇒ 远端代码执行面扩大。
+- **指纹变更 = 换机或中间人 ⇒ trust 必须作废**（fail-closed），且 UI 要说明原因，不能只是悄悄失效。
+- 路径规范化必须与读取侧同源（一处实现），否则会出现「读得到历史但 trust 判定为另一个项目」这类割裂。
+- 撤销必须**立即生效**（下一次 spawn 即不带 flag），不要求重启应用。
+- 远端 trust 与本地 trust 的存储与语义**各自独立**，不得互相回退（远端某主机的信任不因本地项目被信任而生效）。
