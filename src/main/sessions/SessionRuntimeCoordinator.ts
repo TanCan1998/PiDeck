@@ -1721,6 +1721,9 @@ export class SessionRuntimeCoordinator {
 			throw new Error(`Session runtime replacement reservation conflict: ${targetSessionId}`);
 		}
 		this.releaseRuntimeReplacement(replacement);
+		// Per-runtime commands/diagnostics must not keep the origin record after fork.
+		const tab = this.agents.list().find((candidate) => candidate.id === replacement.agentId);
+		if (tab) tab.deckSessionId = targetSessionId;
 		return {
 			sessionId: targetSessionId,
 			agentId: replacement.agentId,

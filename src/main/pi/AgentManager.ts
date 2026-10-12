@@ -3690,17 +3690,52 @@ export class AgentManager {
 	}
 
 	async forkSession(agentId: string, entryId: string) {
-		const runtime = this.requireRuntime(agentId);
-		const response = await runtime.process.client.request({ type: "fork", entryId }, 120_000);
-		await this.refreshRuntimeAfterSessionReplacement(agentId);
-		return response.data;
+		return this.replaceLiveSession(agentId, { type: "fork", entryId });
 	}
 
 	async cloneSession(agentId: string) {
+		return this.replaceLiveSession(agentId, { type: "clone" });
+	}
+
+	/** pi owns the new file; only a successful, non-cancelled RPC may replace identity. */
+	private async replaceLiveSession(agentId: string, command: { type: "fork"; entryId: string } | { type: "clone" }) {
 		const runtime = this.requireRuntime(agentId);
-		const response = await runtime.process.client.request({ type: "clone" }, 120_000);
-		await this.refreshRuntimeAfterSessionReplacement(agentId);
-		return response.data;
+		const remote = this.isRemoteRuntime(runtime.tab.projectId);
+		if (remote && typeof this.remoteRuntime?.registerRemoteSession !== "function") throw new Error(REMOTE_RUNTIME_CODES.catalogIdentityUnsupported);
+		const originPath = runtime.tab.sessionPath;
+		const originPiId = runtime.tab.sessionId;
+		if (remote) {
+			// A lost response can follow a completed fork. Until pi confirms rejection
+			// or cancellation, the cached origin path cannot prove runtime identity.
+			runtime.tab.sessionPath = undefined;
+			runtime.tab.sessionId = undefined;
+		}
+		const response = await runtime.process.client.request(command, 120_000);
+		const data: unknown = response.data;
+		const cancelled = data && typeof data === "object" && "cancelled" in data && data.cancelled === true;
+		if (response.success === false) {
+			if (remote) {
+				// A negative response can also follow a failed post-fork rebind. Restore
+				// only if a fresh state read proves origin; never trust the cached path.
+				const fresh = await runtime.process.client.request({ type: "get_state" }, this.rpcTimeoutMs).catch(() => undefined);
+				const state: unknown = fresh?.data;
+				if (state && typeof state === "object" && "sessionFile" in state && typeof state.sessionFile === "string") {
+					runtime.tab.sessionPath = state.sessionFile;
+					if ("sessionId" in state && typeof state.sessionId === "string") runtime.tab.sessionId = state.sessionId;
+				}
+				if (runtime.tab.sessionPath !== originPath) this.clearReplacedMessageWindow(agentId);
+			}
+			throw new Error(remote ? "REMOTE_SESSION_REPLACEMENT_RPC_FAILED" : (response.error ?? "Session replacement RPC failed"));
+		}
+		if (cancelled) {
+			if (remote) {
+				runtime.tab.sessionPath = originPath;
+				runtime.tab.sessionId = originPiId;
+			}
+			return data;
+		}
+		const targetSessionId = await this.refreshRuntimeAfterSessionReplacement(agentId, remote);
+		return targetSessionId ? { ...(data && typeof data === "object" && !Array.isArray(data) ? data : {}), targetSessionId } : data;
 	}
 
 	async switchSession(agentId: string, sessionPath: string) {
@@ -3710,19 +3745,52 @@ export class AgentManager {
 		return response.data;
 	}
 
-	private async refreshRuntimeAfterSessionReplacement(agentId: string) {
-		// A status marker belongs to the pre-replacement session/runtime and must not
-		// authorize a delayed session_info event for the newly bound catalog record.
+	/** Discard origin's projection/version before exposing a different remote file. */
+	private clearReplacedMessageWindow(agentId: string): void {
+		this.messages.set(agentId, []);
+		this.messageDirtyFromByAgent.delete(agentId);
+		this.pendingSlideOutByAgent.delete(agentId);
+		this.displayWindowStartByAgent.delete(agentId);
+		this.displayWindowComputedLengthByAgent.delete(agentId);
+		this.messageHeadOffsetByAgent.delete(agentId);
+		this.sessionFileVersionByAgent.delete(agentId);
+	}
+
+	private async refreshRuntimeAfterSessionReplacement(agentId: string, registerRemoteReplacement = false): Promise<string | undefined> {
+		// The marker and message window belong to the old file, not the RPC result.
 		this.pendingAutomaticTitles.delete(agentId);
 		const runtime = this.requireRuntime(agentId);
+		if (registerRemoteReplacement) {
+			// RPC has already switched pi. If get_state fails, the old cached path is
+			// NOT evidence that pi still owns origin: leave identity unknown/fail-closed.
+			runtime.tab.sessionPath = undefined;
+			runtime.tab.sessionId = undefined;
+			this.clearReplacedMessageWindow(agentId);
+			const response = await runtime.process.client.request({ type: "get_state" }, this.rpcTimeoutMs);
+			const state: unknown = response.data;
+			if (!state || typeof state !== "object" || !("sessionFile" in state) || typeof state.sessionFile !== "string" || !state.sessionFile) throw new Error(REMOTE_RUNTIME_CODES.locatorUnresolved);
+			runtime.tab.sessionPath = state.sessionFile;
+			if ("sessionId" in state && typeof state.sessionId === "string") runtime.tab.sessionId = state.sessionId;
+			const project = this.getProject(runtime.tab.projectId);
+			if (!project || !isRemoteProject(project)) throw new Error(REMOTE_RUNTIME_CODES.locatorUnresolved);
+			const registration = await this.registerRemoteSessionIdentity(project, state.sessionFile);
+			const locator = registration.record.locator;
+			if (locator?.kind !== "ssh" || locator.hostId !== project.locator.hostId || locator.remotePath !== state.sessionFile) throw new Error(REMOTE_RUNTIME_CODES.locatorUnresolved);
+			// Remote history is read by the existing bounded reader, never local fs or
+			// unbounded get_messages. Do not relabel origin's runtime tail as the fork.
+			this.emitState();
+			return registration.record.id;
+		}
 		const stateResponse = await runtime.process.client.request({ type: "get_state" }, this.rpcTimeoutMs).catch(() => ({ data: undefined }));
-		const state = stateResponse.data as { sessionFile?: string; sessionName?: string } | undefined;
+		const state = stateResponse.data as { sessionId?: string; sessionFile?: string; sessionName?: string } | undefined;
 		if (state?.sessionFile) {
 			runtime.tab.sessionPath = this.reportSessionPathFromPi(state.sessionFile, runtime.tab.projectId, runtime.tab.sessionEnvironment ?? "native", this.getProject(runtime.tab.projectId)?.path ?? runtime.tab.cwd) ?? runtime.tab.sessionPath;
 		}
-		// 重新附加后恢复：保留附加期间用户发送/流式中的消息，避免投影替换吞掉乐观消息
+		if (state?.sessionId) runtime.tab.sessionId = state.sessionId;
+		// Preserve optimistic/in-flight messages during the local history projection.
 		await this.loadMessages(agentId, false, undefined, { preserveMessagesAfter: Date.now() }).catch(() => undefined);
 		this.emitState();
+		return undefined;
 	}
 
 	async getCommands(agentId: string) {

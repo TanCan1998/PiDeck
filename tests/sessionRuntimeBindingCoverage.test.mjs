@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const coordinator = readFileSync("src/main/sessions/SessionRuntimeCoordinator.ts", "utf8");
+const replacement = readFileSync("src/main/sessions/agentSessionReplacement.ts", "utf8");
 const main = readFileSync("src/main/index.ts", "utf8");
 const agentManager = readFileSync("src/main/pi/AgentManager.ts", "utf8");
 const sessionIpc = readFileSync("src/main/ipc/sessionIpc.ts", "utf8");
@@ -69,9 +70,13 @@ test("catalog deletion unbinds first then stops the agent in the background", ()
 	assert.match(coordinator, /isActivating\(sessionId: string\): boolean/);
 });
 
-test("replacement restore is gated by full origin identity in main", () => {
-	assert.match(main, /const originKey = originEntry\?\.filePath[\s\S]*buildSessionOriginKey/);
-	assert.match(main, /canRestoreOrigin: \(\) => \{[\s\S]*?buildSessionOriginKey[\s\S]*?originKey/);
+test("replacement restore is gated by full local/SSH origin identity in the session owner", () => {
+	// index now delegates; the policy remains mandatory in its extracted owner.
+	assert.match(main, /function\s+replaceAgentSession\s*\([^)]*\)[\s\S]*?createAgentSessionReplacer\s*\(/);
+	assert.match(replacement, /const\s+originKey\s*=[\s\S]*?originEntry\?\.filePath[\s\S]*?buildSessionOriginKey\s*\(/);
+	assert.match(replacement, /canRestoreOrigin:\s*\(\)\s*=>\s*\{[\s\S]*?buildSessionOriginKey[\s\S]*?originKey/);
+	assert.match(replacement, /project\.hostId\s*===\s*originLocator\.hostId/);
+	assert.match(replacement, /tab\.sessionPath\s*===\s*originLocator\.remotePath/);
 	assert.match(coordinator, /failClosedRuntimeReplacement/);
 	assert.match(coordinator, /replacementBySession/);
 });

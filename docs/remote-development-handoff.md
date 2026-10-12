@@ -461,8 +461,8 @@ trust-flag 门禁）上重跑完整真机验收 `e2e/remoteSessionAcceptance.spe
 | edit-message | `sessions:catalog-edit-message` → `SessionRuntimeCoordinator.mutateCatalogMessage` | 改写本机 JSONL | `SESSION_COMMAND_FAILED`（debugDetails=`UNSUPPORTED_PROJECT_LOCATION`） | 远端会话文件写端口；运行中的 `sessions:runtime-edit-message` 另被 `AgentManager.assertLocalRuntimeOperation` 显式拒绝（`REMOTE_RUNTIME_CODES.localOperationUnsupported`） |
 | delete-message | `sessions:catalog-delete-message` | 同上（写墓碑） | 同上 | 同上 |
 | prepare-resend | `sessions:catalog-prepare-resend` | 同上（截断该消息及其后继） | 同上 | 同上 |
-| fork | `sessions:runtime-fork` → pi RPC `fork`（需运行实例） | 只发 RPC | **推测**：`AgentManager.forkSession` **没有**本机守卫 ⇒ 远端 runtime 下会让远端 pi 写出新会话文件 | 属「经 pi 的远端写入」：未真机验收，且要与远端写面统一评估 |
-| clone（同族，一并记录） | `sessions:runtime-clone`（RPC）/ `sessions:catalog-copy`（本机临时 pi 进程） | RPC 版只发 RPC；catalog 版先过 `getLocalFilePath` 守卫 | RPC 版同 fork；catalog 版抛稳定码 | 同 fork |
+| fork | `sessions:runtime-fork` → pi RPC `fork`（需运行实例） | 官方 RPC → fresh `get_state` → 既有远端端口按 RPC 后路径登记**新 ssh record** → coordinator 换绑；PiDeck 不写远端 JSONL | **live-runtime 切片已实现**：取消不 refresh/不登记；否定响应或状态读取失败按「身份未知」fail-closed（旧缓存路径不作为复原证据），已换文件不误绑旧记录 | **真机待验**（目标 pi 版本 / 新文件落盘 / Electron 新 record 读历史） |
+| clone（同族，一并记录） | `sessions:runtime-clone`（RPC）/ `sessions:catalog-copy`（本机临时 pi 进程） | 同上（与 fork 同一替换 owner）；catalog 版先过 `getLocalFilePath` 守卫 | RPC 版已实现（同上）；catalog 版仍抛稳定码 | 同上（停态/临时会话面明确不做） |
 | export-HTML | `sessions:catalog-export-html` | 先 `getLocalFilePath` 守卫 → 本机临时 pi 进程导出 HTML | 抛稳定码（fail-closed） | 只需**远端读**：复用 `RemoteSessionHistoryReader` 读窗口，HTML 仍写本机（新接线，不改远端） |
 
 **本批已实现（只做「纯 catalog 记录操作」那一档）**
@@ -482,7 +482,9 @@ trust-flag 门禁）上重跑完整真机验收 `e2e/remoteSessionAcceptance.spe
    （ssh 记录没有墓碑；DSH 侧靠 `dismissedDshSessionIds`）。要不要墓碑、要不要真删远端文件、文案怎么改，都需要先定方案与授权。
 2. 归档 / 取消归档 / 列出归档 / 删除归档：全部依赖远端文件移动或远端归档索引 = 远端写面。
 3. edit-message / delete-message / prepare-resend：远端会话文件写。
-4. fork / clone：远端 pi 会落盘**新**会话文件（经 pi 的写），需要与远端写面一起定验收判据。
+4. fork / clone：远端 pi 会落盘**新**会话文件（经 pi 的写）。live-runtime 身份链已实现（见上表）：
+   替换策略唯一 owner 是 `src/main/sessions/agentSessionReplacement.ts`（`main/index.ts` 只留依赖注入转发），
+   本机与 SSH 走同一个 `replaceBoundRuntime` 状态机。**停态 clone**（本机临时 pi 进程那条）与远端 edit/resend 仍不做。
 5. export-HTML：只缺接线（远端读能力已交付），不在本批。
 
 **P4.5b 已实现（远端归档 / 取消归档 / 列出归档）**
@@ -522,5 +524,7 @@ trust-flag 门禁）上重跑完整真机验收 `e2e/remoteSessionAcceptance.spe
   归档→列表→恢复 UI 往返、远端文件确实移走/移回、两次 SHA-256 不变、恢复后新记录读回 prompt 与回复。
   证据日志 `/tmp/p45b-ui-acceptance-final.log`；失败定位证据 `/tmp/p45b-ui-third-failure/`（修复前恢复后空白）。
 
-**哪些是推测**：上表「有运行实例的改名」「fork/clone 在远端 runtime 下会真的写远端文件」是读码推断（都只发 RPC、
-无本机守卫），没有真机复跑；P4.5b 的单会话归档/恢复已完成真实 Electron＋SSH 验证，不能据此声称子会话目录也有 parity。
+**哪些是推测**：上表「有运行实例的改名」仍是读码推断（只发 RPC、无本机守卫），没有真机复跑；
+fork/clone 的**身份链**（RPC → fresh state → 新 ssh record → coordinator 换绑 → 旧记录不动）已有真实 catalog/coordinator/AgentManager 行为测试覆盖，
+但**远端 pi 实际写出的新文件内容与 pi 版本行为仍未真机核验**（本机只读了 pi 包源码证明 RPC 存在）。
+P4.5b 的单会话归档/恢复已完成真实 Electron＋SSH 验证，不能据此声称 fork/clone 或子会话目录也有 parity。
