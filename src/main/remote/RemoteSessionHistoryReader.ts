@@ -264,6 +264,38 @@ export function parseRemoteSessionWindow(stdout: string, input: { marker: string
 }
 
 /**
+ * 一条远端会话记录（locator）→ 远端绝对路径。
+ *
+ * 绝对写法直接用（`attachRemoteLocatorEntry` 吸收 runtime 握手时写的就是 pi 上报的绝对路径）；
+ * 相对写法必须经过会话根解析，解析不出就 fail-closed——猜一个 `<home>/.pi/agent/sessions` 会在配了
+ * 自定义 `sessionDir` 的机器上读错文件（那是「读到了别人的历史」级别的问题，不是少读一点）。
+ *
+ * 为什么是**导出**的纯函数而不是读取器内部的闭包：远端读（本模块）与远端写（`RemoteSessionArchive` 的
+ * 归档/恢复）必须用同一份「locator → 绝对路径」实现。各拼一次会在配了自定义会话根的机器上把文件
+ * 归到另一个目录，而那种错「看起来一切正常」。路径**判据**（绝对/规范化/无控制字节/无单引号）与
+ * 本函数同源，见 `validateRemoteSessionHistoryPath`。
+ */
+export async function resolveRemoteSessionPath(input: { hostId: string; locator: SshSessionLocator; resolveSessionRoot?: RemoteSessionHistoryRootPort }): Promise<string> {
+	const locator = input?.locator;
+	if (locator === undefined) throw stable(REMOTE_SESSION_HISTORY_CODES.locatorInvalid);
+	const remotePath = locator.remotePath;
+	if (typeof remotePath === "string" && remotePath.startsWith("/")) {
+		const validated = validateRemoteSessionHistoryPath(remotePath);
+		if (validated === undefined) throw stable(REMOTE_SESSION_HISTORY_CODES.pathInvalid);
+		return validated;
+	}
+	const relative = remotePath ?? locator.remoteSessionId;
+	if (typeof relative !== "string" || relative.length === 0) throw stable(REMOTE_SESSION_HISTORY_CODES.pathUnresolved);
+	const resolveRoot = input.resolveSessionRoot;
+	if (resolveRoot === undefined) throw stable(REMOTE_SESSION_HISTORY_CODES.pathUnresolved);
+	const resolved = await resolveRoot(input.hostId);
+	if (!resolved.ok) throw stable(resolved.code);
+	const joined = joinRemoteSessionRoot(resolved.root, relative);
+	if (joined === undefined) throw stable(REMOTE_SESSION_HISTORY_CODES.pathInvalid);
+	return joined;
+}
+
+/**
  * 远端窗口读取端口：由装配注入（生产实现走 pinned SSH 短命令）。
  *
  * 超时**归传输层**：生产传输是 `SshClientRuntime.run`，它的 `execFile` 自带 30 s 上限与 256 KiB 输出上限
@@ -308,28 +340,10 @@ function createReader(ports: RemoteSessionHistoryReaderPorts): RemoteSessionHist
 	if (typeof ports?.transport?.readRemoteWindow !== "function" || typeof ports?.project !== "function") throw stable(REMOTE_SESSION_HISTORY_READER_OPTIONS_INVALID);
 
 	/**
-	 * 一条远端会话记录 → 远端绝对路径。
-	 *
-	 * 绝对写法直接用（`attachRemoteLocatorEntry` 吸收 runtime 握手时写的就是 pi 上报的绝对路径）；
-	 * 相对写法必须经过会话根解析，解析不出就 fail-closed——猜一个 `<home>/.pi/agent/sessions` 会在配了
-	 * 自定义 `sessionDir` 的机器上读错文件（那是「读到了别人的历史」级别的问题，不是少读一点）。
+	 * 一条远端会话记录 → 远端绝对路径（唯一实现在模块级 `resolveRemoteSessionPath`，读取与归档共用）。
 	 */
 	async function resolveRemotePath(hostId: string, locator: SshSessionLocator): Promise<string> {
-		const remotePath = locator.remotePath;
-		if (typeof remotePath === "string" && remotePath.startsWith("/")) {
-			const validated = validateRemoteSessionHistoryPath(remotePath);
-			if (validated === undefined) throw stable(REMOTE_SESSION_HISTORY_CODES.pathInvalid);
-			return validated;
-		}
-		const relative = remotePath ?? locator.remoteSessionId;
-		if (typeof relative !== "string" || relative.length === 0) throw stable(REMOTE_SESSION_HISTORY_CODES.pathUnresolved);
-		const resolveRoot = ports.resolveSessionRoot;
-		if (resolveRoot === undefined) throw stable(REMOTE_SESSION_HISTORY_CODES.pathUnresolved);
-		const resolved = await resolveRoot(hostId);
-		if (!resolved.ok) throw stable(resolved.code);
-		const joined = joinRemoteSessionRoot(resolved.root, relative);
-		if (joined === undefined) throw stable(REMOTE_SESSION_HISTORY_CODES.pathInvalid);
-		return joined;
+		return await resolveRemoteSessionPath({ hostId, locator, resolveSessionRoot: ports.resolveSessionRoot });
 	}
 
 	return {

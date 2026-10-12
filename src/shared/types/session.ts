@@ -205,6 +205,13 @@ export type ArchivedDshSession = {
 export type ArchivedPiSession = {
 	summary: SessionSummary;
 	originalPath?: string;
+	/**
+	 * 远端归档条目（P4.5b）：远端文件被 `mv` 进远端 `.pideck-archive/` 后，本机只剩归档索引，
+	 * 恢复身份是**本机 catalog 会话 id**（远端没有本机归档路径，所以恢复走
+	 * `sessions:catalog-unarchive-remote` 而不是本机路径契约）。
+	 * 与 `originalPath` 分开：`originalPath` 是「本机文件要移回哪里」，远端条目没有这个信息。
+	 */
+	archivedRemoteSessionId?: string;
 };
 
 /** PiDeck-owned session identity, independent from a running Pi process. */

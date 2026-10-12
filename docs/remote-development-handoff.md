@@ -453,10 +453,10 @@ trust-flag 门禁）上重跑完整真机验收 `e2e/remoteSessionAcceptance.spe
 | --- | --- | --- | --- | --- |
 | 改名（改标题，无运行实例） | `sessions:catalog-update` → `sessionIpc` catalogUpdate | 前半是纯 catalog（`claimTitleOwnership` + `update`）；local locator 额外改本机 JSONL 的 name 行 | **本批打通**：只落 catalog 标题（manual 终态） | 远端 JSONL 的 name 行不更新 —— 远端 pi/TUI 里仍是旧名 = 远端写面 |
 | 改名（有运行实例） | 同通道 → `SessionRuntimeCoordinator.renameRuntime` → pi RPC `set_session_name` | 只发 RPC，由 pi 自己写远端文件 | **推测可用**（`AgentManager.rename` 不碰本机文件；`reportSessionPathFromPi` 对远端 runtime 原样收下回报路径） | 真机验收（含「改名后重启仍是新名」） |
-| 归档 | `sessions:catalog-archive` | 把本机会话文件移进 `.pideck-archive/` + 移出 catalog | 抛稳定码（fail-closed） | 远端归档端口（移动远端文件 = 远端写）+ manifest/索引语义 |
-| 取消归档 | `sessions:catalog-unarchive` | 入参就是**本机归档路径**（`.pideck-archive/*.jsonl`），无 sessionId | 不适用（没有远端归档可恢复） | 远端归档建立后需要按远端 id 的恢复通道；不能沿用本机路径契约 |
-| 列出归档 | `sessions:catalog-list-archived` | 遍历本机扫描根下的 `.pideck-archive/` | 恒空（不报错，但也没有远端条目） | 远端归档目录列举 |
-| 删除归档 | `sessions:catalog-delete-archived` | 本机回收站（`shell.trashItem`）+ 归档索引 | 不适用（拿不到输入） | 同「列出归档」 |
+| 归档 | `sessions:catalog-archive` | 远端文件 `mv` 进**同目录旁的** `.pideck-archive/` + 本机归档索引 + 移出 catalog | **P4.5b 已交付** | —（运行中仍 fail-closed，先停 Agent） |
+| 取消归档 | `sessions:catalog-unarchive`（本机） / `sessions:catalog-unarchive-remote`（远端，新通道） | 远端按**本机 catalog 会话 id** 查归档索引，把文件 `mv` 回原位并重建记录 | **P4.5b 已交付**（按 id，不沿用本机路径契约） | 渲染层归档视图的远端行（见下） |
+| 列出归档 | `sessions:catalog-list-archived` | 本机扫描根下的 `.pideck-archive/` + **本机归档索引**里的远端条目 | **P4.5b 已交付**（远端归档区**不扫描**） | 渲染层归档视图的远端行（见下） |
+| 删除归档 | `sessions:catalog-delete-archived` | 本机回收站（`shell.trashItem`）+ 归档索引 | **不适用且有意保持 fail-closed**：远端没有本机归档路径，也没有 `rm` 链路 | 需另立「真删远端数据」的显式动作（二次确认） |
 | 移除记录 | `sessions:catalog-delete` | **删本机会话文件（回收站）+ 移出 catalog** | 抛稳定码（fail-closed） | 需要产品决策 + （真删远端）远端写端口，见下条 |
 | edit-message | `sessions:catalog-edit-message` → `SessionRuntimeCoordinator.mutateCatalogMessage` | 改写本机 JSONL | `SESSION_COMMAND_FAILED`（debugDetails=`UNSUPPORTED_PROJECT_LOCATION`） | 远端会话文件写端口；运行中的 `sessions:runtime-edit-message` 另被 `AgentManager.assertLocalRuntimeOperation` 显式拒绝（`REMOTE_RUNTIME_CODES.localOperationUnsupported`） |
 | delete-message | `sessions:catalog-delete-message` | 同上（写墓碑） | 同上 | 同上 |
@@ -472,7 +472,8 @@ trust-flag 门禁）上重跑完整真机验收 `e2e/remoteSessionAcceptance.spe
 - 代价（有意为之、已写进代码注释）：远端文件里的 name 行不变。远端写属未交付面，不在这一档里顺手补。
 - 证据：`tests/remoteSessionCatalogRename.test.mjs`（真实 `SessionCatalog` + 真实 `registerSessionIpc`，本机文件面整个换成
   留痕替身）——远端改名成功且 `getLocalFilePath` / 会话文件改写**一次都没发生**；标题落盘后仍是 ssh locator、重名登记不得覆盖；
-  本机会话改名仍按本机路径改写 name 行；远端**归档**仍是稳定码拒绝且不动 catalog 记录。
+  本机会话改名仍按本机路径改写 name 行；远端**归档**装配未提供远端端口时仍是稳定码拒绝且不动 catalog 记录
+  （P4.5b 起该码是 `REMOTE_SESSION_ARCHIVE_UNAVAILABLE`，见下）。
 
 **明确没做（会碰远端会话文件，或需要产品决策）**
 
@@ -484,5 +485,34 @@ trust-flag 门禁）上重跑完整真机验收 `e2e/remoteSessionAcceptance.spe
 4. fork / clone：远端 pi 会落盘**新**会话文件（经 pi 的写），需要与远端写面一起定验收判据。
 5. export-HTML：只缺接线（远端读能力已交付），不在本批。
 
+**P4.5b 已实现（远端归档 / 取消归档 / 列出归档）**
+
+- 归档：远端文件 `mv` 进**文件所在目录旁的** `.pideck-archive/`（`mkdir -p` 后 `move` 两步；同目录 ⇒ 同一文件系统 ⇒
+  rename 原子；扫描口径本就跳过该目录名），成功后才在本机落**归档索引**并把记录移出 catalog。远端**数据不删**。
+- 取消归档：**不能沿用本机路径契约**（本机通道的入参是 `.pideck-archive/*.jsonl` 本机路径，远端没有这种路径）。
+  选择：catalog 持久化一份**远端归档索引**（`archivedRemoteSessions`：sessionId + hostId + projectId + title +
+  originalRemotePath + archivedRemotePath），恢复按 **本机 catalog 会话 id** 走新通道 `sessions:catalog-unarchive-remote`；
+  两个绝对路径**归档时就落盘**，恢复不再重算会话根（会话根可能已被改过）。
+- 列出归档：远端条目只来自**本机索引**，远端归档区**不扫描**（列一次归档 = 一次 ssh 往返 + 会话根探测，而索引就是权威）。
+  条目带 `archivedRemoteSessionId`，**不带** `originalPath`（本机字段里不出现远端路径）。
+- 运行中**先判后发**：`sessionRuntimeCoordinator.getTarget/isActivating` 命中时一个远端命令都不发，抛 `session.remoteArchiveStopFirst`
+  / `session.remoteUnarchiveStopFirst`（可执行文案：先停 Agent），稳定码 `REMOTE_SESSION_ARCHIVE_BUSY` 进日志。
+- 路径判据与读取侧**同源**（`resolveRemoteSessionPath` / `validateRemoteSessionHistoryPath`，绝对 + 规范化 + 拒单引号）；
+  `[ ! -e '<目标>' ] &&` 保证**不覆盖**已有归档/同名活会话；失败即停不重试、只回稳定码（stderr 不外传、日志不记路径/命令）。
+- 证据：`tests/remoteSessionArchive.test.mjs`（真实 `SessionCatalog` + 真实 `registerSessionIpc` + **按真实 mkdir/mv 语义执行的假 SSH exec**）：
+  两步顺序、移动结果、索引与列表（含重启后仍在）、恢复与「恢复后记录重建」、运行中拒绝且零远端命令、
+  路径非法（相对无根 / 含单引号）零命令、失败不覆盖不谎报成功、本机归档/取消归档行为不变。
+
+**P4.5b 明确没做 / 已知缺口**
+
+1. **删除归档（真删远端数据）不做**：远端没有回收站，`rm` = 永久删除，按 §0 属另一件需二次确认的显式动作。
+   fail-closed 由构造保证：渲染层的远端归档行只带 id（远端路径不过 IPC），`sessions:catalog-delete-archived` 只接受本机
+   归档路径并交给 `sessionScanner.deleteArchived`（它拒绝不在本机扫描根 `.pideck-archive/` 内的路径），远端写面里没有任何 `rm`。
+2. **渲染层归档视图的远端行未接线**：`filterArchivedPiByFamily` 要求「有本机 `originalPath` 才可恢复」，远端条目没有它 ⇒
+   当前在归档弹框里**看不到**（有意的 fail-closed：不显示一个点「恢复」必然失败的死行）。接线时要一并处理
+   「按 id 恢复」与「远端行不给删除按钮」。
+3. 同级子会话目录（`<stem>/`）不随远端归档一起移动（本地归档会移动它）：本批只移动会话文件本身。
+
 **哪些是推测**：上表「有运行实例的改名」「fork/clone 在远端 runtime 下会真的写远端文件」是读码推断（都只发 RPC、
-无本机守卫），没有真机复跑；其余各行的稳定码 / 空列表结论都由代码路径与针对性测试支持。
+无本机守卫），没有真机复跑；其余各行的稳定码 / 空列表结论都由代码路径与针对性测试支持。P4.5b 的远端 `mv` 语义由假 exec
+按 POSIX 语义验证，**未真机复跑**。

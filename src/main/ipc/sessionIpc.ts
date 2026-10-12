@@ -37,6 +37,7 @@ import type {
 	ResolveLaunchDefaultsInput,
 	ResolvedLaunchDefaults,
 	ArchivedDshSession,
+	ArchivedPiSession,
 } from "../../shared/types";
 import { parseSessionProcessEventsFromFile } from "../sessions/sessionProcessEventsFile";
 import { dshUnavailablePageFor } from "../dsh/dshManualStop";
@@ -45,6 +46,8 @@ import { resolveLaunchDefaultOptions, isModelInModelsConfig } from "../sessions/
 import { BackgroundScanCoordinator } from "../sessions/BackgroundScanCoordinator";
 import { DIRECTORY_IMPORT_MAX_SUMMARIES } from "../sessions/directorySessionImport";
 import type { DirectorySessionImporter } from "../sessions/DirectorySessionImporter";
+import { REMOTE_SESSION_ARCHIVE_CODES } from "../remote/RemoteSessionArchive";
+import type { SshSessionLocator } from "../../shared/projectLocation";
 
 function isDshModelDiscoveryInput(input: unknown): input is DshModelDiscoveryInput {
 	if (!isRecord(input) || typeof input.settingsNs !== "string" || !input.settingsNs.trim()) return false;
@@ -56,6 +59,28 @@ function isDshModelDiscoveryInput(input: unknown): input is DshModelDiscoveryInp
 
 function isRecord(input: unknown): input is Record<string, unknown> {
 	return typeof input === "object" && input !== null && !Array.isArray(input);
+}
+
+/**
+ * 本机归档索引里的一条**远端归档**→ 列表行（`ArchivedPiSession`）。
+ *
+ * 为什么 `filePath` 留空而不填远端路径：本机字段里不该出现远端路径（读侧同样把 ssh 记录的 `filePath` 清空），
+ * 而渲染层的本机归档行会把 `summary.filePath` 当成「要移回哪里」——填了远端路径就是一条点下去会失败的死行。
+ * 远端恢复身份走 `archivedRemoteSessionId`（本机 catalog 会话 id）。
+ */
+function remoteArchivedRow(entry: ArchivedRemoteSessionEntry): ArchivedPiSession {
+	return {
+		summary: {
+			id: entry.sessionId,
+			filePath: "",
+			name: entry.title,
+			preview: "",
+			updatedAt: entry.updatedAt,
+			messageCount: 0,
+			projectId: entry.projectId,
+		},
+		archivedRemoteSessionId: entry.sessionId,
+	};
 }
 
 function parseSessionId(value: unknown): string {
@@ -111,7 +136,7 @@ export function scheduleCatalogBackgroundScan(projectId: string, task: () => Pro
 import type { ProjectStore } from "../projects/ProjectStore";
 import type { SettingsStore } from "../settings/SettingsStore";
 import type { SessionScanner } from "../sessions/SessionScanner";
-import type { SessionCatalog } from "../sessions/SessionCatalog";
+import type { SessionCatalog, ArchivedRemoteSessionEntry } from "../sessions/SessionCatalog";
 import type { SessionRuntimeCoordinator } from "../sessions/SessionRuntimeCoordinator";
 import { SessionCommandIpcError } from "../sessions/SessionCommandIpcError";
 import { appendSessionForkSuffix } from "../sessions/sessionForkTitle";
@@ -363,6 +388,17 @@ export type SessionIpcDeps = {
 	 * **绝不**回退成本机导出。
 	 */
 	exportRemoteCatalogSessionHtml?: (sessionId: string) => Promise<Record<string, unknown> & { path: string }>;
+	/**
+	 * 远端会话归档（P4.5b）：把远端文件 `mv` 进同目录旁的 `.pideck-archive/`，返回移动前后的远端绝对路径。
+	 * 未装配（远端实验开关关掉 / 旧装配）时远端分支给 `REMOTE_SESSION_ARCHIVE_UNAVAILABLE`，
+	 * **绝不**落回本机路径分支（那对 ssh locator 抛稳定码，会让一次可完成的归档整体失败）。
+	 */
+	archiveRemoteSession?: (input: { hostId: string; locator: SshSessionLocator }) => Promise<{ originalPath: string; archivedPath: string }>;
+	/**
+	 * 远端会话取消归档（P4.5b）：按本机归档索引记下的两个绝对路径把远端文件移回原位。
+	 * 入参是本机 catalog 会话 id → 索引条目的路径，不是“本机归档路径”（远端没有这种路径）。
+	 */
+	unarchiveRemoteSession?: (input: { hostId: string; originalPath: string; archivedPath: string }) => Promise<void>;
 	replaceAgentSession: (agentId: string, fn: () => Promise<any>, options?: { markForked?: boolean }) => Promise<any>;
 	/** DSH 后端专用 IPC 依赖（C1 分组；未装配 = 无 DSH 后端）。 */
 	dshBackend?: DshBackendIpcDeps;
@@ -434,6 +470,8 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		replaceAgentSession,
 		dshBackend,
 		readRemoteSessionHistoryPage,
+		archiveRemoteSession,
+		unarchiveRemoteSession,
 	} = deps;
 	const localSessionFilePath = (sessionId: string) => sessionCatalog.getLocalFilePath(sessionId);
 	// C1：DSH 后端依赖从 dshBackend 分组解构（未装配 = 空对象，相关通道降级）。
@@ -886,6 +924,39 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			});
 			return true;
 		}
+		// 远端会话归档（P4.5b）：远端文件 `mv` 进同目录旁的 `.pideck-archive/` + 本机归档索引 + 移出 catalog。
+		// 必须插在 localSessionFilePath() **之前**：那个入口对 ssh locator 抛稳定码，放后面就是死代码
+		// （f00977a33 的教训）。
+		if (entry?.locator?.kind === "ssh") {
+			const remoteLocator = entry.locator;
+			if (!archiveRemoteSession) throw new Error(REMOTE_SESSION_ARCHIVE_CODES.unavailable);
+			// 先判后发：运行实例绑定存在时**一个远端命令都不发**（移动正被远端 pi 追加写的文件会把历史写坏）。
+			// 这里给出的是可执行文案（“先停 Agent”）而不是裸码：同一句拒绝就是用户看到的全文，
+			// 稳定码留在日志里（与本机归档的拒绝文案同一机制）。
+			if (sessionRuntimeCoordinator.getTarget(sessionId) || sessionRuntimeCoordinator.isActivating(sessionId)) {
+				void appLogger.warn("session", "Remote session archive refused: runtime still bound", { sessionId, hostId: remoteLocator.hostId, code: REMOTE_SESSION_ARCHIVE_CODES.busy });
+				throw new Error(mainCopy("session.remoteArchiveStopFirst"));
+			}
+			const { originalPath, archivedPath } = await archiveRemoteSession({ hostId: remoteLocator.hostId, locator: remoteLocator });
+			// 顺序固定：**远端移动成功之后**才动本机（先落索引、再移出记录）。
+			// 远端失败时抛出，本机状态原样不动——绝不谎报成功（也不会留一条指向不存在归档的索引）。
+			await sessionCatalog.rememberArchivedRemoteSession({
+				sessionId,
+				hostId: remoteLocator.hostId,
+				projectId: entry.projectId,
+				title: entry.title,
+				updatedAt: entry.updatedAt,
+				...(remoteLocator.remoteSessionId !== undefined ? { remoteSessionId: remoteLocator.remoteSessionId } : {}),
+				...(remoteLocator.remotePath !== undefined ? { remotePath: remoteLocator.remotePath } : {}),
+				originalRemotePath: originalPath,
+				archivedRemotePath: archivedPath,
+				archivedAt: Date.now(),
+			});
+			await sessionCatalog.removeWithDescendants(sessionId);
+			// 只记身份与稳定码，不记远端路径、不记命令（与读取侧同一股敏纪律）。
+			void appLogger.info("session", "Remote session archived (remote file moved into .pideck-archive)", { sessionId, hostId: remoteLocator.hostId });
+			return true;
+		}
 		const sessionFilePath = localSessionFilePath(sessionId);
 		if (!entry || !sessionFilePath) return false;
 		// 运行中的会话不能归档（同删除）：移动文件会破坏 pi 对当前写入位置的引用。
@@ -907,10 +978,53 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		void appLogger.info("session", "Session restored from archive", { restoredPath });
 		return true;
 	});
-	ipcMain.handle(ipcChannels.sessionsCatalogListArchived, async () => sessionScanner.listArchived());
+	/**
+	 * 远端会话取消归档（P4.5b）：入参是**本机 catalog 会话 id**，不是路径。
+	 *
+	 * 为什么不沿用 `sessions:catalog-unarchive`：那条通道的入参是本机归档路径（`scanner.unarchive` 按它查
+	 * 本机归档索引并把文件移回原位），而远端会话从来就没有本机路径——硬套进去只能是「远端绝对路径先被
+	 * 当成 WSL 本机路径、然后在归档索引里找不到」。所以远端恢复按 id 走：恢复目标（归档前/后的远端
+	 * 绝对路径）由本机归档索引给出。
+	 */
+	ipcMain.handle(ipcChannels.sessionsCatalogUnarchiveRemote, async (_event, rawSessionId: unknown): Promise<boolean> => {
+		const sessionId = parseSessionId(rawSessionId);
+		const archived = sessionCatalog.getArchivedRemoteSession(sessionId);
+		if (!archived) throw new Error(REMOTE_SESSION_ARCHIVE_CODES.entryNotFound);
+		if (!unarchiveRemoteSession) throw new Error(REMOTE_SESSION_ARCHIVE_CODES.unavailable);
+		// 同归档：绑定存在就不动远端（先判后发）。
+		if (sessionRuntimeCoordinator.getTarget(sessionId) || sessionRuntimeCoordinator.isActivating(sessionId)) {
+			void appLogger.warn("session", "Remote session unarchive refused: runtime still bound", { sessionId, hostId: archived.hostId, code: REMOTE_SESSION_ARCHIVE_CODES.busy });
+			throw new Error(mainCopy("session.remoteUnarchiveStopFirst"));
+		}
+		await unarchiveRemoteSession({ hostId: archived.hostId, originalPath: archived.originalRemotePath, archivedPath: archived.archivedRemotePath });
+		// 远端移回成功后才动本机：先摘索引，再按归档时刻的身份把记录登记回来
+		// （稳定身份 = remoteSessionId 优先，与墓碑同口径）。ensureRemoteSession 命中同一身份时不会重复。
+		await sessionCatalog.forgetArchivedRemoteSession(sessionId);
+		const remoteIdentity = archived.remoteSessionId ?? archived.remotePath;
+		if (remoteIdentity) {
+			await sessionCatalog.ensureRemoteSession({
+				projectId: archived.projectId,
+				hostId: archived.hostId,
+				remoteSessionId: remoteIdentity,
+				remotePath: archived.remotePath ?? remoteIdentity,
+				title: archived.title,
+				updatedAt: archived.updatedAt,
+			});
+		}
+		void appLogger.info("session", "Remote session restored from archive", { sessionId, hostId: archived.hostId });
+		return true;
+	});
+	ipcMain.handle(ipcChannels.sessionsCatalogListArchived, async (): Promise<ArchivedPiSession[]> => {
+		const local = await sessionScanner.listArchived();
+		// 远端归档条目：数据源是本机归档索引，**不扫远端归档区**（列一次归档就要一次 ssh 往返 + 会话根探测，
+		// 而归档区本来就不在常规扫描口径里；索引就是权威）。
+		return [...local, ...sessionCatalog.listArchivedRemoteSessions().map(remoteArchivedRow)];
+	});
 	ipcMain.handle(ipcChannels.sessionsCatalogDeleteArchived, async (_event, archivedPath: unknown): Promise<boolean> => {
 		// 校验入参：归档路径必须是 .pideck-archive 目录内的 JSONL，防路径穿越。
 		// 是否真的位于归档目录内由 sessionScanner.deleteArchived 兜底校验。
+		// **远端归档没有这条通道**（P4.5b 明确不做）：远端没有回收站，`rm` 是永久删除；本 handler 只接受本机路径，
+		// 远端归档行也只带 id（远端路径不过 IPC）⇒ 不存在一条能删掉远端数据的链路。
 		if (typeof archivedPath !== "string" || !archivedPath.endsWith(".jsonl")) {
 			throw new Error(mainCopy("session.invalidArchivePath"));
 		}

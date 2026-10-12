@@ -25,10 +25,6 @@ const TRUST_NOTICE_COMPONENT = "src/renderer/src/components/session/RemoteSessio
 const PLAYWRIGHT_CLI = "node_modules/@playwright/test/cli.js";
 const CREDENTIAL_VARS = ["PIDECK_E2E_REMOTE_HOST", "PIDECK_E2E_REMOTE_USER", "PIDECK_E2E_REMOTE_FINGERPRINT"];
 /** 缺口探针开关在 spec 里的**常量名**与**取值**（spec 必须由它门控那条更强的断言）。 */
-const GAP_PROBE_CONST = "GAP_PROBE_ENV";
-const GAP_PROBE_VALUE = "PIDECK_E2E_P42_GAP_PROBE";
-/** 探针步骤在 spec 里的唯一标号（用整串定位，避免命中文件头注释里的泛称）。 */
-const PROBE_STEP_LABEL = "缺口探针（" + GAP_PROBE_VALUE + "=1）";
 
 function source(relativePath) {
 	return readFileSync(relativePath, "utf8");
@@ -133,19 +129,22 @@ test("the new session entry is a real UI click (hover then click), and not force
 	assert.ok(!/piDesktop|ipcRenderer/.test(body), "the helper must not create the session through IPC");
 });
 
-test("the gap probe can only add assertions, never weaken the chain", () => {
+test("the reload-history step is part of the default chain and still asserts the remote body", () => {
 	const text = source(SPEC);
-	// 探针默认关：开关常量名与取值都固定，且不得出现在凭据变量里。
-	assert.ok(!CREDENTIAL_VARS.includes(GAP_PROBE_VALUE), "the probe switch must not be a credential variable");
-	assert.match(text, new RegExp(GAP_PROBE_CONST + ' = "' + GAP_PROBE_VALUE + '"'), "the spec must declare the probe switch constant with the documented value");
-	assert.match(text, new RegExp("process\\.env\\[" + GAP_PROBE_CONST + '\\] === "1"'), "the probe step must be gated on the switch");
-	const probeIndex = text.indexOf(PROBE_STEP_LABEL);
-	assert.ok(probeIndex > 0, "the probe step must exist and be labelled");
-	const probe = text.slice(probeIndex, text.indexOf("} finally {"));
-	assert.match(probe, /toBeVisible\(/, "the probe must assert (it is a red-evidence step, not a silent observation)");
-	// 探针必须在链路断言之后：先证明「本次交付的链路」，再去测「已知未交付的能力」。
+	// 曾经的「缺口探针」在远端正文读取交付后已提升为**默认门禁**：开关必须不存在——留着开关就等于
+	// 允许把这条覆盖关掉，而它正是「远端读页分支被本机路径守卫挡死」那个 bug 溜过验收的缺口。
+	assert.ok(!text.includes("PIDECK_E2E_P42_GAP_PROBE"), "the promoted step must not keep a probe env switch");
+	assert.ok(!text.includes("GAP_PROBE_ENV"), "no probe env constant should remain in the spec");
+	const stepIndex = text.indexOf('await test.step("⋯ →「重新加载会话」后历史仍在（无存活 runtime 的远端正文读取）"');
+	assert.ok(stepIndex > 0, "the reload-history step must exist and be labelled");
+	const step = text.slice(stepIndex, text.indexOf("} finally {"));
+	// 它必须是"真断言"而不是静默观察：断言 prompt 与回复正文都可见。
+	assert.match(step, /getByRole\("menuitem", \{ name: "重新加载会话", exact: true \}\)/, "the step must drive the real reload menu item");
+	assert.match(step, /重载后必须仍能看到 prompt/, "the step must assert the prompt is still visible");
+	assert.match(step, /重载后必须仍能看到回复正文/, "the step must assert the assistant body is still visible");
+	// 顺序仍在"重开标签页后历史仍在"之后：先交付链、再这条与 runtime 无关的路径。
 	const reopenIndex = text.indexOf("重开后必须还能看到刚才的 prompt");
-	assert.ok(reopenIndex > 0 && reopenIndex < probeIndex, "the probe must come after the delivered chain's assertions");
+	assert.ok(reopenIndex > 0 && reopenIndex < stepIndex, "the reload-history step must come after the delivered chain's assertions");
 });
 
 test("without credentials the spec is skipped, never passed", { timeout: 300_000 }, () => {

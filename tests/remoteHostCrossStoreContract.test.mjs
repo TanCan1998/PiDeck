@@ -37,6 +37,14 @@ const COVERED_HOST_ID_FIELDS = new Map([
 	["src/main/sessions/SessionCatalog.ts:RemoteSessionRegistrationInput", "sessions"],
 	["src/main/sessions/SessionCatalog.ts:remoteSessionIdentity", "sessions"],
 	["src/main/sessions/SessionCatalog.ts:remoteSessionLocator", "sessions"],
+	// P4.5b 远端归档索引：hostId 与归档条目一起落进 catalog（持久化引用），归 sessions 源。
+	// 它是「下一次 catalog 写入里那条 host 引用的来源」，与上面四个远端登记名字同类。
+	// P4.5a 的远端墓碑：墓碑条目类型与「(hostId, remoteSessionId) → 墓碑键」的派生函数，属主同为 sessions
+	//（与上面的远端归档索引同一份 catalog 文件）。具名类型后 catalog 文件类型本身不再需要单独登记。
+	["src/main/sessions/SessionCatalog.ts:DismissedRemoteSessionEntry", "sessions"],
+	["src/main/sessions/SessionCatalog.ts:readRemoteDismissalKey", "sessions"],
+	["src/main/sessions/SessionCatalog.ts:ArchivedRemoteSessionEntry", "sessions"],
+	["src/main/sessions/SessionCatalog.ts:readArchivedRemoteSessionEntry", "sessions"],
 	["src/shared/types/remoteHost.ts:RemoteHostConnectResult", "runtime"],
 	["src/shared/types/remoteHost.ts:RemoteHostDisconnectResult", "runtime"],
 	["src/shared/types/remoteHost.ts:RemoteHostDiagnosticsResult", "runtime"],

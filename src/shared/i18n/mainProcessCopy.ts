@@ -85,6 +85,10 @@ export const mainProcessZhCN = {
 	"session.exportRemotePartialNotice": "这是部分历史：远端会话按 128 KiB 窗口分页读取，本次导出已达上限（最多 {pages} 页 / {messages} 条消息），更早的消息未包含。需要完整历史请在该远端主机上导出。",
 	"session.inUseDeleteBlocked": "会话“{title}”正在使用中，请先关闭 Agent 后再删除。",
 	"session.stopBeforeDelete": "请先停止会话运行实例，再删除会话。",
+	// P4.5b：远端归档/取消归档要移动的是**那台机器上**的文件，而运行中的远端 pi 正在追加写它。
+	// 必须给出可执行下一步（先停 Agent），而不是只报一个码。
+	"session.remoteArchiveStopFirst": "该会话正在运行：请先停止它的 Agent（关闭 Agent）再归档，移动正被远端 pi 写入的会话文件会破坏历史。",
+	"session.remoteUnarchiveStopFirst": "该会话正在运行：请先停止它的 Agent（关闭 Agent）再恢复归档。",
 	"session.invalidArchivePath": "无效的归档会话路径。",
 	"session.newTitle": "新会话",
 	"session.dshUntitled": "DSH 会话",
@@ -339,6 +343,8 @@ export const mainProcessEnUS: Record<MainProcessTranslationKey, string> = {
 	"session.exportRemotePartialNotice": "Partial history: a remote session is read page by page in 128 KiB windows and this export hit the limit ({pages} pages / {messages} messages), so earlier messages are not included. Export on the remote host for the full history.",
 	"session.inUseDeleteBlocked": 'Session "{title}" is in use. Close its Agent before deleting it.',
 	"session.stopBeforeDelete": "Stop the session runtime before deleting the session.",
+	"session.remoteArchiveStopFirst": "This session is running: stop its Agent first, then archive — moving a file that the remote pi is still writing to would corrupt the history.",
+	"session.remoteUnarchiveStopFirst": "This session is running: stop its Agent first, then restore it from the archive.",
 	"session.invalidArchivePath": "Invalid archived session path.",
 	"session.newTitle": "New session",
 	"session.dshUntitled": "DSH session",

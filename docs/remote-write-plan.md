@@ -22,7 +22,8 @@
 | 操作 | 远端需做什么 | 归属 |
 |---|---|---|
 | 移除记录 | 只动本机 catalog + 墓碑；有运行实例时先停进程（**零远端数据写入**） | **P4.5a** |
-| 归档 / 取消归档 / 列出归档 / 删除归档 | 远端 `move` 进 `.pideck-archive/`、列目录、删文件；取消归档不能沿用本机「归档路径」契约 | P4.5b |
+| 归档 / 取消归档 / 列出归档 | 远端 `move` 进 `.pideck-archive/`（同目录旁）+ 本机归档索引；取消归档不能沿用本机「归档路径」契约（按本机 catalog id 恢复，见 handoff、「P4.5b 已实现」） | **P4.5b 已交付** |
+| 删除归档 | 远端 `rm`（**永久删除**，无回收站） | **不做**（P4.5b 明确排除，fail-closed：远端路径不过 IPC、写面无 `rm`）；需另立需二次确认的显式动作 |
 | edit-message / delete-message / prepare-resend | 改写远端 JSONL（截断/墓碑行） | P4.5c |
 | fork / clone（落盘） | pi 自己写新会话文件（经 RPC，不由 PiDeck 写） | P4.5d |
 | 改名后的 `name` 行 | 改写远端 JSONL | P4.5c（可经 pi RPC 时优先 RPC） |

@@ -270,6 +270,7 @@ import { createRemoteHostConnectionService, type RemoteHostConnectionService } f
 import { createSshClientRuntime, resolvePosixSshClient, type SshClientRuntime } from "./remote/SshClientRuntime";
 import { buildPinnedSshInvocation } from "./remote/SshVerifiedConnection";
 import { createRemoteSessionHistoryReader } from "./remote/RemoteSessionHistoryReader";
+import { createRemoteSessionArchive } from "./remote/RemoteSessionArchive";
 import { exportRemoteSessionHtml, REMOTE_SESSION_EXPORT_LIMITS } from "./remote/RemoteSessionHtmlExport";
 import { createRemoteSessionScanner } from "./sessions/RemoteSessionScanner";
 import type { SshSessionLocator } from "../shared/projectLocation";
@@ -2714,6 +2715,29 @@ function registerIpc() {
 	});
 
 	/**
+	 * 远端短命令的统一执行入口（读取与归档两条链共用）：每次重新过 `buildPinnedSshInvocation`
+	 * （pin 文件/指纹、路由摘要、严格配置复查）。超时归传输层：`SshClientRuntime.run` 的 execFile 自带
+	 * 30 s 上限与 256 KiB 输出上限（远端历史窗口上界 128 KiB 就是为后者留的余量）。
+	 */
+	const runPinnedRemoteCommand = async ({ hostId, remoteCommand }: { hostId: string; remoteCommand: string }) => {
+		const client = await remoteSshClientIfEnabled();
+		const invocation = await buildPinnedSshInvocation(app.getPath("userData"), hostId, "ssh-batch", { client, remoteCommand });
+		const result = await client.run(invocation.executable, invocation.args);
+		return { exitCode: result.exitCode, stdout: result.stdout };
+	};
+
+	/**
+	 * 远端会话根判定（远端读取与远端归档共用）：走**与扫描/登记同一份**实现。
+	 * pi 的 user-level `settings.json` 可以把会话根换掉，各自再拼一次 `<home>/.pi/agent/sessions` 就会在
+	 * 那些机器上读/写错文件（那是「读到了别人的历史」级别的问题，不是少一点）。
+	 */
+	const resolveRemoteSessionRoot = async (hostId: string): Promise<{ ok: true; root: string } | { ok: false; code: string }> => {
+		const port = await remoteHostServiceIfEnabled();
+		if (port === undefined) return { ok: false, code: "REMOTE_CONNECTION_SERVICE_UNAVAILABLE" };
+		return await createRemoteSessionScanner({ port, catalog: sessionCatalog }).resolveSessionRoot(hostId);
+	};
+
+	/**
 	 * 远端会话历史的有界窗口读取（Phase 4 远端历史）。
 	 *
 	 * 传输是既有 **pinned SSH 短命令**：每次读取都重新过 `buildPinnedSshInvocation`（pin 文件/指纹、路由
@@ -2727,22 +2751,9 @@ function registerIpc() {
 	 */
 	const readRemoteSessionHistoryPage = remoteExperimentEnabled
 		? async (input: { hostId: string; locator: SshSessionLocator; before?: number }) => {
-				const client = await remoteSshClientIfEnabled();
 				const reader = createRemoteSessionHistoryReader({
-					transport: {
-						// 超时归传输层：`SshClientRuntime.run` 的 execFile 自带 30 s 上限与 256 KiB 输出上限，
-						// 窗口上界（128 KiB）就是为它留出的余量。
-						readRemoteWindow: async ({ hostId, remoteCommand }) => {
-							const invocation = await buildPinnedSshInvocation(app.getPath("userData"), hostId, "ssh-batch", { client, remoteCommand });
-							const result = await client.run(invocation.executable, invocation.args);
-							return { exitCode: result.exitCode, stdout: result.stdout };
-						},
-					},
-					resolveSessionRoot: async (hostId) => {
-						const port = await remoteHostServiceIfEnabled();
-						if (port === undefined) return { ok: false as const, code: "REMOTE_CONNECTION_SERVICE_UNAVAILABLE" };
-						return await createRemoteSessionScanner({ port, catalog: sessionCatalog }).resolveSessionRoot(hostId);
-					},
+					transport: { readRemoteWindow: runPinnedRemoteCommand },
+					resolveSessionRoot: resolveRemoteSessionRoot,
 					project: (rawMessages, activeEntryIds) => agentManager.projectRemoteHistoryMessages(rawMessages, activeEntryIds),
 					logger: { warn: (message, details) => appLogger.warn("session", message, details) },
 				});
@@ -2789,6 +2800,21 @@ function registerIpc() {
 			}
 		: undefined;
 
+	/**
+	 * 远端会话归档 / 取消归档（P4.5b）：把远端会话文件 `mv` 进 / 出**它自己所在目录旁的** `.pideck-archive/`。
+	 *
+	 * 与远端历史读同一条 pinned SSH 短命令通道（同一 pin/指纹/路由校验、同一会话根判定），零新增 helper op；
+	 * 实验开关关掉时端口不装配（`remoteSessionArchive === undefined`）⇒ 远端归档分支得到稳定码
+	 * `REMOTE_SESSION_ARCHIVE_UNAVAILABLE`，而不是落回本机路径分支。
+	 * 本机侧的归档索引与 catalog 记录由 sessionIpc 的远端分支负责（这里只管远端文件）。
+	 */
+	const remoteSessionArchive = remoteExperimentEnabled
+		? createRemoteSessionArchive({
+				transport: { runRemoteCommand: runPinnedRemoteCommand },
+				resolveSessionRoot: resolveRemoteSessionRoot,
+			})
+		: undefined;
+
 	registerSessionIpc({
 		projectStore,
 		settingsStore,
@@ -2820,6 +2846,12 @@ function registerIpc() {
 		copyCatalogSession,
 		exportCatalogSessionHtml,
 		exportRemoteCatalogSessionHtml,
+		archiveRemoteSession: remoteSessionArchive ? (input: { hostId: string; locator: SshSessionLocator }) => remoteSessionArchive.moveIntoArchive(input) : undefined,
+		unarchiveRemoteSession: remoteSessionArchive
+			? async (input: { hostId: string; originalPath: string; archivedPath: string }) => {
+					await remoteSessionArchive.moveBack(input);
+				}
+			: undefined,
 		replaceAgentSession,
 		// C1：DSH 后端专用 IPC 依赖按后端分组（注册表化铺路；未来新增后端各自提供一份）
 		dshBackend: {

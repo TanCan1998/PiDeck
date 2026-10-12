@@ -544,6 +544,8 @@ const api = {
 		archiveRecord: (sessionId: string) => ipcRenderer.invoke(ipcChannels.sessionsCatalogArchive, sessionId) as Promise<boolean>,
 		/** 恢复归档会话（移回原路径并重新入目录） */
 		unarchiveRecord: (archivedPath: string) => ipcRenderer.invoke(ipcChannels.sessionsCatalogUnarchive, archivedPath) as Promise<boolean>,
+		/** 恢复**远端**归档会话（按本机 catalog 会话 id；远端文件由主进程按归档索引移回原位） */
+		unarchiveRemoteRecord: (sessionId: string) => ipcRenderer.invoke(ipcChannels.sessionsCatalogUnarchiveRemote, sessionId) as Promise<boolean>,
 		/** 列出已归档会话（恢复 UI 用；带归档前原始路径供按项目归属过滤） */
 		listArchived: () => ipcRenderer.invoke(ipcChannels.sessionsCatalogListArchived) as Promise<import("../shared/types").ArchivedPiSession[]>,
 		/** 永久删除已归档会话（归档文件移入系统回收站并移出索引；不可恢复） */

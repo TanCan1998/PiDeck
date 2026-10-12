@@ -117,19 +117,92 @@ type SessionCatalogFile = {
 	 * 按 (hostId, remoteSessionId) 成对记：远端会话身份是「哪台主机 + 会话根下的相对路径」，
 	 * 单看 remoteSessionId 会把两台主机上的同名路径当成同一条。
 	 */
-	dismissedRemoteSessions?: Array<{ hostId: string; remoteSessionId: string }>;
+	dismissedRemoteSessions?: DismissedRemoteSessionEntry[];
+	/**
+	 * 远端（ssh locator）会话的**本机归档索引**：远端文件被 `mv` 进远端 `.pideck-archive/` 后，
+	 * 本机只剩这份索引——它既是「列出归档」的数据源，也是「取消归档」的恢复身份。
+	 * 为什么不是「扫远端归档目录」：每次列归档都要跑一遍远端扫描（登录壳 + 会话根探测 + 列目录），
+	 * 而归档区本来就不在常规扫描口径里；把两个绝对路径（归档前/后）落进本机索引，
+	 * 恢复时就不必重算会话根（会话根可能已经被改过）。
+	 */
+	archivedRemoteSessions?: ArchivedRemoteSessionEntry[];
 };
+
+/**
+ * 本机侧的一条**远端归档条目**（P4.5b）。
+ *
+ * 为什么需要它：远端没有回收站，归档 = 把远端文件**移动**到同目录旁的 `.pideck-archive/`；
+ * 移动之后本机必须记住「哪条会话去哪儿了」——只靠远端目录扫描无法恢复（那时远端文件已不在扫描口径内），
+ * 也不能重算恢复目标（`originalRemotePath` 才是权威，会话根可能已变）。
+ * `sessionId` 是恢复身份：本机归档通道的入参是**本机归档路径**，远端没有这种路径，
+ * 所以远端恢复按 id 走（不能沿用本机路径契约）。
+ */
+export type ArchivedRemoteSessionEntry = {
+	/** 本机 catalog 会话 id（恢复身份 + 本机记录重建时的记录 id）。 */
+	sessionId: string;
+	hostId: string;
+	/** 恢复本机记录时的项目归属（归档时刻的值）。 */
+	projectId: string;
+	/** 归档时刻的标题（恢复记录时沿用）。 */
+	title: string;
+	/** 归档时刻会话记录的 updatedAt：恢复时原样回填，不把旧会话抬成「刚更新」。 */
+	updatedAt: number;
+	/** 相对会话根的远端身份；旧记录可能只有绝对路径（见 attachRuntime 的 remoteLocator 注释）。 */
+	remoteSessionId?: string;
+	/** 远端文件绝对路径算出的身份（runtime 上报写法）；与 remoteSessionId 二选一即可。 */
+	remotePath?: string;
+	/** 归档前的远端绝对路径（恢复的移动目标）。 */
+	originalRemotePath: string;
+	/** 归档后的远端绝对路径（当前文件所在位置）。 */
+	archivedRemotePath: string;
+	archivedAt: number;
+};
+
+/**
+ * 一条远端归档条目是否可用：两个绝对路径与身份字段是恢复的全部依据。
+ * 宽容读出（单条残缺只丢弃那一条）：一条坏索引不该让整份 catalog 变成不可用，
+ * 而丢一条的代价是「这条归档在列表里看不到、也恢复不了」，不是数据丢失。
+ */
+function readArchivedRemoteSessionEntry(value: unknown): ArchivedRemoteSessionEntry | undefined {
+	if (!isRecord(value)) return undefined;
+	const sessionId = typeof value.sessionId === "string" ? value.sessionId.trim() : "";
+	const hostId = typeof value.hostId === "string" ? value.hostId.trim() : "";
+	const projectId = typeof value.projectId === "string" ? value.projectId.trim() : "";
+	const originalRemotePath = typeof value.originalRemotePath === "string" ? value.originalRemotePath.trim() : "";
+	const archivedRemotePath = typeof value.archivedRemotePath === "string" ? value.archivedRemotePath.trim() : "";
+	if (sessionId.length === 0 || hostId.length === 0 || projectId.length === 0 || originalRemotePath.length === 0 || archivedRemotePath.length === 0) return undefined;
+	const archivedAt = typeof value.archivedAt === "number" && Number.isFinite(value.archivedAt) ? value.archivedAt : 0;
+	const updatedAt = typeof value.updatedAt === "number" && Number.isFinite(value.updatedAt) ? value.updatedAt : 0;
+	const remoteSessionId = typeof value.remoteSessionId === "string" && value.remoteSessionId.length > 0 ? value.remoteSessionId : undefined;
+	const remotePath = typeof value.remotePath === "string" && value.remotePath.length > 0 ? value.remotePath : undefined;
+	return {
+		sessionId,
+		hostId,
+		projectId,
+		title: typeof value.title === "string" ? value.title : "",
+		updatedAt,
+		...(remoteSessionId !== undefined ? { remoteSessionId } : {}),
+		...(remotePath !== undefined ? { remotePath } : {}),
+		originalRemotePath,
+		archivedRemotePath,
+		archivedAt,
+	};
+}
 
 /**
  * 远端墓碑在内存里的键（`Set` 查询用）：hostId 是 UUID（无空白），remoteSessionId 的形状规则已拒绝
  * 控制字节（见 RemoteSessionScanner.readRemoteSessionId）⇒ `\n` 是唯一分隔符，不会有二义。
  */
+/** 远端墓碑条目（P4.5a）：catalog 文件里持久化的「用户已从列表移除」的远端会话身份。
+ *  具名而不是内联：跨 store 契约要求每个 hostId 字段都有可归属的属主（内联会变成 <unscoped>）。 */
+export type DismissedRemoteSessionEntry = { hostId: string; remoteSessionId: string };
+
 function remoteDismissalKey(hostId: string, remoteSessionId: string): string {
 	return `${hostId}\n${remoteSessionId}`;
 }
 
 /** 键还原成持久化用的结构化身份；不合法（缺分隔符/空半截）返回 undefined，该条墓碑被丢弃。 */
-function readRemoteDismissalKey(key: string): { hostId: string; remoteSessionId: string } | undefined {
+function readRemoteDismissalKey(key: string): DismissedRemoteSessionEntry | undefined {
 	const index = key.indexOf("\n");
 	if (index <= 0 || index === key.length - 1) return undefined;
 	return { hostId: key.slice(0, index), remoteSessionId: key.slice(index + 1) };
@@ -137,7 +210,7 @@ function readRemoteDismissalKey(key: string): { hostId: string; remoteSessionId:
 
 /** `readCatalogState` 的结果：ok/empty 是正常形态，另两种由调用方决定怎么 fail closed。 */
 type CatalogStateRead =
-	| { kind: "ok"; entries: SessionCatalogEntry[]; dismissedDshSessionIds: Set<string>; dismissedRemoteSessionIds: Set<string>; revision: number; locatorNormalizationNeeded: boolean; skipNextBackup: boolean }
+	| { kind: "ok"; entries: SessionCatalogEntry[]; dismissedDshSessionIds: Set<string>; dismissedRemoteSessionIds: Set<string>; archivedRemoteSessions: Map<string, ArchivedRemoteSessionEntry>; revision: number; locatorNormalizationNeeded: boolean; skipNextBackup: boolean }
 	| { kind: "empty" }
 	| { kind: "unsupported"; error: UnsupportedSessionCatalogVersionError | UnsupportedSessionCatalogLocatorError }
 	| { kind: "unreadable"; primary: string; backup: string };
@@ -628,6 +701,8 @@ export class SessionCatalog implements HostRebindStorePort {
 	private dismissedDshSessionIds = new Set<string>();
 	/** 侧栏「移除记录」过的远端会话（键见 remoteDismissalKey）：远端扫描不得再列为「可导入」。 */
 	private dismissedRemoteSessionIds = new Set<string>();
+	/** 远端会话的本机归档索引（键 = 本机 sessionId）：远端归档的列表与恢复都只靠它。 */
+	private archivedRemoteSessions = new Map<string, ArchivedRemoteSessionEntry>();
 	private loaded = false;
 	private writeQueue: Promise<void> = Promise.resolve();
 	private skipNextBackup = false;
@@ -670,6 +745,7 @@ export class SessionCatalog implements HostRebindStorePort {
 			this.entries = read.entries;
 			this.dismissedDshSessionIds = read.dismissedDshSessionIds;
 			this.dismissedRemoteSessionIds = read.dismissedRemoteSessionIds;
+			this.archivedRemoteSessions = read.archivedRemoteSessions;
 			this.revision = read.revision;
 			this.skipNextBackup = read.skipNextBackup;
 			locatorNormalizationNeeded = read.locatorNormalizationNeeded;
@@ -678,12 +754,14 @@ export class SessionCatalog implements HostRebindStorePort {
 			this.entries = [];
 			this.dismissedDshSessionIds = new Set();
 			this.dismissedRemoteSessionIds = new Set();
+			this.archivedRemoteSessions = new Map();
 		} else {
 			// unsupported / unreadable：启动仍可用，但绝不把读不出来的快照当成"空 catalog"写回去。
 			this.needsRepair = true;
 			this.entries = [];
 			this.dismissedDshSessionIds = new Set();
 			this.dismissedRemoteSessionIds = new Set();
+			this.archivedRemoteSessions = new Map();
 			if (read.kind === "unsupported") {
 				void getAppLogger()?.error("session-catalog", "Catalog format is unsupported", { primary: read.error.message });
 			} else {
@@ -832,7 +910,7 @@ export class SessionCatalog implements HostRebindStorePort {
 	 * 「移除记录」远端会话时记下墓碑：远端文件仍在，但下次远端扫描不得再把它列为「可导入」。
 	 * 幂等（重复移除不产生第二次写事务）。**不碰远端**：这里只落本机 catalog 的一个集合。
 	 */
-	async rememberDismissedRemoteSession(input: { hostId: string; remoteSessionId: string }): Promise<void> {
+	async rememberDismissedRemoteSession(input: DismissedRemoteSessionEntry): Promise<void> {
 		this.assertLoaded();
 		const hostId = input?.hostId?.trim();
 		const remoteSessionId = input?.remoteSessionId?.trim();
@@ -845,6 +923,57 @@ export class SessionCatalog implements HostRebindStorePort {
 			}
 			this.dismissedRemoteSessionIds.add(key);
 			return { value: undefined, changed: true };
+		});
+	}
+
+	/**
+	 * 归档一条远端会话：记下本机归档索引（列表与恢复的唯一依据）。
+	 *
+	 * 调用时机是**远端移动成功之后**（见 sessionIpc 的远端归档分支）：远端失败时本机状态必须原样不动，
+	 * 否则索引会声称一个并没有发生的归档。幂等：同一 sessionId 重复记就是覆盖那一条。
+	 */
+	async rememberArchivedRemoteSession(input: ArchivedRemoteSessionEntry): Promise<void> {
+		this.assertLoaded();
+		const entry = readArchivedRemoteSessionEntry(input);
+		// 残缺条目就不记：一条缺路径/缺身份的索引既列不出也恢复不了，只会在列表里多一个死行。
+		if (entry === undefined) return;
+		await this.enqueueMutation((entries) => {
+			const previous = this.archivedRemoteSessions.get(entry.sessionId);
+			if (previous !== undefined && JSON.stringify(previous) === JSON.stringify(entry)) {
+				return { value: undefined, changed: false };
+			}
+			this.archivedRemoteSessions.set(entry.sessionId, entry);
+			return { value: undefined, changed: true };
+		});
+	}
+
+	/**
+	 * 这条远端会话的归档条目（不存在返回 undefined）：取消归档的恢复身份。
+	 * 只读查询，不排队写（与 isRemoteSessionDismissed 同口径）。
+	 */
+	getArchivedRemoteSession(sessionId: string): ArchivedRemoteSessionEntry | undefined {
+		this.assertLoaded();
+		const entry = this.archivedRemoteSessions.get(sessionId);
+		return entry === undefined ? undefined : { ...entry };
+	}
+
+	/** 当前全部远端归档条目（列表 IPC 的数据源；远端归档区**不扫描**，否则列一次归档就多一次远端往返）。 */
+	listArchivedRemoteSessions(): ArchivedRemoteSessionEntry[] {
+		this.assertLoaded();
+		return [...this.archivedRemoteSessions.values()].map((entry) => ({ ...entry }));
+	}
+
+	/**
+	 * 取消归档成功后摘掉索引条目，并返回被摘掉的那一条（调用方要拿它重建本机记录）。
+	 * 不存在时返回 undefined（幂等：远端已移回、索引已被其他路径清掉的情形不算失败）。
+	 */
+	async forgetArchivedRemoteSession(sessionId: string): Promise<ArchivedRemoteSessionEntry | undefined> {
+		this.assertLoaded();
+		return await this.enqueueMutation((_entries) => {
+			const entry = this.archivedRemoteSessions.get(sessionId);
+			if (entry === undefined) return { value: undefined, changed: false };
+			this.archivedRemoteSessions.delete(sessionId);
+			return { value: { ...entry }, changed: true };
 		});
 	}
 
@@ -2048,7 +2177,16 @@ export class SessionCatalog implements HostRebindStorePort {
 		let primaryError: unknown;
 		try {
 			const snapshot = await this.readCatalogFile(this.filePath);
-			return { kind: "ok", entries: snapshot.entries, dismissedDshSessionIds: snapshot.dismissedDshSessionIds, dismissedRemoteSessionIds: snapshot.dismissedRemoteSessionIds, revision: snapshot.revision, locatorNormalizationNeeded: snapshot.locatorNormalizationNeeded, skipNextBackup: false };
+			return {
+				kind: "ok",
+				entries: snapshot.entries,
+				dismissedDshSessionIds: snapshot.dismissedDshSessionIds,
+				dismissedRemoteSessionIds: snapshot.dismissedRemoteSessionIds,
+				archivedRemoteSessions: snapshot.archivedRemoteSessions,
+				revision: snapshot.revision,
+				locatorNormalizationNeeded: snapshot.locatorNormalizationNeeded,
+				skipNextBackup: false,
+			};
 		} catch (error) {
 			primaryError = error;
 			if (error instanceof UnsupportedSessionCatalogVersionError || error instanceof UnsupportedSessionCatalogLocatorError) {
@@ -2058,7 +2196,16 @@ export class SessionCatalog implements HostRebindStorePort {
 		let backupError: unknown;
 		try {
 			const snapshot = await this.readCatalogFile(this.backupFilePath());
-			return { kind: "ok", entries: snapshot.entries, dismissedDshSessionIds: snapshot.dismissedDshSessionIds, dismissedRemoteSessionIds: snapshot.dismissedRemoteSessionIds, revision: snapshot.revision, locatorNormalizationNeeded: snapshot.locatorNormalizationNeeded, skipNextBackup: true };
+			return {
+				kind: "ok",
+				entries: snapshot.entries,
+				dismissedDshSessionIds: snapshot.dismissedDshSessionIds,
+				dismissedRemoteSessionIds: snapshot.dismissedRemoteSessionIds,
+				archivedRemoteSessions: snapshot.archivedRemoteSessions,
+				revision: snapshot.revision,
+				locatorNormalizationNeeded: snapshot.locatorNormalizationNeeded,
+				skipNextBackup: true,
+			};
 		} catch (error) {
 			backupError = error;
 		}
@@ -2075,6 +2222,7 @@ export class SessionCatalog implements HostRebindStorePort {
 			this.entries = [];
 			this.dismissedDshSessionIds = new Set();
 			this.dismissedRemoteSessionIds = new Set();
+			this.archivedRemoteSessions = new Map();
 			this.revision = 0;
 			this.skipNextBackup = false;
 			return { state: this.entries, revision: 0 };
@@ -2082,6 +2230,7 @@ export class SessionCatalog implements HostRebindStorePort {
 		this.entries = preserveUnchangedRecords(this.entries, read.entries);
 		this.dismissedDshSessionIds = read.dismissedDshSessionIds;
 		this.dismissedRemoteSessionIds = read.dismissedRemoteSessionIds;
+		this.archivedRemoteSessions = read.archivedRemoteSessions;
 		this.revision = read.revision;
 		this.skipNextBackup = read.skipNextBackup;
 		return { state: this.entries, revision: read.revision };
@@ -2123,6 +2272,7 @@ export class SessionCatalog implements HostRebindStorePort {
 		entries: SessionCatalogEntry[];
 		dismissedDshSessionIds: Set<string>;
 		dismissedRemoteSessionIds: Set<string>;
+		archivedRemoteSessions: Map<string, ArchivedRemoteSessionEntry>;
 		locatorNormalizationNeeded: boolean;
 		revision: number;
 	}> {
@@ -2160,10 +2310,17 @@ export class SessionCatalog implements HostRebindStorePort {
 			const remoteSessionId = typeof value.remoteSessionId === "string" ? value.remoteSessionId.trim() : "";
 			return hostId.length === 0 || remoteSessionId.length === 0 ? [] : [remoteDismissalKey(hostId, remoteSessionId)];
 		});
+		// 归档索引同样宽容读出：单条残缺（缺身份/缺路径）只丢弃那一条，不让整份 catalog 不可用。
+		const archivedRemoteSessions = new Map<string, ArchivedRemoteSessionEntry>();
+		for (const value of Array.isArray(parsed.archivedRemoteSessions) ? parsed.archivedRemoteSessions : []) {
+			const entry = readArchivedRemoteSessionEntry(value);
+			if (entry !== undefined) archivedRemoteSessions.set(entry.sessionId, entry);
+		}
 		return {
 			entries: entries.map(normalizeEntryLocator),
 			dismissedDshSessionIds: new Set(dismissed),
 			dismissedRemoteSessionIds: new Set(dismissedRemote),
+			archivedRemoteSessions,
 			locatorNormalizationNeeded,
 			revision,
 		};
@@ -2183,6 +2340,8 @@ export class SessionCatalog implements HostRebindStorePort {
 				const identity = readRemoteDismissalKey(key);
 				return identity === undefined ? [] : [identity];
 			}),
+			// 归档索引同样持久化：丢它就是「归档了的远端会话既看不到也恢复不了」。
+			archivedRemoteSessions: [...this.archivedRemoteSessions.values()].map((entry) => ({ ...entry })),
 		};
 		await mkdir(dirname(this.filePath), { recursive: true });
 		const nonce = randomUUID();

@@ -619,6 +619,7 @@ export function createPreviewApi(): PiDesktopApi {
 			deleteRecord: async () => true,
 			archiveRecord: async () => true,
 			unarchiveRecord: async () => true,
+			unarchiveRemoteRecord: async () => true,
 			listArchived: async () => [],
 			deleteArchivedRecord: async () => true,
 			copyRecord: async (sessionId) => ({

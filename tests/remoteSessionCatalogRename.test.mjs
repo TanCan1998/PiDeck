@@ -19,6 +19,8 @@ const REMOTE_PROJECT = { id: "project-remote", name: "Remote", locator: { kind: 
 const LOCAL_PROJECT = { id: "project-local", name: "Local", locator: { kind: "local", environment: "native", path: "/work/app" } };
 const { SessionCatalog } = loadTsCommonJs("src/main/sessions/SessionCatalog.ts", { stubs: { "../logging/sharedLogger": { getAppLogger: () => null } } });
 const { ipcChannels } = loadTsCommonJs("src/shared/ipc.ts");
+/** P4.5b：远端归档的稳定码取值域（与生产同一份常量，避免断言里的字面量漂移）。 */
+const { REMOTE_SESSION_ARCHIVE_CODES } = loadTsCommonJs("src/main/remote/RemoteSessionArchive.ts");
 
 /** 本机文件面替身：调用即留痕（`localCalls` 非空就是「远端路径落进了本机文件操作」）。 */
 async function setup(t) {
@@ -144,13 +146,19 @@ test("local session rename still rewrites the session file name line", async (t)
 	assert.deepEqual(h.localCalls, [`rename:${h.localPath}`]);
 });
 
-test("remote record archive stays fail-closed: no file move, record kept", async (t) => {
+test("remote record archive stays fail-closed when no remote archive port is wired: no file move, record kept", async (t) => {
 	const h = await setup(t);
 	const { record } = await h.registerRemote("--srv-app--/archive-guard.jsonl");
 
-	// 归档＝把会话文件移进 .pideck-archive/（远端写入），本档不实现：必须仍是稳定码拒绝，
-	// 且不能因为改名开了口子就顺手把远端记录从 catalog 摘掉。
-	await assert.rejects(() => h.handlers.get(ipcChannels.sessionsCatalogArchive)({}, record.id), /UNSUPPORTED_PROJECT_LOCATION/);
+	// 归档＝把会话文件移进 .pideck-archive/（远端写入）。P4.5b 已实现远端归档（见
+	// tests/remoteSessionArchive.test.mjs），**但装配没提供远端端口时**（实验开关关掉/旧装配）
+	// 仍必须 fail-closed：稳定码，且不能因为改名开了口子就顺手把远端记录从 catalog 摘掉、
+	// 也不能落回本机路径分支（那是本档当初要守的边界，现在换成“稳定码拒绝”这一条）。
+	await assert.rejects(
+		() => h.handlers.get(ipcChannels.sessionsCatalogArchive)({}, record.id),
+		(error) => error.message === REMOTE_SESSION_ARCHIVE_CODES.unavailable,
+	);
 	assert.deepEqual(h.localCalls, []);
+	assert.deepEqual(h.localPathLookups, []);
 	assert.equal(h.catalog.get(record.id)?.id, record.id);
 });
