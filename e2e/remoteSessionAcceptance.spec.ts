@@ -341,7 +341,8 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 					//    runner 写 lease 有延迟 ⇒ **重试式**读（最多 ~10s，一次 ssh 往返里循环），否则会读到空目录。
 					const leaseCommand = 'for i in $(seq 1 10); do f=$(ls -1t $HOME/.pideck/remote-host/leases/*.json 2>/dev/null | head -1); if [ -n "$f" ]; then cat "$f"; exit 0; fi; sleep 1; done; true';
 					// 判别性证据：重启后的新回合必须**追加到同一个远端会话文件**里（否则「历史还在」可能只是远端 reader 画出来的旧文件）。
-					const evidenceFile = (remoteSessionEvidence.match(/(\S+\.jsonl)/) ?? [])[1];
+					// 取**绝对路径**：证据里 `ls -1` 那行只有文件名，只有 `wc -l` 那行带绝对路径（要求以 / 开头）。
+					const evidenceFile = (remoteSessionEvidence.match(/(\/\S+\.jsonl)/) ?? [])[1];
 					const countEvidenceLines = async () => Number(((await runRemoteCommand(creds, "wc -l < '" + evidenceFile + "'", 20_000)).stdout.match(/(\d+)/) ?? [])[1] ?? 0);
 					const linesBeforeKill = await countEvidenceLines();
 					const leaseOutput = (await runRemoteCommand(creds, leaseCommand, 20_000)).stdout.trim();
@@ -369,8 +370,20 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 					await expect(assistant.first(), "重启后必须还能出 assistant 卡片").toBeVisible({ timeout: timeouts.helperMs });
 					await expect.poll(async () => (await assistant.allInnerTexts()).join(" ").trim().length, { timeout: timeouts.helperMs, message: "重启后的回复必须真的有正文" }).toBeGreaterThan(0);
 					await expect(window.locator(".composer-send-primary")).toHaveAttribute("aria-label", "发送", { timeout: timeouts.helperMs });
-					// 同一会话的硬证据：新回合把消息追加进了**同一个**远端会话文件（行数增长），不是另开了一个 pi 会话。
-					expect(await countEvidenceLines(), "重启后的回合必须往同一远端会话文件追加（行数增长）").toBeGreaterThan(linesBeforeKill);
+					// 同一会话的硬证据：新回合把消息追加进了**同一个**远端会话文件（行数增长）。
+					// pi 可能延迟落盘 ⇒ 轮询；失败时把该目录**全部** jsonl 的行数打出来（能区分「延迟」与「另开了新文件」）。
+					let grew = false;
+					for (let i = 0; i < 10 && !grew; i += 1) {
+						if ((await countEvidenceLines()) > linesBeforeKill) {
+							grew = true;
+							break;
+						}
+						await new Promise((resolve) => setTimeout(resolve, 1500));
+					}
+					if (!grew) {
+						const listing = (await runRemoteCommand(creds, "wc -l " + paths.sessionEvidenceDir + "/*.jsonl 2>/dev/null; true", 20_000)).stdout.trim();
+						expect(grew, "重启后的回合必须往同一远端会话文件追加（行数增长）。目录现状：\n" + listing + "\n计划里用的就是：" + evidenceFile).toBe(true);
+					}
 				});
 			}
 			if (process.env[GAP_PROBE_ENV] === "1") {
