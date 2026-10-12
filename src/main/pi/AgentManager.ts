@@ -3735,6 +3735,14 @@ export class AgentManager {
 			return data;
 		}
 		const targetSessionId = await this.refreshRuntimeAfterSessionReplacement(agentId, remote);
+		if (remote) {
+			// 远端 fork 的会话文件是**懒创建**的：pi 立刻把 `get_state.sessionFile` 换成新路径，但文件要等这条会话
+			// 首次追加消息才落盘（2026-10-12 协议级真机探针：fork 成功后 `ls` 无新文件，连 `set_session_name` 成功也不落盘）。
+			// 所以「换绑后远端还没有这份文件」是**正常语义**、不是失败。这条布尔判据让真机排查一眼分清两种情形：
+			// true ⇒ pi 报的仍是原文件（那才是 PiDeck 身份推导的问题）；false ⇒ pi 报了新路径（符合懒创建语义）。
+			// 只记布尔、不记路径（脱敏纪律）。
+			void this.appLogger?.info("agent", "Remote session replacement reported file", { agentId, sameFileAsBefore: runtime.tab.sessionPath === originPath });
+		}
 		return targetSessionId ? { ...(data && typeof data === "object" && !Array.isArray(data) ? data : {}), targetSessionId } : data;
 	}
 

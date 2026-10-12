@@ -447,15 +447,16 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 				await expect(window.locator(".message-timeline .user-turn-text").filter({ hasText: PROMPT }), "恢复后必须重新从远端读回 prompt").toBeVisible({ timeout: timeouts.helperMs });
 				await expect(window.locator(".message-timeline .assistant-text").first()).toBeVisible({ timeout: timeouts.helperMs });
 			});
-			// 远端 live fork 探针（默认关闭）：2026-10-12 真机实测**未定论**，证据分层如下：
-			//   - fork 后应用侧**确实换绑**（composer 的 session id 变化；侧栏该远端项目稍后从 1 行变 2 行）；
-			//   - 但远端 sessions 目录乃至整个 $HOME 近 10 分钟**没有任何新 .jsonl**，且**原文件 sha256 未变**；
-			//   - 新会话的输入框也**没有**拿回 fork 点的文本（渲染层草稿回填，另一处独立缺口）。
-			// 所以本步骤"必须多出一个新文件"的判据在真机上不成立 —— 但这是**能力未定论**，不是环境抖动，
-			// 因此**不能**进默认门禁（默认门禁只跑已达标链路）。下次接手要查：① pi `get_state.sessionFile`
-			// 究竟返回哪条路径（是否与原文件相同）；② pi 的 fork 是否**懒创建**文件（首条新消息落盘时才建）；
-			// ③ 第二条记录指向哪条路径（同一文件重复登记，还是 pi 报了一条磁盘上还不存在的路径）。
-			// 打开方式：PIDECK_E2E_P42_FORK_PROBE=1；定论后把整段提升为默认步骤。
+			// 远端 live fork 探针（默认关闭）：**语义已查明（2026-10-12 协议级真机证据）**——
+			// pi 的 `fork` 会立刻把 `get_state.sessionFile` 换成**新路径**（同目录、新文件名、新 sessionId），
+			// 但该**文件是懒创建的**：磁盘上要等这条会话首次追加消息（一次真实回合）之后才出现
+			// （协议探针实测：fork 成功后 `ls` 看不到新文件，连 `set_session_name` 成功也不落盘）。
+			// 所以判据**不能**是「fork 后立刻多出一个文件」——那是错的期望；正确判据是：
+			//   ① 应用侧换绑到新记录（composer 的 session id 变化 + 侧栏该远端项目出现第二条记录）；
+			//   ② **原文件字节不变**（fork 不得就地改写 origin）；
+			//   ③ 原会话仍能从远端文件读回历史（换绑后它没有 runtime ⇒ 走远端读页路径）。
+			// 暂不提升为默认门禁：远端 pi 的模型配额已用尽（`Codex error: The usage limit has been reached`），
+			// 断言改完后还没跑过一次完整验收；配额恢复后跑 PIDECK_E2E_P42_FORK_PROBE=1 再提升。
 			if (process.env[FORK_PROBE_ENV] === "1") {
 				await test.step("时间线「Fork」→ 远端 pi 落盘新会话文件 → 应用换绑新记录，旧会话与旧文件不动", async () => {
 					// 判据分层：① 远端真的多出一个 pi 自己写的新文件（不是 PiDeck 手写）；② 应用侧换绑到新记录
@@ -473,6 +474,8 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 					const sha256 = async (path: string) => (await runRemoteCommand(creds, "sha256sum '" + path + "'", 20_000)).stdout.trim().split(/\s+/)[0];
 					const shaBefore = await sha256(originFile);
 					// 消息动作按钮平时只在 hover 时可点（与本地同一组件），先 hover 再点。
+					const preForkSessionId = await window.locator(".composer[data-session-id]").first().getAttribute("data-session-id");
+					expect(preForkSessionId, "Fork 前必须能读到当前会话 id").toBeTruthy();
 					const userMessage = window.locator(".message-timeline article").filter({ hasText: PROMPT }).first();
 					await userMessage.hover();
 					await userMessage.getByRole("button", { name: "Fork", exact: true }).click();
@@ -480,7 +483,7 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 					// 换绑成功本身证明主进程已从 fresh get_state 拿到新路径并登记成新记录 ⇒ 此刻远端文件必然已存在。
 					const forkedSessionId = await expect
 						.poll(async () => window.locator(".composer[data-session-id]").first().getAttribute("data-session-id"), { timeout: timeouts.helperMs, message: "Fork 后必须换绑到一条新记录" })
-						.not.toBe(sessionId)
+						.not.toBe(preForkSessionId)
 						.then(() => window.locator(".composer[data-session-id]").first().getAttribute("data-session-id"));
 					expect(forkedSessionId, "Fork 后必须能读到新记录的 session id").toBeTruthy();
 					if (!forkedSessionId) throw new Error("REMOTE_FORK_SESSION_ID_MISSING");
