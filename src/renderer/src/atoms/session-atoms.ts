@@ -85,7 +85,9 @@ export type SessionLoadState = {
 export type SessionMessageCacheEntry = {
 	messages: ChatMessage[];
 	revision: number;
-	source: "disk" | "runtime";
+	// "remote" = 这条历史来自远端会话文件（ssh locator）经主进程有界窗口读回：
+	// 游标语义与本地**不同**（远端是字节偏移，本地是活动分支消息下标），因此不能走本地那套数值算术。
+	source: "disk" | "runtime" | "remote";
 	updatedAt: number;
 	/** Changes only when the user-message outline can change. */
 	outlineRevision?: number;
@@ -546,7 +548,10 @@ export const cacheSessionMessagesAtom = atom(
 			force?: boolean;
 		},
 	) => {
+		const historySource = input.source === "disk" && get(sessionRecordsAtom)[input.sessionId]?.locator?.kind === "ssh" ? ("remote" as const) : input.source;
 		const cache = get(sessionMessagesCacheAtom);
+		// 远端记录的「磁盘页」其实是远端有界窗口读回的结果：来源要标成 "remote"，否则下游那条
+		// 「超限裁剪时把数值游标前移」的算术会把字节偏移算坏（静默跳内容）。
 		const current = cache[input.sessionId];
 		// Revision 守卫仅在「上一次与本次均为 disk 来源」时生效——
 		// 防止慢一拍的历史分页响应覆盖后续新快照。
@@ -584,11 +589,11 @@ export const cacheSessionMessagesAtom = atom(
 			[input.sessionId]: {
 				messages: input.messages,
 				revision,
-				source: input.source,
+				source: historySource,
 				updatedAt: Date.now(),
 				outlineRevision,
 				outlineLastUserIndex,
-				...(input.source === "disk" && input.page ? { page: input.page } : {}),
+				...(historySource !== "runtime" && input.page ? { page: input.page } : {}),
 				// runtime 窗口语义（2026-08 激活分页）：entry 每次整体重建，
 				// 调用方必须显式给出 windowStart/history（undefined = 清除，如版本失效丢前缀）；
 				// disk 来源无窗口概念，两字段缺省即不存在
