@@ -1729,7 +1729,7 @@ test("catalog message mutation refuses DSH sessions", async () => {
 	assert.equal(harness.calls.mutatePersisted.length, 0);
 });
 
-test("catalog message mutation rejects SSH locators before touching stale local paths", async () => {
+test("catalog message mutation routes SSH records to the remote write port, never to the local path branch", async () => {
 	const { SessionRuntimeCoordinator } = loadCoordinator();
 	const harness = createHarness({
 		entry: catalogEntry({
@@ -1737,12 +1737,154 @@ test("catalog message mutation rejects SSH locators before touching stale local 
 			locator: { kind: "ssh", hostId: "host-a", remoteSessionId: "remote-1" },
 		}),
 	});
+	const mutations = [];
+	const port = {
+		mutate: async (input) => {
+			mutations.push(input);
+			return { text: "remote snapshot" };
+		},
+	};
+	const localPathLookups = [];
+	const originalGetLocalFilePath = harness.catalog.getLocalFilePath;
+	harness.catalog.getLocalFilePath = (sessionId) => {
+		localPathLookups.push(sessionId);
+		return originalGetLocalFilePath(sessionId);
+	};
+	const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender, undefined, undefined, () => port);
+
+	const edited = await coordinator.editCatalogMessage("session-1", "message-1", "updated", "entry-1");
+	const deleted = await coordinator.deleteCatalogMessage("session-1", "message-2", "entry-2");
+	const resend = await coordinator.prepareCatalogResend("session-1", "message-3", "entry-3");
+
+	assert.equal(edited.ok, true);
+	assert.equal(deleted.ok, true);
+	assert.equal(resend.ok, true);
+	assert.equal(resend.value.text, "remote snapshot");
+	// 三条链路共用一个写面，参数逐字段透传（locator 身份也带上，写面自己再校验一次）。
+	assert.deepEqual(
+		mutations.map((input) => [input.operation, input.messageId, input.entryId, input.hostId]),
+		[
+			["edit", "message-1", "entry-1", "host-a"],
+			["delete", "message-2", "entry-2", "host-a"],
+			["resend", "message-3", "entry-3", "host-a"],
+		],
+	);
+	assert.equal(mutations[0].newText, "updated");
+	assert.equal(mutations[1].newText, undefined);
+	assert.equal(mutations[0].locator.kind, "ssh");
+	// 「不再被 ssh 分支影响」：本机路径入口一次都没被调、本机文件改写一次都没有。
+	assert.deepEqual(localPathLookups, []);
+	assert.equal(harness.calls.mutatePersisted.length, 0);
+});
+
+test("catalog message mutation on an SSH record fails closed when no remote write port is assembled", async () => {
+	const { SessionRuntimeCoordinator } = loadCoordinator();
+	const harness = createHarness({
+		entry: catalogEntry({
+			filePath: "C:/stale/session.jsonl",
+			locator: { kind: "ssh", hostId: "host-a", remoteSessionId: "remote-1" },
+		}),
+	});
+	const localPathLookups = [];
+	const originalGetLocalFilePath = harness.catalog.getLocalFilePath;
+	harness.catalog.getLocalFilePath = (sessionId) => {
+		localPathLookups.push(sessionId);
+		return originalGetLocalFilePath(sessionId);
+	};
 	const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender);
+
 	const result = await coordinator.deleteCatalogMessage("session-1", "message-1");
+
+	// 稳定码，不落回本机路径分支（旧行为是 UNSUPPORTED_PROJECT_LOCATION，那是「本地路径不存在」的误报）。
 	assert.equal(result.ok, false);
 	assert.equal(result.error.code, "SESSION_COMMAND_FAILED");
-	assert.match(result.error.debugDetails, /UNSUPPORTED_PROJECT_LOCATION/);
+	assert.equal(result.error.debugDetails, "REMOTE_SESSION_HISTORY_WRITER_UNAVAILABLE");
+	assert.deepEqual(localPathLookups, []);
 	assert.equal(harness.calls.mutatePersisted.length, 0);
+});
+
+test("a running SSH session refuses the mutation with zero remote commands (fail-closed)", async () => {
+	const { SessionRuntimeCoordinator } = loadCoordinator();
+	const harness = createHarness({
+		entry: catalogEntry({ backend: "pi", locator: { kind: "ssh", hostId: "host-a", remoteSessionId: "remote-1" } }),
+		tabs: [{ id: "agent-a", status: "idle", createdAt: 1 }],
+	});
+	let mutations = 0;
+	const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender, undefined, undefined, () => ({
+		mutate: async () => {
+			mutations += 1;
+			return undefined;
+		},
+	}));
+	const generation = coordinator.bindExistingAgent("session-1", "agent-a");
+
+	// 先判后发：绑定存在时一个远端命令都不发（可执行文案由渲染层按 SESSION_RUNTIME_BUSY 给出）。
+	for (const run of [() => coordinator.editCatalogMessage("session-1", "message-1", "updated"), () => coordinator.deleteCatalogMessage("session-1", "message-1"), () => coordinator.prepareCatalogResend("session-1", "message-1")]) {
+		const result = await run();
+		assert.equal(result.ok, false);
+		assert.equal(result.error.code, "SESSION_RUNTIME_BUSY");
+		assert.match(result.error.debugDetails, /Stop the running agent/);
+	}
+	assert.equal(mutations, 0);
+	assert.equal(harness.calls.mutatePersisted.length, 0);
+
+	// 停掉之后同一条 ssh 记录就能写（拒绝只是运行期冲突规则，不是永久禁用）。
+	const stopped = await coordinator.stopRuntime({ sessionId: "session-1", agentId: "agent-a", runtimeGeneration: generation });
+	assert.equal(stopped.ok, true);
+	assert.equal(mutations, 0);
+	const afterStop = await coordinator.deleteCatalogMessage("session-1", "message-1");
+	assert.equal(afterStop.ok, true);
+	assert.equal(mutations, 1);
+});
+
+test("remote write failures map onto the session command error codes without leaking paths", async () => {
+	const { SessionRuntimeCoordinator } = loadCoordinator();
+	const harness = createHarness({ entry: catalogEntry({ backend: "pi", locator: { kind: "ssh", hostId: "host-a", remoteSessionId: "remote-1" } }) });
+	const failing = (error) => new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender, undefined, undefined, () => ({ mutate: async () => Promise.reject(error) }));
+
+	// 远端上界（默认 256 KiB）与本机 32MB 不同：体积参数必须跟着错误走。
+	const tooLarge = Object.assign(new Error("REMOTE_SESSION_HISTORY_WRITER_FILE_TOO_LARGE"), { details: { size: 300_000, limit: 262_144 } });
+	const tooLargeResult = await failing(tooLarge).editCatalogMessage("session-1", "message-1", "updated");
+	assert.equal(tooLargeResult.ok, false);
+	assert.equal(tooLargeResult.error.code, "SESSION_FILE_TOO_LARGE");
+	assert.equal(tooLargeResult.error.params.limitMb, 1, "文案里的上界必须是远端真实上界");
+
+	// 目标条目不在远端文件里 = 未找到（与在本机链路的分类一致）。
+	const missing = await failing(new Error("REMOTE_SESSION_HISTORY_WRITER_MESSAGE_NOT_FOUND")).editCatalogMessage("session-1", "message-1", "updated");
+	assert.equal(missing.error.code, "MESSAGE_NOT_FOUND");
+
+	// 其余稳定码落 SESSION_COMMAND_FAILED，且 debugDetails 只有码（不含路径/命令/正文）。
+	const failed = await failing(new Error("REMOTE_SESSION_HISTORY_WRITER_COMMAND_FAILED")).deleteCatalogMessage("session-1", "message-1");
+	assert.equal(failed.error.code, "SESSION_COMMAND_FAILED");
+	assert.equal(failed.error.debugDetails, "REMOTE_SESSION_HISTORY_WRITER_COMMAND_FAILED");
+	// 裸异常（写面之外的装配错误）折叠成传输失败码，不外传自由文本。
+	const folded = await failing(new Error("boom /home/dev/.pi/agent/sessions/x.jsonl")).editCatalogMessage("session-1", "message-1", "updated");
+	assert.equal(folded.error.debugDetails, "REMOTE_SESSION_HISTORY_WRITER_TRANSPORT_FAILED");
+});
+
+test("local records keep the local file branch even when a remote write port is assembled", async () => {
+	const { SessionRuntimeCoordinator } = loadCoordinator();
+	const harness = createHarness({ entry: catalogEntry({ filePath: "C:/sessions/session-1.jsonl", status: "active" }) });
+	let mutations = 0;
+	const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender, undefined, undefined, () => ({
+		mutate: async () => {
+			mutations += 1;
+			return undefined;
+		},
+	}));
+
+	const edited = await coordinator.editCatalogMessage("session-1", "message-1", "updated");
+	const resend = await coordinator.prepareCatalogResend("session-1", "message-3");
+
+	assert.equal(edited.ok, true);
+	assert.equal(resend.ok, true);
+	assert.equal(resend.value.text, "hello");
+	// 本机链路逐字不变：还是 mutatePersistedSessionMessage，远端写面一次都不参与。
+	assert.deepEqual(
+		harness.calls.mutatePersisted.map((item) => item.operation),
+		["edit", "resend"],
+	);
+	assert.equal(mutations, 0);
 });
 
 test("SessionCommandIpcError maps MESSAGE_NOT_FOUND to the dedicated copy key", () => {

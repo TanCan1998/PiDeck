@@ -458,9 +458,9 @@ trust-flag 门禁）上重跑完整真机验收 `e2e/remoteSessionAcceptance.spe
 | 列出归档 | `sessions:catalog-list-archived` | 本机扫描根下的 `.pideck-archive/` + **本机归档索引**里的远端条目 | **P4.5b 已交付**（远端归档区**不扫描**） | UI 与真机往返已验证（见下） |
 | 删除归档 | `sessions:catalog-delete-archived` | 本机回收站（`shell.trashItem`）+ 归档索引 | **不适用且有意保持 fail-closed**：远端没有本机归档路径，也没有 `rm` 链路 | 需另立「真删远端数据」的显式动作（二次确认） |
 | 移除记录 | `sessions:catalog-delete` | **删本机会话文件（回收站）+ 移出 catalog** | 抛稳定码（fail-closed） | 需要产品决策 + （真删远端）远端写端口，见下条 |
-| edit-message | `sessions:catalog-edit-message` → `SessionRuntimeCoordinator.mutateCatalogMessage` | 改写本机 JSONL | `SESSION_COMMAND_FAILED`（debugDetails=`UNSUPPORTED_PROJECT_LOCATION`） | 远端会话文件写端口；运行中的 `sessions:runtime-edit-message` 另被 `AgentManager.assertLocalRuntimeOperation` 显式拒绝（`REMOTE_RUNTIME_CODES.localOperationUnsupported`） |
-| delete-message | `sessions:catalog-delete-message` | 同上（写墓碑） | 同上 | 同上 |
-| prepare-resend | `sessions:catalog-prepare-resend` | 同上（截断该消息及其后继） | 同上 | 同上 |
+| edit-message | `sessions:catalog-edit-message` → `SessionRuntimeCoordinator.mutateCatalogMessage` | 改写 JSONL（本机：本机文件；ssh：**远端文件**，经 `RemoteSessionHistoryWriter`） | **P4.5c 已交付**：ssh 分支在 `getLocalFilePath` **之前**分流，分块读回 → 按本机同一语义算新内容 → 同目录临时文件分块写 → `mv` 原子替换；运行中**先判后发**（零远端命令，`SESSION_RUNTIME_BUSY`）；端口缺失/路径非法/超上界/命令失败一律稳定码且**目标文件不变**；日志只记身份与操作 |
+| delete-message | `sessions:catalog-delete-message` | 同上（写墓碑） | **P4.5c 已交付**（同写面）：assistant 的过程链一并墓碑、子节点重挂；文件里没有该消息时是 no-op（零远端命令） |
+| prepare-resend | `sessions:catalog-prepare-resend` | 同上（截断该消息及其后继） | **P4.5c 已交付**（同写面）：返回原文/参考图快照 + 该条及其后继全部墓碑 |
 | fork | `sessions:runtime-fork` → pi RPC `fork`（需运行实例） | 官方 RPC → fresh `get_state` → 既有远端端口登记**新 ssh record** → coordinator 换绑 | **live-runtime 身份链已实现**（取消不 refresh/不登记；否定响应或状态读取失败按「身份未知」fail-closed） | **真机语义已查明（2026-10-12，协议级探针）**：pi 的 `fork` 立刻把 `get_state.sessionFile` 换成新路径，但该**文件懒创建**（要等该会话首次追加消息才落盘；连 `set_session_name` 成功也不落盘）⇒ 登记新记录是对的，但**新记录可能暂时指向磁盘上还不存在的文件**；应用侧换绑已真机验证（composer 换 session id、侧栏 1→2 行、原文件 sha256 未变）。验收步骤仍以探针形式存在（`PIDECK_E2E_P42_FORK_PROBE=1`），配额恢复后跑一次再提升为默认门禁 |
 | clone（同族，一并记录） | `sessions:runtime-clone`（RPC）/ `sessions:catalog-copy`（本机临时 pi 进程） | 同上（与 fork 同一替换 owner）；catalog 版先过 `getLocalFilePath` 守卫 | RPC 版同上（clone 在 pi 里也走 fork 语义）；catalog 版仍抛稳定码 | 同上（停态/临时会话面明确不做） |
 | export-HTML | `sessions:catalog-export-html` | 先 `getLocalFilePath` 守卫 → 本机临时 pi 进程导出 HTML | 抛稳定码（fail-closed） | 只需**远端读**：复用 `RemoteSessionHistoryReader` 读窗口，HTML 仍写本机（新接线，不改远端） |
@@ -481,7 +481,12 @@ trust-flag 门禁）上重跑完整真机验收 `e2e/remoteSessionAcceptance.spe
    会有两个用户可感知后果 —— 远端文件仍在（toast 说「会话已删除」而远端数据没删），且**下次远端扫描会把它重新列为「可导入」**
    （ssh 记录没有墓碑；DSH 侧靠 `dismissedDshSessionIds`）。要不要墓碑、要不要真删远端文件、文案怎么改，都需要先定方案与授权。
 2. 归档 / 取消归档 / 列出归档 / 删除归档：全部依赖远端文件移动或远端归档索引 = 远端写面。
-3. edit-message / delete-message / prepare-resend：远端会话文件写。
+3. edit-message / delete-message / prepare-resend：**P4.5c 已交付**（远端写面，见上表）。已知边界：
+   ① 整读上界 **256 KiB**（本机链路是 32MB）⇒ 超出的会话失败于 `SESSION_FILE_TOO_LARGE`（文案带真实上界），不截断改写；
+   ② 临时文件沿用远端 umask（典型 0644）⇒ **不改权限位**，0600 的会话文件改写后会放宽；
+   ③ 并发判据只有「本会话有无运行实例」⇒ 远端 pi **之外**的写者（另一台机器上的 TUI、手工编辑）发现不了，读写之间也没有版本复核；
+   ④ 运行中拒绝复用本机同一条 `SESSION_RUNTIME_BUSY`（渲染层既有文案 + debugDetails），没有 P4.5b 那种「先停止 Agent」专用 key；
+   ⑤ **真机未跑**：`base64 -d` 的存在性、以及三条链路在真实远端文件上的端到端行为都还只是本地行为测试（按真实 shell 语义的假 exec）。
 4. fork / clone：远端 pi 会落盘**新**会话文件（经 pi 的写）。live-runtime 身份链已实现（见上表）：
    替换策略唯一 owner 是 `src/main/sessions/agentSessionReplacement.ts`（`main/index.ts` 只留依赖注入转发），
    本机与 SSH 走同一个 `replaceBoundRuntime` 状态机。**停态 clone**（本机临时 pi 进程那条）与远端 edit/resend 仍不做。

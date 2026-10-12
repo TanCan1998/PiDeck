@@ -272,6 +272,7 @@ import { createSshClientRuntime, resolvePosixSshClient, type SshClientRuntime } 
 import { buildPinnedSshInvocation } from "./remote/SshVerifiedConnection";
 import { createRemoteSessionHistoryReader } from "./remote/RemoteSessionHistoryReader";
 import { createRemoteSessionArchive } from "./remote/RemoteSessionArchive";
+import { createRemoteSessionHistoryWriter, type RemoteSessionMessageMutationPort } from "./remote/RemoteSessionHistoryWriter";
 import { exportRemoteSessionHtml, REMOTE_SESSION_EXPORT_LIMITS } from "./remote/RemoteSessionHtmlExport";
 import { createRemoteSessionScanner } from "./sessions/RemoteSessionScanner";
 import type { SshSessionLocator } from "../shared/projectLocation";
@@ -359,6 +360,15 @@ let fileSystemService: FileSystemService;
 let sessionScanner: SessionScanner;
 let sessionCatalog: SessionCatalog;
 let sessionRuntimeCoordinator: SessionRuntimeCoordinator;
+/**
+ * 远端会话消息改写端口（P4.5c）：编辑 / 删除 / 重发三条链路共用的写面。
+ *
+ * 为什么是模块级 let 而不是构造期常量：写面依赖 pinned SSH 短命令，而那条通道在 `registerIpc()`
+ * （挂在下面的启动流程里）才装配；协调器构造时把 `() => remoteSessionMessageMutation` 作为解析器注入，
+ * 于是「开关关闭 / 尚未装配」在调用时自然就是 undefined ⇒ fail-closed，不需要 setter，也不把业务
+ * 分支塞回本文件。
+ */
+let remoteSessionMessageMutation: RemoteSessionMessageMutationPort | undefined;
 /** 闲置 agent 自动释放器（内存优化）：whenReady 阶段装配，quit 时 stop */
 let idleAgentReleaser: IdleAgentReleaser | null = null;
 let codexSessionImporter: CodexSessionImporter;
@@ -2747,6 +2757,22 @@ function registerIpc() {
 			})
 		: undefined;
 
+	/**
+	 * 远端会话的**受控改写**（P4.5c）：编辑消息 / 删除消息（写墓碑）/ 准备重发（截断该消息及其后继）。
+	 *
+	 * 与远端历史读、远端归档**同一条** pinned SSH 短命令通道（同一 `runPinnedRemoteCommand`：每次都
+	 * 重新过 pin/指纹/路由摘要/严格配置，同一 `resolveRemoteSessionRoot`：会话根只有一个来源），
+	 * 零新增 helper op。实验开关关掉时端口不装配 ⇒ 协调器的 ssh 分支得到稳定码
+	 * `REMOTE_SESSION_HISTORY_WRITER_UNAVAILABLE`，而**不会**落回本机路径分支（本机路径入口对 ssh
+	 * locator 抛稳定码，落回只会得到“本地文件缺失”这种错误原因）。
+	 */
+	remoteSessionMessageMutation = remoteExperimentEnabled
+		? createRemoteSessionHistoryWriter({
+				transport: { runRemoteCommand: runPinnedRemoteCommand },
+				resolveSessionRoot: resolveRemoteSessionRoot,
+			})
+		: undefined;
+
 	registerSessionIpc({
 		projectStore,
 		settingsStore,
@@ -4153,10 +4179,18 @@ app
 		// 项目位置注入给会话协调器：远端会话在 pi 上报会话文件之前没有 ssh 身份，"这条会话的 runtime
 		// 在哪台机器上"只能由项目 locator 回答（AgentManager 也按它路由 runtime）。位置真相同的单一
 		// 来源仍然是 projectStore，这里只给一个只读取值器。
-		sessionRuntimeCoordinator = new SessionRuntimeCoordinator(sessionCatalog, compositeAgentGateway, sendAgentPromptWithIntegrations, appLogger, (projectId) => {
-			const project = projectStore.get(projectId);
-			return project && !isLocalProject(project) ? project.locator : undefined;
-		});
+		sessionRuntimeCoordinator = new SessionRuntimeCoordinator(
+			sessionCatalog,
+			compositeAgentGateway,
+			sendAgentPromptWithIntegrations,
+			appLogger,
+			(projectId) => {
+				const project = projectStore.get(projectId);
+				return project && !isLocalProject(project) ? project.locator : undefined;
+			},
+			// 远端会话文件改写端口（P4.5c）：调用时解析——端口在 registerIpc() 里才装配（见模块级声明）。
+			() => remoteSessionMessageMutation,
+		);
 
 		// 定时任务调度器与执行编排器装配
 		automationStore = new AutomationStore(join(app.getPath("userData"), "automation.json"));

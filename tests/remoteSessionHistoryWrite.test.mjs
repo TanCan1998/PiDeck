@@ -1,0 +1,671 @@
+import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
+
+/**
+ * 远端会话 JSONL 的**受控改写**（P4.5c：编辑消息 / 删除消息 / 准备重发）。
+ *
+ * 不连真机：远端短命令是**假 SSH exec**——它按真实 shell 语义执行（`wc -c`、`tail -c +N | head -c M`、
+ * GNU `base64`（含 76 列折行）、`base64 -d` 的 `>`/`>>` 重定向、`mv`），跑在一份内存文件表上。
+ * 于是「分块读的边界」「临时文件按序分块写完才 mv」「失败时目标文件一个字节都没动」这些最容易写错的
+ * 东西被真正测到，而不是靠 mock 返回现成结果把 bug 掩盖过去。
+ *
+ * 内容语义的判据不是「像本机」，而是**用真实本机 `SessionFileEditor` 在同一份夹具上跑一遍再逐字节比对**
+ *（时间戳也用同一份注入时钟，墓碑 ts 因此可比）。
+ *
+ * 覆盖：三条操作的内容语义（含 delete 的过程链墓碑与子节点重挂、resend 的后继全墓碑 + 原文快照）；
+ * 读/写的分块边界与命令形状（只出现单引号字面量与 base64）；运行中由协调器拒绝（见 sessionRuntimeCoordinator
+ * 测试）；路径非法零命令；远端失败 ⇒ 稳定码 + 目标文件不变 + 不重试；超上界/坏文档 fail-closed。
+ */
+
+const HOST = "11111111-1111-4111-8111-111111111111";
+const HOME = "/home/dev";
+const SESSION_ROOT = HOME + "/.pi/agent/sessions";
+const REMOTE_ID = "ws/target.jsonl";
+const TARGET_PATH = SESSION_ROOT + "/" + REMOTE_ID;
+const FIXED_TS = 1_700_000_100_000;
+const BANNER = "Now using node v20.19.0 (npm v10.8.2)\n";
+
+/** 稳定码不是自由文本。 */
+const STABLE_CODE = /^[A-Z][A-Z0-9_]{2,63}$/;
+/** 远端 shell 可能混进登录横幅（~/.bashrc）——标记就是为它准备的。 */
+const WRAP_COLUMNS = 76;
+
+const {
+	createRemoteSessionHistoryWriter,
+	buildRemoteSessionHistoryChunkReadCommand,
+	buildRemoteSessionHistoryChunkWriteCommand,
+	buildRemoteSessionHistoryReplaceCommand,
+	remoteSessionHistoryTempPath,
+	parseRemoteSessionHistoryChunk,
+	remoteSessionHistoryWriteFailure,
+	REMOTE_SESSION_HISTORY_WRITER_CODES,
+	REMOTE_SESSION_HISTORY_WRITER_OPTIONS_INVALID,
+	REMOTE_SESSION_HISTORY_READ_CHUNK_BYTES,
+	REMOTE_SESSION_HISTORY_WRITE_CHUNK_BYTES,
+} = loadTsCommonJs("src/main/remote/RemoteSessionHistoryWriter.ts");
+const { SessionFileEditor, SessionFileEditorError } = loadTsCommonJs("src/main/pi/SessionFileEditor.ts");
+const { SessionCatalog } = loadTsCommonJs("src/main/sessions/SessionCatalog.ts", { stubs: { "../logging/sharedLogger": { getAppLogger: () => null } } });
+const { SessionRuntimeCoordinator } = loadTsCommonJs("src/main/sessions/SessionRuntimeCoordinator.ts");
+const { REMOTE_HELPER_MAX_REMOTE_COMMAND_LENGTH } = loadTsCommonJs("src/main/remote/RemoteHelperContract.ts");
+const { REMOTE_SESSION_HISTORY_TRANSPORT_BYTES } = loadTsCommonJs("src/main/remote/RemoteSessionHistoryReader.ts");
+
+/** 命令形状：唯一解析点。生产实现的模板字面量一变，这里先红。 */
+const READ_WITH_SIZE_SHAPE = /^printf '([A-Za-z0-9_]+)'; wc -c < '([^'\\]+)'; tail -c \+(\d+) -- '[^'\\]+' \| head -c (\d+) \| base64$/;
+const READ_CHUNK_SHAPE = /^printf '([A-Za-z0-9_]+)'; tail -c \+(\d+) -- '([^'\\]+)' \| head -c (\d+) \| base64$/;
+const WRITE_CHUNK_SHAPE = /^printf '%s' '([A-Za-z0-9+/=]*)' \| base64 -d (>>|>) '([^'\\]+)'$/;
+const REPLACE_SHAPE = /^mv -- '([^'\\]+)' '([^'\\]+)'$/;
+
+function wrapColumns(text) {
+	if (text.length <= WRAP_COLUMNS) return `${text}\n`;
+	const lines = [];
+	for (let index = 0; index < text.length; index += WRAP_COLUMNS) lines.push(text.slice(index, index + WRAP_COLUMNS));
+	return `${lines.join("\n")}\n`;
+}
+
+function ancestorsOf(path) {
+	const segments = path.split("/");
+	const dirs = new Set();
+	for (let index = 1; index < segments.length; index += 1) dirs.add(segments.slice(0, index).join("/"));
+	return dirs;
+}
+
+/**
+ * 假远端 shell：内存文件表 + 上面四条命令的**真实语义**。
+ * `failAt(command, index)` 让测试指定「第几条命令在远端失败」，用于验证失败即停与目标文件不变。
+ */
+function fakeShell(initialFiles, options = {}) {
+	const files = new Map(Object.entries(initialFiles).map(([path, content]) => [path, Buffer.from(content, "utf8")]));
+	const dirs = new Set();
+	for (const path of files.keys()) for (const dir of ancestorsOf(path)) dirs.add(dir);
+	const commands = [];
+	const transport = {
+		async runRemoteCommand({ remoteCommand }) {
+			const index = commands.length;
+			commands.push(remoteCommand);
+			if (options.failAt?.(remoteCommand, index)) return { exitCode: 1, stdout: "" };
+			let match = READ_WITH_SIZE_SHAPE.exec(remoteCommand);
+			if (match) {
+				const [, marker, sizePath, start, count] = match;
+				const content = files.get(sizePath);
+				if (content === undefined) return { exitCode: 1, stdout: "" };
+				const slice = content.subarray(Number(start) - 1, Number(start) - 1 + Number(count));
+				// BSD 的 `wc -c` 会右对齐补空格：解析必须容忍（生产解析先 trim）。
+				return { exitCode: 0, stdout: `${options.banner ? BANNER : ""}${marker}${String(content.length).padStart(8, " ")}\n${wrapColumns(slice.toString("base64"))}` };
+			}
+			match = READ_CHUNK_SHAPE.exec(remoteCommand);
+			if (match) {
+				const [, marker, start, path, count] = match;
+				const content = files.get(path);
+				if (content === undefined) return { exitCode: 1, stdout: "" };
+				const slice = content.subarray(Number(start) - 1, Number(start) - 1 + Number(count));
+				return { exitCode: 0, stdout: `${marker}${wrapColumns(slice.toString("base64"))}` };
+			}
+			match = WRITE_CHUNK_SHAPE.exec(remoteCommand);
+			if (match) {
+				const [, payload, operator, path] = match;
+				const written = Buffer.from(payload, "base64");
+				if (operator === ">>") {
+					const current = files.get(path);
+					if (current === undefined) return { exitCode: 1, stdout: "" };
+					files.set(path, Buffer.concat([current, written]));
+					return { exitCode: 0, stdout: "" };
+				}
+				files.set(path, written);
+				return { exitCode: 0, stdout: "" };
+			}
+			match = REPLACE_SHAPE.exec(remoteCommand);
+			if (match) {
+				const [, from, to] = match;
+				const content = files.get(from);
+				if (content === undefined) return { exitCode: 1, stdout: "" };
+				if (!dirs.has(to.slice(0, to.lastIndexOf("/")))) return { exitCode: 1, stdout: "" };
+				files.set(to, content);
+				files.delete(from);
+				return { exitCode: 0, stdout: "" };
+			}
+			throw new Error(`UNEXPECTED_REMOTE_COMMAND: ${remoteCommand}`);
+		},
+	};
+	const writeCommands = () => commands.filter((command) => WRITE_CHUNK_SHAPE.test(command));
+	const replaceCommands = () => commands.filter((command) => REPLACE_SHAPE.test(command));
+	return {
+		files,
+		commands,
+		transport,
+		resolveSessionRoot: async () => ({ ok: true, root: SESSION_ROOT }),
+		text: (path = TARGET_PATH) => files.get(path)?.toString("utf8"),
+		bytes: (path = TARGET_PATH) => files.get(path),
+		writeCommands,
+		replaceCommands,
+	};
+}
+
+function createWriter(shell, options = {}) {
+	return createRemoteSessionHistoryWriter({ transport: shell.transport, resolveSessionRoot: shell.resolveSessionRoot, now: () => FIXED_TS, ...options });
+}
+
+function locatorWith(remotePath) {
+	return { kind: "ssh", hostId: HOST, remoteSessionId: REMOTE_ID, remotePath };
+}
+
+const ABSOLUTE_LOCATOR = locatorWith(TARGET_PATH);
+
+/** 一条真实形状的 pi 会话：含过程链（thinking-only assistant → toolResult）与一条 system 条目。 */
+function fixtureDocument() {
+	const line = (entry) => JSON.stringify(entry);
+	const stamp = "2026-01-01T00:00:00.000Z";
+	return `${[
+		line({ type: "session", id: "sess-1", timestamp: stamp }),
+		line({ type: "message", id: "u1", parentId: null, timestamp: stamp, message: { role: "user", content: [{ type: "text", text: "hello world" }] } }),
+		line({ type: "message", id: "a1", parentId: "u1", timestamp: stamp, message: { role: "assistant", content: [{ type: "text", text: "first answer" }] } }),
+		line({ type: "message", id: "a2", parentId: "a1", timestamp: stamp, message: { role: "assistant", content: [{ type: "thinking", thinking: "plan the work" }] } }),
+		line({ type: "message", id: "tr1", parentId: "a2", timestamp: stamp, message: { role: "toolResult", content: [{ type: "text", text: "tool output" }] } }),
+		line({ type: "message", id: "a3", parentId: "tr1", timestamp: stamp, message: { role: "assistant", content: [{ type: "text", text: "second answer" }] } }),
+		line({
+			type: "message",
+			id: "u2",
+			parentId: "a3",
+			timestamp: stamp,
+			message: {
+				role: "user",
+				content: [
+					{ type: "text", text: "again" },
+					{ type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+				],
+			},
+		}),
+		line({ type: "message", id: "sys1", parentId: "u2", timestamp: stamp, message: { role: "system", content: [{ type: "text", text: "system prompt" }] } }),
+	].join("\n")}\n`;
+}
+
+/** 大夹具：强制分块读/写（分块大小由测试调小）。 */
+function largeDocument(messageCount = 40) {
+	const stamp = "2026-01-01T00:00:00.000Z";
+	const lines = [JSON.stringify({ type: "session", id: "sess-big", timestamp: stamp })];
+	let parentId = null;
+	for (let index = 0; index < messageCount; index += 1) {
+		const id = `m${index}`;
+		lines.push(
+			JSON.stringify({
+				type: "message",
+				id,
+				parentId,
+				timestamp: stamp,
+				message: { role: "user", content: [{ type: "text", text: `message-${index}-${"x".repeat(64)}` }] },
+			}),
+		);
+		parentId = id;
+	}
+	return `${lines.join("\n")}\n`;
+}
+
+/** 本机链路同一份夹具的改写结果：真实 `SessionFileEditor` + 真实临时文件。 */
+async function localMutation(t, document, kind, target, newText) {
+	const directory = await mkdtemp(join(tmpdir(), "pideck-remote-write-local-"));
+	t.after(() => rm(directory, { recursive: true, force: true }));
+	const path = join(directory, "session.jsonl");
+	await writeFile(path, document);
+	const editor = new SessionFileEditor({ now: () => FIXED_TS });
+	const file = { protocolPath: path, hostPath: path, environment: "native" };
+	const reload = async () => undefined;
+	if (kind === "edit") await editor.editMessage({ file, target, newText, reload });
+	else if (kind === "delete") await editor.deleteMessage({ file, target, reload });
+	else await editor.truncateForResend({ file, target, reload });
+	return await readFile(path);
+}
+
+const USER_TARGET = { entryId: "u1", role: "user", text: "hello world" };
+const ASSISTANT_TARGET = { entryId: "a3", role: "assistant", text: "second answer" };
+const EARLIER_ASSISTANT_TARGET = { entryId: "a1", role: "assistant", text: "first answer" };
+
+/** 一次远端改写的通用入口（默认走 absolute locator + 标记 id 形状与渲染层一致）。 */
+async function remoteMutation(shell, operation, input = {}, options = {}) {
+	const writer = createWriter(shell, options);
+	return await writer.mutate({ hostId: HOST, locator: ABSOLUTE_LOCATOR, operation, messageId: `_viewer-history-${input.entryId ?? "u1"}`, ...input });
+}
+
+test("edit writes the same bytes as the local SessionFileEditor (byte-for-byte parity)", async (t) => {
+	const document = fixtureDocument();
+	const shell = fakeShell({ [TARGET_PATH]: document });
+
+	const result = await remoteMutation(shell, "edit", { entryId: "u1", newText: "edited text" });
+
+	assert.equal(result, undefined);
+	const expected = await localMutation(t, document, "edit", USER_TARGET, "edited text");
+	assert.deepEqual(shell.bytes(), expected);
+	assert.notEqual(shell.text(), document, "夹具必须真的被改写（否则这个断言毫无意义）");
+	// 改写后仍是**完整可解析**的 JSONL（原子替换保证的是整份，不是半截）。
+	const rewritten = shell
+		.text()
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line));
+	assert.equal(rewritten.filter((entry) => entry.type === "session").length, 1);
+	assert.equal(rewritten.length, 8);
+	// 编辑只动目标行：其余行逐字节保留。
+	const editedLine = shell
+		.text()
+		.split("\n")
+		.find((line) => line.includes('"id":"u1"'));
+	assert.match(editedLine, /"text":"edited text"/);
+	assert.equal(shell.text().includes("first answer"), true);
+});
+
+test("delete tombstones the answer, its process chain and reparents children (same bytes as local)", async (t) => {
+	const document = fixtureDocument();
+	const shell = fakeShell({ [TARGET_PATH]: document });
+
+	await remoteMutation(shell, "delete", { entryId: "a3" });
+
+	const expected = await localMutation(t, document, "delete", ASSISTANT_TARGET);
+	assert.deepEqual(shell.bytes(), expected);
+	const entries = shell
+		.text()
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line));
+	// 过程链（thinking-only assistant + toolResult）与目标回答一起墓碑；上一段回答保留。
+	assert.deepEqual(
+		entries.filter((entry) => entry.type === "deleted").map((entry) => entry.id),
+		["a2", "tr1", "a3"],
+	);
+	assert.equal(entries.find((entry) => entry.id === "a2").reason, undefined);
+	// 唯一子节点重挂到被删条目的父节点（否则它会挂在墓碑上，从活动分支脱落）。
+	assert.equal(entries.find((entry) => entry.id === "u2").parentId, "a1");
+	assert.equal(entries.find((entry) => entry.id === "a1").type, "message");
+});
+
+test("deleting an assistant without a process chain reparents children to its parent (same bytes as local)", async (t) => {
+	const document = fixtureDocument();
+	const shell = fakeShell({ [TARGET_PATH]: document });
+
+	await remoteMutation(shell, "delete", { entryId: "a1" });
+
+	const expected = await localMutation(t, document, "delete", EARLIER_ASSISTANT_TARGET);
+	assert.deepEqual(shell.bytes(), expected);
+	const entries = shell
+		.text()
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line));
+	assert.deepEqual(
+		entries.filter((entry) => entry.type === "deleted").map((entry) => entry.id),
+		["a1"],
+	);
+	assert.equal(entries.find((entry) => entry.id === "a2").parentId, "u1");
+});
+
+test("prepare-resend tombstones the message and every descendant and returns the original snapshot", async (t) => {
+	const document = fixtureDocument();
+	const shell = fakeShell({ [TARGET_PATH]: document });
+
+	const result = await remoteMutation(shell, "resend", { entryId: "u2" });
+
+	// 跨 realm 的对象/数组不能 deepStrictEqual（原型不同），只比字段。
+	assert.equal(result.text, "again");
+	assert.equal(result.images.length, 1);
+	assert.equal(result.images[0].type, "image");
+	assert.equal(result.images[0].mimeType, "image/png");
+	assert.equal(result.images[0].data, "AAAA");
+	const expected = await localMutation(t, document, "resend", { entryId: "u2", role: "user", text: "again" });
+	assert.deepEqual(shell.bytes(), expected);
+	const entries = shell
+		.text()
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line));
+	assert.deepEqual(
+		entries.filter((entry) => entry.type === "deleted").map((entry) => entry.id),
+		["u2", "sys1"],
+	);
+	// 理由与本机一致（截断标记），且墓碑保留 id/parentId（否则 pi 的活动分支会断）。
+	for (const entry of entries.filter((item) => item.type === "deleted")) {
+		assert.equal(entry.reason, "resend-truncate");
+		assert.equal(typeof entry.id, "string");
+	}
+	// 未波及的历史保持原样。
+	assert.equal(entries.find((entry) => entry.id === "a3").type, "message");
+});
+
+test("the whole rewrite is temp-file chunks followed by exactly one atomic mv (single-quoted literals only)", async () => {
+	const shell = fakeShell({ [TARGET_PATH]: fixtureDocument() });
+
+	await remoteMutation(shell, "edit", { entryId: "u1", newText: "edited" });
+
+	// 读一条 + 写一条（内容 < 4096）+ 替换一条：形状与顺序都被逐字钉住。
+	assert.equal(shell.commands.length, 3);
+	const read = READ_WITH_SIZE_SHAPE.exec(shell.commands[0]);
+	assert.notEqual(read, null, `读命令形状不符: ${shell.commands[0]}`);
+	assert.equal(read[4], String(REMOTE_SESSION_HISTORY_READ_CHUNK_BYTES), "单次读取窗口上界必须是有界常量");
+	// 读窗口的 base64 输出留在传输层 256 KiB 上界之下（两边的算术必须自洽，否则大文件读取必失败）。
+	assert.equal(Math.ceil(REMOTE_SESSION_HISTORY_READ_CHUNK_BYTES / 3) * 4 < REMOTE_SESSION_HISTORY_TRANSPORT_BYTES, true);
+	const [, , , start] = read;
+	assert.equal(start, "1", "第一次读从文件首字节开始");
+	assert.match(shell.commands[0], new RegExp(`'${TARGET_PATH.replaceAll("/", "\\/")}'`));
+
+	const write = WRITE_CHUNK_SHAPE.exec(shell.commands[1]);
+	assert.notEqual(write, null, `写命令形状不符: ${shell.commands[1]}`);
+	const [, , operator, tempPath] = write;
+	assert.equal(operator, ">", "第一块用 `>` 创建临时文件（后续块用 `>>` 追加）");
+	assert.notEqual(tempPath, TARGET_PATH, "内容只能写进临时文件");
+	assert.equal(tempPath.slice(0, tempPath.lastIndexOf("/")), TARGET_PATH.slice(0, TARGET_PATH.lastIndexOf("/")), "临时文件必须在同目录（同一文件系统 ⇒ rename 原子）");
+	assert.match(tempPath.split("/").pop(), /^\..+\.pideck-tmp$/, "临时文件名隐藏且不以 .jsonl 结尾（远端扫描不会捡走它）");
+
+	assert.equal(shell.commands[2], `mv -- '${tempPath}' '${TARGET_PATH}'`);
+	// 写内容的过程只碰临时文件：唯一提到目标路径的**写**命令是最后那条 mv。
+	assert.deepEqual(
+		shell.writeCommands().filter((command) => command.includes(TARGET_PATH)),
+		[],
+	);
+	// 命令里只允许单引号字面量与 base64 字符集：没有任何第二套语法。
+	for (const command of shell.commands) {
+		assert.equal(/["`$\\\n]/.test(command), false, `命令行不得出现双引号/反引号/命令替换/反斜杠/换行: ${command}`);
+		assert.equal(command.length <= REMOTE_HELPER_MAX_REMOTE_COMMAND_LENGTH, true, `命令超过 pinned 通道的单命令上界: ${command.length}`);
+	}
+});
+
+test("chunked transfer over many read/write commands produces the same bytes as a single chunk", async () => {
+	const document = largeDocument();
+	assert.equal(document.length > 4096, true, "夹具必须大于单块上界，否则分块路径根本没被走到");
+	const chunked = fakeShell({ [TARGET_PATH]: document });
+	const plain = fakeShell({ [TARGET_PATH]: document });
+
+	await remoteMutation(chunked, "edit", { entryId: "m3", newText: "smaller" }, { readChunkBytes: 512, writeChunkBytes: 64 });
+	await remoteMutation(plain, "edit", { entryId: "m3", newText: "smaller" });
+
+	// 分块只是传输细节，结果必须与「一块装下」完全一致。
+	assert.deepEqual(chunked.bytes(), plain.bytes());
+	assert.equal(chunked.writeCommands().length > 1, true, "必须真的走了多块写入");
+	// 块数 = 内容字节 / 分块大小（向上取整），两种分块大小各自成立。
+	assert.equal(chunked.writeCommands().length, Math.ceil(chunked.bytes().length / 64));
+	assert.equal(plain.writeCommands().length, Math.ceil(plain.bytes().length / REMOTE_SESSION_HISTORY_WRITE_CHUNK_BYTES));
+	// `wc -c` 只在第一条读命令里（后续块用游标续读）。
+	assert.equal(chunked.commands.filter((command) => command.includes("wc -c")).length, 1);
+	assert.equal(chunked.replaceCommands().length, 1);
+});
+
+test("a login banner in stdout does not corrupt the rewrite (marker guards the payload)", async () => {
+	const document = fixtureDocument();
+	const shell = fakeShell({ [TARGET_PATH]: document }, { banner: true });
+
+	await remoteMutation(shell, "edit", { entryId: "u1", newText: "after banner" });
+
+	assert.match(shell.text(), /"text":"after banner"/);
+	// 横幅绝不会被当成内容写回。
+	assert.equal(shell.text().includes("Now using node"), false);
+	assert.match(shell.text(), /"text":"first answer"/);
+});
+
+test("a failing remote command stops immediately: stable code, target bytes untouched, no retry", async () => {
+	const document = fixtureDocument();
+	// ① 读失败：没有写、没有 mv。
+	const readFailure = fakeShell({ [TARGET_PATH]: document }, { failAt: (_command, index) => index === 0 });
+	assert.equal(await rejectionCode(() => remoteMutation(readFailure, "edit", { entryId: "u1", newText: "x" })), REMOTE_SESSION_HISTORY_WRITER_CODES.commandFailed);
+	assert.equal(readFailure.commands.length, 1, "失败即停：不得自动重试");
+	assert.equal(readFailure.bytes().toString("utf8"), document, "读失败时目标文件一个字节都没动");
+	assert.deepEqual(readFailure.writeCommands(), []);
+	assert.deepEqual(readFailure.replaceCommands(), []);
+
+	// ② 写临时文件失败：目标文件不变，且不再往下发命令。
+	const writeFailure = fakeShell({ [TARGET_PATH]: document }, { failAt: (_command, index) => index === 1 });
+	assert.equal(await rejectionCode(() => remoteMutation(writeFailure, "delete", { entryId: "a3" })), REMOTE_SESSION_HISTORY_WRITER_CODES.commandFailed);
+	assert.equal(writeFailure.commands.length, 2);
+	assert.equal(writeFailure.bytes().toString("utf8"), document);
+	assert.deepEqual(writeFailure.replaceCommands(), []);
+
+	// ③ mv 失败（临时文件写成功了也不算成功）：稳定码 + 目标文件不变。
+	const replaceFailure = fakeShell({ [TARGET_PATH]: document }, { failAt: (_command, index) => index === 2 });
+	assert.equal(await rejectionCode(() => remoteMutation(replaceFailure, "delete", { entryId: "a3" })), REMOTE_SESSION_HISTORY_WRITER_CODES.commandFailed);
+	assert.equal(replaceFailure.commands.length, 3);
+	assert.equal(replaceFailure.bytes().toString("utf8"), document);
+	assert.equal(REMOTE_SESSION_HISTORY_WRITER_CODES.commandFailed.match(STABLE_CODE) !== null, true);
+});
+
+test("a truncated read is refused instead of writing back half the history", async () => {
+	const document = fixtureDocument();
+	// 远端少回一个字节：长度校验必须拦住它（写回半截内容是最坏的结果）。
+	const shell = fakeShell({ [TARGET_PATH]: document }, { failAt: (command, index) => index === 0 && command.includes("wc -c") });
+	// 第一条命令「成功」但内容被截断：用一个在 read 之后动手的通道模拟。
+	const truncated = fakeShell({ [TARGET_PATH]: document });
+	const original = truncated.transport.runRemoteCommand;
+	truncated.transport.runRemoteCommand = async (input) => {
+		const result = await original(input);
+		// 丢掉尾部 5 个字符（换行 + 4 个 base64 字符 = 3 个数据字节）：只丢 padding 不会改变解码长度，
+		// 那样测的就不是「少回数据」了。
+		if (result.stdout.includes("PIDECK_HISTORY_") && READ_WITH_SIZE_SHAPE.test(input.remoteCommand)) {
+			return { exitCode: 0, stdout: result.stdout.slice(0, result.stdout.length - 5) };
+		}
+		return result;
+	};
+	assert.equal(await rejectionCode(() => createWriter(truncated).mutate({ hostId: HOST, locator: ABSOLUTE_LOCATOR, operation: "edit", messageId: "m", entryId: "u1", newText: "x" })), REMOTE_SESSION_HISTORY_WRITER_CODES.transferInvalid);
+	assert.equal(truncated.bytes().toString("utf8"), document);
+	assert.deepEqual(truncated.writeCommands(), []);
+	// 上面的夹具本身：一条成功但非 0 退出的命令同样是稳定码（不是裸异常）。
+	assert.equal(await rejectionCode(() => remoteMutation(shell, "edit", { entryId: "u1", newText: "x" })), REMOTE_SESSION_HISTORY_WRITER_CODES.commandFailed);
+	assert.equal(shell.bytes().toString("utf8"), document);
+});
+
+test("a file over the rewrite bound fails closed before any write", async () => {
+	const document = largeDocument();
+	const shell = fakeShell({ [TARGET_PATH]: document });
+
+	assert.equal(await rejectionCode(() => remoteMutation(shell, "edit", { entryId: "m0", newText: "x" }, { maxFileBytes: 64 })), REMOTE_SESSION_HISTORY_WRITER_CODES.fileTooLarge);
+	assert.equal(shell.bytes().toString("utf8"), document);
+	assert.deepEqual(shell.writeCommands(), []);
+	// 上界在读完第一条（拿到大小）后立刻生效：不把整份文件拉回来。
+	assert.equal(shell.commands.length, 1);
+});
+
+test("an unparsable or graph-broken document is refused (same inputs the local editor refuses)", async () => {
+	const cases = {
+		duplicate: '{"type":"session","id":"s"}\n{"type":"message","id":"x","parentId":null,"message":{"role":"user","content":[]}}\n{"type":"message","id":"x","parentId":null,"message":{"role":"user","content":[]}}\n',
+		invalidJson: '{"type":"session","id":"s"}\nnot-json\n',
+		danglingParent: '{"type":"session","id":"s"}\n{"type":"message","id":"x","parentId":"ghost","message":{"role":"user","content":[]}}\n',
+	};
+	for (const [name, document] of Object.entries(cases)) {
+		const shell = fakeShell({ [TARGET_PATH]: document });
+		assert.equal(await rejectionCode(() => remoteMutation(shell, "edit", { entryId: "x", newText: "y" })), REMOTE_SESSION_HISTORY_WRITER_CODES.fileInvalid, name);
+		assert.equal(shell.bytes().toString("utf8"), document, name);
+		assert.deepEqual(shell.writeCommands(), [], name);
+	}
+});
+
+test("delete of a message that is not in the remote file is a no-op (no remote writes at all)", async () => {
+	const document = fixtureDocument();
+	const shell = fakeShell({ [TARGET_PATH]: document });
+
+	const result = await remoteMutation(shell, "delete", { entryId: "does-not-exist", messageId: "live-uuid" });
+
+	assert.equal(result, undefined);
+	assert.deepEqual(shell.writeCommands(), []);
+	assert.deepEqual(shell.replaceCommands(), []);
+	assert.equal(shell.bytes().toString("utf8"), document);
+	// edit/resend 依赖正文：找不到就必须报未找到（与在本机链路一致）。
+	const editShell = fakeShell({ [TARGET_PATH]: document });
+	assert.equal(await rejectionCode(() => remoteMutation(editShell, "edit", { entryId: "does-not-exist", messageId: "live-uuid", newText: "y" })), REMOTE_SESSION_HISTORY_WRITER_CODES.messageNotFound);
+	const resendShell = fakeShell({ [TARGET_PATH]: document });
+	assert.equal(await rejectionCode(() => remoteMutation(resendShell, "resend", { entryId: "does-not-exist", messageId: "live-uuid" })), REMOTE_SESSION_HISTORY_WRITER_CODES.messageNotFound);
+});
+
+test("role rules match the local chain (system entries refuse edit and resend)", async (t) => {
+	const document = fixtureDocument();
+	const editShell = fakeShell({ [TARGET_PATH]: document });
+	assert.equal(await rejectionCode(() => remoteMutation(editShell, "edit", { entryId: "sys1", newText: "y" })), REMOTE_SESSION_HISTORY_WRITER_CODES.roleInvalid);
+	assert.equal(editShell.bytes().toString("utf8"), document);
+	// 本机同判据（AgentManager 把非 user 角色映射成 assistant 后由编辑器拒）。
+	await assert.rejects(
+		() => localMutation(t, document, "edit", { entryId: "sys1", role: "assistant", text: "system prompt" }, "y"),
+		(error) => error instanceof SessionFileEditorError && error.code === "SESSION_ENTRY_ROLE_INVALID",
+	);
+
+	const resendShell = fakeShell({ [TARGET_PATH]: document });
+	assert.equal(await rejectionCode(() => remoteMutation(resendShell, "resend", { entryId: "sys1" })), REMOTE_SESSION_HISTORY_WRITER_CODES.roleInvalid);
+	assert.equal(resendShell.bytes().toString("utf8"), document);
+});
+
+test("invalid remote paths and identities are refused before any command is sent", async () => {
+	// 相对身份 + 没有会话根解析端口 = fail-closed（绝不猜 <home>/.pi/agent/sessions）。
+	const relative = createRemoteSessionHistoryWriter({ transport: fakeShell({}).transport, now: () => FIXED_TS });
+	assert.equal(await rejectionCode(() => relative.mutate({ hostId: HOST, locator: locatorWith(REMOTE_ID), operation: "delete", messageId: "m" })), REMOTE_SESSION_HISTORY_WRITER_CODES.pathUnresolved);
+
+	// 含单引号的远端路径：绝不进命令行（拒绝而不是实现一套转义）。
+	const quoted = fakeShell({ [TARGET_PATH]: fixtureDocument() });
+	assert.equal(await rejectionCode(() => createWriter(quoted).mutate({ hostId: HOST, locator: locatorWith(`${SESSION_ROOT}/ws/it's.jsonl`), operation: "delete", messageId: "m" })), REMOTE_SESSION_HISTORY_WRITER_CODES.pathInvalid);
+	assert.deepEqual(quoted.commands, [], "路径非法时一个远端命令都不发");
+
+	// hostId / locator / operation 判据。
+	const identity = fakeShell({ [TARGET_PATH]: fixtureDocument() });
+	const writer = createWriter(identity);
+	assert.equal(await rejectionCode(() => writer.mutate({ hostId: "nope", locator: ABSOLUTE_LOCATOR, operation: "delete", messageId: "m" })), REMOTE_SESSION_HISTORY_WRITER_CODES.hostIdInvalid);
+	assert.equal(await rejectionCode(() => writer.mutate({ hostId: HOST, locator: { ...ABSOLUTE_LOCATOR, hostId: "22222222-2222-4222-8222-222222222222" }, operation: "delete", messageId: "m" })), REMOTE_SESSION_HISTORY_WRITER_CODES.locatorInvalid);
+	assert.equal(await rejectionCode(() => writer.mutate({ hostId: HOST, locator: ABSOLUTE_LOCATOR, operation: "truncate", messageId: "m" })), REMOTE_SESSION_HISTORY_WRITER_CODES.operationInvalid);
+	assert.deepEqual(identity.commands, [], "身份/操作非法时一个远端命令都不发");
+
+	// 纯构造器判据：文档里的形状（只允许单引号字面量 + base64 字符集）。
+	const codeOf = (run) => {
+		try {
+			run();
+		} catch (error) {
+			return typeof error?.message === "string" ? error.message : String(error);
+		}
+		throw new Error("EXPECTED_THROW");
+	};
+	assert.equal(
+		codeOf(() => buildRemoteSessionHistoryReplaceCommand({ from: `${SESSION_ROOT}/a.jsonl`, to: `${SESSION_ROOT}/b'c.jsonl` })),
+		REMOTE_SESSION_HISTORY_WRITER_CODES.pathInvalid,
+	);
+	assert.equal(
+		codeOf(() => remoteSessionHistoryTempPath(`${SESSION_ROOT}/a'c.jsonl`, "abcd1234")),
+		REMOTE_SESSION_HISTORY_WRITER_CODES.pathInvalid,
+	);
+	assert.equal(
+		codeOf(() => buildRemoteSessionHistoryChunkWriteCommand({ remotePath: `${SESSION_ROOT}/a.jsonl`, chunk: "AAAA'$(rm -rf /)'" })),
+		REMOTE_SESSION_HISTORY_WRITER_OPTIONS_INVALID,
+	);
+	assert.equal(buildRemoteSessionHistoryReplaceCommand({ from: `${SESSION_ROOT}/a.jsonl`, to: `${SESSION_ROOT}/b.jsonl` }), `mv -- '${SESSION_ROOT}/a.jsonl' '${SESSION_ROOT}/b.jsonl'`);
+	assert.equal(
+		codeOf(() => buildRemoteSessionHistoryChunkReadCommand({ remotePath: `${SESSION_ROOT}/a.jsonl`, start: 1, count: 1, nonce: "short" })),
+		REMOTE_SESSION_HISTORY_WRITER_OPTIONS_INVALID,
+	);
+	assert.equal(buildRemoteSessionHistoryChunkWriteCommand({ remotePath: `${SESSION_ROOT}/a.jsonl`, chunk: "QUJD", append: true }), `printf '%s' 'QUJD' | base64 -d >> '${SESSION_ROOT}/a.jsonl'`);
+	assert.match(remoteSessionHistoryTempPath(`${SESSION_ROOT}/a.jsonl`, "deadbeefdeadbeef"), /^\/home\/dev\/\.pi\/agent\/sessions\/\..+\.pideck-tmp$/);
+
+	// 分块解析：标记缺失/长度不符都折叠成稳定码（跨 realm 的错误只能按 message 认码）。
+	assert.equal(
+		codeOf(() => parseRemoteSessionHistoryChunk("no marker here", { marker: "PIDECK_HISTORY_ab", withSize: true, expectedBytes: 1 })),
+		REMOTE_SESSION_HISTORY_WRITER_CODES.transferInvalid,
+	);
+	assert.equal(
+		codeOf(() => parseRemoteSessionHistoryChunk("PIDECK_HISTORY_ab3\nQUJD", { marker: "PIDECK_HISTORY_ab", withSize: true, expectedBytes: 4 })),
+		REMOTE_SESSION_HISTORY_WRITER_CODES.transferInvalid,
+	);
+	assert.equal(parseRemoteSessionHistoryChunk("PIDECK_HISTORY_ab   3\nQUJD\n", { marker: "PIDECK_HISTORY_ab", withSize: true, expectedBytes: 3 }).size, 3);
+	assert.deepEqual(parseRemoteSessionHistoryChunk("banner\nPIDECK_HISTORY_ab QUJD\n", { marker: "PIDECK_HISTORY_ab", withSize: false, expectedBytes: 3 }).bytes, Buffer.from("ABC"));
+	assert.equal(remoteSessionHistoryWriteFailure(Object.assign(new Error(REMOTE_SESSION_HISTORY_WRITER_CODES.fileTooLarge), { details: { size: 1, limit: 2 } })).details.limit, 2);
+	assert.equal(remoteSessionHistoryWriteFailure(new Error("boom")).code, REMOTE_SESSION_HISTORY_WRITER_CODES.transportFailed);
+	assert.equal(REMOTE_SESSION_HISTORY_WRITE_CHUNK_BYTES, 4096);
+});
+
+test("constructor rejects an invalid assembly and folds transport errors into a stable code", async () => {
+	const codeOf = (run) => {
+		try {
+			run();
+		} catch (error) {
+			return typeof error?.message === "string" ? error.message : String(error);
+		}
+		throw new Error("EXPECTED_THROW");
+	};
+	assert.equal(
+		codeOf(() => createRemoteSessionHistoryWriter({})),
+		REMOTE_SESSION_HISTORY_WRITER_OPTIONS_INVALID,
+	);
+	assert.equal(
+		codeOf(() => createRemoteSessionHistoryWriter({ transport: fakeShell({}).transport, maxFileBytes: 64 * 1024 * 1024 })),
+		REMOTE_SESSION_HISTORY_WRITER_OPTIONS_INVALID,
+	);
+	// 连接层自己的稳定码原样转述（不吞成裸异常、也不谎报命令失败）。
+	const shell = fakeShell({ [TARGET_PATH]: fixtureDocument() });
+	shell.transport.runRemoteCommand = async () => {
+		throw new Error("SSH_HOST_NOT_READY");
+	};
+	assert.equal(await rejectionCode(() => createWriter(shell).mutate({ hostId: HOST, locator: ABSOLUTE_LOCATOR, operation: "delete", messageId: "m", entryId: "a3" })), "SSH_HOST_NOT_READY");
+});
+
+/** 稳定码断言：rejection 的 message 是码（远端一系的既有约定）。 */
+async function rejectionCode(run) {
+	try {
+		await run();
+	} catch (error) {
+		return typeof error?.message === "string" ? error.message : String(error);
+	}
+	throw new Error("EXPECTED_REJECTION");
+}
+
+/**
+ * 接线级证据：真实 `SessionCatalog` + 真实 `SessionRuntimeCoordinator` + 真实写面 + 假远端 shell。
+ * 三条链路在 ssh 记录上的完整行为（本机路径入口一次都不参与），结果与本机编辑器同序改写逐字节一致。
+ */
+test("the three chains over an ssh record end to end: remote file rewritten, local path never touched", async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), "pideck-remote-write-chain-"));
+	t.after(() => rm(directory, { recursive: true, force: true }));
+	const catalog = new SessionCatalog(join(directory, "session-catalog.json"));
+	await catalog.load();
+	const document = fixtureDocument();
+	const shell = fakeShell({ [TARGET_PATH]: document });
+	const coordinator = new SessionRuntimeCoordinator(
+		catalog,
+		{ backend: "pi", list: () => [] },
+		async () => ({ accepted: false, delivery: "rejected", error: "unused", sessionId: "unused", requestId: "unused" }),
+		undefined,
+		undefined,
+		() => createWriter(shell),
+	);
+	const localPathLookups = [];
+	const originalGetLocalFilePath = catalog.getLocalFilePath.bind(catalog);
+	catalog.getLocalFilePath = (sessionId) => {
+		localPathLookups.push(sessionId);
+		return originalGetLocalFilePath(sessionId);
+	};
+	const registration = await catalog.ensureRemoteSession({ projectId: "project-remote", hostId: HOST, remoteSessionId: REMOTE_ID, remotePath: TARGET_PATH, title: "远端会话", updatedAt: 1 });
+	const sessionId = registration.record.id;
+
+	// 三条链路（同一份会话上的连续操作）：编辑 → 删除回答 → 重发截断。
+	const edited = await coordinator.editCatalogMessage(sessionId, "live-1", "edited remotely", "u1");
+	const deleted = await coordinator.deleteCatalogMessage(sessionId, "live-2", "a3");
+	const resent = await coordinator.prepareCatalogResend(sessionId, "live-3", "u2");
+
+	assert.equal(edited.ok, true);
+	assert.equal(deleted.ok, true);
+	assert.equal(resent.ok, true);
+	assert.equal(resent.value.text, "again");
+	assert.equal(resent.value.images.length, 1);
+	assert.equal(resent.value.images[0].data, "AAAA");
+
+	// 同序跑一遍真实本机编辑器：两条链路必须得到**同一份字节**（判据不是「看起来像」）。
+	const localDirectory = await mkdtemp(join(tmpdir(), "pideck-remote-write-chain-local-"));
+	t.after(() => rm(localDirectory, { recursive: true, force: true }));
+	const localPath = join(localDirectory, "session.jsonl");
+	await writeFile(localPath, document);
+	const editor = new SessionFileEditor({ now: () => FIXED_TS });
+	const file = { protocolPath: localPath, hostPath: localPath, environment: "native" };
+	const reload = async () => undefined;
+	await editor.editMessage({ file, target: USER_TARGET, newText: "edited remotely", reload });
+	await editor.deleteMessage({ file, target: ASSISTANT_TARGET, reload });
+	await editor.truncateForResend({ file, target: { entryId: "u2", role: "user", text: "again" }, reload });
+	assert.deepEqual(shell.bytes(), await readFile(localPath));
+
+	// ssh 记录全程不碰本机路径入口。
+	assert.deepEqual(localPathLookups, []);
+
+	// 本机会话在同一条协调器上仍走本机分支（远端 shell 一条命令都不发）。
+	const commandsBefore = shell.commands.length;
+	const draft = await catalog.createDraft({ projectId: "project-local", title: "本机会话", environment: "native" });
+	await catalog.update(draft.id, { filePath: join(directory, "local.jsonl") });
+	const localResult = await coordinator.editCatalogMessage(draft.id, "live-4", "local edit", "entry-x");
+	assert.equal(localResult.ok, false, "替身 agents 没有本机写面能力：失败恰好证明它走的是本机分支");
+	assert.deepEqual(shell.commands.length, commandsBefore);
+});

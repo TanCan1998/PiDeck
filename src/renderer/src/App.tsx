@@ -2612,7 +2612,12 @@ export function App() {
 		resolveProjectId: (sessionId) => getSessionRecord(sessionId)?.projectId ?? activeProjectId,
 		hasPersistedSessionFile: (sessionId) => {
 			const record = getSessionRecord(sessionId);
-			return Boolean(record?.filePath) && !record?.noSession;
+			if (!record || record.noSession) return false;
+			// 远端（ssh）会话没有本机 filePath，但它在远端有真实的会话文件——编辑 / 删除 / 准备重发改写的
+			// 就是它（P4.5c 的远端写面）。判据必须认 locator 里的远端身份，否则远端会话在这里被判成
+			// 「无持久化文件」，那三条链路在 UI 上永远走不到（表现为"匿名会话不支持编辑"）。
+			if (record.locator?.kind === "ssh") return Boolean(record.locator.remoteSessionId || record.locator.remotePath);
+			return Boolean(record.filePath);
 		},
 		// 生图 draft：会话消息里存在生图占位/结果即判定为生图模式（无 pi runtime、无 pi JSONL）。
 		isImageGenSession: (sessionId) => (store.get(sessionMessagesCacheAtom)?.[sessionId]?.messages ?? []).some((message) => message.meta?.imageGen !== undefined),

@@ -37,6 +37,7 @@ import { buildSessionOriginKey } from "../../shared/sessionIdentity";
 import type { SshSessionLocator } from "../../shared/projectLocation";
 import { createSessionModelPreference } from "../../shared/modelDisplayName";
 import { isRewindCheckpointId, isRewindRestoreScope } from "../../shared/types";
+import { REMOTE_SESSION_HISTORY_WRITER_CODES, remoteSessionHistoryWriteFailure, type RemoteSessionMessageMutationPort } from "../remote/RemoteSessionHistoryWriter";
 import type { SessionCatalogEntry } from "./SessionCatalog";
 import { sessionFileSizeMb } from "./sessionFileSizeCopy";
 
@@ -79,6 +80,15 @@ export interface SessionCatalogGateway {
  * 缺省未注入 ⇒ 一律按本机语义处理，本地行为逐字不变。
  */
 export type SessionProjectLocatorResolver = (projectId: string) => ProjectLocator | undefined;
+
+/**
+ * 装配注入：远端会话文件改写端口（P4.5c 的编辑 / 删除 / 重发三条链路共用一个写面）。
+ *
+ * 为什么是「解析器」而不是端口本身：写面依赖 pinned SSH 短命令，而那条通道只在 `registerIpc()` 的
+ * 装配期才存在（协调器在更早的启动阶段构造）。解析器在**调用时**取端口，于是「实验开关关闭」与
+ * 「端口尚未装配」都自然表示成 undefined ⇒ fail-closed，不需要可变字段或 setter。
+ */
+export type RemoteSessionMessageMutationResolver = () => RemoteSessionMessageMutationPort | undefined;
 
 export interface SessionAgentGateway {
 	/** 本网关的运行时后端身份（pi/dsh）；CompositeAgentGateway 按它路由。 */
@@ -211,6 +221,8 @@ class SessionRuntimeCommandError extends Error {
 	constructor(
 		readonly code: SessionCommandErrorCode,
 		message: string,
+		/** 展示参数（目前只有远端写面的体积上界）：与 `SessionFileEditorError.details` 同形状，只为文案服务。 */
+		readonly details?: Record<string, unknown>,
 	) {
 		super(message);
 		this.name = "SessionRuntimeCommandError";
@@ -303,6 +315,7 @@ export class SessionRuntimeCoordinator {
 		private readonly sendAgentPrompt: (input: SendPromptInput) => Promise<SendPromptResult>,
 		private readonly logger?: SessionRuntimeLogger,
 		private readonly resolveProjectLocator?: SessionProjectLocatorResolver,
+		private readonly resolveRemoteMessageMutation?: RemoteSessionMessageMutationResolver,
 	) {}
 
 	/** 渲染层在 currentSessionId 变化时汇报聚焦会话（见 sessions:set-focused-session IPC）。 */
@@ -1925,6 +1938,15 @@ export class SessionRuntimeCoordinator {
 			if (entry.backend === "dsh" || entry.backend === "imagegen") {
 				throw new SessionRuntimeCommandError("SESSION_COMMAND_FAILED", `backend "${entry.backend}" does not support persisted session message mutation`);
 			}
+			// ssh 记录：改写的是**远端** JSONL（P4.5c）。这条分支必须插在 `getLocalFilePath` **之前** ——
+			// 那个入口对 ssh locator 抛稳定码，放在它后面就是死代码（P4.5b 归档分支记过同一条账）。
+			const locator = this.catalog.getLocator(sessionId);
+			if (locator?.kind === "ssh") {
+				const value = await this.mutateRemoteCatalogMessage(sessionId, locator, messageId, operation, newText, entryId);
+				// 只记身份与操作：远端路径、消息正文、命令行都不进日志（读写/归档同一条脱敏纪律）。
+				void this.logger?.info("session-runtime", "Remote catalog session message mutated", { sessionId, hostId: locator.hostId, operation });
+				return { ok: true, value };
+			}
 			const sessionFilePath = this.catalog.getLocalFilePath(sessionId);
 			if (!sessionFilePath) {
 				throw new SessionRuntimeCommandError("SESSION_COMMAND_FAILED", "Session not persisted");
@@ -1960,11 +1982,61 @@ export class SessionRuntimeCoordinator {
 		}
 	}
 
+	/**
+	 * ssh 记录的 catalog 级改写：整条链走远端文件写面，本机一个路径解析都不做。
+	 *
+	 * 冲突规则（docs/remote-write-plan.md §3，硬性）：会话有运行实例 / 正在激活 ⇒ **先判后发**，一个远端
+	 * 命令都不发，抛与本机链路同一个拒绝（`SESSION_RUNTIME_BUSY`，渲染层已有「先停止 Agent」文案）；
+	 * 装配没提供写端口（实验开关关闭）时给稳定码，绝不落回本机路径分支。不确定是否在写 ⇒ fail-closed：
+	 * 宁可拒绝，也不排队等待或与远端 pi 并发写。
+	 */
+	private async mutateRemoteCatalogMessage(sessionId: string, locator: SshSessionLocator, messageId: string, operation: "edit" | "delete" | "resend", newText?: string, entryId?: string): Promise<{ text: string; images?: ImageContent[] } | undefined> {
+		this.requireStoppedForFileMutation(sessionId);
+		const port = this.resolveRemoteMessageMutation?.();
+		if (!port) throw new SessionRuntimeCommandError("SESSION_COMMAND_FAILED", REMOTE_SESSION_HISTORY_WRITER_CODES.unavailable);
+		let value: { text: string; images?: ImageContent[] } | undefined;
+		try {
+			value = await port.mutate({
+				hostId: locator.hostId,
+				locator,
+				operation,
+				messageId,
+				...(newText === undefined ? {} : { newText }),
+				...(entryId === undefined ? {} : { entryId }),
+			});
+		} catch (error) {
+			throw this.remoteMessageMutationCommandError(error);
+		}
+		// 写期间若被重新激活：远端已改但内存是旧树——拒绝让调用方感知竞态（与本机分支同一步）。
+		this.requireStoppedForFileMutation(sessionId);
+		return value;
+	}
+
+	/**
+	 * 远端写面的稳定码 → 会话命令错误码。
+	 *
+	 * 为什么按码显式映射，而不是沿用 `commandFailure` 的文案匹配：远端写面本来就只回稳定码（路径、
+	 * 命令行、stderr 都不外传），匹配自由文本既不稳也没必要。体积参数必须跟着错误一起走 —— 远端的
+	 * 整读上界（默认 256 KiB）远小于本机 32MB，用本机兜底数字渲染文案就是骗人。
+	 */
+	private remoteMessageMutationCommandError(error: unknown): SessionRuntimeCommandError {
+		const failure = remoteSessionHistoryWriteFailure(error);
+		if (failure.code === REMOTE_SESSION_HISTORY_WRITER_CODES.fileTooLarge) return new SessionRuntimeCommandError("SESSION_FILE_TOO_LARGE", failure.code, failure.details);
+		if (failure.code === REMOTE_SESSION_HISTORY_WRITER_CODES.messageNotFound) return new SessionRuntimeCommandError("MESSAGE_NOT_FOUND", failure.code);
+		return new SessionRuntimeCommandError("SESSION_COMMAND_FAILED", failure.code);
+	}
+
 	private commandFailure<T>(error: unknown): SessionCommandResult<T> {
 		if (error instanceof SessionRuntimeCommandError) {
 			return {
 				ok: false,
-				error: { code: error.code, debugDetails: error.message },
+				error: {
+					code: error.code,
+					debugDetails: error.message,
+					// 远端整读上界自带体积参数（见 remoteMessageMutationCommandError）：文案里的两个占位符
+					// 必须用真实上界，而不是本机 32MB 的兜底数字。
+					...(error.code === "SESSION_FILE_TOO_LARGE" ? { params: this.sessionFileSizeParams(error) } : {}),
+				},
 			};
 		}
 		// 模型在本地 models.json 存在但运行中 Agent 未加载：标记 needsRestart，
