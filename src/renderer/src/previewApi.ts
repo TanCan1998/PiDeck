@@ -23,7 +23,7 @@ const projects: Project[] = [
 	{
 		id: "builtin-chat",
 		name: "Chat",
-		path: "C:/Users/14012/AppData/Roaming/pi-desktop/chat-workspace",
+		path: "C:/Users/14012/AppData/Roaming/PiDeck/chat-workspace",
 		lastOpenedAt: now,
 		pinned: true,
 		sortOrder: -1,
@@ -132,6 +132,8 @@ let previewSettings: AppSettings = {
 	autoSessionTitle: true,
 	// Ask 提问系统通知默认关闭：与主进程 SettingsStore 默认一致
 	askNotificationEnabled: false,
+	// 仅失焦提醒开关：与主进程 SettingsStore 默认一致（预览 mock 需覆盖 AppSettings 全部必填字段）
+	alertOnlyWhenUnfocused: false,
 	// 人文关怀提醒开关：与主进程 SettingsStore 默认值保持一致（预览 mock 需覆盖 AppSettings 全部必填字段）
 	agentCountReminderEnabled: true,
 	// 公告通知开关：与主进程 SettingsStore 默认一致（预览 mock 需覆盖 AppSettings 全部必填字段）
@@ -170,7 +172,7 @@ let previewSettings: AppSettings = {
 	workspaceContentOpenMode: "split",
 	contentMaxWidth: 1800,
 	chatContentWidthPct: 80,
-	sessionStatusPlacement: "sidebar",
+	sessionStatusPlacement: "composer",
 	navigationMode: "tabs",
 	sessionTabMaxWidth: SESSION_TAB_MAX_WIDTH_DEFAULT,
 	maxEditorFileSizeMB: 5,
@@ -1152,7 +1154,7 @@ export function createPreviewApi(): PiDesktopApi {
 				releasesUrl: "https://github.com/ayuayue/PiDeck/releases",
 				platform: "win32" as NodeJS.Platform,
 				homeDir: "C:/Users/preview",
-				userDataDir: "C:/Users/preview/AppData/Roaming/pi-desktop",
+				userDataDir: "C:/Users/preview/AppData/Roaming/PiDeck",
 			}),
 			preferredSystemLanguages: async () => (navigator.languages?.length ? [...navigator.languages] : [navigator.language]),
 			networkAddresses: async () => [{ address: "192.168.1.100", interfaceName: "Wi-Fi", cidr: "192.168.1.100/24", isPrivate: true, family: "IPv4" }],

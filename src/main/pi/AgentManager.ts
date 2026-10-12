@@ -39,7 +39,9 @@ import { extractPiToolTruncation } from "../../shared/formatToolDetail";
 import { COMPACT_CANCELLED_BY_OWNER, COMPACT_CANCELLED_BY_USER_ABORT, COMPACT_HOOK_REJECT_MAX_MS, COMPACT_OBSERVATION_MAX_AGE_MS, COMPACT_ROUTED_TO_OWNER, COMPACT_USER_ABORT_WINDOW_MS, COMPACT_WAIT_TIMEOUT } from "../../shared/compactFeedback";
 import { PiProcess } from "./PiProcess";
 import { createBridgeServiceHandler } from "./bridge/bridgeServices";
-import { APP_DEEP_LINK_SCHEME } from "../utils/deepLinkScheme";
+import { APP_DISPLAY_NAME } from "../utils/appBrand";
+import { isMainWindowFocused, shouldAlertNow } from "../notifications/alertFocusGate";
+import { buildToastXml, notificationLaunchUrl, resolveNotificationLogoUri } from "../notifications/notificationToast";
 import { createCompactRpcRequest } from "./compactRpc";
 import { readPiCompactionOwnership, type PiCompactionOwnership } from "./compactionOwner";
 import { mergeSubagentSources } from "./derivedSubagents";
@@ -981,6 +983,23 @@ export class AgentManager {
 		void this.createStandbyAgent(projectId).finally(() => {
 			this.standbySpawnPending = false;
 		});
+	}
+
+	/**
+	 * 丢弃指定项目未被认领的 standby 进程（回收，不是消费）：草稿会话切到非 pi 后端
+	 * （生图/生视频/DSH/ACP）时调用——该进程已经服务不了这个会话，继续挂着只能等
+	 * 10min TTL 自然到期（用户反馈的「没用到的预加载进程占着内存」）。
+	 * 只丢项目匹配的条目：池是单槽位，同项目另一个新草稿仍可能认领它。
+	 * 返回是否真的丢掉了条目（调用方无需关心失败：没池子/项目不符都当无事发生）。
+	 */
+	releaseStandbyAgent(projectId: string): boolean {
+		if (this.standbyPool.status()?.projectId !== projectId) return false;
+		const agentId = this.standbyPool.clear();
+		if (!agentId) return false;
+		// 与 TTL 到期同一条回收路径（stop 会顺带从 agents map 移除，standby 标记进程对 UI 本就不可见）
+		void this.stop(agentId);
+		void this.appLogger?.info("agent", "Standby agent released", { agentId, projectId });
+		return true;
 	}
 
 	/**
@@ -5704,11 +5723,13 @@ export class AgentManager {
 		try {
 			const settings = this.settingsStore.get();
 			if (!settings.askNotificationEnabled) return;
+			// 仅失焦提醒：窗口在前台时用户就在看，不再弹系统通知（设置默认关闭时不生效）
+			if (!shouldAlertNow(settings.alertOnlyWhenUnfocused, isMainWindowFocused(this.getWindow()))) return;
 			if (!Notification.isSupported()) return;
 			if (this.notifiedAskAgents.has(agentId)) return;
 			this.notifiedAskAgents.add(agentId);
 
-			const appName = app.getName();
+			const appName = APP_DISPLAY_NAME;
 			const title = sessionTitle || appName;
 			// 有具体提问内容时展示问题，否则退回通用文案（批量提问等无 title 场景）
 			const questionText = question.length > 60 ? `${question.slice(0, 60)}…` : question;
@@ -5718,7 +5739,7 @@ export class AgentManager {
 				body,
 				silent: false,
 				// 自定义 toast XML：launch 携带 sessionId，点击后经 pideck:// 协议唤起应用并跳转对应会话
-				toastXml: this.buildToastXml(appName, body, sessionId),
+				toastXml: buildToastXml({ title: appName, body, launch: notificationLaunchUrl(sessionId), logoUri: this.notificationLogoUri() }),
 			});
 			// 点击通知：聚焦主窗口并切换到对应会话（session-first，跳转按 SessionRecord.id）
 			notification.on("click", () => {
@@ -5744,10 +5765,13 @@ export class AgentManager {
 		try {
 			const settings = this.settingsStore.get();
 			if (!settings.enableNotifications) return;
+			// 仅失焦提醒：窗口在前台时不弹系统通知（设置默认关闭时不生效）
+			if (!shouldAlertNow(settings.alertOnlyWhenUnfocused, isMainWindowFocused(this.getWindow()))) return;
 			if (!Notification.isSupported()) return;
 
-			// 使用应用名称作为通知标题，在 Windows/macOS 通知中心中显示为应用标识
-			const appName = app.getName();
+			// 使用品牌常量而非 app.getName()：asar 内 package.json 只有 name=pi-desktop，
+			// 安装版通知标题会显示 pi-desktop（用户反馈），品牌名固定走 APP_DISPLAY_NAME。
+			const appName = APP_DISPLAY_NAME;
 			const body = this.translate("mainNotification.sessionDone", { title: sessionTitle });
 			// 会话结束时 runtime 一定已绑定会话；跳转目标用 record.id（renderer 按它索引会话），
 			// tab.sessionId 是 pi 侧会话 id 只能兜底（见 resolveNotificationSessionId 注释）。
@@ -5758,7 +5782,7 @@ export class AgentManager {
 				body,
 				silent: false,
 				// 自定义 toast XML：launch 携带 sessionId，点击后经 pideck:// 协议唤起应用并跳转对应会话
-				toastXml: this.buildToastXml(appName, body, sessionId),
+				toastXml: buildToastXml({ title: appName, body, launch: notificationLaunchUrl(sessionId), logoUri: this.notificationLogoUri() }),
 			});
 			notification.on("click", () => {
 				this.focusMainWindowForSession(sessionId);
@@ -5798,25 +5822,11 @@ export class AgentManager {
 	}
 
 	/**
-	 * 生成带会话跳转参数的 Windows toast XML。
-	 * 使用 activationType="protocol" + 本构建 deep link scheme（stable：pideck://，dev 通道：pideck-dev://）：
-	 * 点击通知时 Windows 通过注册表协议关联唤起应用（不依赖 ToastActivatorCLSID / 快捷方式匹配，更可靠），
-	 * 被唤起实例的 argv 携带协议 URL，主实例据此识别要跳转的会话。
-	 * 两通道 scheme 不同，保证 dev 包的通知不会唤起 stable（反之亦然）。
-	 * sessionId 缺省时 launch 回退为 scheme 根地址（点击仅聚焦窗口）。
+	 * 通知字标（透明底品牌字标）的 file:// URI；资源缺失时为 null（通知退回系统默认图标）。
+	 * Windows toast XML 见 notifications/notificationToast.ts（branding 与 launch 收口在那里）。
 	 */
-	private buildToastXml(title: string, body: string, sessionId?: string): string {
-		const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-		const launch = sessionId ? `${APP_DEEP_LINK_SCHEME}://session/${sessionId}` : `${APP_DEEP_LINK_SCHEME}://`;
-		return `<toast activationType="protocol" launch="${launch}">
-  <visual>
-    <binding template="ToastGeneric">
-      <text>${esc(title)}</text>
-      <text>${esc(body)}</text>
-    </binding>
-  </visual>
-  <audio src="ms-winsoundevent:Notification.Default" />
-</toast>`;
+	private notificationLogoUri(): string | null {
+		return resolveNotificationLogoUri({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath() });
 	}
 
 	// abort 流闸与升级收口在 AbortStreamGateController；以下薄包装保持事件路径调用点与契约测试形态。

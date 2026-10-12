@@ -2,6 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
+ * source-sha256: f6ed5d27b02752637d2e437b7e1f3e3726a34c82eeee039b9c2b372671b3c28a（来自 src/shared/i18n/mainProcessCopy.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import type { MainProcessTranslationKey } from "./mainProcessCopy";
 
@@ -46,6 +47,8 @@ export const mainProcessZhTW: Record<MainProcessTranslationKey, string> = {
 	"git.commitMessageModelRequired": "未配置提交摘要生成模型，請前往 設定 > Git 配置供應商與模型後重試。",
 	"git.commitMessageBusy": "上一份提交摘要仍在生成中，請稍候再試。",
 	"git.commitMessageTimeout": "提交摘要生成超時，請重試。",
+	"git.commitMessageEmptyDiff": "沒有暫存的更改，請先暫存更改後再生成提交摘要。",
+	"git.commitMessageNoRepo": "未找到可用的 Git 倉庫目錄，請先開啟或初始化倉庫後重試。",
 	"tray.showWindow": "顯示視窗",
 	"tray.version": "PiDeck v{version}",
 	"tray.checkUpdate": "檢查更新…",
