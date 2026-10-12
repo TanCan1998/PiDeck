@@ -435,3 +435,9 @@ node scripts/verify-remote-connection-service.mjs '<IPv4>' '<user>' '<independen
 **范围诚实说明**：本演练验的是「进程组被杀 → 用户走产品恢复路径 → 同一远端会话继续」。产品**自动**重连只覆盖两个窄窗口
 （abort 窗口内退出 / `code===0` 干净退出，见 `AgentManager` 的 `autoRestartAttempted` 分支），`kill -9` 不在其中——
 所以演练**刻意不断言"自动接回"**（那会是一条假测试）；自动窗口由单元测试 + `reattachProcess` 的远端分支覆盖。
+
+### 回归证据（最新 HEAD）
+
+`2026-10` 在 `31407ce3c`（含本轮的 i18n 接线、远端游标契约收口、plan-args 诊断日志、trust key 模块与
+trust-flag 门禁）上重跑完整真机验收 `e2e/remoteSessionAcceptance.spec.ts`（两条：产品路 + trust 提示）：
+**`2 passed (2.3m)`**。即：这一批改动对 P4.2 已交付的产品路**零回归**。
