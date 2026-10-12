@@ -461,6 +461,7 @@ export const zhCN = {
 	"app.devToolsOpened": "开发者控制台已打开。",
 	"app.expandList": "展开列表",
 	"app.exportedPath": "已导出：{path}",
+	"app.exportedPathTruncated": "已导出（远端历史较长，只含最近的部分消息）：{path}",
 	"app.feedbackCopied": "反馈内容已复制",
 	"app.filesRefreshed": "文件列表已刷新",
 	"app.filesRefreshFailed": "刷新文件列表失败：{error}",

@@ -192,8 +192,12 @@ test("session context menu exposes archive and restores refresh the manager proj
 	assert.match(components, /onSelect=\{props\.onArchiveSession\}/);
 	assert.match(content, /actions\.sessions\.archive\(menu\.projectId, menuSession\)/);
 	assert.match(content, /actions\.sessions\.unarchive\(archived, managerProject\.id\)/);
-	assert.match(app, /unarchiveSidebarSession\(archivedPath: string, projectId = activeProjectId\)/);
-	assert.match(app, /unarchiveSidebarSession\(archived\.filePath, projectId\)/);
+	// 恢复入口现在收**归档条目**（不是裸路径）：远端归档没有本机路径，必须由条目里的
+	// `archivedRemoteSessionId` 决定走哪条通道（`restoreArchivedPiSession` 是唯一分流点）。
+	// 这条守卫等价迁移：仍然要求"入口收条目 + 调用点传条目"，只是形状随实现演进。
+	assert.match(app, /unarchiveSidebarSession\(archived: ArchivedPiSession, projectId = activeProjectId\)/);
+	assert.match(app, /restoreArchivedPiSession\(archived, api\.sessions\)/);
+	assert.match(app, /await unarchiveSidebarSession\(archived, projectId\)/);
 	assert.match(app, /archivedSessionToastMessage\(session\)/);
 	assert.match(app, /ARCHIVED_SESSION_TOAST_MS/);
 });

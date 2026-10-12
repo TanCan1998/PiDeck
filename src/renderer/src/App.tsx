@@ -3336,7 +3336,7 @@ export function App() {
 						}
 						api.sessions
 							.exportRecordHtml(currentSessionId)
-							.then((result) => showToast(t("app.exportedPath", { path: result.path }), 3500))
+							.then((result) => showToast(result.truncated ? t("app.exportedPathTruncated", { path: result.path }) : t("app.exportedPath", { path: result.path }), 3500))
 							.catch((error) => showToast(error instanceof Error ? error.message : String(error), 5000));
 					},
 					// 草稿期不提供重命名入口（与 canCopySession/canExportHtml 同款草稿闸门）：此时

@@ -574,6 +574,8 @@ const api = {
 		exportRecordHtml: (sessionId: string) =>
 			ipcRenderer.invoke(ipcChannels.sessionsCatalogExportHtml, sessionId) as Promise<{
 				path: string;
+				/** 远端导出命中上限（页数/消息数/字节）：导出的是**部分**历史，UI 必须如实告知 */
+				truncated?: boolean;
 			}>,
 		/** DSH 会话文件路径推导（右键「复制会话文件路径」；非 DSH/不可推导返回 undefined）。 */
 		getDshSessionPath: (sessionId: string) => ipcRenderer.invoke(ipcChannels.sessionsGetDshSessionPath, sessionId) as Promise<string | undefined>,

@@ -461,6 +461,7 @@ export const enUS: Record<TranslationKey, string> = {
 	"app.devToolsOpened": "Developer Console opened.",
 	"app.expandList": "Expand list",
 	"app.exportedPath": "Exported: {path}",
+	"app.exportedPathTruncated": "Exported (long history — only the most recent messages are included): {path}",
 	"app.feedbackCopied": "Feedback copied",
 	"app.filesRefreshed": "File list refreshed",
 	"app.filesRefreshFailed": "Failed to refresh file list: {error}",
