@@ -461,7 +461,7 @@ trust-flag 门禁）上重跑完整真机验收 `e2e/remoteSessionAcceptance.spe
 | edit-message | `sessions:catalog-edit-message` → `SessionRuntimeCoordinator.mutateCatalogMessage` | 改写本机 JSONL | `SESSION_COMMAND_FAILED`（debugDetails=`UNSUPPORTED_PROJECT_LOCATION`） | 远端会话文件写端口；运行中的 `sessions:runtime-edit-message` 另被 `AgentManager.assertLocalRuntimeOperation` 显式拒绝（`REMOTE_RUNTIME_CODES.localOperationUnsupported`） |
 | delete-message | `sessions:catalog-delete-message` | 同上（写墓碑） | 同上 | 同上 |
 | prepare-resend | `sessions:catalog-prepare-resend` | 同上（截断该消息及其后继） | 同上 | 同上 |
-| fork | `sessions:runtime-fork` → pi RPC `fork`（需运行实例） | 官方 RPC → fresh `get_state` → 既有远端端口按 RPC 后路径登记**新 ssh record** → coordinator 换绑；PiDeck 不写远端 JSONL | **live-runtime 切片已实现**：取消不 refresh/不登记；否定响应或状态读取失败按「身份未知」fail-closed（旧缓存路径不作为复原证据），已换文件不误绑旧记录 | **真机待验**（目标 pi 版本 / 新文件落盘 / Electron 新 record 读历史） |
+| fork | `sessions:runtime-fork` → pi RPC `fork`（需运行实例） | 官方 RPC → fresh `get_state` → 既有远端端口按 RPC 后路径登记**新 ssh record** → coordinator 换绑；PiDeck 不写远端 JSONL | **live-runtime 身份链已实现**（取消不 refresh/不登记；否定响应或状态读取失败按「身份未知」fail-closed）| **真机实测未定论（2026-10-12）**：fork 后应用侧确实换绑（composer 换 session id、侧栏 1→2 行），但远端 `$HOME` 近 10 分钟**没有任何新 `.jsonl`**、原文件 sha256 未变、新会话输入框也没拿回 fork 点文本 ⇒ 待查 `get_state.sessionFile` 实际值 / pi 是否懒创建文件 / 第二条记录指向哪条路径；证据：`e2e/remoteSessionAcceptance.spec.ts` 的 `PIDECK_E2E_P42_FORK_PROBE=1` 探针 |
 | clone（同族，一并记录） | `sessions:runtime-clone`（RPC）/ `sessions:catalog-copy`（本机临时 pi 进程） | 同上（与 fork 同一替换 owner）；catalog 版先过 `getLocalFilePath` 守卫 | RPC 版已实现（同上）；catalog 版仍抛稳定码 | 同上（停态/临时会话面明确不做） |
 | export-HTML | `sessions:catalog-export-html` | 先 `getLocalFilePath` 守卫 → 本机临时 pi 进程导出 HTML | 抛稳定码（fail-closed） | 只需**远端读**：复用 `RemoteSessionHistoryReader` 读窗口，HTML 仍写本机（新接线，不改远端） |
 
@@ -525,6 +525,6 @@ trust-flag 门禁）上重跑完整真机验收 `e2e/remoteSessionAcceptance.spe
   证据日志 `/tmp/p45b-ui-acceptance-final.log`；失败定位证据 `/tmp/p45b-ui-third-failure/`（修复前恢复后空白）。
 
 **哪些是推测**：上表「有运行实例的改名」仍是读码推断（只发 RPC、无本机守卫），没有真机复跑；
-fork/clone 的**身份链**（RPC → fresh state → 新 ssh record → coordinator 换绑 → 旧记录不动）已有真实 catalog/coordinator/AgentManager 行为测试覆盖，
-但**远端 pi 实际写出的新文件内容与 pi 版本行为仍未真机核验**（本机只读了 pi 包源码证明 RPC 存在）。
+fork/clone 的**身份链**（RPC → fresh state → 新 ssh record → coordinator 换绑 → 旧记录不动）已有真实 catalog/coordinator/AgentManager 行为测试覆盖；
+**真机实测（2026-10-12）未定论**：fork 后应用侧换绑成功，但远端没有新文件、原文件未变、输入框未回填 fork 点文本 ⇒ 不能声称远端 fork 已交付（见上表与 e2e 里的 fork 探针）。
 P4.5b 的单会话归档/恢复已完成真实 Electron＋SSH 验证，不能据此声称 fork/clone 或子会话目录也有 parity。
