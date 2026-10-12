@@ -753,6 +753,17 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			if (target) {
 				const renamed = await sessionRuntimeCoordinator.renameRuntime(target, title);
 				if (!renamed.ok) throw sessionCommandIpcError(renamed.error, appLogger, mainCopy);
+			} else if (sessionCatalog.getLocator(sessionId)?.kind === "ssh") {
+				// 远端会话改名是**纯 catalog 记录操作**：PiDeck 的显示名就是 catalog 标题，上面已经用
+				// claimTitleOwnership 占成 manual 终态（登记/自动标题都不会再覆盖它），因此不需要任何文件操作。
+				// 这里刻意不走 localSessionFilePath：它对 ssh locator 抛稳定码，会让一次只改记录的改名失败。
+				// 代价（已记录）：远端 JSONL 里的 name 行不变，pi 在远端的原生标题仍是旧名——远端文件写入
+				// 属尚未交付的远端写面，不能在这里顺手补。有运行实例时改名走上面的 RPC 分支，与本分支无关。
+				void appLogger.info("session", "Remote session renamed (catalog title only)", {
+					sessionId,
+					oldTitle: entry.title,
+					newTitle: title,
+				});
 			} else {
 				const sessionFilePath = localSessionFilePath(sessionId);
 				if (sessionFilePath) {

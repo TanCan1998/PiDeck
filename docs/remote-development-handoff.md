@@ -441,3 +441,48 @@ node scripts/verify-remote-connection-service.mjs '<IPv4>' '<user>' '<independen
 `2026-10` 在 `31407ce3c`（含本轮的 i18n 接线、远端游标契约收口、plan-args 诊断日志、trust key 模块与
 trust-flag 门禁）上重跑完整真机验收 `e2e/remoteSessionAcceptance.spec.ts`（两条：产品路 + trust 提示）：
 **`2 passed (2.3m)`**。即：这一批改动对 P4.2 已交付的产品路**零回归**。
+
+## 远端会话生命周期 parity 侦察（重命名 / 归档 / 移除记录 / 编辑重发 / fork / 导出）
+
+**侦察口径**：读码 + 针对性测试（未真机复跑）。判据只有一条——`SessionCatalog.getLocalFilePath` 是**本机文件路径的唯一入口**，
+对 `locator.kind === "ssh"` 经 `SessionLocatorRouter.resolveFilePath` 直接抛稳定码 `UNSUPPORTED_PROJECT_LOCATION`。所以
+「今天远端能不能用」这一列基本等价于「这条路径会不会经过本机文件」：经过就 fail-closed（明确抛码，**不是**静默失败），
+不经过的才可能通。
+
+| 操作 | 通道 / 实现入口 | 实现碰什么 | 今天远端 | 缺什么 |
+| --- | --- | --- | --- | --- |
+| 改名（改标题，无运行实例） | `sessions:catalog-update` → `sessionIpc` catalogUpdate | 前半是纯 catalog（`claimTitleOwnership` + `update`）；local locator 额外改本机 JSONL 的 name 行 | **本批打通**：只落 catalog 标题（manual 终态） | 远端 JSONL 的 name 行不更新 —— 远端 pi/TUI 里仍是旧名 = 远端写面 |
+| 改名（有运行实例） | 同通道 → `SessionRuntimeCoordinator.renameRuntime` → pi RPC `set_session_name` | 只发 RPC，由 pi 自己写远端文件 | **推测可用**（`AgentManager.rename` 不碰本机文件；`reportSessionPathFromPi` 对远端 runtime 原样收下回报路径） | 真机验收（含「改名后重启仍是新名」） |
+| 归档 | `sessions:catalog-archive` | 把本机会话文件移进 `.pideck-archive/` + 移出 catalog | 抛稳定码（fail-closed） | 远端归档端口（移动远端文件 = 远端写）+ manifest/索引语义 |
+| 取消归档 | `sessions:catalog-unarchive` | 入参就是**本机归档路径**（`.pideck-archive/*.jsonl`），无 sessionId | 不适用（没有远端归档可恢复） | 远端归档建立后需要按远端 id 的恢复通道；不能沿用本机路径契约 |
+| 列出归档 | `sessions:catalog-list-archived` | 遍历本机扫描根下的 `.pideck-archive/` | 恒空（不报错，但也没有远端条目） | 远端归档目录列举 |
+| 删除归档 | `sessions:catalog-delete-archived` | 本机回收站（`shell.trashItem`）+ 归档索引 | 不适用（拿不到输入） | 同「列出归档」 |
+| 移除记录 | `sessions:catalog-delete` | **删本机会话文件（回收站）+ 移出 catalog** | 抛稳定码（fail-closed） | 需要产品决策 + （真删远端）远端写端口，见下条 |
+| edit-message | `sessions:catalog-edit-message` → `SessionRuntimeCoordinator.mutateCatalogMessage` | 改写本机 JSONL | `SESSION_COMMAND_FAILED`（debugDetails=`UNSUPPORTED_PROJECT_LOCATION`） | 远端会话文件写端口；运行中的 `sessions:runtime-edit-message` 另被 `AgentManager.assertLocalRuntimeOperation` 显式拒绝（`REMOTE_RUNTIME_CODES.localOperationUnsupported`） |
+| delete-message | `sessions:catalog-delete-message` | 同上（写墓碑） | 同上 | 同上 |
+| prepare-resend | `sessions:catalog-prepare-resend` | 同上（截断该消息及其后继） | 同上 | 同上 |
+| fork | `sessions:runtime-fork` → pi RPC `fork`（需运行实例） | 只发 RPC | **推测**：`AgentManager.forkSession` **没有**本机守卫 ⇒ 远端 runtime 下会让远端 pi 写出新会话文件 | 属「经 pi 的远端写入」：未真机验收，且要与远端写面统一评估 |
+| clone（同族，一并记录） | `sessions:runtime-clone`（RPC）/ `sessions:catalog-copy`（本机临时 pi 进程） | RPC 版只发 RPC；catalog 版先过 `getLocalFilePath` 守卫 | RPC 版同 fork；catalog 版抛稳定码 | 同 fork |
+| export-HTML | `sessions:catalog-export-html` | 先 `getLocalFilePath` 守卫 → 本机临时 pi 进程导出 HTML | 抛稳定码（fail-closed） | 只需**远端读**：复用 `RemoteSessionHistoryReader` 读窗口，HTML 仍写本机（新接线，不改远端） |
+
+**本批已实现（只做「纯 catalog 记录操作」那一档）**
+
+- `src/main/ipc/sessionIpc.ts` 的 catalogUpdate：无运行实例且 locator 是 ssh 时，改名**只落 catalog 标题**，刻意不调用
+  `localSessionFilePath`（它对 ssh locator 抛码，会让一次纯记录操作整体失败）。本机 locator 分支逐字未动。
+- 代价（有意为之、已写进代码注释）：远端文件里的 name 行不变。远端写属未交付面，不在这一档里顺手补。
+- 证据：`tests/remoteSessionCatalogRename.test.mjs`（真实 `SessionCatalog` + 真实 `registerSessionIpc`，本机文件面整个换成
+  留痕替身）——远端改名成功且 `getLocalFilePath` / 会话文件改写**一次都没发生**；标题落盘后仍是 ssh locator、重名登记不得覆盖；
+  本机会话改名仍按本机路径改写 name 行；远端**归档**仍是稳定码拒绝且不动 catalog 记录。
+
+**明确没做（会碰远端会话文件，或需要产品决策）**
+
+1. **移除记录（`sessions:catalog-delete`）不是纯记录操作**：今天的语义是「删文件 + 移出记录」。只给 ssh 记录做 catalog 移除
+   会有两个用户可感知后果 —— 远端文件仍在（toast 说「会话已删除」而远端数据没删），且**下次远端扫描会把它重新列为「可导入」**
+   （ssh 记录没有墓碑；DSH 侧靠 `dismissedDshSessionIds`）。要不要墓碑、要不要真删远端文件、文案怎么改，都需要先定方案与授权。
+2. 归档 / 取消归档 / 列出归档 / 删除归档：全部依赖远端文件移动或远端归档索引 = 远端写面。
+3. edit-message / delete-message / prepare-resend：远端会话文件写。
+4. fork / clone：远端 pi 会落盘**新**会话文件（经 pi 的写），需要与远端写面一起定验收判据。
+5. export-HTML：只缺接线（远端读能力已交付），不在本批。
+
+**哪些是推测**：上表「有运行实例的改名」「fork/clone 在远端 runtime 下会真的写远端文件」是读码推断（都只发 RPC、
+无本机守卫），没有真机复跑；其余各行的稳定码 / 空列表结论都由代码路径与针对性测试支持。
