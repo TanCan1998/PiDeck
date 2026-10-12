@@ -806,6 +806,8 @@ export const zhCN = {
 	"app.sessionDeletedFromArchive": "已从归档删除",
 	"app.sessionDeleteFailed": "删除会话失败",
 	"session.deletedDshKeepData": "会话记录已删除（DSH host 数据保留在 DSH_HOME，可手动清理）",
+	// 远端「移除记录」：远端文件一个字节都没动，提示不能给「已删除数据」的错觉。
+	"session.removedRemoteRecord": "已从列表移除（远端会话文件保留，远端数据未删除）",
 	"app.sessionArchived": "已归档会话。可在项目右键「会话管理」→「已归档」中查看并恢复",
 	"app.sessionArchivedDsh": "已归档会话。可在「配置管理」的 DSH 页「归档区」查看并恢复",
 	"app.sessionRestored": "已恢复会话",
@@ -3130,6 +3132,9 @@ export const zhCN = {
 	"menu.copySession": "复制会话",
 	"menu.sessionProxy": "会话代理",
 	"menu.archiveSession": "归档会话",
+	// 远端会话：本机只能移除「记录」，不能删远端文件（先安全、后可逆）。文案必须如实。
+	"menu.removeRemoteRecord": "从列表移除",
+	"menu.removeRemoteRecordHint": "只移出 PiDeck 列表；远端会话文件保留，也不再出现在「可导入」里",
 	"menu.copying": "复制中...",
 	"menu.group.open": "打开与定位",
 	"menu.group.create": "新建",

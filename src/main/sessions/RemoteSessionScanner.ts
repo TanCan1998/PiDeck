@@ -133,6 +133,11 @@ export type RemoteSessionScannerPort = {
 /** catalog 侧只用到 ensureRemoteSession 这一个入口（SessionCatalog 结构上满足）。 */
 export type RemoteSessionCatalogPort = {
 	ensureRemoteSession(input: RemoteSessionRegistrationInput): Promise<RemoteSessionRegistration>;
+	/**
+	 * 可选：这条远端会话是否已被用户「移除记录」（墓碑命中）。列表级发现用它把已移除的会话从「可导入」
+	 * 里排除——远端文件仍在（PiDeck 不删远端数据），但「删了又回来」是用户可感知的错误。
+	 */
+	isRemoteSessionDismissed?(hostId: string, remoteSessionId: string): boolean;
 };
 
 /** 远端会话归属哪个本地项目由装配决定（本批不解析正文，无法自行推断）。 */

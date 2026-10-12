@@ -796,6 +796,31 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		const sessionId = parseSessionId(rawSessionId);
 		const entry = sessionCatalog.get(sessionId);
 		if (!entry) return false;
+		// 远端会话（ssh locator）没有本机会话文件，删除的语义只能是**纯本机记录操作**：
+		// 移出 catalog 记录 + 记墓碑（下次远端扫描不再列为「可导入」）。本机语义是「删文件 + 移出记录」，
+		// 这里只保留与它一致的那一半——
+		// 1. **不删远端数据**（远端文件与远端 pi 会话原样保留，UI 文案也是「从列表移除」而不是「已删除」）；
+		// 2. 不调 `localSessionFilePath`（它对 ssh locator 抛稳定码，会让整个移除失败——就是今天的行为）；
+		// 3. 不发任何 SSH/远端命令，也不动本机回收站；
+		// 4. 不碰运行实例：停 Agent 是用户自己的动作（这条路径只移除记录，不代表用户要求终止远端会话）。
+		// 真删远端文件是**另一个显式动作**（需二次确认），不在本批（见 docs/remote-write-plan.md §0）。
+		const remoteLocator = entry.locator?.kind === "ssh" ? entry.locator : undefined;
+		if (remoteLocator) {
+			// 墓碑的键是**扫描侧的会话身份**（remoteSessionId，与 scan 的条目同值域）。G3 早期的远端记录
+			// 可能只有 remotePath（同一个相对会话根的身份，见 readSshSessionLocator 的注释），所以按这个
+			// 顺序取；两者都没有的历史记录（只有 hostId）本就永远匹配不上一次扫描，无需墓碑。
+			const remoteSessionId = remoteLocator.remoteSessionId ?? remoteLocator.remotePath;
+			if (typeof remoteSessionId === "string" && remoteSessionId.length > 0) {
+				await sessionCatalog.rememberDismissedRemoteSession({ hostId: remoteLocator.hostId, remoteSessionId });
+			}
+			await sessionCatalog.removeWithDescendants(sessionId);
+			// 只记身份（hostId/sessionId），不记路径、不记命令（与读取侧同一股敏纪律）。
+			void appLogger.info("session", "Remote session record removed (tombstoned; remote file kept)", {
+				sessionId,
+				hostId: remoteLocator.hostId,
+			});
+			return true;
+		}
 		const sessionFilePath = localSessionFilePath(sessionId);
 		// 删除即先杀后删：失败一次/卡在 bound 的会话也能删掉。
 		// 仍按路径扫一遍游离 agent，避免只解绑 catalog 却留着进程。

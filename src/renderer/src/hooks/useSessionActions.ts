@@ -144,7 +144,8 @@ export function useSessionActions(options: UseSessionActionsOptions) {
 		}
 		dismissSessionTree(session);
 		// DSH 删除会记墓碑：刷新/自动导入不再把同一 host 会话导回侧栏。
-		showToast(t("app.sessionDeleted"), 3200);
+		// 远端记录同样是「移出列表 + 墓碑」，且远端文件原样保留：文案必须如实（本机逐字不变）。
+		showToast(t(session.locator?.kind === "ssh" ? "session.removedRemoteRecord" : "app.sessionDeleted"), 3200);
 		const projectId = sessionsProjectId ?? activeProjectId;
 		// 删除结果已经应用到本地；保留对账但不让其它会话再次进入 loading 布局。
 		if (projectId) await refreshProjectSessions(projectId, true);

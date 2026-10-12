@@ -808,6 +808,8 @@ export const enUS: Record<TranslationKey, string> = {
 	"app.sessionDeletedFromArchive": "Deleted from archive",
 	"app.sessionDeleteFailed": "Failed to delete session",
 	"session.deletedDshKeepData": "Session record deleted (DSH host data remains in DSH_HOME; clean it up manually)",
+	// Remote "remove record": nothing on the remote host was touched, so the toast must not claim data loss.
+	"session.removedRemoteRecord": "Removed from the list (the remote session file is kept; no remote data was deleted)",
 	"app.sessionArchived": "Session archived. Open the project's Session Manager → Archived to view and restore it.",
 	"app.sessionArchivedDsh": "Session archived. Open Configuration → DSH → Archive to view and restore it.",
 	"app.sessionRestored": "Session restored",
@@ -3134,6 +3136,9 @@ export const enUS: Record<TranslationKey, string> = {
 	"menu.copySession": "Copy Session",
 	"menu.sessionProxy": "Session proxy",
 	"menu.archiveSession": "Archive Session",
+	// Remote sessions: the local app can only remove the record, never the remote file.
+	"menu.removeRemoteRecord": "Remove from list",
+	"menu.removeRemoteRecordHint": "Removes it from PiDeck only; the remote session file is kept and stays out of the import list",
 	"menu.copying": "Copying...",
 	"menu.group.open": "Open & Locate",
 	"menu.group.create": "Create",

@@ -640,6 +640,8 @@ export function SidebarContent(props: SidebarContentProps) {
 						void actions.agents.close(menuAgent);
 						controller.closeMenu();
 					}}
+					// 远端记录的「删除」只是移除本机记录（远端文件保留，主进程记墓碑）：菜单文案必须如实。
+					isRemoteSession={menuAgentSessionRecord?.locator?.kind === "ssh"}
 					onDeleteSession={() => {
 						const bound = Object.entries(controller.catalog.runtimeBySessionId).find(([, runtime]) => runtime?.agentId === menuAgent.id);
 						const sessionId = bound?.[0];
@@ -708,6 +710,8 @@ export function SidebarContent(props: SidebarContentProps) {
 					}}
 					// F5：DSH 会话无 filePath 但可复制 host 会话文件路径（主进程按 dshSessionId 推导）
 					hasFilePath={Boolean(menuSession.filePath) || menuSession.backend === "dsh"}
+					// 远端记录的「删除」只是移除本机记录（远端文件保留，主进程记墓碑）：菜单文案必须如实。
+					isRemoteSession={menuSession.locator?.kind === "ssh"}
 					canRpcLog={Boolean(menuSessionRuntimeAgent)}
 					rpcToggleDisabled={!menuSessionRuntimeAgent}
 					isRpcLogging={menuSessionRuntimeAgent ? controller.isAgentRpcLogging(menuSessionRuntimeAgent.id) : false}

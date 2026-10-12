@@ -802,6 +802,8 @@ export function AgentContextMenu(props: {
 	onCloseAgent: () => void;
 	/** 运行中也可删：主进程先停后删，不必先关 Agent。 */
 	onDeleteSession?: () => void;
+	/** 这条会话是**远端记录**（ssh locator）：删除只能移除本机记录，远端文件保留（文案如实）。 */
+	isRemoteSession?: boolean;
 }) {
 	const busy = Boolean(props.actionLoading);
 	return (
@@ -876,9 +878,9 @@ export function AgentContextMenu(props: {
 				{t("menu.closeAgent")}
 			</DropdownMenuItem>
 			{props.onDeleteSession && (
-				<DropdownMenuItem variant="destructive" disabled={busy} onSelect={props.onDeleteSession}>
+				<DropdownMenuItem variant="destructive" disabled={busy} title={props.isRemoteSession ? t("menu.removeRemoteRecordHint") : undefined} onSelect={props.onDeleteSession}>
 					<Trash2 className="size-3.5" aria-hidden="true" />
-					{t("common.delete")}
+					{t(props.isRemoteSession ? "menu.removeRemoteRecord" : "common.delete")}
 				</DropdownMenuItem>
 			)}
 		</MenuShell>
@@ -936,6 +938,8 @@ export function SessionContextMenu(props: {
 	onOpenLogs?: () => void;
 	onArchiveSession: () => void;
 	onDeleteSession: () => void;
+	/** 这条会话是**远端记录**（ssh locator）：删除只是「从列表移除」，远端文件保留（文案如实）。 */
+	isRemoteSession?: boolean;
 }) {
 	const busy = Boolean(props.actionLoading);
 	// 历史会话（无 runtime）不展示 RPC 日志项：没有运行中的 pi 子进程就无日志可记/可看
@@ -1013,9 +1017,9 @@ export function SessionContextMenu(props: {
 				<Archive className="size-3.5" aria-hidden="true" />
 				{t("menu.archiveSession")}
 			</DropdownMenuItem>
-			<DropdownMenuItem variant="destructive" disabled={busy} onSelect={props.onDeleteSession}>
+			<DropdownMenuItem variant="destructive" disabled={busy} title={props.isRemoteSession ? t("menu.removeRemoteRecordHint") : undefined} onSelect={props.onDeleteSession}>
 				<Trash2 className="size-3.5" aria-hidden="true" />
-				{t("common.delete")}
+				{t(props.isRemoteSession ? "menu.removeRemoteRecord" : "common.delete")}
 			</DropdownMenuItem>
 		</MenuShell>
 	);

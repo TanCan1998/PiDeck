@@ -2876,7 +2876,8 @@ export function App() {
 		}
 		// 先关 Tab 再清状态，并带走 sibling-dir / parentSessionPath 子会话，避免空态 Composer 残留。
 		dismissSessionTree(session, projectId);
-		showToast(t("app.sessionDeleted"), 2200);
+		// 远端记录只移出列表，远端文件原样保留：提示不能给「已删除数据」的错觉（本机文案逐字不变）。
+		showToast(t(session.locator?.kind === "ssh" ? "session.removedRemoteRecord" : "app.sessionDeleted"), 2200);
 		// 已按删除结果摘除子树；对账不能重新插入项目级 loading 行，挤动其它会话。
 		await refreshProjectSessions(projectId, true);
 	}

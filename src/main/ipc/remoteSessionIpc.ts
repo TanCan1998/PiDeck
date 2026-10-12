@@ -68,6 +68,24 @@ export function registerRemoteSessionIpc(input: RemoteSessionIpcInput): void {
 	const titleChannel = input?.channels?.title;
 	if (typeof scanChannel !== "string" || scanChannel.length === 0 || typeof registerChannel !== "string" || registerChannel.length === 0) throw new Error(CHANNELS_INVALID);
 
+	/**
+	 * 墓碑查询：这条远端会话是否已被用户「移除记录」。
+	 *
+	 * 与 DSH 的 `dshListForeignSessions` 同一形状：**在 IPC 边界过滤「可导入」列表**，用 catalog 的
+	 * dismissed 集合排掉用户已经移除记录的那几条（否则刷新一下「移掉的又回来了」）。差别只是身份是
+	 * (hostId, remoteSessionId) 对而不是单个 dshSessionId。
+	 *
+	 * 取不到 catalog（旧装配 / 取 catalog 抛错）时按「没有墓碑」处理：列表原样返回。宁可多列一条
+	 * （用户可再移除一次），也不因为一个可恢复的装配问题把整张列表变成空的。
+	 */
+	const isRemoteSessionDismissed = (hostId: string, remoteSessionId: string): boolean => {
+		try {
+			return input.catalog?.()?.isRemoteSessionDismissed?.(hostId, remoteSessionId) ?? false;
+		} catch {
+			return false;
+		}
+	};
+
 	const resolveScanner = async (): Promise<{ scanner: ReturnType<typeof createRemoteSessionScanner> } | { code: string }> => {
 		try {
 			const port = await input.service?.();
@@ -85,7 +103,11 @@ export function registerRemoteSessionIpc(input: RemoteSessionIpcInput): void {
 		const resolved = await resolveScanner();
 		if ("code" in resolved) return { ok: false, code: resolved.code };
 		try {
-			return await resolved.scanner.scan(hostId);
+			const result = await resolved.scanner.scan(hostId);
+			if (!result.ok) return result;
+			// 墓碑只在**这次列举**生效：已「移除记录」的会话不再出现在「可导入」列表里。
+			// 远端一个字节都不改（也不会额外发任何帧：扫到的条目本身就是列表的全部输入）。
+			return { ok: true, entries: result.entries.filter((entry) => !isRemoteSessionDismissed(hostId, entry.remoteSessionId)) };
 		} catch (error) {
 			// scanner 自己已 fail-closed；这一层是最后一道「绝不把裸异常跨 IPC 抛出去」。
 			return { ok: false, code: codeOf(error, REMOTE_SESSION_CODES.scanFailed) };
