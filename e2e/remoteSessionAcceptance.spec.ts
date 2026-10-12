@@ -38,17 +38,14 @@ import { REMOTE_ACCEPTANCE_ENV, createRemoteSessionInProject, matchesRemoteFinge
  *
  * 「重启后历史仍在」这一条如实区分两件事：
  * - **本次交付的链路**＝`⋯ → 关闭 Agent`（杀进程 + 解绑）后**重新点开该会话**，历史仍在；
- * - **尚未交付的能力**＝重启/重载后**从远端读回历史正文**（`docs/remote-development-handoff.md` 的
- *   P4.2 遗留项与 `src/main/ipc/remoteSessionIpc.ts` 的「本批不解析正文」都记着它）。
- *   第二条不放进默认门禁（默认门禁只反映本次交付的链路），但留了一个行为等价的缺口探针步骤：
- *   用 PIDECK_E2E_P42_GAP_PROBE=1 打开它就能拿到缺口的运行证据（红）。探针默认关闭 ≠ 放宽断言：
- *   它打开的是一条更强的断言，关掉的是「把已知未交付能力算进本次门禁」。
+ * - **无存活 runtime 的远端正文读取**＝`⋯ → 重新加载会话`后历史仍在（应用侧从远端会话文件读回正文）。
+ *   这条曾是 P4.2 遗留项、以「缺口探针」开关默认关闭；`f00977a33` 修掉「远端读页分支被本机路径守卫挡死、
+ *   变成不可达死代码」之后它**进入默认门禁**——运行中的会话走 runtime 内存消息，覆盖不到这条路径，
+ *   那正是该 bug 溜过验收的原因。
  */
 const credentials = readRemoteAcceptanceCredentials(process.env);
 const timeouts = readRemoteAcceptanceTimeouts(process.env);
 const HELP_TEXT = "set " + [REMOTE_ACCEPTANCE_ENV.host, REMOTE_ACCEPTANCE_ENV.user, REMOTE_ACCEPTANCE_ENV.fingerprint].join(" / ") + " to run the real-host acceptance test";
-/** 缺口探针开关（默认关）：见文件头的说明。 */
-const GAP_PROBE_ENV = "PIDECK_E2E_P42_GAP_PROBE";
 // 破坏性演练开关：会 kill 该会话自己的远端 pi 进程（默认关闭，只在人工演练时打开）。
 const REATTACH_DRILL_ENV = "PIDECK_E2E_P42_REATTACH_DRILL";
 /** 最小 prompt：与 scripts/verify-remote-runtime.mjs 的协议层验收用同一条，避免两处口径漂移。 */
@@ -249,7 +246,7 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 		const paths = await createRemoteRunPaths(creds);
 		let sessionId = "";
 		let remoteSessionEvidence = "";
-		console.log("[p42-acceptance] chain run=" + paths.runId + " host=" + creds.host + " probe=" + (process.env[GAP_PROBE_ENV] === "1" ? "on" : "off"));
+		console.log("[p42-acceptance] chain run=" + paths.runId + " host=" + creds.host);
 		try {
 			await test.step("远端前置：项目目录（唯一命名，结束清理）", async () => {
 				await createRemoteProjectDirectory(creds, paths);
@@ -386,21 +383,18 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 					}
 				});
 			}
-			if (process.env[GAP_PROBE_ENV] === "1") {
-				await test.step("缺口探针（PIDECK_E2E_P42_GAP_PROBE=1）：⋯ →「重新加载会话」后历史仍在", async () => {
-					// 这条断言是「重启/重载后从远端读回历史正文」——计划里的未交付能力（P4.2 遗留项）。
-					// 默认关掉它是为了让默认门禁只反映本次交付的链路；打开它就是一次**红证**：
-					// 重载会走 readRecordMessagePage → 远端会话没有本机 filePath ⇒ 空页被 force 写进缓存。
-					await openTabsActionMenu(window);
-					await expect(window.getByRole("menuitem", { name: "重新加载会话", exact: true }), "无进程时「重新加载会话」必须可用").toBeVisible({ timeout: timeouts.helperMs });
-					await window.getByRole("menuitem", { name: "重新加载会话", exact: true }).click();
-					const timeline = window.locator(".message-timeline");
-					// 先把「重载之后时间线长什么样」原样记下来（证据不只来自失败信息）。
-					console.log("[p42-gap-probe] after reload: userTurns=" + (await timeline.locator(".user-turn-text").count()) + " assistant=" + (await timeline.locator(".assistant-text").count()) + " textLength=" + (await timeline.innerText()).trim().length);
-					await expect(timeline.locator(".user-turn-text").filter({ hasText: PROMPT }), "重载后必须仍能看到 prompt（远端会话正文读取）").toBeVisible({ timeout: timeouts.helperMs });
-					await expect(timeline.locator(".assistant-text").first(), "重载后必须仍能看到回复正文").toBeVisible({ timeout: timeouts.helperMs });
-				});
-			}
+			await test.step("⋯ →「重新加载会话」后历史仍在（无存活 runtime 的远端正文读取）", async () => {
+				// 默认门禁的一部分（见文件头）：这条走的是「应用侧从远端会话文件读回正文」，与上面的
+				// 「重开标签页」不同——后者可能仍靠 runtime 内存消息，覆盖不到读页分支。
+				await openTabsActionMenu(window);
+				await expect(window.getByRole("menuitem", { name: "重新加载会话", exact: true }), "无进程时「重新加载会话」必须可用").toBeVisible({ timeout: timeouts.helperMs });
+				await window.getByRole("menuitem", { name: "重新加载会话", exact: true }).click();
+				const timeline = window.locator(".message-timeline");
+				// 时间线现状原样记进日志（证据不只来自失败信息）。
+				console.log("[p42-acceptance] after reload: userTurns=" + (await timeline.locator(".user-turn-text").count()) + " assistant=" + (await timeline.locator(".assistant-text").count()) + " textLength=" + (await timeline.innerText()).trim().length);
+				await expect(timeline.locator(".user-turn-text").filter({ hasText: PROMPT }), "重载后必须仍能看到 prompt（远端正文读取）").toBeVisible({ timeout: timeouts.helperMs });
+				await expect(timeline.locator(".assistant-text").first(), "重载后必须仍能看到回复正文（远端正文读取）").toBeVisible({ timeout: timeouts.helperMs });
+			});
 		} finally {
 			if (consoleErrors.length > 0) console.log("[p42-acceptance] renderer console errors:\n" + consoleErrors.join("\n"));
 			preserveAppLogs(remoteUserDataRoot, paths.runId);
