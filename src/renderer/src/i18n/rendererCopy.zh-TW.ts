@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: d20f5e4c493a1c3471217c00d1b32501a3b1fd7724344df6f6f5f7f0dc6c7bef（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: 87bbcd7684eda0503585ea386e9c8bbb1d5ba7b1094bcd8be3dbc0b4a9051e06（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -215,6 +215,8 @@ export const zhTW: Record<TranslationKey, string> = {
 	"acp.restoreMissing": "該會話繫結的 ACP 工具已被刪除，請在設定 → ACP 工具裡重新登記後才能恢復與繼續",
 	"acp.hostInstructionsUnsupported": "ACP 後端不支援內部指令",
 	"acp.turnBusy": "{tool} 正在回覆中，請等待本輪結束或先停止當前回覆",
+	"acp.abortForceStopped": "「{tool}」長時間未響應停止請求，已強制結束本輪；重新發送即可繼續",
+	"acp.stallForceStopped": "「{tool}」長時間無任何輸出，已自動停止本輪；請檢查該 CLI 的模型/網路配置後重試",
 	"acp.imagesNotSupported": "{tool} 不支援圖片輸入，請移除圖片後重試",
 	"acp.authRequired": "「{tool}」未登入或憑據失效：請先在終端執行該 CLI 完成登入，再回到這裡重試",
 	"acp.toolNameRequired": "名稱必填",
@@ -1221,7 +1223,6 @@ export const zhTW: Record<TranslationKey, string> = {
 	"ask.batchIncomplete": "還有題目未回答",
 	"ask.batchGoReview": "去審閱",
 	"ask.multiSelectHint": "可多選",
-	"ask.selectedPrefix": "已選擇：",
 	// ── 命令面板（Ctrl/Cmd+P）：模糊搜索设置项并跳转 + 执行操作 ──
 	"command.placeholder": "搜尋設定項或操作…",
 	"command.empty": "沒有匹配的結果",
@@ -4580,6 +4581,8 @@ export const zhTW: Record<TranslationKey, string> = {
 	"settings.catalogSectionTitle": "模型目錄",
 	"settings.catalogSectionDesc": "內建模型目錄隨版本釋出（打包資源）；模型上新時可從 GitHub main 分支拉取預生成目錄覆蓋到本地（複用應用更新的 GitHub 映象配置，國內可達性更好），覆蓋檔案僅寫入應用資料目錄，可隨時一鍵還原。",
 	"settings.catalogUpdateSource": "目錄更新源（與應用更新同源）",
+	"settings.catalogAutoUpdate": "自動更新模型目錄",
+	"settings.catalogAutoUpdateDesc": "後臺檢查（與應用更新同一輪）發現新版本時自動拉取並啟用，無需手動點「更新到最新」；覆蓋層帶校驗與上一版備份，可隨時還原。",
 	"settings.catalogBuiltin": "內建目錄",
 	"settings.catalogOverlay": "覆蓋版本（最新 pi-ai）",
 	"settings.catalogModelCount": "條模型",
@@ -4601,6 +4604,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"settings.catalogRestorePrevOk": "已恢復上一個覆蓋版",
 	"settings.catalogFailNetwork": "網路不可用或下載失敗，請檢查網路/代理後重試",
 	"settings.catalogFailValidation": "下載內容校驗失敗，未應用（倉庫檔案可能異常）",
+	"settings.catalogFailIncompatible": "遠端目錄格式高於當前版本，請先更新 PiDeck 後再重試",
 	"settings.catalogFailWrite": "寫入失敗，當前目錄未受影響",
 	"settings.catalogFailNoBackup": "沒有可恢復的備份",
 	"settings.catalogFailUnexpected": "操作失敗，請重試",
@@ -4751,6 +4755,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"settings.announcementNotificationDesc": "收到新公告時彈出提醒（預設開啟；輸入或會話執行中會自動延後彈出）。關閉後側欄公告入口與提醒一併隱藏",
 	"settings.enablePiProxy": "啟用 Pi agent 代理",
 	"settings.enablePiProxyDesc": "開啟後所有 Pi 會話預設走下方地址（重啟會話後生效）。僅儲存地址不開啟開關時，可配合右鍵選單「會話代理」或下方供應商白名單按需啟用",
+	"settings.piProxySwitchOverridden": "「按模型走代理」名單已啟用：名單內模型強制走代理、名單外強制直連，此開關不再參與決策。清空名單後開關恢復生效。",
 	"settings.piProxyModels": "按模型走代理",
 	"settings.piProxyModelsDesc": "粒度比供應商更細：僅名單內模型強制走代理（即使全域關閉也複用上方地址），名單外強制直連。條目格式為 provider/模型ID，留空則不按模型過濾（回落供應商名單/全域設定）",
 	"settings.piProxyModelsHint": "與按供應商白名單可共存：模型名單優先匹配，供應商名單兜底；新建會話首條請求即按模型自動匹配代理",

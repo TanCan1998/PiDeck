@@ -45,7 +45,7 @@ import { readDataEnvDecision, validateStartupDataEnv, writeDataEnvDecision } fro
 import { registerDataEnvIpc } from "./ipc/dataEnvIpc";
 import { ChannelSwitchService } from "./update/ChannelSwitchService";
 import { registerChannelSwitchIpc } from "./ipc/channelSwitchIpc";
-import { resolveUpdateChannel } from "./update/channelIdentity";
+import { isDevChannelBuild, resolveUpdateChannel } from "./update/channelIdentity";
 import { APP_DEEP_LINK_SCHEME } from "./utils/deepLinkScheme";
 import { APP_DISPLAY_NAME, initializeAppBrand } from "./utils/appBrand";
 import { migrateDevUserData } from "./projects/devUserDataMigration";
@@ -294,6 +294,7 @@ import { EnhancePromptService, PI_ENHANCE_HOST_FILENAME } from "./pi/enhance/Enh
 import { testPiProxy } from "./pi/PiProxyTester";
 import { SessionScanner } from "./sessions/SessionScanner";
 import { resolveLaunchDefaultOptions, isModelInModelsConfig } from "./sessions/launchDefaults";
+import { mergeCatalogModels } from "./pi/catalogModelsForValidation";
 import { createSessionModelPreference } from "../shared/modelDisplayName";
 import { modelThinkingLevelOf } from "../shared/modelThinkingLevels";
 import { SessionCatalog, canAttachRuntimeMetadata } from "./sessions/SessionCatalog";
@@ -802,6 +803,17 @@ function discardAnonymousSession(binding: SessionRuntimeBinding): void {
 	emitSessionRuntimeDetach(binding);
 }
 
+/**
+ * 会话创建校验用的 pi 目录模型：capability 快照（get_available_models，含 auth.json
+ * 官方 provider 与 models-store 目录）优先，快照缺失（尚未 hydration / RPC 降级）时退回
+ * CLI 缓存（models.json ∪ pi --list-models）。
+ * 必须与模型选择器同源：只用 CLI 缓存会把 auth 渠道模型判为不存在，新会话首发的点选
+ * 被静默换成配置默认模型（issue #340）。同步读是有意的——创建链路不能为校验 fork pi。
+ */
+function validationCatalogModels(): AvailableModel[] | undefined {
+	return mergeCatalogModels(piModelCapabilityCache?.getSnapshot(), getCachedModelList());
+}
+
 async function createAnonymousSession(input: CreateAnonymousSessionInput): Promise<CreateAnonymousSessionResult> {
 	const project = projectStore.get(input.projectId);
 	if (!project) throw new Error(mainCopy("project.notFound"));
@@ -813,9 +825,9 @@ async function createAnonymousSession(input: CreateAnonymousSessionInput): Promi
 	try {
 		const [settingsResult, modelsResult] = await Promise.all([configManager.getSettingsConfig(), configManager.getModelsConfig()]);
 		// 渲染层/引导页显式传入的模型（欢迎页偏好等）也可能指向已删除条目：
-		// 校验仍存在（models.json ∪ pi 目录，与选择器可选范围一致），不存在则交给 launchDefaults 按配置默认 →
+		// 校验仍存在（models.json ∪ capability 快照，与选择器可选范围一致），不存在则交给 launchDefaults 按配置默认 →
 		// enabledModels → lastUsed 的顺序兜底。
-		if (model && !isModelInModelsConfig(modelsResult.parsed, model, getCachedModelList())) {
+		if (model && !isModelInModelsConfig(modelsResult.parsed, model, validationCatalogModels())) {
 			model = undefined;
 		}
 		// 缺省填充与引导页展示共用同一解析器（launchDefaults，含「最后一次使用」优先）：
@@ -824,8 +836,8 @@ async function createAnonymousSession(input: CreateAnonymousSessionInput): Promi
 			backend: "pi",
 			settings: settingsResult.parsed,
 			models: modelsResult.parsed,
-			// 与 createDraft 同源：存在性校验含 pi 目录（冷缓存 null 时退回仅 models.json）。
-			catalogModels: getCachedModelList(),
+			// 与 createDraft 同源：存在性校验含 capability 快照（auth 渠道模型也在内）。
+			catalogModels: validationCatalogModels(),
 			lastUsedModel: settingsStore.get().lastUsedModel,
 		});
 		if (!model) {
@@ -2562,6 +2574,8 @@ function registerIpc() {
 	// quitApp 先置 isQuitting，与托盘「退出」菜单同一写法，避免 closeToTray 把退出吞成隐藏到托盘。
 	registerAcpIpc({
 		settingsStore,
+		// ACP 仅供开发构建（未打包 dev / dev 通道包）：stable 隐藏全部入口，工具域 IPC 拒绝。
+		isDevChannel: () => isDevChannelBuild(),
 		// 会话级配置桥惰性取 manager:注册时(此处)尚未实例化(4786 行 opt-in 段),
 		// 与生命周期依赖同一条惰性模式。
 		getSessionManager: () => acpAgentManager,
@@ -3058,6 +3072,9 @@ function registerIpc() {
 		copyCatalogSession,
 		exportCatalogSessionHtml,
 		replaceAgentSession,
+		// 模型存在性校验数据源：与模型选择器同源（capability 快照 ∪ CLI 缓存），否则
+		// auth 渠道模型被判为不存在并静默换成配置默认模型（issue #340）。
+		validationCatalogModels,
 		// fork/clone 统一命令层：重发/编辑 fork 化（mutationFork/branchMode）与 Web HTTP 同源
 		sessionForkCommands,
 		// C1：DSH 后端专用 IPC 依赖按后端分组（注册表化铺路；未来新增后端各自提供一份）
@@ -3306,6 +3323,9 @@ function registerIpc() {
 		checkPiUpdate: () => extensionManager.checkPiUpdate(),
 		// 模型目录：复用设置页同一检查链路（GitHub main 分支 manifest 比对），结果并入更新快照。
 		checkCatalogUpdate: () => catalogUpdater.checkRemote(),
+		// 目录自动更新：检测到新版本后由 UpdateService 按设置（catalogAutoUpdate，默认开）自动拉取，
+		// 与设置页「更新到最新」按钮共用同一 updater（含校验与备份）。
+		updateCatalog: () => catalogUpdater.update(),
 		sendToRenderer: (snapshot: import("../shared/types").AppUpdateStatusSnapshot) => {
 			if (mainWindow && !mainWindow.isDestroyed()) {
 				mainWindow.webContents.send(ipcChannels.appUpdateStatusChanged, snapshot);
@@ -4995,8 +5015,9 @@ app
 		ensurePiResourceMigration = ensureResourceMigration;
 		agentManager.configureResourceMigrationGate(ensureResourceMigration);
 		// 多后端网关装配：pi + dsh + acp（DSH 在窗口创建后后台预热，失败时按需重试）。
-		// ACP 是 opt-in（settings.acpEnabled，默认 false）：网关常驻注册，但开关是运行时读的
-		// （deps.isEnabled），关闭时 create 直接拒绝——既保证「关闭就不 spawn 任何 CLI」，
+		// ACP 是 opt-in（settings.acpEnabled，默认 false）且仅限开发构建（未打包 dev 或 dev 通道包，
+		// isDevChannelBuild）：网关常驻注册，但开关与通道都是运行时读的（deps.isEnabled），
+		// 任一不满足时 create 直接拒绝——既保证「stable 渠道/stable 构建不 spawn 任何 ACP CLI」，
 		// 又让设置页开关立即生效（不必重启）。
 		// 不按启动时的开关决定是否注册：合成器的事件订阅（onOutput）与能力并集在启动时一次成形，
 		// 启动后才补注册的网关收不到事件转发，ACP 时间线会静默无输出；
@@ -5006,7 +5027,7 @@ app
 			piLocator,
 			getProject: (projectId) => projectStore.get(projectId),
 			getTools: () => settingsStore.get().acpTools ?? [],
-			isEnabled: () => settingsStore.get().acpEnabled === true,
+			isEnabled: () => settingsStore.get().acpEnabled === true && isDevChannelBuild(),
 			// configOptions 变更推送：set_config_option 响应/config_option_update 通知都走同一事件,
 			// 渲染层按 agentId 隔离(旧 agent 迟到事件写旧 atom,不再被读)。
 			onConfigOptionsChanged: (tab, options) => {

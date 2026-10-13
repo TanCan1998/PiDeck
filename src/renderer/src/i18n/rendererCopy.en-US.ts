@@ -209,6 +209,8 @@ export const enUS: Record<TranslationKey, string> = {
 	"acp.restoreMissing": "The ACP tool bound to this session was removed; re-register it in Settings → ACP Tools to restore and continue",
 	"acp.hostInstructionsUnsupported": "The ACP backend does not support host instructions",
 	"acp.turnBusy": "{tool} is still responding; wait for this turn to finish or stop it first",
+	"acp.abortForceStopped": "{tool} did not respond to the stop request in time, so the turn was force-stopped; send again to continue",
+	"acp.stallForceStopped": "{tool} produced no output for a long time, so the turn was stopped automatically; check the CLI's model/network configuration and retry",
 	"acp.imagesNotSupported": "{tool} does not accept image input; remove the images and try again",
 	"acp.authRequired": "{tool} is not signed in or its credentials expired: run the CLI in a terminal to log in, then come back and retry",
 	"acp.toolNameRequired": "Name is required",
@@ -1220,7 +1222,6 @@ export const enUS: Record<TranslationKey, string> = {
 	"ask.batchIncomplete": "Some questions are still unanswered",
 	"ask.batchGoReview": "Go to review",
 	"ask.multiSelectHint": "Select multiple",
-	"ask.selectedPrefix": "Selected: ",
 	// ── Command palette (Ctrl/Cmd+P): fuzzy-search settings + run actions ──
 	"command.placeholder": "Search settings or commands…",
 	"command.empty": "No matching results",
@@ -4591,6 +4592,8 @@ export const enUS: Record<TranslationKey, string> = {
 	"settings.catalogSectionDesc":
 		"The built-in model catalog ships with each release (packaged resource). When new models land, pull the pre-generated catalog from the GitHub main branch to overlay locally (reuses the app update GitHub mirror config for better reachability); the overlay lives only in the app data directory and can be reverted anytime.",
 	"settings.catalogUpdateSource": "Catalog update source (same as app update)",
+	"settings.catalogAutoUpdate": "Update catalog automatically",
+	"settings.catalogAutoUpdateDesc": "When the background check (same cycle as the app update) finds a newer catalog, download and enable it automatically — no need to click “Update to latest”. The overlay is verified and the previous version is backed up, so it can be restored at any time.",
 	"settings.catalogBuiltin": "Built-in",
 	"settings.catalogOverlay": "Overlay (latest pi-ai)",
 	"settings.catalogModelCount": "models",
@@ -4612,6 +4615,7 @@ export const enUS: Record<TranslationKey, string> = {
 	"settings.catalogRestorePrevOk": "Restored previous overlay",
 	"settings.catalogFailNetwork": "Network unavailable or download failed; check network/proxy and retry",
 	"settings.catalogFailValidation": "Downloaded content failed validation; not applied (repo files may be broken)",
+	"settings.catalogFailIncompatible": "The remote catalog format is newer than this app version; update PiDeck and retry",
 	"settings.catalogFailWrite": "Write failed; current catalog is unaffected",
 	"settings.catalogFailNoBackup": "No backup to restore",
 	"settings.catalogFailUnexpected": "Operation failed, please retry",
@@ -4763,6 +4767,7 @@ export const enUS: Record<TranslationKey, string> = {
 	"settings.announcementNotificationDesc": "Show a toast when new announcements arrive (default on; auto-deferred while typing or a session is running). Turning off also hides the sidebar megaphone entry",
 	"settings.enablePiProxy": "Enable Pi agent proxy",
 	"settings.enablePiProxyDesc": "When on, all Pi sessions use the address below by default (takes effect after restarting the session). Save the address without enabling it to apply it per-session via the \u201CSession proxy\u201D context menu or the provider allowlist below",
+	"settings.piProxySwitchOverridden": "The proxy-by-model allowlist is active: listed models are forced through the proxy and all others are forced direct, so this switch no longer applies. Clear the list to make it effective again.",
 	"settings.piProxyModels": "Proxy by model",
 	"settings.piProxyModelsDesc":
 		"Finer granularity than providers: when the allowlist is non-empty, only listed models are forced through the proxy (reusing the address above even if the global switch is off) and others are forced direct. Entries use provider/modelId. Leave empty to disable model filtering (fall back to provider allowlist / global settings).",

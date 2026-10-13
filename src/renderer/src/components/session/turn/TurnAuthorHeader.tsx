@@ -18,6 +18,8 @@ import { formatTime } from "../TimelineFormat";
  *   而不是统一的终端图标——否则同一会话里分不清是哪个 CLI 在回答；工具已删除时
  *   回退通用终端图标 + 通用名「ACP」。
  * - 头像走品牌内联 SVG（Fallback），不拉远程图，保证离线会话也能辨认。
+ * - 行头只留时间戳；本轮模型名与耗时一起放 turn 尾部（见 TurnRow 底部耗时行），
+ *   同一会话频繁换模型时用户视线本来就在回复底部。
  */
 export function TurnAuthorHeader(props: { backend?: AgentBackend; acpToolId?: string; endedAt: number }) {
 	const backend: AgentBackend = props.backend ?? "pi";
