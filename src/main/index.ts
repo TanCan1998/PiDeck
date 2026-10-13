@@ -266,6 +266,7 @@ import { toWslLinuxPath, toWindowsHostPath } from "./wsl/WslPaths";
 import { registerProjectsIpc } from "./ipc/projectsIpc";
 import { registerRemoteHostIpc } from "./ipc/remoteHostIpc";
 import { registerRemoteProjectIpc } from "./ipc/remoteProjectIpc";
+import { registerRemoteProjectTrustIpc } from "./ipc/remoteProjectTrustIpc";
 import { registerRemoteSessionIpc } from "./ipc/remoteSessionIpc";
 import { createRemoteHostConnectionService, type RemoteHostConnectionService } from "./remote/RemoteHostConnectionService";
 import { createSshClientRuntime, resolvePosixSshClient, type SshClientRuntime } from "./remote/SshClientRuntime";
@@ -278,6 +279,8 @@ import { createRemoteSessionScanner } from "./sessions/RemoteSessionScanner";
 import type { SshSessionLocator } from "../shared/projectLocation";
 import { matchRemoteSessionProject } from "./remote/remoteSessionProjectMatch";
 import { openRemoteHostCatalogView } from "./remote/RemoteHostCatalogView";
+import { createRemoteProjectTrustHostFacts } from "./remote/RemoteProjectTrustHostFacts";
+import { createRemoteProjectTrustService, type RemoteProjectTrustService } from "./remote/RemoteProjectTrustService";
 import { createRemoteReferenceWriteGuard } from "./remote/RemoteReferenceWriteGuard";
 import { registerUsageStatsIpc } from "./ipc/usageStatsIpc";
 import { UsageStatsService } from "./usageStats/UsageStatsService";
@@ -369,6 +372,14 @@ let sessionRuntimeCoordinator: SessionRuntimeCoordinator;
  * 分支塞回本文件。
  */
 let remoteSessionMessageMutation: RemoteSessionMessageMutationPort | undefined;
+/**
+ * 远端项目 trust 决策服务（P4.4b）：决策表读写 + 主机 pin 事实 → 四态。
+ *
+ * 为什么是模块级 let：它同时在两处被拿去用——`registerIpc()`（trust 域 IPC 与主机退役清理钩子）和
+ * `AgentManager` 构造时注入的远端运行时端口（`resolveTrust` 闭包在**真正 spawn 时**才求值）。
+ * 后者比前者早执行，用解析器而不是实例就避免了「构造时捕获一个当时还不存在的对象」。
+ */
+let remoteProjectTrustService: RemoteProjectTrustService | undefined;
 /** 闲置 agent 自动释放器（内存优化）：whenReady 阶段装配，quit 时 stop */
 let idleAgentReleaser: IdleAgentReleaser | null = null;
 let codexSessionImporter: CodexSessionImporter;
@@ -2392,10 +2403,24 @@ function registerIpc() {
 	// 按需回调这个解析器：门禁表达式与连接服务单例都只允许有一份（见 remoteRuntimePort 的注释）。
 	// 未登记（本函数还没跑到）/门禁关闭时，端口一律 REMOTE_FEATURE_DISABLED，绝不回退本机。
 	remoteHostServiceResolver = remoteHostServiceIfEnabled;
+	// 远端项目 trust 决策表（P4.4b）：持久化段指向 SettingsStore（随配置备份），主机事实指向已确认 pin 的
+	// 只读目录入口（不新增 SSH 通道、不复制路径归一化）。装配处只此一份：远端运行时端口与 trust 域共用它。
+	const remoteProjectTrust = createRemoteProjectTrustService({
+		settings: {
+			read: () => settingsStore.get().remoteProjectTrust,
+			// 专用写入入口：决策不得经通用 `settings:update` 通道（那会让渲染层构造的记录替换整张表）。
+			write: (records) => settingsStore.replaceRemoteProjectTrust(records),
+		},
+		hostFacts: createRemoteProjectTrustHostFacts({ userDataDir: app.getPath("userData") }),
+	});
+	// 远端会话的 trust 解析发生在 AgentManager 的端口里（它比本函数先构造），所以实例挂在模块级变量上：
+	// 那里的 `resolveTrust` 闭包在**真正 spawn 时**才求值，不会拿到一个当时还不存在的对象。
+	remoteProjectTrustService = remoteProjectTrust;
 	registerRemoteHostIpc({
 		enabled: remoteExperimentEnabled,
 		userDataDir: app.getPath("userData"),
-		list: () => openRemoteHostCatalogView(app.getPath("userData")),
+		// 主机退役时同时清掉它的 trust 决策（与 pin 清理同一位置、同一重试语义）。
+		list: () => openRemoteHostCatalogView(app.getPath("userData"), { onHostRetired: (hostId) => remoteProjectTrustService?.forgetHost(hostId) ?? Promise.resolve() }),
 		service: remoteHostServiceIfEnabled,
 		// The add-host flow holds a pin store across two IPC calls (offer, then the user's answer), so its
 		// lifetime is the process, not a call. Registering disposal here keeps the broker's timers from
@@ -2403,6 +2428,8 @@ function registerIpc() {
 		registerCleanup: (cleanup) => quitCleanup.register("remote-host-stores", cleanup),
 	});
 	// 远端项目域（登记/回答/列表/读取/搜索）与 hosts 域分开注册：同一个连接服务端口，不同域的 handler。
+	// 远端 trust 域（决策表的清单/写入/撤销）同样分开：它不动 SSH，只读写桌面配置 + 已确认的 pin 事实。
+	registerRemoteProjectTrustIpc({ enabled: remoteExperimentEnabled, trust: () => remoteProjectTrustService });
 	registerRemoteProjectIpc({
 		enabled: remoteExperimentEnabled,
 		userDataDir: app.getPath("userData"),
@@ -3702,6 +3729,9 @@ app
 				// 远端会话身份登记（P4.2 收口）的正门：catalog 也是懒取（AgentManager 比它更早装配）。
 				resolveCatalog: () => sessionCatalog,
 				settings: () => settingsStore.get(),
+				// 远端项目 trust 决策（P4.4b）：端口每次 prepare 现读，未决策/材料缺失/endpoint 变更都返回
+				// undefined ⇒ 一个 flag 都不加（零行为变更）。
+				resolveTrust: () => remoteProjectTrustService,
 			}),
 		);
 		// C12：退出清理登记（before-quit 统一 runAll，新增资源不再改 before-quit）

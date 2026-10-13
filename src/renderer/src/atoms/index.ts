@@ -11,3 +11,4 @@ export * from "./git-atoms";
 export * from "./dsh-atoms";
 export * from "./announcement-atoms";
 export * from "./automation-atoms";
+export * from "./remote-trust-atoms";

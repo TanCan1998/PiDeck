@@ -12,6 +12,7 @@ import { normalizeThemeSchedule } from "../../shared/themeSchedule";
 import { normalizeQuickMessages } from "../../shared/quickMessages";
 import { clampSessionTabMaxWidth, SESSION_TAB_MAX_WIDTH_DEFAULT } from "../../shared/sessionTabWidth";
 import { getAppLogger } from "../logging/sharedLogger";
+import { normalizeRemoteProjectTrustRecords } from "../remote/RemoteProjectTrust";
 import { setConfiguredGitPath } from "../git/gitExecutable";
 import { renameWithRetry } from "../utils/fsRetry";
 
@@ -262,6 +263,10 @@ Gitmoji 对应关系：
 	piRpcNoExtensions: false,
 	piRpcNoSkills: false,
 
+	// ── 远端项目 trust（P4.4b）：决策表存在这里，随配置备份一起走 ──
+	// 缺省空表 = 未决策任何远端项目 ⇒ 远端 spawn 不传任何 trust flag（与历史行为逐字一致）。
+	remoteProjectTrust: [],
+
 	// 字体配置：默认使用系统字体；用户可通过自定义字体设置修改。
 	// 出厂默认取 "default" 档：与 CSS token 基线（:root 无覆盖时）一致，
 	// 避免「默认」档位名与实际出厂外观错位（旧默认 medium 比 default 大一档）。
@@ -392,6 +397,9 @@ export class SettingsStore {
 			this.settings.quickMessages = normalizeQuickMessages(parsed.quickMessages);
 			// 隐藏模块来自旧 JSON 时可能是脏值（非数组/含空串与重复项）；统一清洗，缺字段回落空数组（全显示）。
 			this.settings.hiddenModules = normalizeHiddenModules(parsed.hiddenModules);
+			// 远端 trust 决策表来自旧 JSON 时可能是脏值（非数组 / 字段畸形 / key 与零件不自洽）：
+			// 逐条严格解码后丢弃脏条目。缺这一段 = 空表（未决策过），不做任何迁移。
+			this.settings.remoteProjectTrust = normalizeRemoteProjectTrustRecords(parsed.remoteProjectTrust);
 		}
 		// showThinking 不再作为可持久化的独立配置项，完全跟随 pi agent 的 hideThinkingBlock。
 		// 启动时重新读取以确保每次启动都使用最新值，而非缓存的 defaultSettings。
@@ -468,7 +476,9 @@ export class SettingsStore {
 
 	async update(patch: Partial<AppSettings>) {
 		// showThinking 完全由 pi agent 的 hideThinkingBlock 控制，不允许通过桌面设置修改
-		const { showThinking: _, ...safePatch } = patch;
+		// remoteProjectTrust 同属「不能让通用设置补丁碰」的一段：它决定远端项目 `.pi` 资源是否执行，
+		// 写入必须走远端 trust 域（它持有 pin 事实与 key 计算），见 replaceRemoteProjectTrust。
+		const { showThinking: _, remoteProjectTrust: __, ...safePatch } = patch;
 		// 按供应商/模型代理白名单变更时做规范化（去重去空白），避免非法值写入磁盘。
 		if ("piProxyProviders" in safePatch) {
 			safePatch.piProxyProviders = normalizeProxyList(safePatch.piProxyProviders);
@@ -628,6 +638,19 @@ export class SettingsStore {
 		// 只记变更的 key 列表，不记值——避免 proxyUrl 等敏感内容落盘；值变更回查用 save 前的内存态
 		void getAppLogger()?.info("settings", "Settings updated", { keys: Object.keys(safePatch) });
 		return this.get();
+	}
+
+	/**
+	 * 整体替换远端项目 trust 决策表（P4.4b）。
+	 *
+	 * 为什么单开一个入口、而不是让通用 `update()` 接这一段：trust 记录决定「远端项目的 `.pi` 资源是否执行」，
+	 * 其写入必须由持有 pin 事实的一方（`RemoteProjectTrustService`）按 trust key 生产；把这一段暴露给通用
+	 * `settings:update` 通道，等于把「用一条渲染层构造的记录换掉整张表」变成可能。这里仍做严格解码归一化
+	 * （只信形状，不信来源），并立即落盘（决策要跨重启、撤销要马上生效）。
+	 */
+	async replaceRemoteProjectTrust(records: unknown): Promise<void> {
+		this.settings.remoteProjectTrust = normalizeRemoteProjectTrustRecords(records);
+		await this.save();
 	}
 
 	/** 规范化按供应商代理白名单：去重、去空白、过滤非字符串。 */

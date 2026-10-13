@@ -61,6 +61,19 @@ const COVERED_HOST_ID_FIELDS = new Map([
 	// 真正持久化的引用写在 ProjectStore 的 ssh locator（由 projects 源扫描）。
 	["src/shared/types/remoteHost.ts:RemoteProjectEnrollRequest", "runtime"],
 	["src/shared/types/remoteHost.ts:RemoteProjectEnrollResult", "runtime"],
+	// 远端项目 trust 决策（P4.4b）：这两个结构真的落盘（桌面 settings.json 的 remoteProjectTrust 段，
+	// 随配置备份一起走），但归 host-profiles 而不是新开一个源，理由就是它们的生命周期完全绑在主机档案上：
+	//   - hostId 之外，每条记录还绑了 pin 密码学事实的摘要（endpointDigest）与规范项目根 ⇒ 换了 endpoint
+	//     就命中不到（fail-closed），换了主机就命中不到（id 永不复用）；
+	//   - 主机退役时由 RemoteHostStore 的 onHostRetired 钩子（与 pin 清理同一位置、同一重试语义）清掉，
+	//     因此它**不参与**引用扫描、也不该阻塞 retire——把它登记成 projects/sessions 那种引用源会把
+	//     「删主机前先撤销信任」变成硬前置，而产品语义是随主机一起清。
+	// 若将来「主机退役不再清理 trust」或「trust 记录可以被另一台主机命中」，这个属主必须重新审视。
+	["src/shared/types/remoteTrust.ts:RemoteProjectTrustRecord", "host-profiles"],
+	["src/shared/types/remoteTrust.ts:RemoteProjectTrustEntry", "host-profiles"],
+	// 决策请求 DTO（remote:trust-set 的入参）：只是渲染层回显 hostId 的一次调用，不持久化任何东西，
+	// 与上面那批 RemoteHost*Result 同类。真正落盘的是 Record（已在上面登记）。
+	["src/shared/types/remoteTrust.ts:RemoteProjectTrustSetInput", "runtime"],
 ]);
 
 const TYPE_FILES = readdirSync("src/shared/types")

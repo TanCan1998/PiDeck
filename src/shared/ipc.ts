@@ -44,6 +44,12 @@ export const ipcChannels = {
 	remoteSessionTitle: "remote:remote-session-title",
 	/** 把一条远端会话幂等登记进本地 catalog。 */
 	remoteSessionRegister: "remote:remote-session-register",
+	/** 远端项目 trust：列清单（主机 label + 项目根 + 状态；不含任何 pin 材料）。 */
+	remoteTrustList: "remote:trust-list",
+	/** 远端项目 trust：记录一条决策（approve/deny）。 */
+	remoteTrustSet: "remote:trust-set",
+	/** 远端项目 trust：撤销某 (hostId, 规范项目根) 的决策（含已作废的那条）。 */
+	remoteTrustClear: "remote:trust-clear",
 	projectsList: "projects:list",
 	projectsAdd: "projects:add",
 	// 文件夹右键菜单直达：按路径添加项目（渲染层确认后调用；projectsAdd 走系统目录选择框）

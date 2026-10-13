@@ -13,6 +13,15 @@ export type RemoteHostStoreState = DecodedRemoteHostSnapshot & { status: "ready"
 type SnapshotRead = { kind: "missing" } | { kind: "invalid" } | { kind: "valid"; snapshot: DecodedRemoteHostSnapshot };
 type PinEnrollment = Pick<SshHostPinStore, "offer" | "answer" | "readPin"> & Partial<Pick<SshHostPinStore, "deletePin" | "hasPendingOffer" | "pendingRoute">>;
 
+/**
+ * Cleanup hook for references other stores hold to a host whose profile is being compressed into a
+ * retired id. Called at the **same place and with the same retry semantics as pin deletion**: once
+ * right after `retire()` commits, and again on every `open()`/`refresh()` for the ids in
+ * `retiredHostIds` (so leftovers from a crash or a failed write get a second chance). Failures are
+ * swallowed: a hygiene cleanup must never turn the catalog into `needs-repair`, and the next open retries.
+ */
+export type HostRetiredHook = (hostId: string) => Promise<void>;
+
 /** Main-owned view of which host ids are still referenced by projects/sessions. */
 export type RemoteHostReferences = { referencedHostIds(): Promise<ReadonlySet<string>> };
 
@@ -177,15 +186,24 @@ async function applyLockCheck(userDataDir: string, state: RemoteHostStoreState):
 	}
 }
 
-/** Delete pins whose host id is retired; best effort, because the next load tolerates them anyway. */
-async function pruneRetiredPins(userDataDir: string, snapshot: DecodedRemoteHostSnapshot, pinStore: PinEnrollment): Promise<void> {
-	if (snapshot.retiredHostIds.length === 0 || typeof pinStore.deletePin !== "function") return;
+/**
+ * Delete pins whose host id is retired; best effort, because the next load tolerates them anyway.
+ * The same retry pass runs `onHostRetired` for each retired id: other stores' leftovers for that host
+ * (remote project trust decisions) get the identical second chance a leftover pin does.
+ */
+async function pruneRetiredPins(userDataDir: string, snapshot: DecodedRemoteHostSnapshot, pinStore: PinEnrollment, onHostRetired?: HostRetiredHook): Promise<void> {
+	if (snapshot.retiredHostIds.length === 0) return;
 	for (const hostId of snapshot.retiredHostIds) {
-		try {
-			await pinStore.deletePin(hostId);
-		} catch {
-			// Leftovers are ignored by pinIssues and retried on the next open.
+		if (typeof pinStore.deletePin === "function") {
+			try {
+				await pinStore.deletePin(hostId);
+			} catch {
+				// Leftovers are ignored by pinIssues and retried on the next open.
+			}
 		}
+		// Same retry pass as the pin: other stores' leftovers for this retired id (remote project trust
+		// decisions) are cleaned here too, so a crash between commit and cleanup is recovered on next open.
+		if (onHostRetired !== undefined) await onHostRetired(hostId).catch(() => undefined);
 	}
 }
 
@@ -224,8 +242,9 @@ export class RemoteHostStore {
 	private readonly lockPath: string;
 	private readonly pinStore: PinEnrollment;
 	private readonly references?: RemoteHostReferences;
+	private readonly onHostRetired?: HostRetiredHook;
 
-	private constructor(userDataDir: string, pinStore: PinEnrollment, state: RemoteHostStoreState, references?: RemoteHostReferences) {
+	private constructor(userDataDir: string, pinStore: PinEnrollment, state: RemoteHostStoreState, references?: RemoteHostReferences, onHostRetired?: HostRetiredHook) {
 		this.userDataDir = userDataDir;
 		// 同源磁盘根（`RemoteHostPaths.ts`）：store 文件 / 备份 / 锁 / pin 根只有一个出处，避免「锁指向
 		// 另一个文件」这类漂移把互斥静默失效。
@@ -236,16 +255,17 @@ export class RemoteHostStore {
 		this.pinStore = pinStore;
 		this.state = state;
 		this.references = references;
+		this.onHostRetired = onHostRetired;
 	}
 
-	static async open(userDataDir: string, options: { pinStore?: PinEnrollment; references?: RemoteHostReferences; referenceRegistry?: RemoteHostReferenceRegistryView } = {}): Promise<RemoteHostStore> {
+	static async open(userDataDir: string, options: { pinStore?: PinEnrollment; references?: RemoteHostReferences; referenceRegistry?: RemoteHostReferenceRegistryView; onHostRetired?: HostRetiredHook } = {}): Promise<RemoteHostStore> {
 		if (typeof userDataDir !== "string" || !isAbsolute(userDataDir) || /[\x00-\x1f\x7f]/.test(userDataDir)) throw new Error("REMOTE_HOST_STORE_PATH_INVALID");
 		const pinStore = options.pinStore ?? new SshHostPinStore(userDataDir);
 		const references = resolveReferences(options);
 		const state = await loadState(userDataDir, pinStore);
 		await applyLockCheck(userDataDir, state);
-		await pruneRetiredPins(userDataDir, state, pinStore);
-		return new RemoteHostStore(userDataDir, pinStore, state, references);
+		await pruneRetiredPins(userDataDir, state, pinStore, options.onHostRetired);
+		return new RemoteHostStore(userDataDir, pinStore, state, references, options.onHostRetired);
 	}
 
 	/**
@@ -256,7 +276,7 @@ export class RemoteHostStore {
 	async refresh(): Promise<RemoteHostStoreState> {
 		const state = await loadState(this.userDataDir, this.pinStore);
 		await applyLockCheck(this.userDataDir, state);
-		await pruneRetiredPins(this.userDataDir, state, this.pinStore);
+		await pruneRetiredPins(this.userDataDir, state, this.pinStore, this.onHostRetired);
 		this.state = state;
 		return this.getSnapshot();
 	}
@@ -346,6 +366,10 @@ export class RemoteHostStore {
 		} catch {
 			// Best effort; pruneRetiredPins retries on the next load.
 		}
+		// Other decisions bound to this host (remote project trust) are cleaned in the same step: retired ids
+		// are never reused, so a leftover entry can never match again — it would only show up as a row for a
+		// host that no longer exists. Same retry discipline as the pin: failures wait for the next open.
+		if (this.onHostRetired !== undefined) await this.onHostRetired(hostId).catch(() => undefined);
 		return retired;
 	}
 

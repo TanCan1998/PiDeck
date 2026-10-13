@@ -14,6 +14,10 @@
  *
  * 本模块**不**碰本机路径：plan 里的每个路径都由 `buildRemotePiRuntimePlan` 在构造点按远端
  * 绝对 POSIX 形状验过（本机 Windows 路径、相对路径当场抛稳定码）。
+ *
+ * 远端项目 trust（P4.4b）：决策由装配注入的 `resolveTrust` 提供，**每次 prepare 现读**（撤销下一次
+ * spawn 即生效，不需重启）；解析不出决策/材料缺失/解析失败一律按「未决策」处理 —— plan 里一个
+ * trust flag 都不出现，远端行为与历史版本一致（远端 pi 是否加载项目 `.pi` 资源仍由它自己决定）。
  */
 import { randomUUID } from "node:crypto";
 import type { RemotePiRuntimeFacts } from "../remote/RemoteHostConnectionService";
@@ -23,7 +27,7 @@ import type { RemoteSessionRegistration } from "../sessions/SessionCatalog";
 import { createRemoteSessionScanner, REMOTE_SESSION_MAX_ID_LENGTH, REMOTE_SESSION_MAX_PATH_LENGTH, titleFromRemoteSessionId, type RemoteSessionCatalogPort, type RemoteSessionScannerPort } from "../sessions/RemoteSessionScanner";
 import type { PiRuntimeLauncher, RemoteSshPiRuntimeLaunchPlan } from "./PiSpawnHandle";
 import { buildRemotePiRuntimePlan } from "./piRemoteRuntimePlan";
-import type { PiRpcBaseArgsSettings } from "./piRpcArgs";
+import type { PiRpcBaseArgsSettings, PiTrustOverride } from "./piRpcArgs";
 
 /**
  * 远端运行时域的稳定码（消息即码：调用方（协调器/测试）按字符串判定，绝不按措辞）。
@@ -115,6 +119,18 @@ export type RemoteRuntimeServicePort = {
 	createPiRuntimeLauncher(): PiRuntimeLauncher;
 } & RemoteSessionScannerPort;
 
+/**
+ * 远端项目 trust 的决策来源（装配注入）。
+ *
+ * 只暴露一件事：这一次 spawn 该不该表态（approve / no-approve），以及不表态（undefined）——
+ * 后者涵盖「用户没决策」「endpoint 变了导致作废」「pin 事实拿不到」三种情形。实现方是
+ * `RemoteProjectTrustService`（结构上满足本类型），它自己从配置与主机目录现读事实；本端口不碰
+ * pin、不新增 SSH 通道。
+ */
+export type RemoteRuntimeTrustPort = {
+	trustOverride(input: { readonly hostId: string; readonly remoteRoot: string }): Promise<PiTrustOverride | undefined>;
+};
+
 export type RemoteRuntimePortDeps = {
 	/**
 	 * 按需解析连接服务；门禁关闭或装配缺失时返回 undefined（端口据此 fail-closed）。
@@ -125,6 +141,11 @@ export type RemoteRuntimePortDeps = {
 	resolveService(): Promise<RemoteRuntimeServicePort | undefined> | RemoteRuntimeServicePort | undefined;
 	/** pi 的基础参数只认这一个设置来源（与本地 `PiProcess` 同一份：`piRpcOffline`）。 */
 	settings(): PiRpcBaseArgsSettings;
+	/**
+	 * 远端项目 trust 的决策来源（可选）。未注入 = 永不表态（正式包/旧装配/测试替身的行为），
+	 * 与「用户没决策」同一条路径：一个 flag 都不加。
+	 */
+	resolveTrust?(): RemoteRuntimeTrustPort | undefined | Promise<RemoteRuntimeTrustPort | undefined>;
 	/**
 	 * 按需解析 catalog（`SessionCatalog` 结构上满足 `ensureRemoteSession` 这一个入口）。
 	 * 与 `resolveService` 同一个立场：装配比 catalog 早，回调只在真正要登记时才求值。
@@ -197,6 +218,22 @@ function remoteSessionIdWithinRoot(root: string, remotePath: string): string | u
 	return relative;
 }
 
+/**
+ * 解析这一次 spawn 的 trust 决策。
+ *
+ * 失败一律折叠成「未决策」：读配置/读主机目录不顺不是安全问题，但**不能**让它变成
+ * 默认 approve（那等于静默信任任意远端项目），也不能让它把远端会话卡死——不表态就是最保守的行为。
+ */
+async function resolveTrustOverride(resolve: RemoteRuntimePortDeps["resolveTrust"], input: RemoteRuntimePrepareInput): Promise<PiTrustOverride | undefined> {
+	try {
+		const port = await resolve?.();
+		if (port === undefined) return undefined;
+		return await port.trustOverride({ hostId: input.hostId, remoteRoot: input.remoteCwd });
+	} catch {
+		return undefined;
+	}
+}
+
 export function createRemoteRuntimePort(deps: RemoteRuntimePortDeps): RemoteRuntimePort {
 	let launcher: PiRuntimeLauncher | undefined;
 	/** 计划里的 generation 是「这台主机上的第几次启动」：同一次运行内单调递增即可，不做跨重启持久化。 */
@@ -209,6 +246,8 @@ export function createRemoteRuntimePort(deps: RemoteRuntimePortDeps): RemoteRunt
 			const service = await resolveOrUnavailable(() => deps.resolveService());
 			// 事实先取（它会确保主机已连上、runner 已按内容寻址部署），再在构造点验 plan 的形状。
 			const facts = await service.remotePiRuntimeFacts(input.hostId);
+			// trust 决策在**每次 prepare**现读：撤销/改主意在下一轮 spawn 立即生效（本批明确不要求重启应用）。
+			const trust = await resolveTrustOverride(deps.resolveTrust, input);
 			const plan = buildRemotePiRuntimePlan({
 				hostId: input.hostId,
 				generation: (generation += 1),
@@ -218,6 +257,8 @@ export function createRemoteRuntimePort(deps: RemoteRuntimePortDeps): RemoteRunt
 				runnerPath: facts.runnerPath,
 				nonce: (deps.createNonce ?? defaultNonce)(),
 				...(input.sessionFile === undefined ? {} : { sessionFile: input.sessionFile }),
+				// 未决策（含材料缺失 / 解析失败）⇒ 不传这个字段 ⇒ args 里不出现任何 trust flag。
+				...(trust === undefined ? {} : { trust }),
 				settings: deps.settings(),
 			});
 			launcher = service.createPiRuntimeLauncher();

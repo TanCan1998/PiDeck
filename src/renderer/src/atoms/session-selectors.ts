@@ -72,12 +72,15 @@ export const sessionIdByRuntimeAgentIdAtomFamily = atomFamily((agentId: string) 
 export const sessionRuntimeUiBySessionIdAtomFamily = atomFamily((sessionId: string) => atom((get) => get(sessionRuntimeUiByIdAtom)[sessionId]));
 
 /**
- * 这条会话是否跑在「远端项目资源未加载」的状态（Phase 4 P4.2 收口第 1 项）。
+ * 这条会话是否要显示远端 trust 条（`RemoteSessionTrustNotice` 的渲染判据）。
  *
  * 标记来自主进程：远端会话（`runtimePlan.kind === "remote-ssh"` 那条路）的 tab 带
  * `remoteTrustUnhandled: true`，经 agents:state 事件透传到 SessionRuntimeViewState。
  * 本机/WSL/DSH/生图会话、以及旧 main 或旧 payload 缺字段的情况一律为 false——
  * 消费端据此不渲染提示、也不报错（契约上该字段可选）。
+ *
+ * 注意它只是「要不要渲染」：四种展示态（未决策 / 已信任 / 已拒绝 / 因 endpoint 变更作废）由决策表
+ * 合成，见 `remote-trust-atoms.ts` 的 `sessionRemoteTrustStateAtomFamily`。
  */
 export const sessionRemoteTrustUnhandledAtomFamily = atomFamily((sessionId: string) => atom((get) => get(sessionRuntimeByIdAtom)[sessionId]?.remoteTrustUnhandled === true));
 

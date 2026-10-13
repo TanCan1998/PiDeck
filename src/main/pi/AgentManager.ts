@@ -1629,9 +1629,10 @@ export class AgentManager {
 			sessionEnvironment,
 			sessionSource: input.source ?? "pi",
 			// 这条路径的 runtimePlan.kind 恒为 "remote-ssh"（launch.plan 由 buildRemotePiRuntimePlan 构造）。
-			// 远端项目资源（.pi/ 的扩展/技能/提示词/项目设置）在 RPC 无 UI 下不会被信任加载，
-			// 而 PiDeck 刻意不传 trust flag（完整远端 trust 语义属 P4.4）——这里只把现状标出来，
-			// 让渲染层如实告知用户，不改任何安全边界；本机/WSL 分支不写这个字段。
+			// 本字段（P4.2 起的字段名）现在只表示「这条会话的远端项目 trust 由 PiDeck 的决策表管理」，
+			// 因此是渲染层「要不要显示 trust 条」的判据；四种展示态由决策表合成。
+			// 具体传什么 flag 不在这里决定：远端运行时端口每次 prepare 现读决策（P4.4b），未决策就一个都不传。
+			// 本机/WSL 分支不写这个字段。
 			remoteTrustUnhandled: true,
 			// 不写 wslDistro/wslUser/importedSourceId：它们是本机（WSL/导入器）身份，远端会话没有这些维度。
 			noSession: input.noSession,
@@ -1696,7 +1697,8 @@ export class AgentManager {
 				projectPath: remoteCwd,
 				sessionPath: input.sessionPath,
 				deckSessionId: input.deckSessionId,
-				// 远端 trust 语义属 P4.4：这里刻意不传 trustOverride（`PiProcess` 的远端分支也不消费它）。
+				// 远端 trust 不在这里传（也不再需要本机那套 override 参数）：决策由远端运行时端口在
+				// prepare 时按 trust key 现读，未决策 ⇒ plan 里不出现任何 trust flag。
 				noSession: input.noSession,
 				onExit: (payload) => this.handleCreateProcessExit(id, tab, payload),
 			});

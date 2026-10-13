@@ -41,6 +41,14 @@
   渲染层主机 DTO 只有 `{id,label,sshHost,verified,disabled}`。所以 P4.4a/b 的 UI 只能显示「主机 label + 已验证 +
   决策状态」，**不能**显示指纹/known_hosts 摘要；trust key 里的 endpoint 身份只留在主进程与配置里。
 
+- **P4.4b 已交付（2026-10，本次）**：决策存储（`AppSettings.remoteProjectTrust`，写入只走 trust 域，通用 `settings:update` 碰不到）、
+  四态判定（未决策 / 已信任 / 已拒绝 / 因 endpoint 变更作废 + 原因）、flag 传递（`buildRemotePiArgs` 里**唯一**一处映射，
+  显式收到决策才追加；未决策一个 flag 都不加 ⇒ 零行为变更）、渲染层（会话提示条四态 + 决策/撤销、设置页「远端信任」清单、
+  `remote:trust-list|set|clear` 三通道、渲染层结构上不含任何 pin 材料）、host 退役清理（`RemoteHostStore.onHostRetired` + 下次 open 重试）。
+  门禁 `tests/remoteTrustFlagContract.test.mjs` 按授权**等价迁移并加强**：flag 字面量只允许出现在已登记解析点闭集内，
+  launcher/plan 不得自拼，plan 类型仍不得有 trust 字段，且「未决策 ⇒ args 精确等于基础参数」「禁止默认 approve」都是硬断言。
+  **未做**：远端 pi 版本门（本机有 `supportsTrustFlags`，远端没有 ⇒ 若远端 pi < 0.79 带 flag 会让 pi 启动失败；
+  目标主机 0.85.1 已实测支持）、多窗口并发 CAS、主机删除 UI（生产当前没有可达的 retire 入口）。
 - **刻意未做（并说明理由）**：P4.4a 里的「存储 + 设置页清单 + 提示条显示状态」在本期**没有决策入口**
   （决策 UX 属 P4.4b），做出来就是「无人可写、永远显示『未决策』」的空壳 ⇒ 按仓库纪律（不为假设中的未来需求
   增加抽象/配置项）暂不实现。**建议**：把「存储 + 决策 UX + 传递 flag」放进同一批（P4.4b，需授权），

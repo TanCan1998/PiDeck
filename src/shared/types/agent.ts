@@ -50,13 +50,15 @@ export type AgentTab = {
 	/** 运行时后端；缺省 "pi"（旧数据/旧路径兼容）。 */
 	backend?: AgentBackend;
 	/**
-	 * 远端会话的 trust 现状标记（Phase 4 P4.2）：true 表示这条会话跑在「**远端项目资源未加载**」
-	 * 的状态下——远端 pi 是否加载项目目录里的 `.pi` 资源（扩展/技能/提示词/项目设置）由远端
-	 * `~/.pi/agent/settings.json` 的 `defaultProjectTrust` 决定，而 RPC 模式没有 UI 可确认，
-	 * 所以 PiDeck 既不传 trust flag 也不放宽任何安全边界。渲染层据此给出如实提示。
-	 * 完整远端 trust 语义（hostId + endpoint identity + canonical remote path 的统一 trust key）属 P4.4，
-	 * 本字段不承诺那些语义。本机 / WSL / DSH / 生图会话不带它（undefined 或 false = 无此状态）；
-	 * 旧 payload 缺字段时按「无标记」处理：不显示提示，也不报错（可选字段向后兼容）。
+	 * 远端会话标记（P4.2 起的字段名，P4.4b 后语义已换成「由 PiDeck 决策」）。
+	 *
+	 * `true` = 这条会话的远端项目 trust **由 PiDeck 的决策表管理**（`remoteProjectTrust` 段，按键
+	 * `hostId + endpoint 身份摘要 + 规范项目根`）：主进程在 spawn 时按决策传 `--approve/--no-approve`，
+	 * 未决策则一个 flag 都不传。渲染层把本标记当作「这是远端会话，该显示 trust 条」的判据，四种展示态
+	 * （未决策 / 已信任 / 已拒绝 / 因 endpoint 变更作废）由决策表决定——**不以 pi 事件为准**：目标远端 pi
+	 * 版本没有 `project_trust` 事件，本机 pi 版本又与之不同，事件既拿不到也不可信。
+	 * 名字保留是为了跨层契约兼容（`SessionRuntimeCoordinator` 透传 + 旧 payload）；本机/WSL/DSH/生图
+	 * 会话不带它（undefined 或 false = 无此状态），旧 payload 缺字段时按「无标记」处理（不显示、不报错）。
 	 */
 	remoteTrustUnhandled?: boolean;
 	/** DSH agent 预设（会话「模式」）：新建/attach 时从 host 解析，回写 catalog 供头部只读展示。 */

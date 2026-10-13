@@ -53,8 +53,9 @@ export type SessionRuntimeViewState = {
 	compactionCount?: number;
 	noSession?: boolean;
 	/**
-	 * 远端会话的 trust 现状标记（agents:state 载荷透传自 `AgentTab.remoteTrustUnhandled`）：
-	 * true = 这条会话跑在「远端项目资源未加载」状态（远端 pi 不加载 .pi/ 的项目级资源）。
+	 * 远端会话标记（agents:state 载荷透传自 `AgentTab.remoteTrustUnhandled`）：这条会话的远端项目
+	 * trust 由 PiDeck 的决策表管理（P4.4b）。它只决定**是否**显示 trust 提示；四种展示态由决策表合成
+	 * （见 `remote-trust-atoms.ts` 的 `sessionRemoteTrustStateAtomFamily`），不以 pi 事件为准。
 	 * undefined/false = 本地/WSL/DSH/生图会话，或旧 main 的载荷没带这个字段；
 	 * 消费端（RemoteSessionTrustNotice）按「无标记 = 不显示提示」处理，不报错。
 	 */

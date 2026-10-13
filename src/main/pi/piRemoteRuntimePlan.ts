@@ -11,11 +11,13 @@
  * 2. **身份字段与别处同源**：`hostId` 用 shared 的 `PROJECT_HOST_ID_PATTERN`（与项目/会话 locator、
  *    引用扫描同一取值域），`nonce` 用与引导握手同一个形态（首字符字母数字、16..64）。
  * 3. **参数只来自 `piRpcArgs`**：远端与本地共享同一份基础参数，避免「同一个 pi 两套参数」的漂移。
+ *    远端项目 trust 的 flag（`--approve/--no-approve`）同样只由 `buildRemotePiArgs` 追加：plan 构造点
+ *    只把**已解析的决策**透传下去，自己不认任何 flag 字面量（见 tests/remoteTrustFlagContract.test.mjs）。
  */
 import { PROJECT_HOST_ID_PATTERN } from "../../shared/projectLocation";
 import { REMOTE_RUNNER_MAX_ARGV_LENGTH } from "../remote/RemoteRunnerContract";
 import type { RemoteSshPiRuntimeLaunchPlan } from "./PiSpawnHandle";
-import { assertRemoteAbsolutePath, buildRemotePiArgs, type PiRpcBaseArgsSettings } from "./piRpcArgs";
+import { assertRemoteAbsolutePath, buildRemotePiArgs, type PiRpcBaseArgsSettings, type PiTrustOverride } from "./piRpcArgs";
 
 /** 与引导握手同一个 nonce 形态（首字符字母数字，16..64）。 */
 const NONCE = /^[A-Za-z0-9][A-Za-z0-9_-]{15,63}$/;
@@ -41,6 +43,11 @@ export type RemotePiRuntimePlanInput = {
 	readonly nonce: string;
 	/** 「重开同一会话」时带上的远端会话文件；新会话不传。 */
 	readonly sessionFile?: string;
+	/**
+	 * 远端项目 trust 决策（approve / no-approve）。**未决策时不要传**：缺省 = 参数里不出现任何 trust flag。
+	 * 调用方（远端运行时端口）从 trust 决策表解析后透传给这里，构造点不做任何默认值。
+	 */
+	readonly trust?: PiTrustOverride;
 	readonly settings?: PiRpcBaseArgsSettings;
 };
 
@@ -52,7 +59,7 @@ export function buildRemotePiRuntimePlan(input: RemotePiRuntimePlanInput): Remot
 	assertRemoteAbsolutePath(input.nodePath);
 	assertRemoteAbsolutePath(input.piPath);
 	assertRemoteAbsolutePath(input.runnerPath);
-	const args = buildRemotePiArgs({ settings: input.settings, ...(input.sessionFile === undefined ? {} : { sessionFile: input.sessionFile }) });
+	const args = buildRemotePiArgs({ settings: input.settings, ...(input.sessionFile === undefined ? {} : { sessionFile: input.sessionFile }), ...(input.trust === undefined ? {} : { trust: input.trust }) });
 	if (args.length > MAX_REMOTE_ARGS) throw new Error("REMOTE_RUNTIME_ARGS_TOO_MANY");
 	return {
 		kind: "remote-ssh",

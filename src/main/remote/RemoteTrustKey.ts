@@ -69,6 +69,17 @@ export function canonicalRemoteRoot(raw: string | undefined): string | undefined
 }
 
 /**
+ * endpoint 身份摘要：`sha256(endpoint 身份)` 的前 32 位 hex。
+ *
+ * 为什么单独导出：trust key 只是它的一个消费者——持久化记录还要把摘要与 hostId / 项目根并列存下来，
+ * 才能回答「同 host + 同根但 endpoint 变了」并说明「已作废」。摘要只允许留在主进程（见 shared/types/remoteTrust 的边界说明）。
+ */
+export function remoteEndpointDigest(endpointIdentity: string | undefined): string | undefined {
+	if (!endpointIdentity) return undefined;
+	return createHash("sha256").update(endpointIdentity, "utf8").digest("hex").slice(0, 32);
+}
+
+/**
  * trust key = `hostId::sha256(endpoint 身份)::规范项目根`。
  *
  * 任一材料缺失 ⇒ undefined（「不可判定」，调用方必须按未决策 / fail-closed 处理，不得当成"已信任"）。
@@ -77,7 +88,7 @@ export function canonicalRemoteRoot(raw: string | undefined): string | undefined
 export function remoteTrustKey(input: { hostId: string | undefined; endpointIdentity: string | undefined; remoteRoot: string | undefined }): string | undefined {
 	const hostId = typeof input.hostId === "string" ? input.hostId.trim() : "";
 	const root = canonicalRemoteRoot(input.remoteRoot);
-	if (!hostId || !input.endpointIdentity || !root) return undefined;
-	const endpointDigest = createHash("sha256").update(input.endpointIdentity, "utf8").digest("hex").slice(0, 32);
+	const endpointDigest = remoteEndpointDigest(input.endpointIdentity);
+	if (!hostId || !endpointDigest || !root) return undefined;
 	return `${hostId}::${endpointDigest}::${root}`;
 }

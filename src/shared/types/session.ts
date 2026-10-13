@@ -420,7 +420,9 @@ export type SessionRuntimeInfo = SessionRuntimeTarget & {
 	compactionCount?: number;
 	noSession?: boolean;
 	/**
-	 * 远端会话的 trust 现状标记（P4.2）：`true` = 这条会话跑在「远端项目资源未加载」的状态。
+	 * 远端会话标记（P4.2 的字段名；P4.4b 后它不再表示「资源未加载」，而是「远端项目 trust 由 PiDeck 的
+	 * 决策表管理」）。渲染层用它决定**是否**显示 trust 条；四种展示态（未决策 / 已信任 / 已拒绝 /
+	 * 因 endpoint 变更作废）来自决策表，不依赖任何 pi 事件（目标远端版本没有 `project_trust` 事件）。
 	 * 本机会话不带它；预览层按它显示常驻提示（缺失 ⇒ 不显示）。
 	 *
 	 * 放在 runtime info 里而不只走 `agents:state`：那个推送只在该会话发生状态变化时才来，

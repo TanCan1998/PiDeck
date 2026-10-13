@@ -495,6 +495,19 @@ trust-flag 门禁）上重跑完整真机验收 `e2e/remoteSessionAcceptance.spe
    本机与 SSH 走同一个 `replaceBoundRuntime` 状态机。**停态 clone**（本机临时 pi 进程那条）与远端 edit/resend 仍不做。
 5. export-HTML：只缺接线（远端读能力已交付），不在本批。
 
+**P4.4b 已实现（远端项目 trust：决策存储 + flag 传递 + 决策 UX）**
+
+- 决策存储 `AppSettings.remoteProjectTrust`：每条记 `trustKey`（`hostId::endpointDigest::规范项目根`）+ 三个零件 + `decision` + `decidedAt`；
+  旧设置文件缺段 = 空表；host 退役（`RemoteHostStore.onHostRetired`）时清理该主机条目，失败下次 open 补清；目录对账丢弃 retired/未知 host 条目。
+- 判定：同 host + 同根但 endpoint 摘要不同 ⇒ **作废 + 写明原因**（不是悄悄回到未决策）；材料只取既有 pin 事实（`openRemoteHostCatalogView`，不新增 SSH 通道）。
+- 传递：`buildRemotePiArgs` 里**唯一**一处映射（`approve → --approve`、`deny → --no-approve`）；**未决策/材料缺失/解析失败 ⇒ 一个 flag 都不加**（零行为变更，禁止默认 approve）；
+  每轮 `prepare()` 现读决策 ⇒ 撤销下一次 spawn 即生效。目标主机 pi 0.85.1 已实测两个 flag 存在且语义正确。
+- 渲染层：会话头部提示条从"只告知"变四态 + 决策/撤销；设置页「远端信任」清单；三通道 `remote:trust-list|set|clear`；**渲染层结构上不含指纹/known_hosts 摘要/endpoint 摘要**
+  （`RemoteProjectTrustEntry` 装不下，另有源码级守卫）。静态标记 `remoteTrustUnhandled` 保留作"是否渲染提示条"，含义改为"该会话 trust 由 PiDeck 决策表管理"。
+- 验收判据（**不需要模型配额**）：远端项目放 `.pi/prompts/trustprobe.md`，`--approve` 时 `get_commands` 里出现该模板、无 flag / `--no-approve` 时不可见；
+  另加既有日志 `Remote pi runtime plan prepared { args }` 断言 args 有无 flag（真机 e2e 步骤待补）。
+- **未做**：远端 pi 版本门（本机 `supportsTrustFlags` 无远端对应物）、多窗口并发 CAS、主机删除 UI（生产无可达 retire 入口）、真机 e2e 步骤。
+
 **P4.5b 已实现（远端归档 / 取消归档 / 列出归档）**
 
 - 归档：远端文件 `mv` 进**文件所在目录旁的** `.pideck-archive/`（`mkdir -p` 后 `move` 两步；同目录 ⇒ 同一文件系统 ⇒

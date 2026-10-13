@@ -34,7 +34,8 @@ test("remote host channel is declared, bridged, and registered behind the dev ga
 	// 门禁把开关接到一个局部变量上（连接服务需要懒构建），再传给注册点。
 	assert.match(main, /remoteExperimentEnabled\s*=\s*!app\.isPackaged\s*&&\s*process\.env\.PIDECK_REMOTE_EXPERIMENTAL\s*===\s*"1"/);
 	assert.match(main, /registerRemoteHostIpc\(\{[\s\S]{0,400}?enabled:\s*remoteExperimentEnabled/);
-	assert.match(main, /openRemoteHostCatalogView\(app\.getPath\("userData"\)\)/);
+	// 目录读取在装配处接上「主机退役即清 trust 决策」的钩子（P4.4b；与 pin 清理同一位置、同一重试语义）。
+	assert.match(main, /openRemoteHostCatalogView\(app\.getPath\("userData"\),\s*\{\s*onHostRetired:[\s\S]{0,200}?forgetHost\(hostId\)/);
 	assert.match(catalog, /createRemoteHostReferenceRegistry\(join\(userDataDir,\s*"session-catalog\.json"\),\s*join\(userDataDir,\s*"projects\.json"\)\)/);
 });
 

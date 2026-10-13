@@ -17,8 +17,9 @@ import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
  * 4. deckSessionId 的远端会话：拿到 pi 上报的会话文件后由端口登记 catalog 身份（ssh locator），
  *    登记失败落会话错误卡 + 稳定码；
  * 5. 远端 runtime 的本机专属操作（终端 cwd、checkpoint 的 git）在守卫处拒绝，本地行为不变；
- * 6. 远端会话如实带 `remoteTrustUnhandled` 标记（P4.2 收口第 1 项：远端项目资源未加载），
- *    本机/WSL tab 契约上没有这个状态，且远端启动参数不含任何 trust flag（安全边界一字不改）。
+ * 6. 远端会话如实带 `remoteTrustUnhandled` 标记（P4.2 收口第 1 项：这条会话的 trust 由 PiDeck 决策表管理），
+ *    本机/WSL tab 契约上没有这个状态，且**未决策时**远端启动参数不含任何 trust flag（零行为变更；
+ *    决策真的能经端口落到 args 也在本套件里验证，见「注入 trust 解析器后…」）。
  */
 
 const { AgentManager } = loadTsCommonJs("src/main/pi/AgentManager.ts");
@@ -165,10 +166,13 @@ function createRecord() {
 	return { facts: [], launches: [], handles: [], prepares: [], forbidden: [], registrations: [], beforeSpawn: 0, launcherRequests: 0 };
 }
 
-function createPort(record, service) {
+function createPort(record, service, options = {}) {
 	return createRemoteRuntimePort({
 		resolveService: () => service,
 		settings: () => ({}),
+		// P4.4b：trust 决策由装配注入。本套件**默认不注入**（= 未决策），专门锁「未决策 ⇒ 一个 flag 都不加」；
+		// 传了解析器的用例用来证明这条断言不是空的（决策真的能经端口落到 plan.args 上）。
+		...(options.resolveTrust === undefined ? {} : { resolveTrust: options.resolveTrust }),
 	});
 }
 
@@ -450,17 +454,17 @@ test("会话身份 key 带 hostId：同路径不同主机不互相顶掉，同�
 	}
 });
 
-test("远端会话 tab 带 remoteTrustUnhandled 标记，且远端启动参数里没有任何 trust flag", async () => {
+test("远端会话 tab 带 remoteTrustUnhandled 标记；未决策时远端启动参数里没有任何 trust flag", async () => {
 	const record = createRecord();
 	const harness = createHarness({ projects: new Map([["remote", remoteProject("remote", HOST_ID)]]), record, remoteRuntime: createPort(record, createFakeService(record)) });
 	const { manager, restore } = harness;
 	try {
 		const tab = await manager.create({ projectId: "remote", title: "远端会话" });
-		// 语义：这条会话跑在「远端项目资源未加载」的状态（远端 pi 不信任加载 .pi/ 的项目级资源）。
+		// 语义：这条会话是远端会话（远端项目 .pi 资源的 trust 由 PiDeck 的决策表管理；提示条据此渲染）。
 		assert.equal(tab.remoteTrustUnhandled, true);
 		// 标记必须落在 agents:state 下发的 tab 上（渲染层只从那里读，见 sessionRemoteTrustNotice.test.mjs）。
 		assert.equal(manager.list().find((candidate) => candidate.id === tab.id).remoteTrustUnhandled, true);
-		// 安全边界一字不改：远端 plan 的参数里不出现信任覆盖 flag（也不新增别的 flag）。
+		// 未注入 trust 解析器 = 未决策：一个 flag 都不加（与历史行为逐字一致，安全边界不变）。
 		const args = record.launches[0].args;
 		assert.equal(args.includes("--approve"), false);
 		assert.equal(args.includes("--no-approve"), false);
@@ -469,13 +473,46 @@ test("远端会话 tab 带 remoteTrustUnhandled 标记，且远端启动参数�
 	}
 });
 
+test("注入 trust 解析器后：决策能落到 plan.args（这条断言不是空的），未决策仍不加", async () => {
+	/** 每次用一套全新 harness：一条会话的 tab 会记住 pi 报回来的会话文件，多次 create 会命中同一 runtime 而不再次 spawn。 */
+	const launchArgsFor = async (override) => {
+		const record = createRecord();
+		const trustPort = { trustOverride: async () => override };
+		const harness = createHarness({
+			projects: new Map([["remote", remoteProject("remote", HOST_ID)]]),
+			record,
+			remoteRuntime: createPort(record, createFakeService(record), { resolveTrust: () => trustPort }),
+		});
+		try {
+			await harness.manager.create({ projectId: "remote", title: "远端会话" });
+			assert.equal(record.launches.length, 1, "每个用例恰好启动一次远端会话");
+			return record.launches[0].args;
+		} finally {
+			harness.restore();
+		}
+	};
+
+	const undecided = await launchArgsFor(undefined);
+	assert.equal(undecided.includes("--approve"), false);
+	assert.equal(undecided.includes("--no-approve"), false);
+
+	const approved = await launchArgsFor("approve");
+	assert.ok(approved.includes("--approve"), "决策经端口落到 plan.args（trust 语义的真实入口）");
+	assert.equal(approved.includes("--no-approve"), false);
+
+	const denied = await launchArgsFor("no-approve");
+	assert.ok(denied.includes("--no-approve"));
+	assert.equal(denied.includes("--approve"), false);
+});
+
 /**
  * 源码级守卫（本机会话的行为级断言需要 electron 桩，不引入那套装置）：
  * - 标记**只**写在 `createRemoteUnlocked` 的 tab 字面量里；
  * - 本机 `createUnlocked` 的 tab 字面量不带这个字段（本地/WSL 契约向后兼容）；
- * - 远端分支不传 trustOverride，参数构造器也不认识 trust flag。
+ * - 远端分支不自己拼 trust（决策由运行时端口在 prepare 时解析，构造点只认已经解析好的决策），
+ *   参数构造器只在**显式传了决策**时追加 flag（缺省 = 不加，见 tests/remoteTrustFlagContract.test.mjs）。
  */
-test("只有远端分支写 remoteTrustUnhandled：本机 tab 不带、远端不传 trust flag", () => {
+test("只有远端分支写 remoteTrustUnhandled：本机 tab 不带、远端分支不拼 trust flag", () => {
 	const source = readFileSync("src/main/pi/AgentManager.ts", "utf8");
 	/** 取锚点之后、下一次 `const t1 = Date.now();` 之前的那一个 `const tab: AgentTab = {…};` 字面量。 */
 	const tabLiteral = (marker) => {
@@ -487,11 +524,17 @@ test("只有远端分支写 remoteTrustUnhandled：本机 tab 不带、远端不
 	assert.match(remoteTab, /remoteTrustUnhandled: true/);
 	assert.doesNotMatch(localTab, /remoteTrustUnhandled/);
 
-	// 注释里说明「刻意不传 trustOverride」是允许的；代码里出现才是违规。
+	// 注释里说明「远端 trust 不在 AgentManager 里解析」是允许的；代码里出现本机那套才是违规。
 	const remoteBody = source.slice(source.indexOf("private async createRemoteUnlocked("), source.indexOf("private async createUnlocked(input: CreateAgentInput)"));
-	assert.doesNotMatch(remoteBody.replace(/\/\/[^\n]*/g, ""), /trustOverride/);
-	assert.doesNotMatch(readFileSync("src/main/pi/piRpcArgs.ts", "utf8"), /--no-approve|--approve/);
-	assert.doesNotMatch(readFileSync("src/main/pi/piRemoteRuntimePlan.ts", "utf8"), /--no-approve|--approve|trustOverride/);
+	assert.doesNotMatch(remoteBody.replace(/\/\/[^\n]*/g, ""), /trustOverride|ensureProjectTrust/);
+	// 参数构造器只在显式传了决策时才加 flag：缺省分支不产生任何默认值（默认 approve 是明令禁止的）。
+	const remoteArgs = readFileSync("src/main/pi/piRpcArgs.ts", "utf8");
+	assert.match(remoteArgs, /if \(input\.trust !== undefined\) args\.push\(input\.trust === "approve" \? "--approve" : "--no-approve"\);/);
+	// plan 构造点只能透传决策，不认 flag 字面量（注释里讨论这两个 flag 是允许的，先剥注释再断言）。
+	const planCode = readFileSync("src/main/pi/piRemoteRuntimePlan.ts", "utf8")
+		.replace(/\/\*[\s\S]*?\*\//g, "")
+		.replace(/^[\t ]*\/\/[^\n]*/gm, "");
+	assert.doesNotMatch(planCode, /--no-approve|--approve/);
 });
 
 test("远端 runtime 的本机专属操作在守卫处拒绝；本机 runtime 行为不变", async () => {

@@ -6,8 +6,8 @@
  * 本机路径与本机语义。但两边跑的是同一个 pi、同一套 RPC，**基础参数必须逐字一致**，否则「本机好用、
  * 远端行为不一样」这种漂移极难查。所以把基础参数抽成这里唯一的一份，本地与远端都从这里取。
  *
- * 远端本轮（P4.2 最小闭环）只带基础参数：资源白名单/安全快照/trust 属 P4.4（远端 artifact 与统一
- * trust key），那时也只在这里扩，不在两个调用点各写一份。
+ * 远端本轮只带基础参数 + 远端项目 trust 决策（P4.4b）：资源白名单/安全快照属 P4.4 的其余部分，
+ * 那时也只在这里扩，不在两个调用点各写一份。
  */
 
 /** 基础参数只依赖这一个开关（与 `PiProcess` 的用法一致：缺省视为开启）。 */
@@ -32,7 +32,22 @@ export type RemotePiArgsInput = {
 	 * `~/.pi/agent/sessions/**` 下维护它的会话，本机不参与这个路径。
 	 */
 	readonly sessionFile?: string;
+	/**
+	 * 远端项目 trust 的决策（P4.4b），词表与本机 `PiProcess.start(sessionPath, trustOverride)` 逐字相同。
+	 *
+	 * **未决策时不要传这个字段**：`undefined` 表示「PiDeck 不表态」，参数里一个 trust flag 都不出现，
+	 * 远端行为与历史版本逐字一致（远端项目 `.pi` 资源是否加载仍由远端自己的 `defaultProjectTrust` 决定）。
+	 * 只有解析到了明确决策（approve / deny）才传值——禁止任何形式的默认 approve。
+	 * 决策来源见 `RemoteProjectTrustService`（key = hostId + endpoint 身份摘要 + 规范项目根）。
+	 */
+	readonly trust?: PiTrustOverride;
 };
+
+/**
+ * trust 覆盖值（本机与远端同一套词汇）：approve=信任项目本地文件，no-approve=忽略项目本地文件。
+ * 与 pi CLI 的 `--approve/--no-approve` 一一对应，映射只写在这里一处。
+ */
+export type PiTrustOverride = "approve" | "no-approve";
 
 /**
  * 远端 pi 的参数：基础参数 + 远端专用的少量项。
@@ -40,6 +55,10 @@ export type RemotePiArgsInput = {
  * 这里**不做**路径合法性之外的任何解释：`sessionFile` 必须是一条绝对 POSIX 路径（形状检查与仓库其它
  * 远端路径门同款），否则抛稳定码 —— 一个本机 Windows 路径（`C:\…`）或相对路径出现在远端命令行里都是
  * 静默错误，必须当场拒绝。
+ *
+ * `trust` 是唯一会改变远端项目 `.pi` 资源是否执行的参数：未传 = 一个 flag 都不加（零行为变更），
+ * 传了才追加对应的 flag。flag 字面量只允许出现在这个映射里（远端 launcher / plan 构造点不得自己拼，
+ * 见 `tests/remoteTrustFlagContract.test.mjs`）。
  */
 export function buildRemotePiArgs(input: RemotePiArgsInput = {}): string[] {
 	const args = basePiRpcArgs(input.settings);
@@ -47,6 +66,7 @@ export function buildRemotePiArgs(input: RemotePiArgsInput = {}): string[] {
 		assertRemoteAbsolutePath(input.sessionFile);
 		args.push("--session", input.sessionFile);
 	}
+	if (input.trust !== undefined) args.push(input.trust === "approve" ? "--approve" : "--no-approve");
 	return args;
 }
 

@@ -1,6 +1,7 @@
 import type { AgentBackend } from "./agent";
 import type { BusySendDelivery } from "../busySendDelivery";
 import type { ExternalEditorSettings } from "./project";
+import type { RemoteProjectTrustRecord } from "./remoteTrust";
 import type { SecurityConfig } from "./security";
 import type { SoundAlertSettings } from "./soundAlert";
 
@@ -591,6 +592,20 @@ export type AppSettings = {
 	 * 缺省 undefined/false：保持按需自动启动的历史语义。
 	 */
 	dshManualStopped?: boolean;
+
+	/**
+	 * 远端项目 trust 决策表（P4.4b）：每条记录 = 「某主机的某个远端项目根」被信任/拒绝过。
+	 *
+	 * 为什么放 settings.json：随配置备份一起走，与远端 pin（`ssh-host-keys/`）分开——pin 是密码学事实，
+	 * 决策是用户意图，两者生命周期不同（主机退役时决策随主机清理，见 `RemoteProjectTrustService.forgetHost`）。
+	 * key 用 `RemoteTrustKey.remoteTrustKey()` 的产物，三样材料（hostId / endpoint 身份 / 规范项目根）
+	 * 任一变化都会换 key，所以旧决策不会被自动继承（fail-closed，见 `docs/remote-trust-plan.md` §2）。
+	 *
+	 * 缺省/旧文件缺这一段 = 空表（自然兼容）；非数组或字段畸形的条目在读取时被丢弃。
+	 * **写入只走远端 trust 域**（`remote:trust-set` / `remote:trust-clear` → `SettingsStore.replaceRemoteProjectTrust`），
+	 * 渲染层的通用 `settings:update` 不得携带这一段（否则等于绕过 trust 域的边界校验）。
+	 */
+	remoteProjectTrust?: RemoteProjectTrustRecord[];
 };
 
 /**

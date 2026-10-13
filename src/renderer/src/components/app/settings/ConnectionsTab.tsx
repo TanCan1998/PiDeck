@@ -5,6 +5,7 @@ import { Button } from "../../ui-shadcn/button";
 import { AddHostDialog } from "./AddHostDialog";
 import { FingerprintConfirmDialog } from "./FingerprintConfirmDialog";
 import { RepairPanel } from "./RepairPanel";
+import { RemoteProjectTrustPanel } from "./RemoteProjectTrustPanel";
 import { SettingsSection } from "./SettingsStorageTab";
 import type { RemoteHostConnectionState, RemoteHostDiagnosticEntry, RemoteHostListItem, RemoteHostPinRequest } from "../../../../../shared/types/remoteHost";
 
@@ -165,6 +166,8 @@ export function ConnectionsTab() {
 					</div>
 				</div>
 			</SettingsSection>
+			{/* 远端信任清单：与主机列表同一页（都是「远端开发」这一域的设置），但状态权威是决策存储而非连接状态。 */}
+			<RemoteProjectTrustPanel />
 			{adding ? (
 				<AddHostDialog
 					onClose={() => setAdding(false)}

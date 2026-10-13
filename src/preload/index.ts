@@ -273,6 +273,21 @@ const api = {
 		/** 该项目已确认 root 的最近一次复核结果（只读；不建会话、不产生 helper 请求）。 */
 		rootStatus: (projectId: string) => ipcRenderer.invoke(ipcChannels.remoteProjectRootStatus, projectId) as Promise<import("../shared/types/remoteHost").RemoteProjectRootStatusResult>,
 	},
+	/**
+	 * 远端项目 trust（P4.4b）：清单 / 决策 / 撤销。
+	 *
+	 * 渲染层只能按 `(hostId, 项目根)` 寻址：trust key、endpoint 摘要、指纹都不出主进程
+	 *（返回的条目类型里结构上就没有这些字段，见 `shared/types/remoteTrust.ts`）。
+	 * 决策只影响**下一次 spawn** 传给远端 pi 的参数（`--approve/--no-approve`）。
+	 */
+	remoteTrust: {
+		/** 只读：列出已记录决策（含因 endpoint 变更已作废的条目）。功能未启用时返回稳定码。 */
+		list: () => ipcRenderer.invoke(ipcChannels.remoteTrustList) as Promise<import("../shared/types/remoteTrust").RemoteProjectTrustListResult>,
+		/** 记录一条决策（approve=信任该项目根的 `.pi` 资源 / deny=不信任）；下一次 spawn 生效。 */
+		set: (input: import("../shared/types/remoteTrust").RemoteProjectTrustSetInput) => ipcRenderer.invoke(ipcChannels.remoteTrustSet, input.hostId, input.remoteRoot, input.decision) as Promise<import("../shared/types/remoteTrust").RemoteProjectTrustSetResult>,
+		/** 撤销某 (hostId, 项目根) 的决策（已作废的条目一并删除）。 */
+		clear: (hostId: string, remoteRoot: string) => ipcRenderer.invoke(ipcChannels.remoteTrustClear, hostId, remoteRoot) as Promise<import("../shared/types/remoteTrust").RemoteProjectTrustClearResult>,
+	},
 	/** 远端会话只读发现与登记（Phase 3 第三段）；本批无侧栏 UI，通道先按 IPC 契约收口。 */
 	remoteSessions: {
 		scan: (hostId: string) => ipcRenderer.invoke(ipcChannels.remoteSessionScan, hostId) as Promise<import("../shared/types/remoteHost").RemoteSessionScanResult>,

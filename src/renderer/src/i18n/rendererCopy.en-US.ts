@@ -3324,6 +3324,18 @@ export const enUS: Record<TranslationKey, string> = {
 	"settings.connections.diagnostics": "Diagnostics",
 	"settings.connections.disabled": "Remote connections are not enabled.",
 	"settings.connections.listUnavailable": "Could not read the host list.",
+	// Remote project trust list (P4.4b): the audit and revoke entry point. The renderer only ever sees
+	// host label + project root + decision/status (no fingerprint, no endpoint digest).
+	"settings.remoteTrust.title": "Remote trust",
+	"settings.remoteTrust.hint": "Decides which remote project root on which host may load its own .pi resources (extensions, skills, prompts, project settings). A decision applies to the next remote session start; a fingerprint, user or port change invalidates it automatically.",
+	"settings.remoteTrust.empty": "No remote project trust decisions yet.",
+	"settings.remoteTrust.disabled": "The remote development experiment is not enabled.",
+	"settings.remoteTrust.listUnavailable": "Could not read the remote trust list.",
+	"settings.remoteTrust.state.approved": "Trusted",
+	"settings.remoteTrust.state.denied": "Denied",
+	"settings.remoteTrust.staleReason.endpoint-changed": "Invalidated: the endpoint changed (fingerprint/user/port), decide again",
+	"settings.remoteTrust.revoke": "Revoke",
+	"settings.remoteTrust.actionFailed": "Action failed: {code}",
 	"settings.connections.connectFailed": "Connection failed: {code}",
 	"settings.connections.disconnectFailed": "Disconnect failed: {code}",
 	"settings.connections.disabledTag": "Disabled",
@@ -4290,9 +4302,21 @@ export const enUS: Record<TranslationKey, string> = {
 	"branch.next": "Next branch",
 	"branch.children": "{count} child branches",
 	"branch.childrenTitle": "Child branches",
-	// Remote session trust status notice (P4.2): states that resources are not loaded; no trust semantics promised here (that is P4.4).
+	// Remote session trust (P4.2 notice → P4.4b decision): four states + actions.
+	// The authoritative state is PiDeck's own decision store (the remote pi has no project_trust event to consume);
+	// no fingerprint or digest ever appears in this copy.
 	"session.remoteTrust.title": "Remote project resources not loaded",
-	"session.remoteTrust.hint": "The remote project's .pi resources (extensions, skills, prompts, project settings) are not loaded: project trust cannot be confirmed without a UI, and PiDeck will not approve on your behalf. Security and read-only boundaries stay unchanged.",
+	"session.remoteTrust.hint": "The remote project's .pi resources (extensions, skills, prompts, project settings) are not loaded until you decide whether to trust this project. The decision applies to the next start.",
+	"session.remoteTrust.approved.title": "Remote project trusted",
+	"session.remoteTrust.approved.hint": "The remote project's .pi resources (extensions, skills, prompts, project settings) will be loaded on the next start.",
+	"session.remoteTrust.denied.title": "Remote project denied",
+	"session.remoteTrust.denied.hint": "The remote project's .pi resources (extensions, skills, prompts, project settings) will not be loaded, on the next start either.",
+	"session.remoteTrust.stale.title": "Remote trust invalidated",
+	"session.remoteTrust.stale.hint": "This host's endpoint changed (fingerprint, user or port), so the previous decision no longer applies: the remote project's .pi resources will not be loaded. Decide again.",
+	"session.remoteTrust.action.trust": "Trust this project",
+	"session.remoteTrust.action.deny": "Deny",
+	"session.remoteTrust.action.revoke": "Undo decision",
+	"session.remoteTrust.actionFailed": "Action failed: {code}",
 	"tool.copyDetail": "Copy full tool call details",
 	"tool.countSuffix": " tools",
 	"tool.done": "Tool calls complete",
