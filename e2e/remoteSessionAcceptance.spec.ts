@@ -76,6 +76,36 @@ async function dismissOnboarding(window: Page, waitMs: number): Promise<void> {
 	await expect(dialog, "引导关闭后不应再可见").toHaveCount(0);
 }
 
+/**
+ * 读主进程日志里**最后一条** `Remote pi runtime plan prepared` 的 args（真机 trust 验收的判据）。
+ *
+ * 为什么用这条日志：远端 args 是「这次 pi 到底带没带 --approve/--no-approve」的唯一权威记录，
+ * 而它出现在 runtime **准备**阶段（第一次 spawn/重启），不需要模型回合。日志位置按隔离 userData
+ * 推导（夹具把 userData 指到 <root>/profile），两个候选路径都试，找不到返回空串让调用方 poll。
+ */
+function readLatestPlanArgs(userDataRoot: string): string {
+	for (const dir of [join(userDataRoot, "profile", "logs"), join(userDataRoot, "logs")]) {
+		if (!existsSync(dir)) continue;
+		const files = readdirSync(dir)
+			.filter((name) => name.endsWith(".log"))
+			.sort();
+		if (files.length === 0) continue;
+		const lines = readFileSync(join(dir, files[files.length - 1]), "utf8")
+			.split("\n")
+			.filter((line) => line.includes("Remote pi runtime plan prepared"));
+		if (lines.length === 0) return "";
+		const last = lines[lines.length - 1];
+		try {
+			const parsed = JSON.parse(last) as { detail?: { args?: unknown } };
+			if (typeof parsed.detail?.args === "string") return parsed.detail.args;
+		} catch {
+			// 退化成原始行（仍然只含 args 与身份，不含正文）。
+		}
+		return last;
+	}
+	return "";
+}
+
 /** 会话 Tab 栏右上角的 ⋯ 菜单（运行控制组：启动/重启、停止回答、重新加载、关闭 Agent 都在这里）。 */
 async function openTabsActionMenu(window: Page): Promise<void> {
 	await window.locator(".session-tabs-actions").getByRole("button", { name: "更多操作" }).click();
@@ -572,6 +602,31 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 				await expect(notice).toContainText(TRUST_TITLE);
 				// 此刻**还没发送**：prompt 仍留在输入框里（提示可见不是发送后的错误态凑出来的）。
 				await expect(window.locator('.composer[data-session-id="' + sessionId + '"]')).toContainText(PROMPT);
+			});
+			await test.step("trust 决策落到下一次 spawn 的 args（真机：未决策零 flag → 信任后 --approve）", async () => {
+				const argsNow = () => readLatestPlanArgs(remoteUserDataRoot);
+				// 提示条 locator 就地取一次：上一个 step 里的同名变量在它自己的块作用域里（不能跨 step 复用）。
+				const notice = window.getByTestId("remote-session-trust-notice");
+				// 前置：runtime 已经起过一次（args 日志出现），否则下面读到的空串分不清「没起」与「没带 flag」。
+				await expect.poll(argsNow, { timeout: timeouts.helperMs, message: "runtime 必须先起来（args 日志出现）" }).toContain("--mode rpc");
+				const undecided = await argsNow();
+				expect(undecided, "未决策时不得带任何 trust flag（零行为变更）").not.toContain("--approve");
+				expect(undecided, "未决策时不得带任何 trust flag（零行为变更）").not.toContain("--no-approve");
+				// 用户从提示条点「信任该项目」：决策落盘，**下一次 spawn** 才生效（当前进程不会换参数）。
+				await notice.getByRole("button", { name: "信任该项目", exact: true }).click();
+				await expect(notice).toContainText("已信任远端项目", { timeout: timeouts.helperMs });
+				await openTabsActionMenu(window);
+				await expect(window.getByRole("menuitem", { name: "关闭 Agent", exact: true })).toBeVisible({ timeout: timeouts.helperMs });
+				await window.getByRole("menuitem", { name: "关闭 Agent", exact: true }).click();
+				await openTabsActionMenu(window);
+				const startItem = window.getByRole("menuitem", { name: /^(启动 Agent|重启)$/ });
+				await expect(startItem).toBeVisible({ timeout: timeouts.helperMs });
+				await startItem.click();
+				// 判据：新的那条 plan 记录必须带 --approve，且只带一次（禁止重复追加）。
+				await expect.poll(argsNow, { timeout: timeouts.helperMs, message: "信任后下一次 spawn 的 args 必须带 --approve" }).toContain("--approve");
+				const approved = await argsNow();
+				expect(approved.split("--approve").length - 1, "--approve 只允许出现一次").toBe(1);
+				expect(approved, "信任时不得同时带 --no-approve").not.toContain("--no-approve");
 			});
 		} finally {
 			if (consoleErrors.length > 0) console.log("[p42-acceptance] renderer console errors:\n" + consoleErrors.join("\n"));
