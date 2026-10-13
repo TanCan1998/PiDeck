@@ -47,6 +47,9 @@ const {
 	REMOTE_SESSION_HISTORY_READ_CHUNK_BYTES,
 	REMOTE_SESSION_HISTORY_WRITE_CHUNK_BYTES,
 } = loadTsCommonJs("src/main/remote/RemoteSessionHistoryWriter.ts");
+const { AgentMessageProjector } = loadTsCommonJs("src/main/pi/AgentMessageProjector.ts");
+const { stoppedMessageFingerprint } = loadTsCommonJs("src/main/pi/stoppedMessageIdentity.ts");
+const projector = new AgentMessageProjector({ translate: (key) => key, isAskAborted: () => false });
 const { SessionFileEditor, SessionFileEditorError } = loadTsCommonJs("src/main/pi/SessionFileEditor.ts");
 const { SessionCatalog } = loadTsCommonJs("src/main/sessions/SessionCatalog.ts", { stubs: { "../logging/sharedLogger": { getAppLogger: () => null } } });
 const { SessionRuntimeCoordinator } = loadTsCommonJs("src/main/sessions/SessionRuntimeCoordinator.ts");
@@ -227,6 +230,43 @@ async function remoteMutation(shell, operation, input = {}, options = {}) {
 	const writer = createWriter(shell, options);
 	return await writer.mutate({ hostId: HOST, locator: ABSOLUTE_LOCATOR, operation, messageId: `_viewer-history-${input.entryId ?? "u1"}`, ...input });
 }
+
+test("live IDs without entryId still mutate the persisted remote turn after stop", async (t) => {
+	for (const operation of ["edit", "delete", "resend"]) {
+		const document = fixtureDocument();
+		const shell = fakeShell({ [TARGET_PATH]: document });
+		const raw = JSON.parse(document.split("\n")[1]).message;
+		const projected = projector.convert("viewer", [raw], ["u1"])[0];
+		const timestamp = Date.parse("2026-01-01T00:00:00.000Z");
+		const stoppedIdentity = { role: "user", timestamp, fingerprint: stoppedMessageFingerprint(projected) };
+		const writer = createWriter(shell, { project: (messages, ids) => projector.convert("viewer", messages, ids) });
+		const result = await writer.mutate({ hostId: HOST, locator: ABSOLUTE_LOCATOR, operation, messageId: "live-random-id", stoppedIdentity, newText: "edited live message" });
+		const expected = await localMutation(t, document, operation, USER_TARGET, "edited live message");
+		assert.deepEqual(shell.bytes(), expected, `${operation}: the message exists on disk, so delete must not report a no-op`);
+		if (operation === "resend") assert.equal(result.text, "hello world");
+	}
+});
+
+test("stopped-identity fallback rejects ambiguous, stale and mismatched messages without remote writes", async () => {
+	const document = fixtureDocument();
+	const raw = JSON.parse(document.split("\n")[1]).message;
+	const projected = projector.convert("viewer", [raw], ["u1"])[0];
+	const identity = { role: "user", timestamp: Date.parse("2026-01-01T00:00:00.000Z"), fingerprint: stoppedMessageFingerprint(projected) };
+	const duplicate = JSON.stringify({ type: "message", id: "duplicate", parentId: "sys1", timestamp: "2026-01-01T00:00:00.000Z", message: raw });
+	for (const [content, stoppedIdentity] of [
+		[document + duplicate + "\n", identity],
+		[document, { ...identity, timestamp: identity.timestamp + 5001 }],
+		[document, { ...identity, fingerprint: "wrong" }],
+		[document, { ...identity, role: "assistant" }],
+	]) {
+		const shell = fakeShell({ [TARGET_PATH]: content });
+		const writer = createWriter(shell, { project: (messages, ids) => projector.convert("viewer", messages, ids) });
+		assert.equal(await rejectionCode(() => writer.mutate({ hostId: HOST, locator: ABSOLUTE_LOCATOR, operation: "delete", messageId: "live-random-id", stoppedIdentity })), REMOTE_SESSION_HISTORY_WRITER_CODES.messageNotFound);
+		assert.equal(shell.writeCommands().length, 0);
+		assert.equal(shell.replaceCommands().length, 0);
+		assert.equal(shell.text(), content);
+	}
+});
 
 test("edit writes the same bytes as the local SessionFileEditor (byte-for-byte parity)", async (t) => {
 	const document = fixtureDocument();
@@ -668,4 +708,60 @@ test("the three chains over an ssh record end to end: remote file rewritten, loc
 	const localResult = await coordinator.editCatalogMessage(draft.id, "live-4", "local edit", "entry-x");
 	assert.equal(localResult.ok, false, "替身 agents 没有本机写面能力：失败恰好证明它走的是本机分支");
 	assert.deepEqual(shell.commands.length, commandsBefore);
+});
+
+test("SSH stop retains the live identity before gateway cache destruction and isolates it by host and path", async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), "pideck-remote-live-stop-"));
+	t.after(() => rm(directory, { recursive: true, force: true }));
+	const catalog = new SessionCatalog(join(directory, "catalog.json"));
+	await catalog.load();
+	const registration = await catalog.ensureRemoteSession({ projectId: "remote", hostId: HOST, remoteSessionId: REMOTE_ID, remotePath: TARGET_PATH, title: "live", updatedAt: 1 });
+	const sessionId = registration.record.id;
+	const document = fixtureDocument();
+	const shell = fakeShell({ [TARGET_PATH]: document });
+	const writer = createWriter(shell, { project: (messages, ids) => projector.convert("viewer", messages, ids) });
+	const messages = [{ id: "live-random-id", role: "user", text: "hello world", timestamp: Date.parse("2026-01-01T00:00:10.000Z"), meta: { persistedTimestamp: Date.parse("2026-01-01T00:00:00.000Z") } }];
+	const tabs = [{ id: "agent-live", projectId: "remote", status: "idle", sessionPath: TARGET_PATH, createdAt: 1 }];
+	const retained = [];
+	const gateway = {
+		backend: "pi",
+		list: () => tabs,
+		getMessages: () => {
+			assert.equal(tabs.length, 1, "identity must be captured before stop, not after runtime caches are destroyed");
+			return messages;
+		},
+		stop: async () => {
+			tabs.length = 0;
+			messages.length = 0;
+		},
+	};
+	const coordinator = new SessionRuntimeCoordinator(
+		catalog,
+		gateway,
+		async () => undefined,
+		undefined,
+		undefined,
+		() => ({
+			mutate: async (input) => {
+				retained.push(input.stoppedIdentity);
+				return writer.mutate(input);
+			},
+		}),
+	);
+	coordinator.bindExistingAgent(sessionId, "agent-live");
+	const stopped = await coordinator.stopRuntime(coordinator.getTarget(sessionId));
+	assert.equal(stopped.ok, true);
+	const deleted = await coordinator.deleteCatalogMessage(sessionId, "live-random-id");
+	assert.equal(deleted.ok, true);
+	assert.equal(retained[0].role, "user");
+	assert.equal("text" in retained[0], false, "only the fingerprint may outlive the runtime, not the message body");
+	assert.deepEqual(shell.bytes(), await localMutation(t, document, "delete", USER_TARGET));
+
+	const otherHost = await catalog.ensureRemoteSession({ projectId: "other-host", hostId: "22222222-2222-4222-8222-222222222222", remoteSessionId: REMOTE_ID, remotePath: TARGET_PATH, title: "other host", updatedAt: 1 });
+	const otherPath = await catalog.ensureRemoteSession({ projectId: "other-path", hostId: HOST, remoteSessionId: "ws/other.jsonl", remotePath: SESSION_ROOT + "/ws/other.jsonl", title: "other path", updatedAt: 1 });
+	// 这里只核对端口收到的身份（另一台主机不存在于假文件表），不伪造文件成功结果。
+	await coordinator.deleteCatalogMessage(otherHost.record.id, "live-random-id");
+	await coordinator.deleteCatalogMessage(otherPath.record.id, "live-random-id");
+	assert.equal(retained[1], undefined);
+	assert.equal(retained[2], undefined);
 });

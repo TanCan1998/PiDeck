@@ -64,6 +64,7 @@ import { SessionFileEditor, type SessionEntryTarget, type SessionFileRef } from 
 import { SessionHistoryReader, boundTurnWindowStart } from "./SessionHistoryReader";
 import { scanJsonlLines } from "../sessions/jsonlLineStream";
 import { estimateMessagesPayloadBytes } from "./messagePayloadSize";
+import { bindRemoteUserMessageTimestamp } from "./remoteMessageTimestamp";
 import { StoppedMessageIdentityCache } from "./stoppedMessageIdentity";
 import {
 	currentIndexTree,
@@ -4854,6 +4855,14 @@ export class AgentManager {
 		}
 
 		const startMessage = isRecord(typed.message) ? typed.message : undefined;
+		if (typed.type === "message_start" && startMessage?.role === "user" && typeof startMessage.timestamp === "number" && Number.isFinite(startMessage.timestamp) && runtime && this.isRemoteRuntime(runtime.tab.projectId)) {
+			const messages = this.messages.get(agentId) ?? [];
+			const index = bindRemoteUserMessageTimestamp(messages, this.messageProjector.convert("_viewer", [startMessage])[0]);
+			if (index !== undefined) {
+				this.markMessagesDirtyFrom(agentId, index);
+				this.scheduleMessageEmit(agentId);
+			}
+		}
 		if (typed.type === "message_start" && startMessage?.role === "assistant") {
 			// abort 封印后的残留 assistant 事件应丢弃，防止误重新激活流式状态。
 			// stop()/关闭路径已 agents.delete + clearStreamGate（封印随之删除），
@@ -5866,6 +5875,12 @@ export class AgentManager {
 		}
 
 		this.messages.set(agentId, list);
+		// 远端事件时间与远端 JSONL 同源，保留作停止后的身份核对；不能拿本机时间跨时钟匹配。
+		const runtime = this.agents.get(agentId);
+		if (runtime && this.isRemoteRuntime(runtime.tab.projectId) && isRecord(partialMessage) && typeof partialMessage.timestamp === "number" && Number.isFinite(partialMessage.timestamp)) {
+			const message = list.find((candidate) => candidate.id === messageId);
+			if (message) message.meta = { ...message.meta, persistedTimestamp: partialMessage.timestamp };
+		}
 		// upsertAssistantMessage 被 text_start/end 等路径调用，走节流合并；
 		// message_end 等终态调用方会在调用后显式 flush，保证最终状态及时。
 		this.scheduleMessageEmit(agentId);

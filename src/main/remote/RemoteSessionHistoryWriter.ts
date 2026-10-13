@@ -49,7 +49,8 @@ import { randomBytes } from "node:crypto";
 // hostId 与 ssh 身份判据只允许有一份：与持久化边界共用 shared 的权威取值域。
 import { PROJECT_HOST_ID_PATTERN, readSshSessionLocator, type SshSessionLocator } from "../../shared/projectLocation";
 import type { ImageContent } from "../../shared/types";
-import { REMOTE_SESSION_HISTORY_CODES, remoteSessionHistoryMarker, resolveRemoteSessionPath, validateRemoteSessionHistoryPath, type RemoteSessionHistoryRootPort } from "./RemoteSessionHistoryReader";
+import { stoppedMessageFingerprint, type StoppedMessageIdentity } from "../pi/stoppedMessageIdentity";
+import { REMOTE_SESSION_HISTORY_CODES, remoteSessionHistoryMarker, resolveRemoteSessionPath, validateRemoteSessionHistoryPath, type RemoteSessionHistoryProjector, type RemoteSessionHistoryRootPort } from "./RemoteSessionHistoryReader";
 
 /** 单次读取的原始字节上界（base64 + 76 列折行后仍留在传输层 256 KiB 输出上界之下）。 */
 export const REMOTE_SESSION_HISTORY_READ_CHUNK_BYTES = 96 * 1024;
@@ -265,6 +266,8 @@ export type RemoteSessionHistoryWriterTransportPort = {
 
 export type RemoteSessionHistoryWriterPorts = {
 	transport: RemoteSessionHistoryWriterTransportPort;
+	/** 与远端读取侧共用的投影器：停止后按内容摘要恢复 live ID，只作唯一匹配，不能模糊挑选。 */
+	project?: RemoteSessionHistoryProjector;
 	/** 相对身份需要它；缺失时相对 identity 以 `PATH_UNRESOLVED` fail-closed（绝不猜会话根）。 */
 	resolveSessionRoot?: RemoteSessionHistoryRootPort;
 	/** 墓碑时间戳（测试注入固定时钟，好与本机编辑器逐字节比对）。 */
@@ -287,6 +290,8 @@ export type RemoteSessionMessageMutationInput = {
 	messageId: string;
 	/** 渲染层消息携带的文件条目 id（meta.entryId），首选锚点。 */
 	entryId?: string;
+	/** 协调器在停止前留存的有界身份摘要；仅内部传递，渲染层不能提供它。 */
+	stoppedIdentity?: StoppedMessageIdentity;
 	/** edit 的新正文；其余操作忽略。 */
 	newText?: string;
 };
@@ -496,9 +501,10 @@ function activeBranchIds(document: JsonlDocument): Set<string> {
  * `entryId` 提示优先（live randomUUID 在文件里必然不存在），其次渲染层合成 id 里的 entryId，再是裸 id；
  * 命中还必须落在**活动分支**上（被 rewind/fork 甩掉的旧分支条目不算，改它们等于改用户看不到的历史）。
  */
-function locateEntry(document: JsonlDocument, input: { messageId: string; entryId?: string }): LocatedEntry | undefined {
+function locateEntry(document: JsonlDocument, input: { messageId: string; entryId?: string; stoppedIdentity?: StoppedMessageIdentity }, project?: RemoteSessionHistoryProjector): LocatedEntry | undefined {
 	const branchIds = activeBranchIds(document);
-	const candidates: Array<string | undefined> = [input.entryId, syntheticHistoryEntryId(input.messageId), input.messageId];
+	const resolvedHint = input.entryId ?? input.stoppedIdentity?.entryId;
+	const candidates: Array<string | undefined> = [resolvedHint, syntheticHistoryEntryId(input.messageId), input.messageId];
 	for (const candidate of candidates) {
 		if (!candidate || !branchIds.has(candidate)) continue;
 		const lineIndex = document.entryLineById.get(candidate);
@@ -507,7 +513,27 @@ function locateEntry(document: JsonlDocument, input: { messageId: string; entryI
 		if (entry.type !== "message") continue;
 		return { lineIndex, entry, entryId: candidate };
 	}
-	return undefined;
+	// 实时 ID 不在 JSONL：与本机读者同一判据（活动分支、同角色、5 秒时间窗、完整内容摘要唯一命中）。
+	// 不按「最近一条相同文本」猜身份，重复 prompt/离支记录/未落盘消息必须拒绝，不能误改。
+	const identity = input.stoppedIdentity;
+	if (resolvedHint !== undefined || !identity || !project || !Number.isFinite(identity.timestamp)) return undefined;
+	const matches: LocatedEntry[] = [];
+	const nearby: LocatedEntry[] = [];
+	for (const entryId of branchIds) {
+		const lineIndex = document.entryLineById.get(entryId);
+		if (lineIndex === undefined) continue;
+		const entry = document.lines[lineIndex].entry;
+		if (!entry || entry.type !== "message" || roleOf(entry) !== identity.role) continue;
+		const raw = messageOf(entry);
+		const timestamp = typeof raw?.timestamp === "number" ? raw.timestamp : typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : NaN;
+		if (Math.abs(timestamp - identity.timestamp) <= 5000) nearby.push({ lineIndex, entry, entryId });
+	}
+	if (nearby.length > 256) return undefined;
+	for (const candidate of nearby) {
+		const projected = project([messageOf(candidate.entry)], [candidate.entryId]);
+		if (projected.some((message) => message.role === identity.role && stoppedMessageFingerprint(message) === identity.fingerprint)) matches.push(candidate);
+	}
+	return matches.length === 1 ? matches[0] : undefined;
 }
 
 /** 渲染层合成消息 id（`${agentId}-history-${entryId}`）→ entryId。 */
@@ -641,7 +667,7 @@ function extractResendContent(content: unknown): { text: string; images?: ImageC
 export type RemoteSessionHistoryWriter = RemoteSessionMessageMutationPort;
 
 export function createRemoteSessionHistoryWriter(ports: RemoteSessionHistoryWriterPorts): RemoteSessionHistoryWriter {
-	if (!isRecord(ports) || typeof ports.transport?.runRemoteCommand !== "function") throw stable(REMOTE_SESSION_HISTORY_WRITER_OPTIONS_INVALID);
+	if (!isRecord(ports) || typeof ports.transport?.runRemoteCommand !== "function" || (ports.project !== undefined && typeof ports.project !== "function")) throw stable(REMOTE_SESSION_HISTORY_WRITER_OPTIONS_INVALID);
 	const maxFileBytes = ports.maxFileBytes ?? REMOTE_SESSION_HISTORY_WRITE_MAX_BYTES;
 	const readChunkBytes = ports.readChunkBytes ?? REMOTE_SESSION_HISTORY_READ_CHUNK_BYTES;
 	const writeChunkBytes = ports.writeChunkBytes ?? REMOTE_SESSION_HISTORY_WRITE_CHUNK_BYTES;
@@ -748,11 +774,12 @@ export function createRemoteSessionHistoryWriter(ports: RemoteSessionHistoryWrit
 			// 先判后发：路径解析成功之前一条远端命令都不发。
 			const remotePath = await resolveRemotePath({ hostId, locator });
 			const document = parseDocument(await readRemoteFile(hostId, remotePath));
-			const located = locateEntry(document, { messageId, ...(entryId === undefined ? {} : { entryId }) });
+			const located = locateEntry(document, { messageId, ...(entryId === undefined ? {} : { entryId }), stoppedIdentity: input.stoppedIdentity }, ports.project);
 			if (!located) {
-				// 文件里没有这条消息：delete 是 no-op（一个远端命令都不发，消息本来就不在历史里），
+				// 文件里没有这条消息：delete 是 no-op（不产生远端写命令，消息本来就不在历史里），
 				// edit/resend 依赖正文，必须报未找到——与本机链路的判定一致。
-				if (operation === "delete") return undefined;
+				// 停止摘要存在但身份无法唯一核对时，delete 也必须拒绝，不能把定位缺陷伪装成删除成功。
+				if (operation === "delete" && !input.stoppedIdentity) return undefined;
 				throw stable(REMOTE_SESSION_HISTORY_WRITER_CODES.messageNotFound);
 			}
 			if (operation === "resend") {

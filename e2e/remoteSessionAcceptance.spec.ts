@@ -3,6 +3,7 @@ import { cpSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { encodePiSessionDirectory } from "../src/main/remote/remoteSessionProjectMatch";
+import { verifyRemoteHistoryMutations } from "./remote-history-mutations";
 import { REMOTE_ACCEPTANCE_ENV, createRemoteSessionInProject, matchesRemoteFingerprint, readRemoteAcceptanceCredentials, readRemoteAcceptanceTimeouts, remoteProjectRow, runRemoteCommand, test, type RemoteAcceptanceCredentials, type RemoteAcceptanceTimeouts } from "./remote-fixtures";
 
 /**
@@ -267,7 +268,7 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 	// 无凭据整体 skip：在 fixture setup 之前生效，所以既不会建临时 userData，也不会启动 Electron。
 	test.skip(credentials === undefined, HELP_TEXT);
 
-	test("远端会话产品路：新建 → 发 prompt 出正文 → 关闭 Agent → 重开历史仍在", async ({ remoteWindow, remoteUserDataRoot }) => {
+	test("远端会话产品路：新建 → 发 prompt 出正文 → 关闭 Agent → 重开历史仍在", async ({ remoteWindow, remoteUserDataRoot }, testInfo) => {
 		// 远端 bootstrap + 远端 pi 拉起 + 一次真实模型调用 + 关闭/重开：给足预算；超时是失败，不是挂起。
 		test.setTimeout(1_200_000);
 		const creds = credentials;
@@ -482,10 +483,8 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 			//   ② **原文件字节不变**（fork 不得就地改写 origin）；
 			//   ③ 原会话仍能从远端文件读回历史（换绑后它已无 runtime ⇒ 走远端读页路径）。
 			// 真机证据：originShaUnchanged=true newFiles=[] rowsAfterFork=2 + 新 session id。
-			await test.step("时间线「Fork」→ 远端 pi 落盘新会话文件 → 应用换绑新记录，旧会话与旧文件不动", async () => {
-				// 判据分层：① 远端真的多出一个 pi 自己写的新文件（不是 PiDeck 手写）；② 应用侧换绑到新记录
-				// （composer 的 session id 变了、归档前的旧记录仍在侧栏）；③ 旧文件字节不变；④ 旧会话仍能
-				// 从远端文件读回历史（换绑后旧记录的 runtime 已不存在 ⇒ 走读页路径）。
+			await test.step("时间线「Fork」→ 应用换绑新记录，旧会话与旧文件不动", async () => {
+				// 文件懒创建：断言换绑、旧文件字节不变、旧会话仍能读回历史；不要求新文件立即存在。
 				const originFile = (remoteSessionEvidence.match(/(\/\S+\.jsonl)/) ?? [])[1];
 				expect(originFile, "Fork 前必须定位到本次会话的远端文件").toBeTruthy();
 				if (!originFile) throw new Error("REMOTE_FORK_EVIDENCE_FILE_MISSING");
@@ -504,7 +503,7 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 				await userMessage.hover();
 				await userMessage.getByRole("button", { name: "Fork", exact: true }).click();
 				// 先等**产品侧**换绑完成（点 Fork 会先激活远端 runtime，约 20s+，再发 RPC；这期间远端目录当然还没文件）。
-				// 换绑成功本身证明主进程已从 fresh get_state 拿到新路径并登记成新记录 ⇒ 此刻远端文件必然已存在。
+				// 换绑成功证明主进程从 fresh get_state 拿到新身份；不代表懒创建的文件已经落盘。
 				const forkedSessionId = await expect
 					.poll(async () => window.locator(".composer[data-session-id]").first().getAttribute("data-session-id"), { timeout: timeouts.helperMs, message: "Fork 后必须换绑到一条新记录" })
 					.not.toBe(preForkSessionId)
@@ -547,6 +546,9 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 				await expect(timeline.locator(".assistant-text").first(), "原会话必须仍能从远端文件读回回复").toBeVisible({ timeout: timeouts.helperMs });
 				console.log("[p42-acceptance] fork: newSessionId=" + forkedSessionId + " origin=" + originFile);
 			});
+			const mutationFile = (remoteSessionEvidence.match(/(\/\S+\.jsonl)/) ?? [])[1];
+			if (!mutationFile) throw new Error("REMOTE_MUTATION_EVIDENCE_FILE_MISSING");
+			await verifyRemoteHistoryMutations({ window, credentials: creds, evidenceFile: mutationFile, evidenceDirectory: paths.sessionEvidenceDir, prompt: PROMPT, timeoutMs: timeouts.helperMs, testInfo });
 		} finally {
 			if (consoleErrors.length > 0) console.log("[p42-acceptance] renderer console errors:\n" + consoleErrors.join("\n"));
 			preserveAppLogs(remoteUserDataRoot, paths.runId);

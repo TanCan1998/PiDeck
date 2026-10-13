@@ -46,7 +46,7 @@ export class StoppedMessageIdentityCache {
 			identities.set(message.id, {
 				entryId: typeof message.meta?.entryId === "string" ? message.meta.entryId : undefined,
 				role: message.role,
-				timestamp: message.timestamp,
+				timestamp: typeof message.meta?.persistedTimestamp === "number" && Number.isFinite(message.meta.persistedTimestamp) ? message.meta.persistedTimestamp : message.timestamp,
 				fingerprint: stoppedMessageFingerprint(message),
 			});
 		}

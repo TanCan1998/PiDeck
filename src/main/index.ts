@@ -2797,6 +2797,7 @@ function registerIpc() {
 		? createRemoteSessionHistoryWriter({
 				transport: { runRemoteCommand: runPinnedRemoteCommand },
 				resolveSessionRoot: resolveRemoteSessionRoot,
+				project: (rawMessages, activeEntryIds) => agentManager.projectRemoteHistoryMessages(rawMessages, activeEntryIds),
 			})
 		: undefined;
 

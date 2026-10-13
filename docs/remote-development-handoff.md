@@ -459,7 +459,7 @@ trust-flag 门禁）上重跑完整真机验收 `e2e/remoteSessionAcceptance.spe
 | 删除归档 | `sessions:catalog-delete-archived` | 本机回收站（`shell.trashItem`）+ 归档索引 | **不适用且有意保持 fail-closed**：远端没有本机归档路径，也没有 `rm` 链路 | 需另立「真删远端数据」的显式动作（二次确认） |
 | 移除记录 | `sessions:catalog-delete` | **删本机会话文件（回收站）+ 移出 catalog** | 抛稳定码（fail-closed） | 需要产品决策 + （真删远端）远端写端口，见下条 |
 | edit-message | `sessions:catalog-edit-message` → `SessionRuntimeCoordinator.mutateCatalogMessage` | 改写 JSONL（本机：本机文件；ssh：**远端文件**，经 `RemoteSessionHistoryWriter`） | **P4.5c 已交付**：ssh 分支在 `getLocalFilePath` **之前**分流，分块读回 → 按本机同一语义算新内容 → 同目录临时文件分块写 → `mv` 原子替换；运行中**先判后发**（零远端命令，`SESSION_RUNTIME_BUSY`）；端口缺失/路径非法/超上界/命令失败一律稳定码且**目标文件不变**；日志只记身份与操作 |
-| delete-message | `sessions:catalog-delete-message` | 同上（写墓碑） | **P4.5c 已交付**（同写面）：assistant 的过程链一并墓碑、子节点重挂；文件里没有该消息时是 no-op（零远端命令） |
+| delete-message | `sessions:catalog-delete-message` | 同上（写墓碑） | **P4.5c 已交付**（同写面）：assistant 的过程链一并墓碑、子节点重挂；文件里没有该消息且无停止摘要时是 no-op（零远端写命令）；有实时身份摘要但无法唯一核对时拒绝，不谎报删除成功 |
 | prepare-resend | `sessions:catalog-prepare-resend` | 同上（截断该消息及其后继） | **P4.5c 已交付**（同写面）：返回原文/参考图快照 + 该条及其后继全部墓碑 |
 | fork | `sessions:runtime-fork` → pi RPC `fork`（需运行实例） | 官方 RPC → fresh `get_state` → 既有远端端口登记**新 ssh record** → coordinator 换绑 | **live-runtime 身份链已实现**（取消不 refresh/不登记；否定响应或状态读取失败按「身份未知」fail-closed） | **真机语义已查明（2026-10-12，协议级探针）**：pi 的 `fork` 立刻把 `get_state.sessionFile` 换成新路径，但该**文件懒创建**（要等该会话首次追加消息才落盘；连 `set_session_name` 成功也不落盘）⇒ 登记新记录是对的，但**新记录可能暂时指向磁盘上还不存在的文件**；应用侧换绑已真机验证（composer 换 session id、侧栏 1→2 行、原文件 sha256 未变）。验收步骤已按正确判据改写并**在真机跑通**（2026-10-12：`2 passed (2.0m)`，含 trust 步骤；证据 `originShaUnchanged=true newFiles=[] rowsAfterFork=2`）|
 | clone（同族，一并记录） | `sessions:runtime-clone`（RPC）/ `sessions:catalog-copy`（本机临时 pi 进程） | 同上（与 fork 同一替换 owner）；catalog 版先过 `getLocalFilePath` 守卫 | RPC 版同上（clone 在 pi 里也走 fork 语义）；catalog 版仍抛稳定码 | 同上（停态/临时会话面明确不做） |
@@ -488,15 +488,21 @@ trust-flag 门禁）上重跑完整真机验收 `e2e/remoteSessionAcceptance.spe
    ④ 运行中拒绝复用本机同一条 `SESSION_RUNTIME_BUSY`（渲染层既有文案 + debugDetails），没有 P4.5b 那种「先停止 Agent」专用 key；
    ⑤ 真机证据分层：**命令形状已在真实主机验证**（2026-10-12 探针：分块写 `base64 -d >`/`>>`、`wc -c <`、
       分块读 `tail -c +N -- | head -c M | base64`、`mv --` 原子替换四种形状逐条通过，base64 折行往返 200B→200B）⇒
-      worker 原先列的「`base64 -d` 可能不存在」风险已关闭；**仍未验证**的是三条链路在真实远端会话文件上的端到端行为
-      （需要一次真实回合，远端 pi 模型配额恢复后再跑）。
+      worker 原先列的「`base64 -d` 可能不存在」风险已关闭；内容语义端到端证据另见⑦，不能用传输成功代替。
    ⑥ 真机**往返**已验证（2026-10-12 探针，纯 shell 用写面的同一套命令形状）：取真实会话文件（2.4 MB 那条）的前 32 KiB 作载荷，
       分块读（`tail -c +N -- f | head -c 4096 | base64`）→ 分块写（`base64 -d >` / `>>`）→ `mv --` 原子替换：**8 块、字节级一致**、
-      源文件未变 ⇒ 分块边界数学与远端工具链在真数据上成立（含 base64 折行）。仍未验证：edit/delete/resend 的**内容语义**在
-      真机上的效果（与本机编辑器的逐字节对照目前只有本地行为测试）。
+      源文件未变 ⇒ 分块边界数学与远端工具链在真数据上成立（含 base64 折行）。这一证据仅验证传输层。
+   ⑦ **内容语义真机已验证（2026-10-13）**：`e2e/remote-history-mutations.ts` 作为默认产品路门禁，经真实 UI 操作本次测试生成的远端会话，
+      `e2e/remoteHistoryAssertions.ts` 用本机真实 `SessionFileEditor` 在临时副本生成期望，并逐字节比较整份结果：编辑 >4096B 中文/换行/引号正文；
+      重发旧轮次墓碑 + 同文件新增 user/assistant entryId；先删 user 保留并重挂 assistant，再删 assistant，重载后为空且文件不再变化。
+      首两跑暴露实时 UUID 未映射及跨机时钟约 5.8 秒偏差；修复为停止前保存 32 会话 × 256 消息的身份摘要（不留正文），
+      从 pi 原始事件保留远端时间，仅在活动分支中按角色 + 5 秒窗口 + 完整内容摘要唯一匹配；UI 时间不变，不放宽窗口，歧义/失配 fail-closed。
+      真机日志 `/tmp/p45c-real-ui-attempt3.log`：**2 passed（3.7m）**；最终重建 main/preload 后 `/tmp/p45c-real-ui-final.log`：**2 passed（3.9m）**。
+      11 个针对性测试文件 **190/190**、项目 typecheck、oracle 严格类型检查、spec `--list`、定向 Biome 均通过；JSONL before/after 附件随 Playwright trace 留存。
+      真实参考图重发、工具过程链、多会话并发仍仅有单测/既有边界证据，未在此真机切片中覆盖。
 4. fork / clone：远端 pi 会落盘**新**会话文件（经 pi 的写）。live-runtime 身份链已实现（见上表）：
    替换策略唯一 owner 是 `src/main/sessions/agentSessionReplacement.ts`（`main/index.ts` 只留依赖注入转发），
-   本机与 SSH 走同一个 `replaceBoundRuntime` 状态机。**停态 clone**（本机临时 pi 进程那条）与远端 edit/resend 仍不做。
+   本机与 SSH 走同一个 `replaceBoundRuntime` 状态机。**停态 clone**（本机临时 pi 进程那条）仍不做；远端 edit/resend 已由 P4.5c 写面承接。
 5. export-HTML：只缺接线（远端读能力已交付），不在本批。
 
 **P4.4b 已实现（远端项目 trust：决策存储 + flag 传递 + 决策 UX）**

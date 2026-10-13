@@ -39,6 +39,7 @@ import { createSessionModelPreference } from "../../shared/modelDisplayName";
 import { isRewindCheckpointId, isRewindRestoreScope } from "../../shared/types";
 import { REMOTE_SESSION_HISTORY_WRITER_CODES, remoteSessionHistoryWriteFailure, type RemoteSessionMessageMutationPort } from "../remote/RemoteSessionHistoryWriter";
 import type { SessionCatalogEntry } from "./SessionCatalog";
+import { StoppedMessageIdentityCache } from "../pi/stoppedMessageIdentity";
 import { sessionFileSizeMb } from "./sessionFileSizeCopy";
 
 export interface SessionCatalogGateway {
@@ -277,6 +278,8 @@ function sameAppliedPreferences(a: AppliedSessionPreferences | undefined, b: App
 
 export class SessionRuntimeCoordinator {
 	private readonly activationBySession = new Map<string, Promise<AgentTab>>();
+	/** SSH live ID 不能在远端文件中直接定位；停止前只留受限摘要（32 会话 × 256 消息），不留正文。 */
+	private readonly remoteStoppedMessageIdentities = new StoppedMessageIdentityCache();
 	private readonly deliveryByRequest = new Map<string, DeliveryCacheEntry>();
 	private readonly agentIdBySession = new Map<string, string>();
 	private readonly sessionIdByAgent = new Map<string, string>();
@@ -842,6 +845,11 @@ export class SessionRuntimeCoordinator {
 			// 规范化目标，别让陈旧身份挡住停止（此前用户只能靠重启停掉后台 Agent）。
 			const stopTarget = this.resolveStopTarget(target);
 			reservation = this.reserveBoundRuntime(stopTarget.sessionId, stopTarget.agentId);
+			const locator = this.catalog.getLocator(stopTarget.sessionId);
+			if (locator?.kind === "ssh") {
+				// stop 会销毁 gateway 消息缓存；必须在它之前捕获，且不能把远端路径交给本机 fs。
+				this.remoteStoppedMessageIdentities.capture(this.remoteMessageIdentityKey(locator), this.agents.getMessages(stopTarget.agentId));
+			}
 			await this.agents.stop(stopTarget.agentId);
 			this.requireCurrentReservation(reservation);
 			this.releaseRuntimeReplacement(reservation);
@@ -1982,6 +1990,11 @@ export class SessionRuntimeCoordinator {
 		}
 	}
 
+	/** host + opaque identity + path 同时绑定，换主机/路径之后不能复用旧 runtime 摘要。 */
+	private remoteMessageIdentityKey(locator: SshSessionLocator): string {
+		return JSON.stringify([locator.hostId, locator.remoteSessionId, locator.remotePath]);
+	}
+
 	/**
 	 * ssh 记录的 catalog 级改写：整条链走远端文件写面，本机一个路径解析都不做。
 	 *
@@ -2001,6 +2014,7 @@ export class SessionRuntimeCoordinator {
 				locator,
 				operation,
 				messageId,
+				stoppedIdentity: this.remoteStoppedMessageIdentities.get(this.remoteMessageIdentityKey(locator), messageId),
 				...(newText === undefined ? {} : { newText }),
 				...(entryId === undefined ? {} : { entryId }),
 			});

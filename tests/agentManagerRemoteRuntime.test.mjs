@@ -243,6 +243,35 @@ test("远端项目 + 注入端口：走远端分支（plan 用 locator.remotePat
 	}
 });
 
+test("remote user/assistant events retain pi timestamps for live-ID mutation across clock skew", async () => {
+	const record = createRecord();
+	const { manager, restore } = createHarness({ projects: new Map([["remote", remoteProject("remote", HOST_ID)]]), record, remoteRuntime: createPort(record, createFakeService(record)) });
+	try {
+		const tab = await manager.create({ projectId: "remote", title: "remote timestamps" });
+		const localTimestamp = Date.now();
+		const remoteTimestamp = localTimestamp - 60_000;
+		manager.messages.set(tab.id, [{ id: "live-user", role: "user", text: "prompt", timestamp: localTimestamp, meta: { requestId: "live-user" } }]);
+		const emit = (event) => record.handles[0].handle.stdout.write(JSON.stringify(event) + "\n");
+		emit({ type: "message_start", message: { role: "user", content: [{ type: "text", text: "prompt" }] } });
+		assert.equal(manager.getMessages(tab.id)[0].meta.persistedTimestamp, undefined, "projector fallback time is not remote evidence");
+		emit({ type: "message_start", message: { role: "user", content: [{ type: "text", text: "prompt" }], timestamp: remoteTimestamp } });
+		let messages = manager.getMessages(tab.id);
+		assert.equal(messages[0].meta.persistedTimestamp, remoteTimestamp);
+		assert.equal(messages[0].timestamp, localTimestamp, "display timestamps do not change");
+		emit({ type: "message_start", message: { role: "assistant", content: [], timestamp: remoteTimestamp + 10 } });
+		emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "answer" }], timestamp: remoteTimestamp + 10, stopReason: "stop" } });
+		messages = manager.getMessages(tab.id);
+		const answer = messages.find((message) => message.role === "assistant");
+		assert.equal(answer.meta.persistedTimestamp, remoteTimestamp + 10);
+		assert.equal(answer.text, "answer");
+		await manager.stop(tab.id);
+		emit({ type: "message_start", message: { role: "user", content: [{ type: "text", text: "prompt" }], timestamp: remoteTimestamp } });
+		assert.equal(manager.messages.has(tab.id), false, "late events must not rebuild stopped caches");
+	} finally {
+		restore();
+	}
+});
+
 test("远端会话：能停（stop 打到远端句柄）、能重启（第二次 plan 带 --session 重开同一远端会话）", async () => {
 	const record = createRecord();
 	const harness = createHarness({ projects: new Map([["remote", remoteProject("remote", HOST_ID)]]), record, remoteRuntime: createPort(record, createFakeService(record)) });

@@ -59,6 +59,15 @@
   断言文件确实移动/移回且 SHA-256 不变，恢复后能读回历史；运行中归档被拒且记录保留。
   已由 `e2e/remoteSessionAcceptance.spec.ts` 真机验证（2 passed / 2.4m，2026-10-12）。
   **不包含删除归档**：远端永久删除在 §1/§5 明确排除。
+- **内容语义真机 UI（2026-10-13）**：默认产品路包含 `e2e/remote-history-mutations.ts`，仅写本次 e2e 生成的文件。
+  编辑 >4096B 中文/换行/引号回复、重发墓碑后同文件新增真实 user/assistant entryId、连续删除 user → assistant 并重载为空；
+  用真实本机 `SessionFileEditor` 生成临时副本期望，完整结果逐字节核对，before/after JSONL 附件保留在 trace。
+  首跑证明实时 UUID 不能直接命中文件；第二跑拒绝定位，追到本机 UI 时间与远端 pi 时间约 5.8 秒差。
+  停止前保存有界摘要（不含正文），保留 pi 原始事件时间，在活动分支按角色/5 秒窗口/内容摘要**唯一**匹配；
+  不放宽时间窗、不凭相同正文猜最近一条；有摘要但定位失败的 delete 不再谎报 no-op。第三跑 **2 passed / 3.7m**，
+  日志 `/tmp/p45c-real-ui-attempt3.log`；最终重建 main/preload 后再次 **2 passed / 3.9m**（`/tmp/p45c-real-ui-final.log`）。
+  11 个针对性测试文件 **190/190**、项目 typecheck、oracle 严格类型检查、spec `--list`、定向 Biome 通过。
+  不代表真实参考图、工具链或外部并发写者也已真机验收。
 - **回归**：本机同操作行为不变；`e2e/remoteSessionAcceptance.spec.ts` 保持绿。
 
 ## 5. 边界
