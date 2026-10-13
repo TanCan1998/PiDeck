@@ -26,7 +26,7 @@ async function waitFor(predicate, label = "condition") {
  * handler(frame) 返回 result 即时应答;返回 error 对象应答错误;undefined 挂起。
  * writeFromCli() 让用例直接向 manager 推通知/请求。
  */
-function fakeAgentProcess(t, { handler = () => undefined } = {}) {
+function fakeAgentProcess(t, { handler = () => undefined, spawnError = undefined } = {}) {
 	const stdin = new PassThrough(); // manager → CLI(测试读)
 	const stdout = new PassThrough(); // CLI → manager(测试写)
 	const stderr = new PassThrough();
@@ -61,6 +61,8 @@ function fakeAgentProcess(t, { handler = () => undefined } = {}) {
 			stderr.destroy();
 		},
 	});
+	// ENOENT 等 spawn 失败在 spawn 返回后异步经 error 事件抛出（与真 Node 一致）。
+	if (spawnError) setImmediate(() => proc.emit("error", spawnError));
 	t.after(() => {
 		try {
 			stdin.destroy();
@@ -357,11 +359,151 @@ test("turnActive 期间重复 sendPrompt 被拒绝(agentMessage 同样不支持)
 	const second = await manager.sendPrompt({ agentId: tab.id, message: "b" });
 	assert.equal(second.accepted, false);
 	assert.match(second.error, /still responding/);
+	// 拒收携带本地化描述符：渲染层 translateI18nDescriptor 据此弹本地化 toast 而非英文原文。
+	assert.equal(second.i18nKey, "acp.turnBusy");
+	assert.equal(second.i18nParams?.tool, TOOL.name);
 	const withInstructions = await manager.sendPrompt({ agentId: tab.id, message: "c", agentMessage: "host rules" });
 	assert.equal(withInstructions.accepted, false);
 	assert.match(withInstructions.error, /Host instructions/);
+	assert.equal(withInstructions.i18nKey, "acp.hostInstructionsUnsupported");
 	void first;
 	await manager.stop(tab.id);
+});
+
+test("图片能力门控:agent 未声明 promptCapabilities.image 时带图发送被拒收并本地化;声明后放行且图块进发件帧", async (t) => {
+	let lastPrompt;
+	const mk = (capabilities) =>
+		harness(t, {
+			handler: (frame) => {
+				if (frame.method === "initialize") return { protocolVersion: 1, agentCapabilities: capabilities };
+				if (frame.method === "session/new") return { sessionId: "sess-img-cap" };
+				if (frame.method === "session/prompt") {
+					lastPrompt = frame.params;
+					return { stopReason: "end_turn" };
+				}
+				return {};
+			},
+		});
+	const images = [{ type: "image", mimeType: "image/png", data: "aW1n" }];
+	// 未声明图片能力:拒收(turn 未启,草稿回填由渲染层完成)
+	const denied = mk({ loadSession: false });
+	const deniedTab = await denied.createAgent();
+	const deniedResult = await denied.manager.sendPrompt({ agentId: deniedTab.id, message: "带图", images });
+	assert.equal(deniedResult.accepted, false);
+	assert.equal(deniedResult.delivery, "rejected");
+	assert.equal(deniedResult.i18nKey, "acp.imagesNotSupported");
+	assert.equal(deniedResult.i18nParams?.tool, TOOL.name);
+	assert.equal(lastPrompt, undefined, "拒收不得发出 session/prompt 帧");
+	// 声明图片能力:放行,prompt 帧携带 image 块(规范 content 顺序:文本后图)
+	const allowed = mk({ promptCapabilities: { image: true } });
+	const allowedTab = await allowed.createAgent();
+	const allowedResult = await allowed.manager.sendPrompt({ agentId: allowedTab.id, message: "带图", images });
+	assert.equal(allowedResult.accepted, true);
+	assert.deepEqual(lastPrompt.prompt, [
+		{ type: "text", text: "带图" },
+		{ type: "image", data: "aW1n", mimeType: "image/png" },
+	]);
+});
+
+test("AUTH_REQUIRED(回合期):-32000 拒收携带登录引导描述符(debugDetails 保留 RPC 原文)", async (t) => {
+	const { manager, createAgent } = harness(t, {
+		handler: (frame) => {
+			if (frame.method === "initialize") return { protocolVersion: 1, agentCapabilities: {} };
+			if (frame.method === "session/new") return { sessionId: "sess-auth" };
+			if (frame.method === "session/prompt") return { __error: true, code: -32000, message: "Authentication required" };
+			return {};
+		},
+	});
+	const tab = await createAgent();
+	const result = await manager.sendPrompt({ agentId: tab.id, message: "hi" });
+	assert.equal(result.accepted, false);
+	assert.equal(result.delivery, "rejected");
+	assert.equal(result.i18nKey, "acp.authRequired");
+	assert.equal(result.i18nParams?.tool, TOOL.name);
+	assert.equal(result.debugDetails, "ACP RPC error -32000: Authentication required", "RPC 原文必须留在 debugDetails 供排查");
+});
+
+test("usage_update 通知映射进 runtime.state 上下文仪表(used/size→contextTokens/Window/Percent,cost→cost)", async (t) => {
+	const { manager, createAgent, lastProc } = harness(t, {
+		handler: (frame) => {
+			if (frame.method === "initialize") return { protocolVersion: 1, agentCapabilities: {} };
+			if (frame.method === "session/new") return { sessionId: "sess-usage" };
+			return {};
+		},
+	});
+	const tab = await createAgent();
+	lastProc().writeFromCli({
+		jsonrpc: "2.0",
+		method: "session/update",
+		params: { sessionId: "sess-usage", update: { sessionUpdate: "usage_update", used: 25528, size: 1_000_000, cost: { amount: 0.42, currency: "USD" } } },
+	});
+	await waitFor(async () => (await manager.getRuntimeState(tab.id)).contextTokens === 25528, "usage 投影进 runtime.state");
+	const state = await manager.getRuntimeState(tab.id);
+	assert.equal(state.contextTokens, 25528);
+	assert.equal(state.contextWindow, 1_000_000);
+	assert.equal(state.contextPercent, 2.6);
+	assert.equal(state.cost, 0.42);
+	assert.equal(state.provider, "acp");
+});
+
+test("工具被删/禁用:create 直接拒且标 i18nKey acp.toolMissing（老会话绑定还在不报错 id）", async (t) => {
+	const { createAgent, manager } = harness(t, {
+		handler: () => ({}),
+	});
+	const failure = await manager.create({ projectId: "p1", backend: "acp", agentPreset: "tool-gone" }).catch((error) => error);
+	assert.match(failure.message, /not found or disabled/);
+	assert.equal(failure.i18nKey, "acp.toolMissing");
+	assert.equal(failure.i18nParams?.tool, "tool-gone");
+	void createAgent;
+});
+
+test("CLI 未安装(spawn ENOENT):create 抛出 acp.toolNotInstalled 描述符（带完整命令行供安装引导）", async (t) => {
+	const { createAgent, manager } = harness(t, {
+		spawnError: Object.assign(new Error("spawn gemini ENOENT"), { code: "ENOENT" }),
+		// 挂起 initialize：等 spawn 的 error 事件决定握手结局（真实 CLI 起不来就是应答绝不返回）。
+		handler: () => undefined,
+	});
+	const failure = await createAgent().catch((error) => error);
+	assert.equal(failure.i18nKey, "acp.toolNotInstalled");
+	assert.equal(failure.i18nParams?.tool, TOOL.name);
+	assert.equal(failure.i18nParams?.command, "gemini --experimental-acp");
+	assert.equal(failure.debugDetails, "spawn gemini ENOENT");
+	assert.equal(manager.list().length, 0);
+});
+
+test("握手超时(initialize 挂起):create 抛出 acp.startupTimeout 描述符（中性重试引导）", async (t) => {
+	const { createAgent, manager } = harness(
+		t,
+		{
+			handler: (frame) => {
+				if (frame.method === "initialize") return undefined; // 永不应答
+				if (frame.method === "session/new") return { sessionId: "never" };
+				return {};
+			},
+		},
+		{ handshakeTimeoutMs: 40 },
+	);
+	const failure = await createAgent().catch((error) => error);
+	assert.equal(failure.i18nKey, "acp.startupTimeout");
+	assert.equal(failure.i18nParams?.tool, TOOL.name);
+	assert.match(failure.debugDetails, /timed out after 40ms: initialize/);
+	assert.equal(manager.list().length, 0);
+});
+
+test("AUTH_REQUIRED(首启):session/new 返回 -32000 时 create 抛出带描述符的错误(coordinator 透传为登录引导 toast)", async (t) => {
+	const { createAgent, manager } = harness(t, {
+		handler: (frame) => {
+			if (frame.method === "initialize") return { protocolVersion: 1, agentCapabilities: {} };
+			if (frame.method === "session/new") return { __error: true, code: -32000, message: "Authentication required" };
+			return {};
+		},
+	});
+	const failure = await createAgent().catch((error) => error);
+	assert.ok(failure instanceof Error);
+	assert.match(failure.message, /Authentication required/);
+	assert.equal(failure.i18nKey, "acp.authRequired");
+	assert.equal(failure.i18nParams?.tool, TOOL.name);
+	assert.equal(manager.list().length, 0, "首启失败不留进程垃圾");
 });
 
 test("permission 审批:select label 映射 optionId 回传;cancel 走 cancelled 结局", async (t) => {
@@ -384,26 +526,26 @@ test("permission 审批:select label 映射 optionId 回传;cancel 走 cancelled
 	cli.writeFromCli({
 		jsonrpc: "2.0",
 		id: 777,
-		method: "permission/request",
+		method: "session/request_permission",
 		params: {
 			sessionId: "sess-1",
-			permissions: [{ type: "command", command: "rm -rf build" }],
+			toolCall: { toolCallId: "shell-1", title: "git status", rawInput: { command: "git status" } },
 			options: [
-				{ kind: "allow_once", name: "Allow" },
-				{ kind: "reject_once", name: "Reject" },
+				{ optionId: "allow-command", kind: "allow_once", name: "Allow" },
+				{ optionId: "reject-command", kind: "reject_once", name: "Reject" },
 			],
 		},
 	});
 	await waitFor(() => events.uiRequests.some((payload) => payload.method === "select" && payload.agentId === tab.id), "ui request raised");
 	const request = events.uiRequests.find((payload) => payload.method === "select");
-	assert.equal(request.title, "rm -rf build");
+	assert.equal(request.title, "git status");
 	assert.deepEqual([...request.options], ["Allow", "Reject"]);
-	// 渲染层点 Allow(label)→ manager 映射回 allow_once
+	// 渲染层点 Allow(label)→ manager 映射回原 optionId（不是 kind）
 	const accepted = await manager.sendUIResponse(tab.id, request.requestId, { type: "select", value: "Allow" });
 	assert.equal(accepted.accepted, true);
 	await waitFor(() => cli.frames.some((frame) => frame.id === 777 && frame.result), "respond frame sent");
 	const respondFrame = cli.frames.find((frame) => frame.id === 777 && frame.result);
-	assert.deepEqual(respondFrame.result, { outcome: "selected", optionId: "allow_once" });
+	assert.deepEqual(respondFrame.result, { outcome: { outcome: "selected", optionId: "allow-command" } });
 	// 完成事件让渲染层撤卡
 	assert.ok(events.uiRequests.some((payload) => payload.requestId === request.requestId && payload.completed === true));
 	void sendPromise;
@@ -431,13 +573,14 @@ test("连接死亡:pending 审批全部 cancelled 结算,tab 转 error", async (
 	cli.writeFromCli({
 		jsonrpc: "2.0",
 		id: 888,
-		method: "permission/request",
-		params: { sessionId: "sess-1", permissions: [{ type: "command", command: "cargo build" }], options: [{ kind: "allow_once" }] },
+		method: "session/request_permission",
+		params: { sessionId: "sess-1", toolCall: { toolCallId: "shell-2", title: "cargo build" }, options: [{ optionId: "allow-build", name: "Allow", kind: "allow_once" }] },
 	});
 	await waitFor(() => events.uiRequests.some((payload) => payload.method === "select"), "permission raised");
-	// 进程死亡 → conn.close 先行,管道已断:respond 帧无处可写(正常语义),
-	// 断言只看审批卡撤除(completed)与 tab 终态。
+	// exit 之后仍可能有 stdout 尾帧；Node 在 stdio 关闭后才发 close。
+	// 断言只看审批卡撤除(completed)与 tab 终态，已断管不要求送出回包。
 	cli.proc.emit("exit", 1, null);
+	cli.proc.emit("close", 1, null);
 	await waitFor(() => events.uiRequests.some((payload) => payload.completed === true), "pending permission settled cancelled");
 	const listed = manager.list().find((item) => item.id === tab.id);
 	assert.equal(listed.status, "error");
@@ -664,4 +807,54 @@ test("session/prompt 非超时拒绝（JSON-RPC 错误）不补发 session/cance
 	// 拒绝是 agent 即时应答：回合已在 agent 侧结束，再发 cancel 反而可能打断下一回合
 	await sleep(120);
 	assert.equal(lastProc().methodFrames("session/cancel").length, 0);
+});
+
+/**
+ * 用户消息主进程侧落库（2026-10 用户反馈：ACP 时间线只有 AI 回复，用户消息不见了）。
+ * ACP 的 user_message_chunk 是 agent 的可选回显，OpenCode 等根本不发；而 agents:message
+ * 是全量替换语义，渲染层的乐观气泡会被第一次 flush 抹掉。
+ */
+test("sendPrompt:agent 不回显时用户消息仍进投影,首条 prompt 兜底标题写回 catalog", async (t) => {
+	const titles = [];
+	const { manager, events, createAgent } = harness(
+		t,
+		{
+			handler: (frame) => {
+				if (frame.method === "initialize") return { protocolVersion: 1, agentCapabilities: {} };
+				if (frame.method === "session/new") return { sessionId: "sess-echo" };
+				if (frame.method === "session/prompt") return { stopReason: "end_turn" }; // 不回显 user_message_chunk
+				return {};
+			},
+		},
+		{ onTitleChanged: (deckSessionId, title) => titles.push({ deckSessionId, title }) },
+	);
+	const tab = await createAgent();
+	const result = await manager.sendPrompt({ agentId: tab.id, message: "修复登录页面的 bug" });
+	assert.equal(result.accepted, true);
+	const flushed = events.messages.at(-1);
+	const user = flushed.messages.find((message) => message.role === "user");
+	assert.ok(user, "用户消息必须由主进程落进投影，不依赖 agent 回显");
+	assert.equal(user.text, "修复登录页面的 bug");
+	assert.equal(flushed.totalLength, flushed.messages.length);
+	assert.deepEqual(titles, [{ deckSessionId: "deck-1", title: "修复登录页面的 bug" }], "首条 prompt 兜底标题必须写回 catalog（ACP 无本地会话文件）");
+	// 第二条 prompt 不得把标题改掉（agent 后续给的标题仍可覆盖，见投影器单测）
+	await manager.sendPrompt({ agentId: tab.id, message: "第二个问题" });
+	assert.equal(titles.length, 1);
+	assert.equal(events.messages.at(-1).messages.filter((message) => message.role === "user").length, 2);
+});
+
+test("sendPrompt 派发失败:撤回刚落的用户条目（不留没有回复的幽灵消息）", async (t) => {
+	const { manager, events, createAgent } = harness(t, {
+		handler: (frame) => {
+			if (frame.method === "initialize") return { protocolVersion: 1, agentCapabilities: {} };
+			if (frame.method === "session/new") return { sessionId: "sess-fail" };
+			if (frame.method === "session/prompt") return { __error: { code: -32000, message: "Authentication required" } };
+			return {};
+		},
+	});
+	const tab = await createAgent();
+	const result = await manager.sendPrompt({ agentId: tab.id, message: "会被拒绝的消息" });
+	assert.equal(result.accepted, false);
+	const flushed = events.messages.at(-1);
+	assert.equal(flushed.messages.filter((message) => message.role === "user").length, 0, "派发失败且 agent 未产出时必须撤回");
 });

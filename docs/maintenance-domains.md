@@ -3,11 +3,14 @@
 > 本文档承接 AGENTS.md 移出的领域运维细节。AGENTS.md 只保留每域一行硬约束速查；
 > 动手改对应模块前，先读本文对应小节。
 
+持久数据迁移统一登记在 [数据迁移台账](data-migrations.md)：新增、调整或退役迁移时，同次更新其触发条件、完成判据、失败/冲突行为、验证证据与退役条件。
+
 ## 应用命名与历史数据目录迁移
 
 - 三平台显示名统一 `PiDeck`，Dev 通道为 `PiDeck Dev`；npm 包名为 `pideck`，Linux 可执行文件为 `pideck` / `pideck-dev`。Linux 必须显式配置 `linux` / `deb` / `appImage` 的产物名，不能让 `.deb` 回退到 npm 历史名称；Dev 单独覆盖三者，避免空格或继承 stable 的 Debian 替代关系。
 - 正式安装版根为 Windows `%APPDATA%\PiDeck`、macOS `~/Library/Application Support/PiDeck`、Linux `~/.config/PiDeck`（遵循 Electron/XDG 路径）；调试态为 `PiDeck-dev[-<branch>]`，Dev 独立环境为 `PiDeck-channel-dev`。便携版仍为 exe 同级 `data/` / `data-channel-dev/`，显式目录不更名。
 - `userDataNameMigration.ts` 负责正式根与开发根的整目录更名、设置/自动化/目录记录/草稿/飞书配置里的绝对路径和会话 token 改写、pi 会话目录迁移与 `header.cwd` 修复；历史消息正文不改。`devUserDataMigration.ts` 必须在读取 Dev 决策指针之前调用，防止升级后独立环境被误判为未选择。
+- 完成状态存于各新根的 `user-data-name-migration.json`（`userDataMigrationState.ts`）：目录、列出的持久化配置路径和适用会话修复全部成功后才原子发布；绑定迁移版本、旧/新根、会话根与平台。命中有效记录后跳过扫描；没有记录的存量用户继续补修，读写失败或会话目录冲突不发布新完成记录、下次重试。根改名失败用旧根，根已改名后的补修失败继续用新根；会话目录两代并存时保留两边、不合并。此记录只证明本条迁移链，不代表飞书子目录/Bot 格式/凭据及其它迁移已验收；完整登记及当前验收状态见 [UD-001](data-migrations.md#ud-001本次补齐的完成状态)。
 - 飞书子目录由 `pi-desktop/` 整体迁到 `feishu/`，保留密文和绑定；路径在实际读写时解析，不在模块导入时缓存，避免早于 `app.setPath`。环境导入兼容两种子目录。改名失败继续旧目录并重试；两代目录并存时使用新目录，但不覆盖、删除或自动合并旧数据。
 - `appBrand.initializeAppBrand` 在 ready 前保留历史运行时名供 Electron 初始化 Linux/macOS 密钥环，ready 时恢复品牌；不能提前改加密身份，否则既有 safeStorage 密文/Cookie 无法使用原密钥。Windows AUMID、macOS bundle ID 和旧 localStorage key 保持兼容身份；旧名只用于兼容，不作为新的安装包或数据目录名。
 - 更新缓存新写入使用 `pideck-updater`，旧缓存可重建，保留不删除。验证入口：`tests/appBrand*.test.mjs`、`tests/*UserData*.test.mjs`、`tests/userData*.test.mjs`、`tests/feishuConfigDirectory.test.mjs`、`tests/feishuSecretStorage.test.mjs`、`tests/channelDataImport.test.mjs`；真实安装与系统密钥环仍需按平台 smoke。
@@ -133,3 +136,18 @@
 - opencc-js 按项目惯例**不是**项目依赖（与 `scripts/generate-t2s-table.cjs` 同：运行时只带生成出来的常量表）：首次生成 `npm i --no-save opencc-js@1.4.2 && node scripts/genZhTwCopy.mjs`。**新鲜度有两道不需要 opencc 的门禁**（都在 `tests/zhTwCopy.test.mjs`）：键集断言（加/删键）与产物头部的 `source-sha256` 指纹——它是 zh-CN 词典区块（`startMarker`…`endMarker` 之间原文）的 sha256，由生成器写入、测试复算，因此「只改值不加键」也会报红。脚本自身的 `--check` 在无 opencc 时直接跳过，**不能当门禁**；产物清单与指纹算法在 `scripts/zhTwCopySources.mjs`（生成器与测试共用，新增第五份产物只改这一处）。脚本头部的 `OVERRIDES` 是分词误伤修正表（opencc 把「内置→內建」拆成「内置→內置」、「播放按钮」附近消出「撥」字这类），**只增改有实际误伤的条目**，别拿它当通用术语表。
 - 语言分支点清单（新增语言/调整判定时一起改，否则某个进程会掉回简体）：`src/shared/types/settings.ts` 的 `AppLanguageMode` + `isTraditionalChineseLanguageTag`（简繁标签判定的唯一实现，其它进程都 import 它）→ `src/renderer/src/i18n.ts` 的 `resolveLocale` → `src/shared/i18n/mainProcessCopy.ts` 的 `normalizeMainProcessLocale` → `src/main/web/WebI18n.ts` 词典 + `src/main/web/WebServiceManager.ts` 注入脚本按浏览器语言分流（`zh-Hant` 也要认，客户端标签全是 `zh-TW`/`zh_CN` 形态）→ `src/main/feishu/FeishuI18n.ts` 的 `normalizeFeishuLocale`/`feishuLanguage`（飞书富文本 API 只认 zh/en，繁体沿用 `zh`）→ `src/main/floating/MiniOverlayWindow.ts` 的浮窗语言分支 → `CommonTab.tsx` 语言下拉。
 - 加载 i18n 模块的测试**别手写 vm 沙箱**：`FeishuI18n.ts` 现在有运行时依赖（繁体词典 + 简繁判定），旧式 `vm.runInNewContext` 沙箱一加 import 就整片失败——用 `tests/helpers/createTsSandbox.mjs`（按源文件目录解析），桩注入见 `tests/feishuI18n.test.mjs`。
+
+## ACP 会话链路（backend=acp 的第三方 CLI 接入）
+
+> 硬边界：ACP 是与 pi 并列的会话后端（`src/main/acp/`），不走 pi SDK/RPC；协议字段以 Agent Client Protocol v1 为准，类型收口在 `src/main/acp/acpProtocol.ts`，禁止为兼容单一 CLI 把非标准字段写回出站协议。
+
+- **wire 兼容红线**（都有针对性测试锁住，改前先看红名单）：initialize 必须 `protocolVersion:1` 且按 `agentCapabilities.loadSession` 决定恢复路径；`session/load` 返回 `result:{}` 合法（不带 sessionId）；权限应答必须嵌套 `{outcome:{outcome:"selected",optionId}}`/`{outcome:{outcome:"cancelled"}}`；配置写入是 `configId`（非 `id`）；`session/update` 通知按 `params.sessionId` 过滤，跨会话的 update 不得进时间线。工具/计划用标准 `tool_call_update` 局部补丁语义（省略字段保留旧值，content 是整表替换），`plan.entries` 整表替换 todos。入站键名宽容：`available_commands_update` 兼容 `commands`（规范 SDK）与 `availableCommands`（opencode 实测，2027-02 smoke 抓到）；非标准 `usage_update`（opencode/kimi 流传）投影进 runtime.state 上下文仪表（used/size/cost），缺失字段 last-wins 不抹旧值。
+- **投影器（AcpEventProjector.ts，纯函数）**：一次 user_message_chunk 只携带一个 content block，同一 prompt 的多块必须并回同一条 user 消息；工具 content 里的图片块保进消息 `images`（随物化链落 ref），detailText 里只窗 `[image]` 占位；settle 时 `max_tokens`→stopReason `length`、`cancelled/aborted`→`aborted`，其余才是 error。工具卡 UI 目前不渲染 images（与 DSH 一致），但数据不许丢。
+- **并发串行化**：manager 的 `updateChain`（投影→物化→flush）与 `configChain`（set_config_option 请求）都是按 runtime 串行的链——乱序响应会让迟到的旧整表回退 `runtime.configOptions` 并推过期通知，并发物化会用旧 messages 快照覆盖后到的新投影；动这两处前先读链上注释。
+- **传输（AcpConnection.ts）**：超限大行走 parseQueue 异步解析，小帧也须入队保序（禁止小帧超车）；stdout EOF 在队列排空前不得关连接；stdin 同步写抛错要收敛成 close 而不是崩主进程。行上限检查是逐行的字节上限，不是整 chunk。
+- **测试基建**：`tests/helpers/acpAgentHarness.mjs` 是内存 fake CLI（PassThrough 子进程 + 帧 handler，handler 返回 `undefined` 即不自动回包，可模拟乱序/延迟响应）；加载生产 TS 一律用 `tests/helpers/loadTsCommonJs.mjs`。ACP 回归集：`tests/acp{Connection,EventProjector,AgentManager,Compatibility,MessagePage,RuntimeLifecycle}.test.mjs` + `tests/useAcpSessionConfig.test.mjs`，改动后全跑。
+- **忙碌投递收敛**：ACP v1 无 steer 通道（回合中 agent 只认 `session/cancel`），`resolveBusySendDelivery` 第三参 `backend==="acp"` 恒回 followUp（split 菜单 steer 项置 undefined 隐藏、队列行 steer 按 `steerSupported` 禁用、`useQueuedPrompt.flushQueuedSteerPrompts` 防御跳过）——忙碌直发只会被 `AcpAgentManager` 拒收成失败队列项。steer 项留给空闲 drain（空闲时 steer 语义≈直发）。
+- **拒收/错误的本地化通道**：`SendPromptResult` 带 `I18nDescriptor`（`i18nKey`/`i18nParams`/`debugDetails`，渲染层 `translateI18nDescriptor` 消费）；激活**失败是 throw**，网关给 Error 挂同名描述符属性，coordinator 经 `shared/errorI18n.ts` 的 `descriptorFromThrownError` 透传。`localizeCreateFailure` 覆盖的场景：AUTH_REQUIRED(-32000)→`acp.authRequired`（create/prompt 两路）、spawn ENOENT→`acp.toolNotInstalled`（含完整命令行）、握手超时→`acp.startupTimeout`（deps.handshakeTimeoutMs 可注入）、工具被删/禁用→`acp.toolMissing`、turnBusy/processNotRunning/hostInstructionsUnsupported/imagesNotSupported；规则：换 i18nKey 必须同步验证主错误文案（`errorMessage(error)`）与 debugDetails，别吞掉根因。
+- **冷会话恢复提示**：`SessionAcpRestoreStrip`（纯函数 `utils/acpSessionRestore.resolveAcpRestoreHint`，单测 tests/acpSessionRestore.test.mjs）挂在 `SessionStartSurface` widgets 顶层，只有「backend=acp + acpSessionId + 未激活」才显示；绑定工具被删降级为只读引导。composer 占位符对 ACP 会话用 `app.composerAcpPlaceholder`（工具名来源：激活后 runtime.modelName，草稿期 acpToolId 查表）。
+- **图片能力门控**：`agentInfo.capabilities.promptImage` 来自 initialize 的 `promptCapabilities.image`；未声明时 `sendPrompt` 带图直接拒收（`acp.imagesNotSupported`），不然给不支持图的 agent 发 image 块只会换来整回合协议错误（acpCompatibility/acpRuntimeLifecycle 的物化用例显式声明 image=true）。
+- 已知未做（勿宣称完整支持）：冷历史自动恢复（catalog 恢复依赖 AcpMessagePage 游标）、真实 CLI smoke（`scripts/acpLiveSmoke.mjs` 需真实 agent，不进 CI）、工具卡图片渲染、`authenticate` RPC（AUTH_REQUIRED 目前只引导用户去终端登录，未拉起 agent 声明的 `authMethods`）。
