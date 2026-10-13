@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -59,7 +60,9 @@ const { REMOTE_SESSION_HISTORY_TRANSPORT_BYTES } = loadTsCommonJs("src/main/remo
 /** 命令形状：唯一解析点。生产实现的模板字面量一变，这里先红。 */
 const READ_WITH_SIZE_SHAPE = /^printf '([A-Za-z0-9_]+)'; wc -c < '([^'\\]+)'; tail -c \+(\d+) -- '[^'\\]+' \| head -c (\d+) \| base64$/;
 const READ_CHUNK_SHAPE = /^printf '([A-Za-z0-9_]+)'; tail -c \+(\d+) -- '([^'\\]+)' \| head -c (\d+) \| base64$/;
-const WRITE_CHUNK_SHAPE = /^printf '%s' '([A-Za-z0-9+/=]*)' \| base64 -d (>>|>) '([^'\\]+)'$/;
+const WRITE_CHUNK_SHAPE = /^(?:umask 077; set -C; )?printf '%s' '([A-Za-z0-9+/=]*)' \| base64 -d (>>|>) '([^'\\]+)'$/;
+const GUARD_SHAPE = /^'([^']+)' '-e' '[^']*' '(snapshot|commit)' '([^']+)' '([^']+)' '([^']*)' '([^']*)' '(\d+)'$/;
+const isCommit = (command) => GUARD_SHAPE.exec(command)?.[2] === "commit";
 const REPLACE_SHAPE = /^mv -- '([^'\\]+)' '([^'\\]+)'$/;
 
 function wrapColumns(text) {
@@ -77,7 +80,7 @@ function ancestorsOf(path) {
 }
 
 /**
- * 假远端 shell：内存文件表 + 上面四条命令的**真实语义**。
+ * 假远端 shell：内存文件表 + 上述读/上传/守卫命令的语义。
  * `failAt(command, index)` 让测试指定「第几条命令在远端失败」，用于验证失败即停与目标文件不变。
  */
 function fakeShell(initialFiles, options = {}) {
@@ -87,10 +90,28 @@ function fakeShell(initialFiles, options = {}) {
 	const commands = [];
 	const transport = {
 		async runRemoteCommand({ remoteCommand }) {
+			if (remoteCommand.length > 8192) throw new Error("TEST_REMOTE_COMMAND_LIMIT_EXCEEDED");
 			const index = commands.length;
 			commands.push(remoteCommand);
 			if (options.failAt?.(remoteCommand, index)) return { exitCode: 1, stdout: "" };
-			let match = READ_WITH_SIZE_SHAPE.exec(remoteCommand);
+			let match = GUARD_SHAPE.exec(remoteCommand);
+			if (match) {
+				const [, , operation, marker, path, temporary, expectedJson, limit] = match;
+				const content = files.get(path);
+				const result = (value) => ({ exitCode: 0, stdout: `${options.banner ? BANNER : ""}${marker}${JSON.stringify(value)}` });
+				if (!content) return result({ ok: false, code: "commandFailed" });
+				const revision = { mode: 0o600, size: content.length, dev: "1", ino: "1", uid: "1", gid: "1", mtimeNs: "1", ctimeNs: "1", digest: createHash("sha256").update(content).digest("hex") };
+				if (content.length > Number(limit)) return result({ ok: false, code: "fileTooLarge", details: { size: content.length, limit: Number(limit) } });
+				if (operation === "snapshot") return result({ ok: true, revision });
+				const expected = JSON.parse(expectedJson);
+				const upload = files.get(temporary);
+				if (!upload || upload.length !== expected.nextSize || createHash("sha256").update(upload).digest("hex") !== expected.nextDigest) return result({ ok: false, code: "transferInvalid" });
+				if (JSON.stringify(revision) !== JSON.stringify(expected.source)) return result({ ok: false, code: "fileChanged" });
+				files.set(path, upload);
+				files.delete(temporary);
+				return result({ ok: true });
+			}
+			match = READ_WITH_SIZE_SHAPE.exec(remoteCommand);
 			if (match) {
 				const [, marker, sizePath, start, count] = match;
 				const content = files.get(sizePath);
@@ -117,6 +138,7 @@ function fakeShell(initialFiles, options = {}) {
 					files.set(path, Buffer.concat([current, written]));
 					return { exitCode: 0, stdout: "" };
 				}
+				if (files.has(path)) return { exitCode: 1, stdout: "" };
 				files.set(path, written);
 				return { exitCode: 0, stdout: "" };
 			}
@@ -134,7 +156,7 @@ function fakeShell(initialFiles, options = {}) {
 		},
 	};
 	const writeCommands = () => commands.filter((command) => WRITE_CHUNK_SHAPE.test(command));
-	const replaceCommands = () => commands.filter((command) => REPLACE_SHAPE.test(command));
+	const replaceCommands = () => commands.filter(isCommit);
 	return {
 		files,
 		commands,
@@ -148,7 +170,7 @@ function fakeShell(initialFiles, options = {}) {
 }
 
 function createWriter(shell, options = {}) {
-	return createRemoteSessionHistoryWriter({ transport: shell.transport, resolveSessionRoot: shell.resolveSessionRoot, now: () => FIXED_TS, ...options });
+	return createRemoteSessionHistoryWriter({ transport: shell.transport, resolveNodePath: async () => "/usr/bin/node", resolveSessionRoot: shell.resolveSessionRoot, now: () => FIXED_TS, ...options });
 }
 
 function locatorWith(remotePath) {
@@ -371,23 +393,25 @@ test("prepare-resend tombstones the message and every descendant and returns the
 	assert.equal(entries.find((entry) => entry.id === "a3").type, "message");
 });
 
-test("the whole rewrite is temp-file chunks followed by exactly one atomic mv (single-quoted literals only)", async () => {
+test("the whole rewrite is private temp chunks followed by exactly one guarded atomic replacement", async () => {
 	const shell = fakeShell({ [TARGET_PATH]: fixtureDocument() });
 
 	await remoteMutation(shell, "edit", { entryId: "u1", newText: "edited" });
 
-	// 读一条 + 写一条（内容 < 4096）+ 替换一条：形状与顺序都被逐字钉住。
-	assert.equal(shell.commands.length, 3);
-	const read = READ_WITH_SIZE_SHAPE.exec(shell.commands[0]);
+	// 读前快照 + 分块读 + 读后复核 + 私密写 + 最后一次守卫提交；不能退化回裸 mv。
+	assert.equal(shell.commands.length, 5);
+	assert.equal(GUARD_SHAPE.exec(shell.commands[0])?.[2], "snapshot");
+	assert.equal(GUARD_SHAPE.exec(shell.commands[2])?.[2], "snapshot");
+	const read = READ_WITH_SIZE_SHAPE.exec(shell.commands[1]);
 	assert.notEqual(read, null, `读命令形状不符: ${shell.commands[0]}`);
 	assert.equal(read[4], String(REMOTE_SESSION_HISTORY_READ_CHUNK_BYTES), "单次读取窗口上界必须是有界常量");
 	// 读窗口的 base64 输出留在传输层 256 KiB 上界之下（两边的算术必须自洽，否则大文件读取必失败）。
 	assert.equal(Math.ceil(REMOTE_SESSION_HISTORY_READ_CHUNK_BYTES / 3) * 4 < REMOTE_SESSION_HISTORY_TRANSPORT_BYTES, true);
 	const [, , , start] = read;
 	assert.equal(start, "1", "第一次读从文件首字节开始");
-	assert.match(shell.commands[0], new RegExp(`'${TARGET_PATH.replaceAll("/", "\\/")}'`));
+	assert.match(shell.commands[1], new RegExp(`'${TARGET_PATH.replaceAll("/", "\\/")}'`));
 
-	const write = WRITE_CHUNK_SHAPE.exec(shell.commands[1]);
+	const write = WRITE_CHUNK_SHAPE.exec(shell.commands[3]);
 	assert.notEqual(write, null, `写命令形状不符: ${shell.commands[1]}`);
 	const [, , operator, tempPath] = write;
 	assert.equal(operator, ">", "第一块用 `>` 创建临时文件（后续块用 `>>` 追加）");
@@ -395,7 +419,11 @@ test("the whole rewrite is temp-file chunks followed by exactly one atomic mv (s
 	assert.equal(tempPath.slice(0, tempPath.lastIndexOf("/")), TARGET_PATH.slice(0, TARGET_PATH.lastIndexOf("/")), "临时文件必须在同目录（同一文件系统 ⇒ rename 原子）");
 	assert.match(tempPath.split("/").pop(), /^\..+\.pideck-tmp$/, "临时文件名隐藏且不以 .jsonl 结尾（远端扫描不会捡走它）");
 
-	assert.equal(shell.commands[2], `mv -- '${tempPath}' '${TARGET_PATH}'`);
+	const commit = GUARD_SHAPE.exec(shell.commands[4]);
+	assert.equal(commit?.[2], "commit");
+	assert.equal(commit?.[4], TARGET_PATH);
+	assert.equal(commit?.[5], tempPath);
+	assert.equal(JSON.parse(commit[6]).nextDigest, createHash("sha256").update(shell.bytes()).digest("hex"));
 	// 写内容的过程只碰临时文件：唯一提到目标路径的**写**命令是最后那条 mv。
 	assert.deepEqual(
 		shell.writeCommands().filter((command) => command.includes(TARGET_PATH)),
@@ -403,7 +431,8 @@ test("the whole rewrite is temp-file chunks followed by exactly one atomic mv (s
 	);
 	// 命令里只允许单引号字面量与 base64 字符集：没有任何第二套语法。
 	for (const command of shell.commands) {
-		assert.equal(/["`$\\\n]/.test(command), false, `命令行不得出现双引号/反引号/命令替换/反斜杠/换行: ${command}`);
+		assert.equal(/["`$\\\n]/.test(command.replace(/'[^']*'/g, "''")), false, `用户参数不得逃出单引号 argv: ${command}`);
+		assert.equal(/[\r\n]/.test(command), false, "单命令禁止换行");
 		assert.equal(command.length <= REMOTE_HELPER_MAX_REMOTE_COMMAND_LENGTH, true, `命令超过 pinned 通道的单命令上界: ${command.length}`);
 	}
 });
@@ -451,16 +480,16 @@ test("a failing remote command stops immediately: stable code, target bytes unto
 	assert.deepEqual(readFailure.replaceCommands(), []);
 
 	// ② 写临时文件失败：目标文件不变，且不再往下发命令。
-	const writeFailure = fakeShell({ [TARGET_PATH]: document }, { failAt: (_command, index) => index === 1 });
+	const writeFailure = fakeShell({ [TARGET_PATH]: document }, { failAt: (command) => WRITE_CHUNK_SHAPE.test(command) });
 	assert.equal(await rejectionCode(() => remoteMutation(writeFailure, "delete", { entryId: "a3" })), REMOTE_SESSION_HISTORY_WRITER_CODES.commandFailed);
-	assert.equal(writeFailure.commands.length, 2);
+	assert.equal(writeFailure.commands.length, 4);
 	assert.equal(writeFailure.bytes().toString("utf8"), document);
 	assert.deepEqual(writeFailure.replaceCommands(), []);
 
 	// ③ mv 失败（临时文件写成功了也不算成功）：稳定码 + 目标文件不变。
-	const replaceFailure = fakeShell({ [TARGET_PATH]: document }, { failAt: (_command, index) => index === 2 });
+	const replaceFailure = fakeShell({ [TARGET_PATH]: document }, { failAt: isCommit });
 	assert.equal(await rejectionCode(() => remoteMutation(replaceFailure, "delete", { entryId: "a3" })), REMOTE_SESSION_HISTORY_WRITER_CODES.commandFailed);
-	assert.equal(replaceFailure.commands.length, 3);
+	assert.equal(replaceFailure.commands.length, 5);
 	assert.equal(replaceFailure.bytes().toString("utf8"), document);
 	assert.equal(REMOTE_SESSION_HISTORY_WRITER_CODES.commandFailed.match(STABLE_CODE) !== null, true);
 });
@@ -468,7 +497,7 @@ test("a failing remote command stops immediately: stable code, target bytes unto
 test("a truncated read is refused instead of writing back half the history", async () => {
 	const document = fixtureDocument();
 	// 远端少回一个字节：长度校验必须拦住它（写回半截内容是最坏的结果）。
-	const shell = fakeShell({ [TARGET_PATH]: document }, { failAt: (command, index) => index === 0 && command.includes("wc -c") });
+	const shell = fakeShell({ [TARGET_PATH]: document }, { failAt: (command) => command.includes("wc -c") });
 	// 第一条命令「成功」但内容被截断：用一个在 read 之后动手的通道模拟。
 	const truncated = fakeShell({ [TARGET_PATH]: document });
 	const original = truncated.transport.runRemoteCommand;

@@ -2797,6 +2797,11 @@ function registerIpc() {
 		? createRemoteSessionHistoryWriter({
 				transport: { runRemoteCommand: runPinnedRemoteCommand },
 				resolveSessionRoot: resolveRemoteSessionRoot,
+				resolveNodePath: async (hostId) => {
+					const port = await remoteHostServiceIfEnabled();
+					if (!port) throw new Error("REMOTE_CONNECTION_SERVICE_UNAVAILABLE");
+					return (await port.remotePiRuntimeFacts(hostId)).nodePath;
+				},
 				project: (rawMessages, activeEntryIds) => agentManager.projectRemoteHistoryMessages(rawMessages, activeEntryIds),
 			})
 		: undefined;

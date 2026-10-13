@@ -24,7 +24,7 @@
 | 移除记录 | 只动本机 catalog + 墓碑；有运行实例时先停进程（**零远端数据写入**） | **P4.5a** |
 | 归档 / 取消归档 / 列出归档 | 远端 `move` 进 `.pideck-archive/`（同目录旁）+ 本机归档索引；取消归档不能沿用本机「归档路径」契约（按本机 catalog id 恢复，见 handoff、「P4.5b 已实现」） | **P4.5b 已交付** |
 | 删除归档 | 远端 `rm`（**永久删除**，无回收站） | **不做**（P4.5b 明确排除，fail-closed：远端路径不过 IPC、写面无 `rm`）；需另立需二次确认的显式动作 |
-| edit-message / delete-message / prepare-resend | 改写远端 JSONL（截断/墓碑行） | **P4.5c 已交付**（`RemoteSessionHistoryWriter`：分块读回 + 同目录临时文件 + `mv` 原子替换；运行中先判后发，整读上界 256 KiB，UI 判据已认 ssh locator）；**不做**远端删文件与停态 clone |
+| edit-message / delete-message / prepare-resend | 改写远端 JSONL（截断/墓碑行） | **P4.5c 已交付并加固**（`RemoteSessionHistoryWriter` + `RemoteSessionWriteGuard`：分块读回 + 私密临时文件 + SHA-256/文件身份复核后原子 rename；运行中先判后发，原文及改写结果上界 256 KiB，UI 判据已认 ssh locator）；**不做**远端删文件与停态 clone |
 | fork / clone（落盘） | pi 自己写新会话文件（经 RPC，不由 PiDeck 写） | **P4.5d 有界切片已实现**（live-runtime 身份链；停态 clone 与临时会话面不做，
   非全量 P4.5d/P4.5c） |
 | 改名后的 `name` 行 | 改写远端 JSONL | P4.5c（可经 pi RPC 时优先 RPC） |
@@ -36,8 +36,7 @@
    摘要/严格配置）。**不新增 helper op**、不改 runner 契约版本。
 2. **参数安全**：远端路径必须**绝对**、规范化、**拒绝含单引号**（沿用 `RemoteTrustKey.canonicalRemoteRoot` 与
    读取侧同源规则）；命令里只允许单引号字面量，禁止字符串插值拼接。
-3. **原子性**：改写类操作一律 **同目录临时文件 + 原子 `mv`**（远端同文件系统内 rename 是原子的），避免半截写入；
-   禁止「先截断再写」。
+3. **原子性与权限**：改写类操作一律**同目录临时文件 + 原子 rename**，禁止「先截断再写」。消息改写首块以 `umask 077` + noclobber 排他创建，上传期间为 `0600`；固定远端 Node 提交命令复核完整性与原文件版本后才恢复原 POSIX mode。源/临时 inode 的 uid/gid 必须一致（不执行 chown）。失败尝试将残留临时文件恢复为 `0600`，不自动清理、不重试；不承诺复制 ACL/xattr。
 4. **失败即停**：破坏性动作**不自动重试**；失败返回稳定码，并把已知的实际状态写进日志与 UI（不谎报成功）。
 5. **脱敏**：日志只记稳定码与身份（hostId/sessionId），**不记路径、不记命令、不记正文**（沿用既有纪律）。
 
@@ -46,6 +45,8 @@
 - 会话文件正被远端 pi 追加时，**禁止** PiDeck 直接改写该文件（edit/delete-message/resend/改名 name 行）：
   - **优先经 pi 自己的 RPC**（运行中会话的 edit/resend 与本地同路）；RPC 不可用则要求**先停止 Agent**，
     并在 UI 明确提示原因，而不是排队等待或并发写。
+- 消息改写同时采用**乐观版本复核**：远端 Node 快照包括 mode/size/dev/ino/uid/gid/mtimeNs/ctimeNs/SHA-256；读前、实际读回内容、读后、提交前一致才可替换。变化返回 `REMOTE_SESSION_HISTORY_WRITER_FILE_CHANGED`，现有 IPC 失败包络承接，双语 UI 提示重载，不自动覆盖。
+- **不是严格互锁**：最终复核与 rename 之间仍有非协作写者竞态。原子 rename 只保证不出现半截文件，不是文件系统 CAS；另一机器上的 TUI/手工编辑不参与本应用 runtime 锁。提交后丢失 SSH 回执可能结果未知，须重载核对，不保证所有错误都代表「从未提交」。
 - 归档/移动同理：**运行中会话禁止 move**（会与 pi 的写入打架）。判断依据：该会话当前是否绑定运行实例
   （`sessionRuntimeCoordinator.getTarget(sessionId)`）+ 远端 pi 是否仍在写。
 - 任何"不确定是否在写"的情形 ⇒ **fail-closed 拒绝**并给出「请先停止 Agent」的可执行提示。
@@ -67,11 +68,14 @@
   不放宽时间窗、不凭相同正文猜最近一条；有摘要但定位失败的 delete 不再谎报 no-op。第三跑 **2 passed / 3.7m**，
   日志 `/tmp/p45c-real-ui-attempt3.log`；最终重建 main/preload 后再次 **2 passed / 3.9m**（`/tmp/p45c-real-ui-final.log`）。
   11 个针对性测试文件 **190/190**、项目 typecheck、oracle 严格类型检查、spec `--list`、定向 Biome 通过。
-  不代表真实参考图、工具链或外部并发写者也已真机验收。
+  这批初始语义证据不代表真实参考图、工具链或外部并发写者也已真机验收；后续并发追加证据见下项。
+- **权限与冲突加固（2026-10-13）**：`tests/remoteSessionWriteGuard.test.mjs` 在一次性本机 POSIX 目录执行生产命令，先写 16 条回归全部红，实施后转绿；扩展为 24 条，覆盖三种 mode 的 edit/delete/resend、多块上传私密性、同长度篡改/追加/同字节换 inode/权限变化/删除、读期间和上传期间变化、临时文件碰撞/软链接、临时内容篡改、超限、rename 失败回收私密权限及归属失配。默认真机 UI 再增加本次专用会话的上传期外部追加反例：原追加逐字节保留、未覆盖成请求的新正文、UI 明确提示重载、残留 temp 为 `0600`；之后重载与 edit/resend/delete 正常闭环仍绿。真机原文件统一收紧为 `0600`，每一步再核对 mode。本切片未降低旧内容语义断言。最终相关14文件 **227/227**、typecheck 和 spec `--list` 通过；最终构建真机 **2 passed / 4.2m**（`/tmp/remote-write-hardening-ui-final.log`），trace/JSONL 在 `/tmp/remote-write-hardening-ui-final-artifacts/`。
 - **回归**：本机同操作行为不变；`e2e/remoteSessionAcceptance.spec.ts` 保持绿。
 
 ## 5. 边界
 
 - 远端路径与 endpoint 身份规则与读取/trust 侧**同源**（一处实现，禁止第二套归一化）。
 - 渲染层不得出现 fingerprint（既有硬边界）：写面的 UI 只显示主机 label 与稳定码文案。
+- `RemoteSessionWriteGuard` 固定脚本只使用远端 Node 标准库，经既有 pinned SSH 短命令运行，Node 路径来自 `remotePiRuntimeFacts`；缺失即拒绝，不尝试系统 Node、不依赖 pi SDK、不升级远端软件、不改 helper 协议。保留每条命令长度门禁与 256 KiB 输入/输出上界。
+- Windows/macOS 客户端、非 Linux 远端及 ACL/xattr 未在本切片验收；不能外推为完整并发锁或全部元数据 parity。
 - 真删远端数据、批量操作、跨项目移动：**不在本计划内**，另行评估与授权。

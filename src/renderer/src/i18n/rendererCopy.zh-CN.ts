@@ -1,6 +1,7 @@
 import { mainProcessZhCN } from "../../../shared/i18n/mainProcessCopy";
 
 export const zhCN = {
+	"sessionCommand.remoteFileChanged": "远端会话文件已被其他程序修改，本次操作未覆盖这些修改。请重新加载会话后再操作。",
 	"quickTask.title": "PiDeck 小任务",
 	"quickTask.new": "新任务",
 	"quickTask.workbench": "打开完整工作台",

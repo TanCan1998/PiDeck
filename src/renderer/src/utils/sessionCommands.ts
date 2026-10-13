@@ -28,7 +28,7 @@ export class SessionCommandFailure extends Error {
 	readonly needsRestart?: boolean;
 
 	constructor(error: SessionCommandError) {
-		super(t(SESSION_COMMAND_ERROR_KEYS[error.code], error.params));
+		super(t(error.code === "SESSION_COMMAND_FAILED" && error.debugDetails === "REMOTE_SESSION_HISTORY_WRITER_FILE_CHANGED" ? "sessionCommand.remoteFileChanged" : SESSION_COMMAND_ERROR_KEYS[error.code], error.params));
 		this.name = "SessionCommandFailure";
 		this.code = error.code;
 		this.params = error.params;

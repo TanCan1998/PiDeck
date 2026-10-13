@@ -1853,6 +1853,10 @@ test("remote write failures map onto the session command error codes without lea
 	const missing = await failing(new Error("REMOTE_SESSION_HISTORY_WRITER_MESSAGE_NOT_FOUND")).editCatalogMessage("session-1", "message-1", "updated");
 	assert.equal(missing.error.code, "MESSAGE_NOT_FOUND");
 
+	const conflict = await failing(new Error("REMOTE_SESSION_HISTORY_WRITER_FILE_CHANGED")).deleteCatalogMessage("session-1", "message-1");
+	assert.equal(conflict.ok, false);
+	assert.equal(conflict.error.code, "SESSION_COMMAND_FAILED");
+	assert.equal(conflict.error.debugDetails, "REMOTE_SESSION_HISTORY_WRITER_FILE_CHANGED");
 	// 其余稳定码落 SESSION_COMMAND_FAILED，且 debugDetails 只有码（不含路径/命令/正文）。
 	const failed = await failing(new Error("REMOTE_SESSION_HISTORY_WRITER_COMMAND_FAILED")).deleteCatalogMessage("session-1", "message-1");
 	assert.equal(failed.error.code, "SESSION_COMMAND_FAILED");

@@ -2,6 +2,7 @@ import { mainProcessEnUS } from "../../../shared/i18n/mainProcessCopy";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
 
 export const enUS: Record<TranslationKey, string> = {
+	"sessionCommand.remoteFileChanged": "The remote session file changed outside this operation. Those changes were not overwritten. Reload the session before trying again.",
 	"quickTask.title": "PiDeck quick task",
 	"quickTask.new": "New task",
 	"quickTask.workbench": "Open workbench",

@@ -12,7 +12,7 @@
  * 传输包络（硬约束，算术写在这里而不是口口相传）：
  * - 单条远端命令 ≤ 8192 字符（`REMOTE_HELPER_MAX_REMOTE_COMMAND_LENGTH`；`buildPinnedSshInvocation`
  *   会拒掉超长命令，也拒换行/控制字节）⇒ **整份内容塞不进一条命令**：写盘按
- *   `REMOTE_SESSION_HISTORY_WRITE_CHUNK_BYTES`（4096 原始字节 → base64 5462 字符）一条命令分块追加到
+ *   `REMOTE_SESSION_HISTORY_WRITE_CHUNK_BYTES`(4096 原始字节 → base64 5464 字符)一条命令分块追加到
  *   临时文件；
  * - 单条命令的 stdout ≤ 256 KiB（`SshClientRuntime.run` 的 maxBuffer）⇒ 读回按
  *   `REMOTE_SESSION_HISTORY_READ_CHUNK_BYTES`（96 KiB 原始字节 → base64 约 128 KiB）一条命令分块读；
@@ -25,10 +25,11 @@
  *   不抄第二套归一化；命令里只出现单引号字面量（路径在校验期已拒单引号/控制字节）与 base64 字符集
  *   （构造期正则校验，不实现转义）；
  * - **先判后发**：路径/locator/操作/分块参数不合法时一个远端命令都不发（构造命令即抛）；
- * - **原子替换**：同目录临时文件**写完**再 `mv`（同一文件系统 ⇒ rename 原子）；禁止先截断目标文件，
- *   禁止往目标文件覆盖式追加；临时文件名不以 `.jsonl` 结尾（远端扫描只收 `*.jsonl`）；
- * - **失败即停**：破坏性动作不自动重试；任何一步非 0 退出都只回稳定码，目标文件一个字节都不动
- *   （半截内容只可能留在临时文件里，绝不谎报成功）；
+ * - **原子替换与权限**：同目录 `0600` 排他临时文件写完，守卫检查版本、摘要与 uid/gid 后保留原 mode 再 rename；
+ *   禁止先截断/覆盖式追加目标；临时文件不以 `.jsonl` 结尾，远端扫描不会收取；
+ * - **乐观冲突检测**：读前/实际读回摘要/读后/提交前一致才替换；最终复核到 rename 仍非严格互锁；
+ * - **失败即停**：破坏性动作不自动重试。提交前失败不替换目标；提交后 SSH 回执丢失可能结果未知，
+ *   必须重新加载核对，不能把所有错误都当成「从未提交」，也不能谎报成功；
  * - **脱敏**：日志只记稳定码与身份（hostId/sessionId）。本模块自己不记日志：路径、正文、命令行都
  *   不返回给调用方也不落日志，调用方（协调器/IPC）只按稳定码记录。
  *
@@ -45,7 +46,8 @@
  * 而不是靠注释声明（时间戳也用同一份 `now` 注入，保证墓碑 ts 可比）。
  */
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { buildRemoteSessionWriteGuardCommand, parseRemoteSessionWriteGuardResult, REMOTE_SESSION_WRITE_GUARD_CODES, REMOTE_SESSION_WRITE_MAX_BYTES, type RemoteSessionFileRevision } from "./RemoteSessionWriteGuard";
 // hostId 与 ssh 身份判据只允许有一份：与持久化边界共用 shared 的权威取值域。
 import { PROJECT_HOST_ID_PATTERN, readSshSessionLocator, type SshSessionLocator } from "../../shared/projectLocation";
 import type { ImageContent } from "../../shared/types";
@@ -63,10 +65,12 @@ export const REMOTE_SESSION_HISTORY_WRITE_CHUNK_BYTES = 4096;
  * 整份改写的内容上界（字节）。读 + 写各 O(字节/分块) 条命令，所以这个上界是**成本**上界：默认 256 KiB
  * 时读 3 条 + 写 64 条左右。超出 fail-closed 而不是截断或排队。
  */
-export const REMOTE_SESSION_HISTORY_WRITE_MAX_BYTES = 256 * 1024;
+export const REMOTE_SESSION_HISTORY_WRITE_MAX_BYTES = REMOTE_SESSION_WRITE_MAX_BYTES;
 
 /** 本模块的稳定码词汇。 */
 export const REMOTE_SESSION_HISTORY_WRITER_CODES = {
+	/** 源文件在读取/上传期间变化：拒绝覆盖外部修改，调用方应重读后显式操作。 */
+	fileChanged: REMOTE_SESSION_WRITE_GUARD_CODES.fileChanged,
 	/** hostId 不是可用的诊断身份/传输键。 */
 	hostIdInvalid: "REMOTE_SESSION_HISTORY_WRITER_HOST_ID_INVALID",
 	/** locator 不是合法 ssh 身份。 */
@@ -200,7 +204,7 @@ export function buildRemoteSessionHistoryChunkWriteCommand(input: { remotePath: 
 	const remotePath = validateRemoteSessionHistoryPath(input?.remotePath);
 	if (remotePath === undefined) throw stable(REMOTE_SESSION_HISTORY_WRITER_CODES.pathInvalid);
 	if (typeof input?.chunk !== "string" || input.chunk.length === 0 || input.chunk.length > Math.ceil(REMOTE_SESSION_HISTORY_WRITE_CHUNK_BYTES / 3) * 4 || !BASE64_PAYLOAD.test(input.chunk)) throw stable(REMOTE_SESSION_HISTORY_WRITER_OPTIONS_INVALID);
-	return `printf '%s' '${input.chunk}' | base64 -d ${input.append === true ? ">>" : ">"} '${remotePath}'`;
+	return `${input.append === true ? "" : "umask 077; set -C; "}printf '%s' '${input.chunk}' | base64 -d ${input.append === true ? ">>" : ">"} '${remotePath}'`;
 }
 
 /** 原子替换命令：`mv -- '<临时路径>' '<目标路径>'`（同一目录 ⇒ 同一文件系统 ⇒ rename 原子）。 */
@@ -266,6 +270,8 @@ export type RemoteSessionHistoryWriterTransportPort = {
 
 export type RemoteSessionHistoryWriterPorts = {
 	transport: RemoteSessionHistoryWriterTransportPort;
+	/** 既有连接服务已验证的远端 Node，不能临时走 PATH 或本机解释器兜底。 */
+	resolveNodePath?: (hostId: string) => Promise<string>;
 	/** 与远端读取侧共用的投影器：停止后按内容摘要恢复 live ID，只作唯一匹配，不能模糊挑选。 */
 	project?: RemoteSessionHistoryProjector;
 	/** 相对身份需要它；缺失时相对 identity 以 `PATH_UNRESOLVED` fail-closed（绝不猜会话根）。 */
@@ -667,7 +673,7 @@ function extractResendContent(content: unknown): { text: string; images?: ImageC
 export type RemoteSessionHistoryWriter = RemoteSessionMessageMutationPort;
 
 export function createRemoteSessionHistoryWriter(ports: RemoteSessionHistoryWriterPorts): RemoteSessionHistoryWriter {
-	if (!isRecord(ports) || typeof ports.transport?.runRemoteCommand !== "function" || (ports.project !== undefined && typeof ports.project !== "function")) throw stable(REMOTE_SESSION_HISTORY_WRITER_OPTIONS_INVALID);
+	if (!isRecord(ports) || typeof ports.transport?.runRemoteCommand !== "function" || (ports.project !== undefined && typeof ports.project !== "function") || (ports.resolveNodePath !== undefined && typeof ports.resolveNodePath !== "function")) throw stable(REMOTE_SESSION_HISTORY_WRITER_OPTIONS_INVALID);
 	const maxFileBytes = ports.maxFileBytes ?? REMOTE_SESSION_HISTORY_WRITE_MAX_BYTES;
 	const readChunkBytes = ports.readChunkBytes ?? REMOTE_SESSION_HISTORY_READ_CHUNK_BYTES;
 	const writeChunkBytes = ports.writeChunkBytes ?? REMOTE_SESSION_HISTORY_WRITE_CHUNK_BYTES;
@@ -701,7 +707,7 @@ export function createRemoteSessionHistoryWriter(ports: RemoteSessionHistoryWrit
 	 * 绝不写回半截内容）、循环次数由「大小 / 分块」自然有界。UTF-8 解码用 fatal：文件里有非法字节时
 	 * 本机链路同样拒绝（`SESSION_FILE_INVALID_JSONL`），这里也必须拒绝——否则写回时会把替换字符写进历史。
 	 */
-	async function readRemoteFile(hostId: string, remotePath: string): Promise<string> {
+	async function readRemoteFile(hostId: string, remotePath: string): Promise<{ text: string; digest: string }> {
 		const nonce = randomBytes(8).toString("hex");
 		const marker = remoteSessionHistoryMarker(nonce);
 		const chunks: Buffer[] = [];
@@ -729,27 +735,39 @@ export function createRemoteSessionHistoryWriter(ports: RemoteSessionHistoryWrit
 			if (assembled >= size) break;
 		}
 		try {
-			return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
+			const bytes = Buffer.concat(chunks);
+			return { text: new TextDecoder("utf-8", { fatal: true }).decode(bytes), digest: createHash("sha256").update(bytes).digest("hex") };
 		} catch {
 			throw stable(REMOTE_SESSION_HISTORY_WRITER_CODES.fileInvalid);
 		}
 	}
 
+	/** 身份+摘要在读前、读后和最后一次远端提交命令中复核；不冒充内核 compare-and-swap。 */
+	async function snapshot(hostId: string, nodePath: string, remotePath: string): Promise<RemoteSessionFileRevision> {
+		const nonce = randomBytes(8).toString("hex");
+		const result = await run(hostId, buildRemoteSessionWriteGuardCommand({ operation: "snapshot", nodePath, remotePath, nonce, maxBytes: maxFileBytes }));
+		if (result.exitCode !== 0) throw stable(REMOTE_SESSION_HISTORY_WRITER_CODES.commandFailed);
+		const revision = parseRemoteSessionWriteGuardResult(result.stdout, remoteSessionHistoryMarker(nonce));
+		if (!revision) throw stable(REMOTE_SESSION_HISTORY_WRITER_CODES.transferInvalid);
+		return revision;
+	}
+
 	/**
-	 * 写回：同目录临时文件分块写完 → `mv` 原子替换目标。
-	 *
-	 * 失败时目标文件一个字节都没动（`mv` 是最后一步），临时文件可能残留半截内容——它是隐藏名且不以
-	 * `.jsonl` 结尾，远端扫描与 pi 都不会捡走它；这里**不做** `rm` 清理（写面无 `rm` 是既定边界）。
+	 * 私密临时文件分块写完 → 验证源版本与上传摘要 → 保留权限并同目录原子替换。
+	 * 失败不重试；临时文件上传为0600，提交失败尝试恢复私密权限；本切片不自动删除远端文件。
 	 */
-	async function writeRemoteFile(hostId: string, remotePath: string, bytes: Buffer): Promise<void> {
+	async function writeRemoteFile(hostId: string, nodePath: string, remotePath: string, bytes: Buffer, source: RemoteSessionFileRevision): Promise<void> {
+		if (bytes.length > maxFileBytes) throw stable(REMOTE_SESSION_HISTORY_WRITER_CODES.fileTooLarge, { size: bytes.length, limit: maxFileBytes });
 		const tempPath = remoteSessionHistoryTempPath(remotePath, randomBytes(8).toString("hex"));
 		for (let offset = 0; offset < bytes.length; offset += writeChunkBytes) {
 			const chunk = bytes.subarray(offset, offset + writeChunkBytes).toString("base64");
 			const result = await run(hostId, buildRemoteSessionHistoryChunkWriteCommand({ remotePath: tempPath, chunk, append: offset > 0 }));
 			if (result.exitCode !== 0) throw stable(REMOTE_SESSION_HISTORY_WRITER_CODES.commandFailed);
 		}
-		const replaced = await run(hostId, buildRemoteSessionHistoryReplaceCommand({ from: tempPath, to: remotePath }));
+		const nonce = randomBytes(8).toString("hex");
+		const replaced = await run(hostId, buildRemoteSessionWriteGuardCommand({ operation: "commit", nodePath, remotePath, temporaryPath: tempPath, source, nonce, maxBytes: maxFileBytes, nextDigest: createHash("sha256").update(bytes).digest("hex"), nextSize: bytes.length }));
 		if (replaced.exitCode !== 0) throw stable(REMOTE_SESSION_HISTORY_WRITER_CODES.commandFailed);
+		if (parseRemoteSessionWriteGuardResult(replaced.stdout, remoteSessionHistoryMarker(nonce)) !== undefined) throw stable(REMOTE_SESSION_HISTORY_WRITER_CODES.transferInvalid);
 	}
 
 	async function resolveRemotePath(input: { hostId: string; locator: SshSessionLocator }): Promise<string> {
@@ -773,7 +791,17 @@ export function createRemoteSessionHistoryWriter(ports: RemoteSessionHistoryWrit
 			const entryId = typeof input?.entryId === "string" && input.entryId.length > 0 ? input.entryId : undefined;
 			// 先判后发：路径解析成功之前一条远端命令都不发。
 			const remotePath = await resolveRemotePath({ hostId, locator });
-			const document = parseDocument(await readRemoteFile(hostId, remotePath));
+			if (!ports.resolveNodePath) throw stable(REMOTE_SESSION_HISTORY_WRITER_CODES.unavailable);
+			let nodePath: string;
+			try {
+				nodePath = await ports.resolveNodePath(hostId);
+			} catch (error) {
+				throw stable(codeOf(error, REMOTE_SESSION_HISTORY_WRITER_CODES.unavailable));
+			}
+			const original = await snapshot(hostId, nodePath, remotePath);
+			const read = await readRemoteFile(hostId, remotePath);
+			if (read.digest !== original.digest || JSON.stringify(await snapshot(hostId, nodePath, remotePath)) !== JSON.stringify(original)) throw stable(REMOTE_SESSION_HISTORY_WRITER_CODES.fileChanged);
+			const document = parseDocument(read.text);
 			const located = locateEntry(document, { messageId, ...(entryId === undefined ? {} : { entryId }), stoppedIdentity: input.stoppedIdentity }, ports.project);
 			if (!located) {
 				// 文件里没有这条消息：delete 是 no-op（不产生远端写命令，消息本来就不在历史里），
@@ -785,11 +813,11 @@ export function createRemoteSessionHistoryWriter(ports: RemoteSessionHistoryWrit
 			if (operation === "resend") {
 				const snapshot = extractResendContent(messageOf(located.entry)?.content);
 				applyMutation(document, located, "resend", now());
-				await writeRemoteFile(hostId, remotePath, serializeDocument(document));
+				await writeRemoteFile(hostId, nodePath, remotePath, serializeDocument(document), original);
 				return { text: snapshot.text, ...(snapshot.images === undefined ? {} : { images: snapshot.images }) };
 			}
 			applyMutation(document, located, operation, now(), input.newText ?? "");
-			await writeRemoteFile(hostId, remotePath, serializeDocument(document));
+			await writeRemoteFile(hostId, nodePath, remotePath, serializeDocument(document), original);
 			return undefined;
 		},
 	};

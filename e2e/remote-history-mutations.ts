@@ -14,7 +14,12 @@ export async function verifyRemoteHistoryMutations(input: { window: Page; creden
 		const result = await runRemoteCommand(credentials, "[ \"$(wc -c < '" + evidenceFile + "')\" -le 262144 ] && base64 < '" + evidenceFile + "'", 20_000);
 		return Buffer.from(result.stdout.replace(/\s/g, ""), "base64").toString("utf8");
 	};
+	const readMode = async () => (await runRemoteCommand(credentials, "stat -c '%a' -- '" + evidenceFile + "'", 20_000)).stdout.trim();
+	// 只收紧本次测试文件；保护原始用户会话，也避免依赖远端默认 umask。
+	await runRemoteCommand(credentials, "chmod 600 -- '" + evidenceFile + "'", 20_000);
+	await expect.poll(readMode).toBe("600");
 	const preserve = async (operation: string, before: string, after: string) => {
+		await expect.poll(readMode, { message: "每种改写都必须保留0600权限" }).toBe("600");
 		await testInfo.attach("remote-history-" + operation + "-before", { body: before, contentType: "application/x-ndjson" });
 		await testInfo.attach("remote-history-" + operation + "-after", { body: after, contentType: "application/x-ndjson" });
 	};
@@ -49,6 +54,49 @@ export async function verifyRemoteHistoryMutations(input: { window: Page; creden
 		await expect(timeline.locator(".user-turn")).toHaveCount(1);
 		await assertSameSession();
 		console.log("[p45c-acceptance] edit: localByteParity=true bytes=" + Buffer.byteLength(editedDocument, "utf8"));
+	});
+
+	await test.step("远端并发冲突：上传期间外部追加必须保留，UI 提示重载且不自动覆盖", async () => {
+		const before = editedDocument;
+		const target = historyMessages(before, "assistant").at(-1);
+		if (!target) throw new Error("REMOTE_CONFLICT_TARGET_MISSING");
+		const lastId = historyEntries(before).at(-1)?.id;
+		expect(typeof lastId).toBe("string");
+		const externalLine = JSON.stringify({ type: "custom", id: "e2e-external-write", parentId: lastId, timestamp: new Date().toISOString(), customType: "pideck-e2e-write-conflict", data: { probe: true } }) + "\n";
+		const expected = before + externalLine;
+		const directory = evidenceFile.slice(0, evidenceFile.lastIndexOf("/"));
+		const name = evidenceFile.slice(evidenceFile.lastIndexOf("/") + 1);
+		// 一条有界远端观察命令：只在本次文件的临时上传已开始时追加，不用 sleep 猜提交时序。
+		const watcherCommand =
+			'i=0; while [ "$i" -lt 100 ]; do if find \'' +
+			directory +
+			"' -maxdepth 1 -name '." +
+			name +
+			".*.pideck-tmp' -print | grep -q .; then printf '%s' '" +
+			Buffer.from(externalLine).toString("base64") +
+			"' | base64 -d >> '" +
+			evidenceFile +
+			"'; printf 'REMOTE_WRITE_CONFLICT_INJECTED'; exit 0; fi; i=$((i+1)); sleep 0.2; done; exit 1";
+		const reply = timeline.locator(".turn-row").filter({ hasText: target.text });
+		await reply.hover();
+		await reply.getByTitle("编辑", { exact: true }).click();
+		// 足够多上传块让观察窗口确定可达，仍严格低于256KiB成本上界。
+		await timeline.locator("textarea").fill("REMOTE_WRITE_SHOULD_NOT_APPEAR\n" + "x".repeat(192 * 1024));
+		const injection = runRemoteCommand(credentials, watcherCommand, 35_000);
+		const injected = await Promise.all([injection, timeline.getByRole("button", { name: "保存", exact: true }).click()]);
+		expect(injected[0].stdout).toContain("REMOTE_WRITE_CONFLICT_INJECTED");
+		await expect(window.getByText(/远端会话文件已被其他程序修改/)).toBeVisible({ timeout: timeoutMs });
+		editedDocument = await readRemote();
+		expect(editedDocument, "不允许把外部追加悄悄覆盖成自己的新回复").toBe(expected);
+		expect(editedDocument).not.toContain("REMOTE_WRITE_SHOULD_NOT_APPEAR");
+		await preserve("conflict", before, editedDocument);
+		const leftovers = await runRemoteCommand(credentials, "find '" + directory + "' -maxdepth 1 -name '." + name + ".*.pideck-tmp' -exec stat -c '%a' -- {} +", 20_000);
+		expect(leftovers.stdout.trim().split(/\s+/)).toEqual(["600"]);
+		await window.locator(".session-tabs-actions").getByRole("button", { name: "更多操作" }).click();
+		await window.getByRole("menuitem", { name: "重新加载会话", exact: true }).click();
+		await expect(timeline.locator(".assistant-text")).toContainText("远端编辑验收_END", { timeout: timeoutMs });
+		await assertSameSession();
+		console.log("[p45c-acceptance] conflict: externalAppendPreserved=true reloadNotice=true privateResidual=true");
 	});
 
 	await test.step("远端重发：旧轮次全墓碑、新 entryId 真正追加到同一文件、UI 无重复", async () => {

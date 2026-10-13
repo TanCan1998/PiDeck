@@ -2,6 +2,8 @@
 
 > 当前开发分支：`feat/remote-development`。代码核对基线：`f7b18947`（第一次协作交接点）；首次交接提交：`a663947c`。
 >
+> 下方早期批次保留历史时点，不把其中「尚未完成」直接当成现状。消息写面最新安全边界见本文末尾「权限与冲突加固」及 `remote-write-plan.md`。
+>
 > ## 交接摘要（面向接手人，2026-10-11 收口）
 >
 > **现状一句话**：**Phase 3 的远端只读能力已在真实主机 + 真实 Electron 上端到端验收通过**——两次独立运行：run `e2emv3cw2x5`（13:01，1.8 分钟）与 run `e2emv3dr8xb`（13:26，1.9 分钟），均为 `1 passed`。测试覆盖九步：加主机 + pin 指纹命中 → 连接 ready → 登记两个远端项目 → 列出远端会话（含夹具）→ 惰性标题（权威名不标「暂定」、弱兜底标「暂定」）→ 导入（清单刷新 + 选中 + 「已导入」标记 + 不开新 Tab）→ 重复导入（`created=false`）→ 项目级 root 漂移（A 显示「需处理」带稳定码、同主机邻居 B 仍 ok 且仍能列目录）。真机侧已交叉验证（远端会话目录 mtime 同步更新、无夹具/项目残留）。
@@ -458,7 +460,7 @@ trust-flag 门禁）上重跑完整真机验收 `e2e/remoteSessionAcceptance.spe
 | 列出归档 | `sessions:catalog-list-archived` | 本机扫描根下的 `.pideck-archive/` + **本机归档索引**里的远端条目 | **P4.5b 已交付**（远端归档区**不扫描**） | UI 与真机往返已验证（见下） |
 | 删除归档 | `sessions:catalog-delete-archived` | 本机回收站（`shell.trashItem`）+ 归档索引 | **不适用且有意保持 fail-closed**：远端没有本机归档路径，也没有 `rm` 链路 | 需另立「真删远端数据」的显式动作（二次确认） |
 | 移除记录 | `sessions:catalog-delete` | **删本机会话文件（回收站）+ 移出 catalog** | 抛稳定码（fail-closed） | 需要产品决策 + （真删远端）远端写端口，见下条 |
-| edit-message | `sessions:catalog-edit-message` → `SessionRuntimeCoordinator.mutateCatalogMessage` | 改写 JSONL（本机：本机文件；ssh：**远端文件**，经 `RemoteSessionHistoryWriter`） | **P4.5c 已交付**：ssh 分支在 `getLocalFilePath` **之前**分流，分块读回 → 按本机同一语义算新内容 → 同目录临时文件分块写 → `mv` 原子替换；运行中**先判后发**（零远端命令，`SESSION_RUNTIME_BUSY`）；端口缺失/路径非法/超上界/命令失败一律稳定码且**目标文件不变**；日志只记身份与操作 |
+| edit-message | `sessions:catalog-edit-message` → `SessionRuntimeCoordinator.mutateCatalogMessage` | 改写 JSONL（本机：本机文件；ssh：**远端文件**，经 `RemoteSessionHistoryWriter`） | **P4.5c 已交付**（`RemoteSessionHistoryWriter` + `RemoteSessionWriteGuard`）：ssh 分支在 `getLocalFilePath` **之前**分流，快照/分块读回/读后复核 → 本机同一语义算新内容 → `0600` 排他临时文件分块写 → 提交前复核 SHA-256/文件身份/归属并恢复原 mode → 原子 rename；运行中**先判后发**（零远端命令，`SESSION_RUNTIME_BUSY`）；提交前失败不替换目标文件，提交后回执丢失可能结果未知且不自动重试；日志只记身份与操作 |
 | delete-message | `sessions:catalog-delete-message` | 同上（写墓碑） | **P4.5c 已交付**（同写面）：assistant 的过程链一并墓碑、子节点重挂；文件里没有该消息且无停止摘要时是 no-op（零远端写命令）；有实时身份摘要但无法唯一核对时拒绝，不谎报删除成功 |
 | prepare-resend | `sessions:catalog-prepare-resend` | 同上（截断该消息及其后继） | **P4.5c 已交付**（同写面）：返回原文/参考图快照 + 该条及其后继全部墓碑 |
 | fork | `sessions:runtime-fork` → pi RPC `fork`（需运行实例） | 官方 RPC → fresh `get_state` → 既有远端端口登记**新 ssh record** → coordinator 换绑 | **live-runtime 身份链已实现**（取消不 refresh/不登记；否定响应或状态读取失败按「身份未知」fail-closed） | **真机语义已查明（2026-10-12，协议级探针）**：pi 的 `fork` 立刻把 `get_state.sessionFile` 换成新路径，但该**文件懒创建**（要等该会话首次追加消息才落盘；连 `set_session_name` 成功也不落盘）⇒ 登记新记录是对的，但**新记录可能暂时指向磁盘上还不存在的文件**；应用侧换绑已真机验证（composer 换 session id、侧栏 1→2 行、原文件 sha256 未变）。验收步骤已按正确判据改写并**在真机跑通**（2026-10-12：`2 passed (2.0m)`，含 trust 步骤；证据 `originShaUnchanged=true newFiles=[] rowsAfterFork=2`）|
@@ -483,8 +485,8 @@ trust-flag 门禁）上重跑完整真机验收 `e2e/remoteSessionAcceptance.spe
 2. 归档 / 取消归档 / 列出归档 / 删除归档：全部依赖远端文件移动或远端归档索引 = 远端写面。
 3. edit-message / delete-message / prepare-resend：**P4.5c 已交付**（远端写面，见上表）。已知边界：
    ① 整读上界 **256 KiB**（本机链路是 32MB）⇒ 超出的会话失败于 `SESSION_FILE_TOO_LARGE`（文案带真实上界），不截断改写；
-   ② 临时文件沿用远端 umask（典型 0644）⇒ **不改权限位**，0600 的会话文件改写后会放宽；
-   ③ 并发判据只有「本会话有无运行实例」⇒ 远端 pi **之外**的写者（另一台机器上的 TUI、手工编辑）发现不了，读写之间也没有版本复核；
+   ② 临时文件上传期间固定为 **0600**（排他创建），提交时保留原 POSIX mode；uid/gid 不一致拒绝替换，不执行 chown。未复制/验证 ACL/xattr，不能宣称完整元数据 parity；
+   ③ **乐观版本复核已交付**：读前/实际读回 SHA-256/读后/提交前核对 mode/size/dev/ino/uid/gid/mtimeNs/ctimeNs/digest，变化拒绝并提示重载。仍不是严格互锁：最终复核与 rename 之间保留非协作写者竞态，提交后回执丢失也不能保证未提交；
    ④ 运行中拒绝复用本机同一条 `SESSION_RUNTIME_BUSY`（渲染层既有文案 + debugDetails），没有 P4.5b 那种「先停止 Agent」专用 key；
    ⑤ 真机证据分层：**命令形状已在真实主机验证**（2026-10-12 探针：分块写 `base64 -d >`/`>>`、`wc -c <`、
       分块读 `tail -c +N -- | head -c M | base64`、`mv --` 原子替换四种形状逐条通过，base64 折行往返 200B→200B）⇒
@@ -499,7 +501,7 @@ trust-flag 门禁）上重跑完整真机验收 `e2e/remoteSessionAcceptance.spe
       从 pi 原始事件保留远端时间，仅在活动分支中按角色 + 5 秒窗口 + 完整内容摘要唯一匹配；UI 时间不变，不放宽窗口，歧义/失配 fail-closed。
       真机日志 `/tmp/p45c-real-ui-attempt3.log`：**2 passed（3.7m）**；最终重建 main/preload 后 `/tmp/p45c-real-ui-final.log`：**2 passed（3.9m）**。
       11 个针对性测试文件 **190/190**、项目 typecheck、oracle 严格类型检查、spec `--list`、定向 Biome 均通过；JSONL before/after 附件随 Playwright trace 留存。
-      真实参考图重发、工具过程链、多会话并发仍仅有单测/既有边界证据，未在此真机切片中覆盖。
+      这批语义证据未覆盖真实参考图重发、工具过程链、多会话并发；后来完成的上传期外部追加反例见下面「权限与冲突加固」。
 4. fork / clone：远端 pi 会落盘**新**会话文件（经 pi 的写）。live-runtime 身份链已实现（见上表）：
    替换策略唯一 owner 是 `src/main/sessions/agentSessionReplacement.ts`（`main/index.ts` 只留依赖注入转发），
    本机与 SSH 走同一个 `replaceBoundRuntime` 状态机。**停态 clone**（本机临时 pi 进程那条）仍不做；远端 edit/resend 已由 P4.5c 写面承接。
@@ -559,3 +561,14 @@ trust-flag 门禁）上重跑完整真机验收 `e2e/remoteSessionAcceptance.spe
 fork/clone 的**身份链**（RPC → fresh state → 新 ssh record → coordinator 换绑 → 旧记录不动）已有真实 catalog/coordinator/AgentManager 行为测试覆盖；
 **真机实测（2026-10-12）**：fork 的语义已用协议级探针查明（pi 立刻换身份、文件懒创建），应用侧换绑与「原文件不变」已在真机验证；仍**未真机验证**的是「新会话首次追加消息后新文件出现且历史读得回来」（远端 pi 模型配额用尽，跑不动完整回合）。
 P4.5b 的单会话归档/恢复已完成真实 Electron＋SSH 验证，不能据此声称 fork/clone 或子会话目录也有 parity。
+
+## 权限与冲突加固（2026-10-13，已交付）
+
+- **范围**：只加固消息 edit/delete/resend，不合并 dev、不升级依赖、不扩展代码文件编辑器/Git/终端，也不移动归档子会话目录。`RemoteSessionWriteGuard` 用固定 Node 标准库脚本，经既有 pinned SSH；Node 来自 `remotePiRuntimeFacts`，没有 PATH/本机解释器兜底或新 helper op。
+- **生效约束**：首块 `umask 077` + noclobber 排他创建，上传为 `0600`；读前/实际读回摘要/读后/提交前核对 mode/size/dev/ino/uid/gid/mtimeNs/ctimeNs/SHA-256。临时文件摘要和大小也须匹配；uid/gid 不一致拒绝，成功替换保留原 mode。输入、输出都保留 **256 KiB** 上界。
+- **冲突 UX**：稳定码 `REMOTE_SESSION_HISTORY_WRITER_FILE_CHANGED` 经现有 `SESSION_COMMAND_FAILED + debugDetails` 包络承接；双语提示外部修改未被覆盖、请重载，不改公共错误码表、不自动重试。失败残留 temp 不自动删除，提交失败会尝试恢复为 `0600`。
+- **回归证据**：新增 16 条生产命令 POSIX 回归先全红，最终扩展为 **24/24**；完整相关 14 文件 **227/227**，typecheck 与 spec `--list` 通过。Biome 只格式化触达文件；构建只做受影响的 main/preload 和 renderer，不执行全仓库构建/生成清单。
+- **真实 Electron＋SSH**：默认产品路在本次专用会话上传期间外部追加一条合法 custom entry，断言外部内容逐字节保留、请求的新正文未提交、重载提示可见、残留 temp 为 `0600`；重载后旧内容仍在，原有 edit/resend/delete 内容语义门禁继续通过。每种改写后都检查原文件仍为 `0600`。最终构建版本 **2 passed（4.2m）**，`/tmp/remote-write-hardening-ui-final.log`；前一次正确构建 **2 passed（4.4m）**，`/tmp/remote-write-hardening-ui2.log`。首轮停在启动画面是定向 renderer 构建漏了 electron-vite production 初始化；修正构建后再测，不改产品或弱化断言。
+- **证据保留**：`/tmp/remote-write-guard-red.log`（初始16条红）、`/tmp/remote-write-hardening-regression.log`（227条）、`/tmp/remote-write-hardening-ui-final-artifacts/`（trace 与 JSONL 附件）；`/tmp` 无长期保留承诺。
+- **边界不外推**：最终版本复核到 rename 之间仍有非协作写者竞态，不是内核 CAS/严格跨机器互锁。提交后 SSH 回执丢失可能结果未知，须重载核对；ACL/xattr 未复制/验证，跨平台、真实参考图和工具过程链未在本切片验收。超256KiB仍明确拒绝，不截断覆盖。
+- **dev/版本集成风险**：本切片从 `dd35b2f0f` 开始；核对时本分支独有157提交、origin/dev独有764提交（`7fb3d74b4`）。本机 pi 为 **1.2.0**，本分支 pi-ai 依赖 **0.86.1**，dev 为 **1.2.0**，本轮真机远端仍为 **0.85.1**。此组合下本切片验收通过，但不证明 dev 合并或远端 pi 1.2.0 兼容；会话文件结构、RPC事件/模型/扩展、trust flag、打包与迁移应在单独集成批次验证，不能把代码堆完后直接声称可合并发布。
