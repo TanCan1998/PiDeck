@@ -1,6 +1,6 @@
 # 远端 trust 完整语义（P4.4）实施计划
 
-> 状态：**待授权**。本文档是门禁产物——「公共契约 / 安全语义变更」必须先出 Implementation Plan 并取得确认，
+> 状态：**已授权开工（P4.4b，用户 2026-10「继续干」）**。本文档是门禁产物——「公共契约 / 安全语义变更」必须先出 Implementation Plan 并取得确认，
 > 而 P4.4b 会改变传给远端 pi 的 trust flag（= 远端项目 `.pi` 资源是否被执行）⇒ 属该门禁范围。
 > P4.2 收口时的明确边界：PiDeck **刻意不传任何 trust flag**，只把现状如实告知（见
 > `docs/remote-development-handoff.md` 与 `RemoteSessionTrustNotice.tsx` 头注释）。
@@ -65,6 +65,26 @@
 - **P4.4c**：与主机重绑（`HostRebindJournal`）联动——重绑后按 `endpointIdentity` 判定 trust 是否保留。
 
 ## 5. 验证计划
+
+### 5.0 真机事实与可观测判据（2026-10-12，父代理在目标主机实测，pi **0.85.1**）
+
+- **flag 存在且语义正确**：`pi --help` 原文 —— `--approve, -a` = "Trust project-local files for this run"；
+  `--no-approve, -na` = "Ignore project-local files for this run"。
+- **目标版本没有 `project_trust` 事件**（在 `dist/bundle/*.js` 里 grep 计数为 0）⇒ **不要**用事件判断"远端 pi 实际信任了
+  什么"；UI 状态以**我们自己的决策存储**为权威（"下一次会传什么 flag"）。本机 pi（0.99.1）与远端 pi（0.85.1）版本不同，
+  更不能把事件当契约。
+- **可观测判据（不需要模型配额）**：在远端项目里放一个项目级提示词模板
+  `<remoteRoot>/.pi/prompts/trustprobe.md`，然后起一次 RPC 会话调 `get_commands`：
+
+  | 传入的 flag | `get_commands` 里是否出现 `trustprobe` |
+  |---|---|
+  | 无 flag | ✗（0 命中） |
+  | `--approve` | **✓（命中）** |
+  | `--no-approve` | ✗（0 命中） |
+
+  ⇒ `--approve` 在目标版本**确实会加载项目本地资源**；未决策与 `--no-approve` 的可观测结果一致（符合"未决策＝维持现状"）。
+  验收 P4.4b 时就用这条：决策为 approve ⇒ 该模板可见；deny / 未决策 ⇒ 不可见；撤销后**下一次 spawn** 立刻回到不可见。
+  另一条既有日志（`Remote pi runtime plan prepared { args }`）同时可断言 args 里究竟有没有 flag。
 
 - **单测**：key 计算（相对/绝对路径归一、单引号/大小写/尾斜杠、指纹与 user/port 变化 ⇒ 作废）、存储迁移、
   状态机（未决策 → 信任 → 撤销）、host 删除时清理。
