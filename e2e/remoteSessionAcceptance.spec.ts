@@ -526,35 +526,32 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 					console.log(
 						"[p42-acceptance] fork probe: originSha unchanged=" + String(shaAfterFork === shaBefore) + " rows=" + String(await projectRow(window, paths.projectName).locator(".session-row").count()) + " titles=" + JSON.stringify(await projectRow(window, paths.projectName).locator(".session-row").allInnerTexts()),
 					);
-					// pi 落盘与目录可见性可能再晚一拍 ⇒ 有界轮询（失败信息里带上目录现状与全盘近 10 分钟的新文件）。
-					let newFiles: string[] = [];
-					for (let attempt = 0; attempt < 30; attempt += 1) {
-						newFiles = (await listFiles()).filter((path) => !beforeFiles.includes(path));
-						if (newFiles.length > 0) break;
+					// pi 的 fork **懒创建**文件（要等该会话首次追加消息才落盘）⇒ 这里**不**断言"立刻多出一个文件"，
+					// 那是我最初写错的期望（真机实测：fork 成功后远端没有任何新文件、原文件 sha256 未变）。
+					// 本步骤的判据是可达成的三条：① 已换绑到新记录（上面的 poll + 侧栏两条记录）② 原文件字节不变
+					// ③ 原会话仍能从远端文件读回历史（它已无 runtime ⇒ 走读页路径）。新文件只作**观察**记进日志。
+					let observedNewFiles: string[] = [];
+					for (let attempt = 0; attempt < 15; attempt += 1) {
+						observedNewFiles = (await listFiles()).filter((path) => !beforeFiles.includes(path));
+						if (observedNewFiles.length > 0) break;
 						await window.waitForTimeout(2000);
 					}
-					// 诊断范围刻意放宽到整个 home：pi 若把 fork 文件写到别处（或根本没写），只有这一层能看出来。
-					const recent = (await runRemoteCommand(creds, "find $HOME /tmp /var/tmp -name '*.jsonl' -newermt '-10 minutes' 2>/dev/null | grep -v node_modules | head -20; true", 20_000)).stdout.trim();
-					// 侧栏该远端项目下的会话行数：若 fork 后出现「两条行指向同一文件」，这条会给出旁证（下面一起断言）。
 					const rowCountAfterFork = await projectRow(window, paths.projectName).locator(".session-row").count();
-					expect(newFiles.length, "Fork 后远端必须多出一个 pi 写的新会话文件。目录现状：" + JSON.stringify(await listFiles()) + " 原文件：" + originFile + " 近 10 分钟新文件（全 home）：\n" + recent + "\n换绑后侧栏会话行数：" + rowCountAfterFork).toBeGreaterThan(0);
-					const forkedFile = newFiles[0];
-					// 旧文件一个字节都没动（派生出新文件，而不是改写原文件）。
+					console.log("[p42-acceptance] fork: originShaUnchanged=" + String((await sha256(originFile)) === shaBefore) + " newFiles=" + JSON.stringify(observedNewFiles) + " rowsAfterFork=" + String(rowCountAfterFork));
 					expect(await sha256(originFile), "Fork 不得改写原会话文件").toBe(shaBefore);
-					// 新文件是 pi 自己写的合法会话文件（首行是 session header），且行数 ≥1。
-					const forkedHead = (await runRemoteCommand(creds, "head -c 400 '" + forkedFile + "'; true", 20_000)).stdout;
-					expect(forkedHead).toContain('"type":"session"');
 					// 侧栏该远端项目下现在有两条会话行：新记录 + 原记录（原记录没有被吸收、也没有被改名成新文件）。
 					const group = projectRow(window, paths.projectName);
 					const expander = group.getByRole("button", { name: "展开", exact: true });
 					if ((await expander.count()) > 0) await expander.first().click();
 					await expect(group.locator(".session-row"), "Fork 后必须同时存在原会话与新会话两条记录").toHaveCount(2, { timeout: timeouts.helperMs });
 					// 旧记录仍然可打开、且历史来自远端文件（此时它没有 runtime，走读页路径）。
-					await group.locator(".session-row").filter({ hasText: PROMPT }).first().click();
+					// 精确锚定**原**会话：fork 行的标题是「<原名> (fork)」也含 PROMPT ⇒ 必须排除它，
+					// 否则会点到那条"文件还没落盘"的新记录上，读回历史自然为空（第一次真机跑就是这么假失败的）。
+					await group.locator(".session-row").filter({ hasText: PROMPT }).filter({ hasNotText: "(fork)" }).first().click();
 					const timeline = window.locator(".message-timeline");
 					await expect(timeline.locator(".user-turn-text").filter({ hasText: PROMPT }), "原会话必须仍能从远端文件读回 prompt").toBeVisible({ timeout: timeouts.helperMs });
 					await expect(timeline.locator(".assistant-text").first(), "原会话必须仍能从远端文件读回回复").toBeVisible({ timeout: timeouts.helperMs });
-					console.log("[p42-acceptance] fork: origin=" + originFile + " forked=" + forkedFile + " newSessionId=" + forkedSessionId);
+					console.log("[p42-acceptance] fork: newSessionId=" + forkedSessionId + " origin=" + originFile);
 				});
 			}
 		} finally {
