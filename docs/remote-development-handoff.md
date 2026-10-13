@@ -490,6 +490,10 @@ trust-flag 门禁）上重跑完整真机验收 `e2e/remoteSessionAcceptance.spe
       分块读 `tail -c +N -- | head -c M | base64`、`mv --` 原子替换四种形状逐条通过，base64 折行往返 200B→200B）⇒
       worker 原先列的「`base64 -d` 可能不存在」风险已关闭；**仍未验证**的是三条链路在真实远端会话文件上的端到端行为
       （需要一次真实回合，远端 pi 模型配额恢复后再跑）。
+   ⑥ 真机**往返**已验证（2026-10-12 探针，纯 shell 用写面的同一套命令形状）：取真实会话文件（2.4 MB 那条）的前 32 KiB 作载荷，
+      分块读（`tail -c +N -- f | head -c 4096 | base64`）→ 分块写（`base64 -d >` / `>>`）→ `mv --` 原子替换：**8 块、字节级一致**、
+      源文件未变 ⇒ 分块边界数学与远端工具链在真数据上成立（含 base64 折行）。仍未验证：edit/delete/resend 的**内容语义**在
+      真机上的效果（与本机编辑器的逐字节对照目前只有本地行为测试）。
 4. fork / clone：远端 pi 会落盘**新**会话文件（经 pi 的写）。live-runtime 身份链已实现（见上表）：
    替换策略唯一 owner 是 `src/main/sessions/agentSessionReplacement.ts`（`main/index.ts` 只留依赖注入转发），
    本机与 SSH 走同一个 `replaceBoundRuntime` 状态机。**停态 clone**（本机临时 pi 进程那条）与远端 edit/resend 仍不做。
