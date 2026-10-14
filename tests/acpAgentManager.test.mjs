@@ -440,6 +440,37 @@ test("stall 看门狗:全静默超阈值先补 cancel 再强杀", async (t) => {
 	assert.equal(result.delivery, "unknown");
 });
 
+test("stall 看门狗:cancel 后 CLI 收口但全程无输出 → 按空白回合拒收(OpenCode 1.15.4 /event 竞态实测形态)", async (t) => {
+	let promptSeen = false;
+	const { manager, events, createAgent, lastProc } = harness(
+		t,
+		{
+			handler: (frame) => {
+				if (frame.method === "initialize") return { protocolVersion: 1, agentCapabilities: {} };
+				if (frame.method === "session/new") return { sessionId: "sess-stall-blank" };
+				if (frame.method === "session/prompt") {
+					promptSeen = true;
+					return undefined; // 挂起:收到 stall cancel 后才收口,且不回任何 session/update
+				}
+				return {};
+			},
+		},
+		{ promptStallTimeoutMs: 80 },
+	);
+	const tab = await createAgent();
+	const sendPromise = manager.sendPrompt({ agentId: tab.id, message: "blank turn" });
+	await waitFor(() => promptSeen, "prompt dispatched");
+	await waitFor(() => lastProc().methodFrames("session/cancel").length === 1, "stall cancel sent");
+	// CLI 响应 cancel 在宽限内回包(生产日志:dispatchMs≈90170,accepted:true 即此形态)
+	const frame = lastProc().frames.find((item) => item.method === "session/prompt" && item.id !== undefined);
+	lastProc().writeFromCli({ jsonrpc: "2.0", id: frame.id, result: { stopReason: "cancelled" } });
+	const result = await sendPromise;
+	assert.equal(result.accepted, false, "看门狗代发 cancel 收口的空白回合不得谎报成功");
+	assert.equal(result.delivery, "rejected");
+	assert.equal(result.i18nKey, "acp.emptyTurn");
+	assert.equal(events.messages.at(-1).messages.length, 0, "孤立用户消息已撤回");
+});
+
 test("stall 看门狗:挂起审批期间不判静默(等待用户是合法状态)", async (t) => {
 	let promptSeen = false;
 	const { manager, createAgent, lastProc, events } = harness(
@@ -520,11 +551,13 @@ test("图片能力门控:agent 未声明 promptCapabilities.image 时带图发�
 	let lastPrompt;
 	const mk = (capabilities) =>
 		harness(t, {
-			handler: (frame) => {
+			handler: (frame, { writeFromCli }) => {
 				if (frame.method === "initialize") return { protocolVersion: 1, agentCapabilities: capabilities };
 				if (frame.method === "session/new") return { sessionId: "sess-img-cap" };
 				if (frame.method === "session/prompt") {
 					lastPrompt = frame.params;
+					// 正常 agent 会回输出;空白回合守卫会拒收无输出的成功结算,这里补一条 chunk
+					writeFromCli({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "sess-img-cap", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } } } });
 					return { stopReason: "end_turn" };
 				}
 				return {};
@@ -781,6 +814,77 @@ test("stop 后 readMessagesByAcpSessionId 回退内存快照:重入会话时间�
 	assert.equal(manager.readMessagesByAcpSessionId("sess-unknown").length, 0, "未见过的会话仍为空(跨 Realm 数组不能 deepEqual)");
 });
 
+test("恢复:load 失败回退 session/new 时投影播种快照,空投影不得抹掉已显示历史", async (t) => {
+	// 焦点预热(2026-10-14)让「选中历史会话即激活」成为常态:load 失败的 CLI 回退
+	// session/new 后,create() 末尾的全量 flush 若带空投影,渲染层已显示的快照历史
+	// 会被整段抹掉。回退分支必须用 messageSnapshots 播种投影。
+	let failLoad = false;
+	let promptCount = 0;
+	const { manager, events } = harness(t, {
+		handler: (frame, { writeFromCli }) => {
+			if (frame.method === "initialize") return { protocolVersion: 1, agentCapabilities: { loadSession: true } };
+			if (frame.method === "session/load") {
+				if (failLoad) return { __error: true, code: -32000, message: "session not found" };
+				return { sessionId: "sess-seed" };
+			}
+			if (frame.method === "session/new") return { sessionId: "sess-seed-fresh" };
+			if (frame.method === "session/prompt") {
+				promptCount += 1;
+				writeFromCli({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "sess-seed", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `answer-${promptCount}` } } } });
+				return { stopReason: "end_turn" };
+			}
+			return {};
+		},
+	});
+	// 第一段:真实回合落两条消息(user seed + assistant),stop 后进快照。
+	const first = await manager.create({ projectId: "p1", title: "t", deckSessionId: "deck-seed", backend: "acp", agentPreset: "gemini", acpSessionId: "sess-seed" });
+	await manager.sendPrompt({ agentId: first.id, message: "keep" });
+	await waitFor(() => (events.messages.at(-1)?.messages ?? []).some((entry) => entry.role === "assistant"), "assistant flushed");
+	await manager.stop(first.id);
+	// 第二段:同一 acpSessionId 但 load 失败(CLI 侧会话已丢)回退 session/new。
+	failLoad = true;
+	const second = await manager.create({ projectId: "p1", title: "t", deckSessionId: "deck-seed", backend: "acp", agentPreset: "gemini", acpSessionId: "sess-seed" });
+	assert.equal(second.status, "idle");
+	// create() 末尾 flushMessages(runtime, true) 必须带出播种消息,而不是空数组。
+	await waitFor(() => {
+		const last = events.messages.at(-1);
+		return last?.agentId === second.id && (last.messages ?? []).some((entry) => entry.role === "assistant");
+	}, "seeded history flushed after session/new fallback");
+	const restored = manager.readMessagesByAcpSessionId("sess-seed");
+	assert.ok(restored.some((entry) => entry.role === "user") && restored.some((entry) => entry.role === "assistant"), "回退后可读消息含 user+assistant");
+});
+
+test("快照上限不截断正常长会话:60 条消息 stop 后仍完整可读(2026-10-14 丢史回归)", async (t) => {
+	// 一个带工具调用的回合 assistant/tool 条目就能上双位数;旧上限 16 会把关闭
+	// 重开后的历史截到只剩最后一小段(ACP CLI 不支持 loadSession 重放时无第二数据源)。
+	// 投影里连续同型 chunk 会并回一条消息,所以用 30 个回合(每回合 user+assistant 各一)攒 60 条。
+	const TURNS = 30;
+	let promptCount = 0;
+	const { manager, events, createAgent } = harness(t, {
+		handler: (frame, { writeFromCli }) => {
+			if (frame.method === "initialize") return { protocolVersion: 1, agentCapabilities: {} };
+			if (frame.method === "session/new") return { sessionId: "sess-long" };
+			if (frame.method === "session/prompt") {
+				promptCount += 1;
+				writeFromCli({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "sess-long", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `answer-${promptCount}` } } } });
+				return { stopReason: "end_turn" };
+			}
+			return {};
+		},
+	});
+	const tab = await createAgent();
+	for (let i = 0; i < TURNS; i += 1) {
+		const result = await manager.sendPrompt({ agentId: tab.id, message: `msg-${i}` });
+		assert.equal(result.accepted, true, `turn ${i} settles with output`);
+	}
+	assert.equal(promptCount, TURNS);
+	await waitFor(() => (events.messages.at(-1)?.messages ?? []).length >= TURNS * 2, "all turns flushed");
+	await manager.stop(tab.id);
+	// 每回合 user 1 + assistant 1 = 60 条;旧上限 16 必红。
+	const snapshot = manager.readMessagesByAcpSessionId("sess-long");
+	assert.ok(snapshot.length >= TURNS * 2, `snapshot keeps full conversation (snapshot=${snapshot.length}, expected>=${TURNS * 2})`);
+});
+
 test("图片物化:消息里的 base64 图经 imageStore 落盘成 ref,put 失败保留 data", async (t) => {
 	const puts = [];
 	let seq = 0;
@@ -985,15 +1089,35 @@ test("session/prompt 非超时拒绝（JSON-RPC 错误）不补发 session/cance
  * ACP 的 user_message_chunk 是 agent 的可选回显，OpenCode 等根本不发；而 agents:message
  * 是全量替换语义，渲染层的乐观气泡会被第一次 flush 抹掉。
  */
-test("sendPrompt:agent 不回显时用户消息仍进投影,首条 prompt 兜底标题写回 catalog", async (t) => {
+test("sendPrompt:agent 成功结算但全程无输出时不得谎报成功或留下孤立用户消息", async (t) => {
+	const { manager, events, createAgent } = harness(t, {
+		handler: (frame) => {
+			if (frame.method === "initialize") return { protocolVersion: 1, agentCapabilities: {} };
+			if (frame.method === "session/new") return { sessionId: "sess-silent-success" };
+			if (frame.method === "session/prompt") return { stopReason: "end_turn" };
+			return {};
+		},
+	});
+	const tab = await createAgent();
+	const result = await manager.sendPrompt({ agentId: tab.id, message: "不会得到回复" });
+	assert.equal(result.accepted, false, "没有任何 assistant/tool 输出不能算发送成功");
+	assert.equal(result.delivery, "rejected", "回合已确定结束且无产出，回填草稿可安全重发");
+	assert.equal(result.i18nKey, "acp.emptyTurn");
+	assert.equal(events.messages.at(-1).messages.length, 0, "空白回合必须撤回孤立用户消息，便于草稿回填重试");
+});
+
+test("sendPrompt:agent 不回显 user chunk 时用户消息仍进投影,首条 prompt 兜底标题写回 catalog", async (t) => {
 	const titles = [];
 	const { manager, events, createAgent } = harness(
 		t,
 		{
-			handler: (frame) => {
+			handler: (frame, { writeFromCli }) => {
 				if (frame.method === "initialize") return { protocolVersion: 1, agentCapabilities: {} };
 				if (frame.method === "session/new") return { sessionId: "sess-echo" };
-				if (frame.method === "session/prompt") return { stopReason: "end_turn" }; // 不回显 user_message_chunk
+				if (frame.method === "session/prompt") {
+					writeFromCli({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "sess-echo", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "已收到" } } } });
+					return { stopReason: "end_turn" }; // 不回显 user_message_chunk，但有正常 assistant 输出
+				}
 				return {};
 			},
 		},
