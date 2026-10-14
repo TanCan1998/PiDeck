@@ -4,6 +4,9 @@ import type { SessionCommandError, TerminalAgentTarget, TerminalShell, TerminalT
 import type { AppLogger } from "../logging/AppLogger";
 import type { ProjectStore } from "../projects/ProjectStore";
 import type { SessionRuntimeCoordinator } from "../sessions/SessionRuntimeCoordinator";
+import type { RemoteTerminalSessionManager } from "../terminal/RemoteTerminalSessionManager";
+import { isRemoteProject } from "../../shared/projectLocation";
+import type { WebContents } from "electron";
 import type { TerminalSessionManager } from "../terminal/TerminalSessionManager";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -72,10 +75,32 @@ export type TerminalIpcDeps = {
 	projectStore: ProjectStore;
 	sessionRuntimeCoordinator: SessionRuntimeCoordinator;
 	terminalManager: TerminalSessionManager;
+	remoteTerminalManager?: RemoteTerminalSessionManager;
+	projectIdForSession?: (sessionId: string) => string | undefined;
 	toSessionCommandIpcError: (error: SessionCommandError) => Error;
 };
 
-export function registerTerminalIpc({ appLogger, projectStore, sessionRuntimeCoordinator, terminalManager, toSessionCommandIpcError }: TerminalIpcDeps): void {
+export function registerTerminalIpc({ appLogger, projectStore, sessionRuntimeCoordinator, terminalManager, remoteTerminalManager, projectIdForSession, toSessionCommandIpcError }: TerminalIpcDeps): void {
+	const senders = new Set<number>();
+	const remoteSender = (sender: WebContents): number => {
+		if (sender.isDestroyed()) throw new Error("REMOTE_TERMINAL_CLOSED");
+		if (!senders.has(sender.id)) {
+			senders.add(sender.id);
+			sender.once("destroyed", () => {
+				remoteTerminalManager?.releaseSender(sender.id);
+				senders.delete(sender.id);
+			});
+		}
+		return sender.id;
+	};
+	const remoteProjectId = (target: TerminalTarget): string | undefined => {
+		const projectId = target.kind === "project" ? target.projectId : projectIdForSession?.(target.sessionId);
+		const project = projectId ? projectStore.get(projectId) : undefined;
+		if (!project || !isRemoteProject(project)) return undefined;
+		if (target.kind !== "project") throw new Error("REMOTE_TERMINAL_PROJECT_TARGET_REQUIRED");
+		if (!remoteTerminalManager) throw new Error("REMOTE_FEATURE_DISABLED");
+		return project.id;
+	};
 	const requireTerminalTarget = (value: unknown): TerminalTarget => {
 		const target = parseTerminalTarget(value);
 		if (target.kind === "project") {
@@ -89,17 +114,23 @@ export function registerTerminalIpc({ appLogger, projectStore, sessionRuntimeCoo
 		return target;
 	};
 
-	ipcMain.handle(ipcChannels.terminalList, (_event, rawTarget: unknown) => {
+	ipcMain.handle(ipcChannels.terminalList, (event, rawTarget: unknown) => {
 		const target = requireTerminalTarget(rawTarget);
+		const remoteId = remoteProjectId(target);
+		if (remoteId && remoteTerminalManager) return remoteTerminalManager.list(remoteSender(event.sender), remoteId);
 		return terminalManager.list(target);
 	});
-	ipcMain.handle(ipcChannels.terminalEnsure, (_event, rawTarget: unknown) => {
+	ipcMain.handle(ipcChannels.terminalEnsure, (event, rawTarget: unknown) => {
 		const target = requireTerminalTarget(rawTarget);
+		const remoteId = remoteProjectId(target);
+		if (remoteId && remoteTerminalManager) return remoteTerminalManager.ensure(remoteSender(event.sender), remoteId);
 		return terminalManager.ensure(target);
 	});
-	ipcMain.handle(ipcChannels.terminalCreate, async (_event, rawTarget: unknown, rawShell?: unknown) => {
+	ipcMain.handle(ipcChannels.terminalCreate, async (event, rawTarget: unknown, rawShell?: unknown) => {
 		const target = requireTerminalTarget(rawTarget);
-		const result = await terminalManager.create(target, parseTerminalShell(rawShell));
+		const shell = parseTerminalShell(rawShell);
+		const remoteId = remoteProjectId(target);
+		const result = remoteId && remoteTerminalManager ? await remoteTerminalManager.create(remoteSender(event.sender), remoteId, shell) : await terminalManager.create(target, shell);
 		void appLogger.info("terminal", "Terminal created", {
 			kind: target.kind,
 			projectId: target.kind === "project" ? target.projectId : undefined,
@@ -109,15 +140,32 @@ export function registerTerminalIpc({ appLogger, projectStore, sessionRuntimeCoo
 		});
 		return result;
 	});
-	ipcMain.handle(ipcChannels.terminalInput, (_event, rawTabId: unknown, rawData: unknown) => {
-		terminalManager.input(parseTerminalTabId(rawTabId), parseTerminalInput(rawData));
+	ipcMain.handle(ipcChannels.terminalInput, (event, rawTabId: unknown, rawData: unknown) => {
+		const id = parseTerminalTabId(rawTabId),
+			data = parseTerminalInput(rawData);
+		if (remoteTerminalManager?.has(id)) {
+			// Budget the remote transport only; native paste behavior remains unchanged.
+			if (data.length > 16 * 1024) throw new Error("INVALID_TERMINAL_INPUT");
+			return remoteTerminalManager.input(remoteSender(event.sender), id, data);
+		}
+		terminalManager.input(id, data);
 	});
-	ipcMain.handle(ipcChannels.terminalResize, (_event, rawTabId: unknown, rawCols: unknown, rawRows: unknown) => {
-		terminalManager.resize(parseTerminalTabId(rawTabId), parseTerminalDimension(rawCols), parseTerminalDimension(rawRows));
+	ipcMain.handle(ipcChannels.terminalResize, (event, rawTabId: unknown, rawCols: unknown, rawRows: unknown) => {
+		const id = parseTerminalTabId(rawTabId),
+			cols = parseTerminalDimension(rawCols),
+			rows = parseTerminalDimension(rawRows);
+		if (remoteTerminalManager?.has(id)) return remoteTerminalManager.resize(remoteSender(event.sender), id, cols, rows);
+		terminalManager.resize(id, cols, rows);
 	});
-	ipcMain.handle(ipcChannels.terminalClose, (_event, rawTabId: unknown) => {
+	ipcMain.handle(ipcChannels.terminalAcknowledge, (event, rawTabId: unknown, sequence: unknown) => {
+		const id = parseTerminalTabId(rawTabId);
+		if (typeof sequence !== "number" || !Number.isSafeInteger(sequence) || sequence < 0) throw new Error("INVALID_TERMINAL_SEQUENCE");
+		if (remoteTerminalManager?.has(id)) remoteTerminalManager.ack(remoteSender(event.sender), id, sequence);
+	});
+	ipcMain.handle(ipcChannels.terminalClose, (event, rawTabId: unknown) => {
 		const tabId = parseTerminalTabId(rawTabId);
-		terminalManager.close(tabId);
+		if (remoteTerminalManager?.has(tabId)) remoteTerminalManager.close(remoteSender(event.sender), tabId);
+		else terminalManager.close(tabId);
 		void appLogger.info("terminal", "Terminal closed", { tabId });
 	});
 	// shell 候选列表（供「选择 Shell」下拉）：只读平台探测结果，无入参可校验

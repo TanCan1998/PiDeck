@@ -196,6 +196,81 @@ test("project file command refuses a host revision change during fresh pin/route
 	});
 });
 
+test("background session-home reads cannot revoke a manual host disconnect", async () => {
+	await withUserData(async (userDataDir) => {
+		await writeStore(userDataDir, 7, [HOST_ID]);
+		const ports = fakePorts({ manager: { home: "/home/remote" } });
+		const service = createRemoteHostConnectionService({ userDataDir, client: CLIENT, nodePath: "/usr/bin/node", ports });
+		try {
+			await service.connect(HOST_ID);
+			await service.disconnect(HOST_ID, "shutdown");
+			const before = ports.managers[0].connected.length;
+			assert.equal(await service.remoteHomeEnsuring(HOST_ID), undefined);
+			assert.equal(ports.managers[0].connected.length, before);
+			assert.equal((await service.withProjectSession(HOST_ID, "/repo", async () => "never")).code, "SSH_HOST_DISCONNECTED");
+			await service.connect(HOST_ID);
+			assert.equal(await service.remoteHomeEnsuring(HOST_ID), "/home/remote");
+		} finally {
+			await service.dispose();
+		}
+	});
+});
+
+test("terminal launch is fenced around pin awaits and remains independent of helper root switches", async () => {
+	await withUserData(async (userDataDir) => {
+		await writeStore(userDataDir, 7, [HOST_ID]);
+		let alterRevision = false,
+			launches = 0,
+			invocationKind,
+			current;
+		const disconnected = [];
+		const { createRemoteHostConnectionService: createService } = loadTsCommonJs("src/main/remote/RemoteHostConnectionService.ts", {
+			stubs: {
+				"./SshVerifiedConnection": {
+					buildPinnedSshInvocation: async (_dir, _host, kind) => {
+						invocationKind = kind;
+						if (alterRevision) await writeStore(userDataDir, 8, [HOST_ID]);
+						return { args: ["-tt"] };
+					},
+				},
+			},
+		});
+		const ports = fakePorts({ verifyRoot: async ({ userPath }) => ({ canonicalPath: userPath }) });
+		const service = createService({ userDataDir, client: CLIENT, nodePath: "/usr/bin/node", ports, onDisconnect: (id) => disconnected.push(id) });
+		try {
+			const first = await service.withProjectSession(HOST_ID, "/one", (session) =>
+				session.withTerminalInvocation("fixed-command", (_invocation, assertCurrent) => {
+					launches++;
+					current = assertCurrent;
+					return "launched";
+				}),
+			);
+			assert.equal(first.value, "launched");
+			assert.equal(invocationKind, "ssh-terminal");
+			await service.withProjectSession(HOST_ID, "/two", async () => "other-root");
+			await current();
+			assert.equal(disconnected.length, 0);
+			alterRevision = true;
+			await assert.rejects(
+				service.withProjectSession(HOST_ID, "/two", (session) =>
+					session.withTerminalInvocation("fixed-command", () => {
+						launches++;
+					}),
+				),
+				/SSH_HOST_NOT_READY/,
+			);
+			assert.equal(launches, 1);
+			await assert.rejects(current(), /SSH_HOST_NOT_READY/);
+			await service.disconnect(HOST_ID, "abort");
+			assert.deepEqual(disconnected, [HOST_ID]);
+			const refused = await service.withProjectSession(HOST_ID, "/one", async () => "never");
+			assert.equal(refused.code, "SSH_HOST_DISCONNECTED");
+		} finally {
+			await service.dispose();
+		}
+	});
+});
+
 test("an unknown host id is refused without reading the store or starting a bootstrap", async () => {
 	await withUserData(async (userDataDir) => {
 		await writeStore(userDataDir, 7, []);

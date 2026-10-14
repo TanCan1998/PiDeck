@@ -855,7 +855,12 @@ export function App() {
 	// 终端归属：有 activeAgent → agent owner；未激活 agent/历史会话 → project owner。
 	// activeProjectId 未同步（如 Tab 直切跨项目会话）时用当前会话所属项目兜底，
 	// 保证未激活 agent 的会话也常显「打开终端」按钮。
-	const terminalOwner = resolveTerminalOwner(activeAgentId, activeProjectId ?? currentSessionRecord?.projectId);
+	const terminalProjectId = activeProjectId ?? currentSessionRecord?.projectId;
+	const terminalOwner = resolveTerminalOwner(
+		activeAgentId,
+		terminalProjectId,
+		projects.some((project) => project.id === terminalProjectId && isRemoteProject(project)),
+	);
 	const {
 		terminalOpen,
 		terminalCollapsed,
@@ -3586,7 +3591,7 @@ export function App() {
 					<ResizablePanel id="empty-main" minSize={200} className="flex min-h-0 flex-col">
 						{/* 无会话空态：引导页 = 新建页面形态（居中 ComposerArea + 虚拟会话），
                 不登记 Tab；首次发送才由 ensureSessionForSend 创建真实会话并落 Tab */}
-						<ProjectEmptyState activeProject={activeProject} projects={projects} onAddProject={() => void addProject()} onSelectProject={selectProjectCommand} />
+						<ProjectEmptyState activeProject={activeProject} projects={projects} onAddProject={() => void addProject()} onSelectProject={selectProjectCommand} onOpenTerminal={!isLanWeb && terminalTarget ? () => setTerminalOpenForOwner(true) : undefined} />
 					</ResizablePanel>
 					{!isLanWeb && terminalDockVisible && terminalTarget && (
 						<TerminalDockPanel

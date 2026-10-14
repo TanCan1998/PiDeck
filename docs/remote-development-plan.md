@@ -1,6 +1,6 @@
 # PiDeck SSH 远程开发实施计划
 
-> 状态：Phase 0–2 已有开发态切片并经 Linux 客户端/远端实机验证；Phase 3 第一段只读浏览已有实机验收；**第二段已提交远端项目持久化、登记与按 projectId 只读浏览的基础实现，尚未完成整体验收**。项目间读取并发、确认后路径复核、重连状态、持久化/引用一致性与侧栏入口迁移仍需收口。搜索/Session 扫描、Phase 4 Agent 生命周期与稳定版发布门禁仍未完成。当前代码核对基线为 `d01464f0`；下一批任务与验收见交接文档，本文 §12 同步维护交付边界。
+> 状态（2026-10-14）：开发态已有 SSH 连接、远端项目/只读浏览、会话生命周期与消息写面、已有代码文件编辑保存的切片和真实 Linux 客户端→Linux 远端证据；最新新增 **项目归属 SSH 终端最小闭环**（§6.5.1）。这些切片不代表各 Phase 的全部 parity 或 Remote v1：远端 Git、跨平台/打包、版本与 dev 集成、长稳及安全发布门禁仍未收口。最新分批验证与未通过项以交接文档为准，本文较早阶段记录保留其时点边界。
 >
 > 文档维护约定：本文只保留决策（范围/架构/阶段门禁/能力对照）；§4.2 bootstrap、§6.5 终端握手、§7 协议帧等 implementation 级细节在对应 Phase 开工时拆出为独立 spec 并随代码演进，本文留指针。每个 Phase 收口时回填状态。
 >
@@ -466,6 +466,20 @@ Phase 5 helper method 与 preload/UI capability 必须从这张表生成同一�
 - 项目级 prompts/skills/extensions 由 project location backend 读取；远端 user scope 默认使用远端既有资源。跨 host 复制/同步仍属于 Phase 6，必须显式选择且永不包含 `auth.json`。
 
 ### 6.5 终端
+
+#### 6.5.1 当前已批准的最小切片（2026-10-14）
+
+- 用户确认本轮采用独立 `RemoteTerminalSessionManager`，保留原生 `TerminalSessionManager`，不先做统一 launcher 重构或新增 helper op。renderer 只传 `projectId`，main 解析 SSH locator；终端按 `senderId + projectId` 隔离，Agent 启动/替换/停止不改变归属，SSH 项目不接受 agent terminal target 或本机 shell 兜底。
+- 在既有主机操作锁内复用已验证 SSH executable、pin/route 和 Node 事实，构造与消费 `ssh -tt -e none` plan 前后复核 host store 代数，原生 spawn 前重读项目 locator；禁用 OpenSSH 本地 escape 控制台，用户输入不成为本机 SSH 命令。固定远端入口独立 POSIX 引用可信 root，`cd` 后检查 `pwd -P`，只在该进程 PATH 前置已验证 Node 目录、清空 `ENV`，再输出私有 nonce marker 并启动 `/bin/sh -i`；不修改服务器配置。remotePath 不作为本机 spawn cwd，shell/argv 不由 renderer 指定。**这里验证的是初始 cwd，不是 chroot 或交互命令的文件沙箱。**
+- 启动 deadline 30s，握手最多32 KiB；timeout/disconnect/窗口销毁先取消，迟到资源只回收不发布。每次 input/resize 前及1s巡检核对项目/host 事实，异步 host 检查之后再次检查 locator。普通控制 helper 切项目根不杀独立 PTY；显式断开、host/project 身份变化、所属窗口销毁及 quit 撤销终端。后台会话 HOME 读取不能解除手动断开，只有明确 connect 可解除。
+- 复用 terminal IPC，增加 output sequence ack：单包最多32 KiB UTF-8、只留一包在途，队列256 KiB，128/64 KiB高低水位 pause/resume；分包不切断代理对。main replay/renderer buffer各128 Ki字符，未知/迟到 tab 事件不建立缓存。远端单次 input16 KiB UTF-8、排队 input64 KiB/32次操作；总32 tab、每窗口16、每窗口同项目4（含已退出 tab，关闭后释放）。本机粘贴契约不改。
+- 项目空态及已有会话共用终端入口。SSH 首帧/失败态也不查询或显示本机 shell 候选，固定显示 `/bin/sh`；xterm 延迟聚焦不得夺走 composer/编辑器的输入焦点。退出 tab 保留，不由 ensure/显式连接自动重建，也不重放命令；新进程须用户新建。自然退出先交付末尾输出，避免丢失测试结果。
+- 真机切片：两专用项目 cwd/输入输出/PID 隔离、执行 UI 已保存代码并成功返回测试结果、`stty size`随窗口变化、Agent 真 runtime 启停保留同一 shell、关闭/手动断开/应用退出后独立 SSH 观察对应前台 shell 已退出。窗口销毁/host资料变化/异步竞态/预算由生产模块单测补充，未外推为每项均有真机证据。
+- 本轮**未实现**下节的 `terminal.prepare`/一次性 launch ticket/manifest runner/统一 launcher/target-aware `terminal:shells`。无后台任务恢复、daemon/disown 清理保证、自动重连、命令重放、shell 切换、端口转发或 Windows/macOS 客户端验收。后续顺序为 Git status/diff → stage/unstage/commit → 跨平台与稳定性；验证明细和失败项见交接文档最新终端节。
+
+#### 6.5.2 未实现的远期 ticket/runner 设计
+
+以下保留为后续完整终端架构的设计与验收要求，**不是当前实现或本轮签收内容**；若推进需单独确认范围，不能用§6.5.1的切片证据声称已经满足下述全部要求。
 
 - 保留 `TerminalSessionManager` 对 tab、replay buffer、input/resize/close 和事件订阅的单一所有权，但把进程创建抽为 `TerminalSessionLauncher`。`LocalTerminalSessionLauncher` 原样承接现有本地/WSL shell 候选、cwd 转换和 node-pty 行为；`SshTerminalSessionLauncher` 只负责远端 ticket、固定 runner 握手和本地 ssh PTY 生命周期，不能让 `TerminalSessionManager` 自行拼远端命令。
 - `TerminalProjectTarget` 迁移为只携带 `{ kind: "project", projectId }`，main 从 `ProjectStore` 解析 location/canonical cwd；`TerminalAgentTarget` 继续携带 `sessionId + agentId + runtimeGeneration` 并由 coordinator 校验。project terminal owner key 改为 `project:<projectId>`，agent terminal owner key 至少包含 `sessionId + agentId + runtimeGeneration`，禁止继续以 renderer 提交的 cwd 或单独 agentId 隔离。`TerminalTab` 的远端 cwd 只能是 `displayCwd`/locator 元数据，不能作为本地 `node:fs` 或 spawn authority。

@@ -18,6 +18,10 @@ export type TerminalTab = {
 	exited?: boolean;
 	exitCode?: number;
 	buffer?: string;
+	/** SSH tabs have a fixed remote shell and a bounded acknowledged output stream. */
+	location?: "ssh";
+	outputSequence?: number;
+	exitReason?: string;
 };
 
 /**
@@ -48,9 +52,11 @@ export function terminalOwnerKeyFor(target: TerminalTarget): string {
 export type TerminalDataEvent = {
 	tabId: string;
 	data: string;
+	sequence?: number;
 };
 
 export type TerminalExitEvent = {
 	tabId: string;
 	exitCode?: number;
+	reason?: string;
 };

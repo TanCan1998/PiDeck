@@ -729,6 +729,8 @@ export const ipcChannels = {
 	terminalEnsure: "terminal:ensure",
 	terminalCreate: "terminal:create",
 	terminalInput: "terminal:input",
+	/** Acknowledge one bounded SSH output packet after rendering or buffering. */
+	terminalAcknowledge: "terminal:acknowledge",
 	terminalResize: "terminal:resize",
 	terminalClose: "terminal:close",
 	terminalData: "terminal:data",

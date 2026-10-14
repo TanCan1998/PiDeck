@@ -137,6 +137,11 @@ test("fresh candidate and strict queries build pinned SSH/SCP argv per request",
 	assert.ok(scp.includes("StrictHostKeyChecking=yes"));
 	const terminal = await buildPinnedSshInvocation(directory, profile.id, "ssh-terminal", { client });
 	assert.equal(terminal.args[0], "-tt");
+	assert.deepEqual(Array.from(terminal.args.slice(1, 3)), ["-e", "none"], "terminal bytes must not enter OpenSSH's local escape/forwarding console");
+	const command = "cd -- '/repo' && exec /bin/sh -i";
+	const interactive = await buildPinnedSshInvocation(directory, profile.id, "ssh-terminal", { client, remoteCommand: command });
+	assert.deepEqual(Array.from(interactive.args.slice(-3)), ["--", "work", command]);
+	await assert.rejects(buildPinnedSshInvocation(directory, profile.id, "ssh-terminal", { client, remoteCommand: "invalid\ncommand" }), /SSH_REMOTE_COMMAND_INVALID/);
 });
 
 test("strict config accepts omitted UpdateHostKeys but never an enabled value", async (t) => {

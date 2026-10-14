@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { encodePiSessionDirectory } from "../src/main/remote/remoteSessionProjectMatch";
 import { initializeRemoteCodeFixture, verifyRemoteCodeEditing, verifyRemoteCodeIsolation, verifyRemoteCodeDisconnect, assertRemoteNodeTestExecuted } from "./remote-file-editing";
+import { verifyRemoteTerminals } from "./remote-terminal";
 import { verifyRemoteHistoryMutations } from "./remote-history-mutations";
 import { REMOTE_ACCEPTANCE_ENV, createRemoteSessionInProject, matchesRemoteFingerprint, readRemoteAcceptanceCredentials, readRemoteAcceptanceTimeouts, remoteProjectRow, runRemoteCommand, test, type RemoteAcceptanceCredentials, type RemoteAcceptanceTimeouts } from "./remote-fixtures";
 
@@ -614,6 +615,53 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 					console.warn("[remote-file-acceptance] cleanup stop was not confirmed", error instanceof Error ? error.message : String(error));
 				}
 			}
+			preserveAppLogs(remoteUserDataRoot, paths.runId);
+			await cleanupRemoteRun(creds, paths, "");
+		}
+	});
+
+	test("远端终端：项目隔离 → 已保存代码测试 → resize → 关闭/断开/退出清理", async ({ remoteWindow, remoteApp, remoteUserDataRoot }, testInfo) => {
+		test.setTimeout(1_200_000);
+		const creds = credentials;
+		if (!creds) {
+			test.skip(true, HELP_TEXT);
+			return;
+		}
+		const paths = await createRemoteRunPaths(creds);
+		const neighborPath = paths.e2eRoot + "/terminal-neighbor-" + paths.runId;
+		try {
+			await dismissOnboarding(remoteWindow, 8_000);
+			await createRemoteProjectDirectory(creds, paths);
+			await initializeRemoteCodeFixture(creds, paths.projectPath);
+			await runRemoteCommand(creds, "mkdir -p '" + neighborPath + "'", 20_000);
+			await addVerifiedRemoteHostAndConnect(remoteWindow, creds, timeouts);
+			await enrollRemoteProjectInSidebar(remoteWindow, paths.projectPath, timeouts);
+			await verifyRemoteCodeEditing({ window: remoteWindow, credentials: creds, projectPath: paths.projectPath, testInfo, timeoutMs: timeouts.helperMs });
+			await enrollRemoteProjectInSidebar(remoteWindow, neighborPath, timeouts);
+			await verifyRemoteTerminals({
+				window: remoteWindow,
+				app: remoteApp,
+				credentials: creds,
+				projectPath: paths.projectPath,
+				neighborPath,
+				timeoutMs: timeouts.helperMs,
+				testInfo,
+				activateAgent: async () => {
+					await createRemoteSessionAndReadId(remoteWindow, paths.projectName, timeouts);
+					// First input activates the lazy runtime; a draft Tab alone is not a live Agent.
+					const composer = remoteWindow.locator(".composer .rich-input");
+					await composer.click();
+					await expect(composer).toBeFocused();
+					await composer.pressSequentially("terminal lifecycle probe");
+					await expect(composer).toContainText("terminal lifecycle probe");
+					await expect(remoteWindow.getByTestId("remote-session-trust-notice")).toBeVisible({ timeout: timeouts.helperMs });
+				},
+				stopAgent: async () => {
+					await openTabsActionMenu(remoteWindow);
+					await remoteWindow.getByRole("menuitem", { name: "关闭 Agent", exact: true }).click();
+				},
+			});
+		} finally {
 			preserveAppLogs(remoteUserDataRoot, paths.runId);
 			await cleanupRemoteRun(creds, paths, "");
 		}

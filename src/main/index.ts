@@ -244,6 +244,9 @@ import { ConfigBackupManager } from "./config/ConfigBackupManager";
 import { TokendanceCatalogStore } from "./config/tokendanceCatalog";
 import { installTokendanceProvider } from "./config/tokendanceInstaller";
 import { TokendanceAuthStore } from "./config/tokendanceAuth";
+import { createRemoteTerminalManager } from "./terminal/createRemoteTerminalManager";
+import type { RemoteTerminalSessionManager } from "./terminal/RemoteTerminalSessionManager";
+import { webContents } from "electron";
 import { TerminalSessionManager } from "./terminal/TerminalSessionManager";
 import { TelemetryService } from "./telemetry/TelemetryService";
 import { PromptManager } from "./prompts/PromptManager";
@@ -424,6 +427,7 @@ let projectResourceManager: ProjectResourceManager;
 let resourceImportManager: ResourceImportManager;
 let webServiceManager: WebServiceManager;
 let terminalManager: TerminalSessionManager;
+let remoteTerminalManager: RemoteTerminalSessionManager | undefined;
 let petSystem: PetSystem | null = null;
 /**
  * 远端连接服务的按需访问器（Phase 4 P4.2）。
@@ -2381,6 +2385,7 @@ function registerIpc() {
 			const service = createRemoteHostConnectionService({
 				userDataDir: app.getPath("userData"),
 				client,
+				onDisconnect: (hostId) => remoteTerminalManager?.closeHost(hostId),
 				// Push every transition to the window: `connect()` only returns the state it reached, so
 				// anything afterwards (degradation, reconnect, the shutdown after ready) is invisible without
 				// this, and the UI ends up showing a stale state.
@@ -3341,11 +3346,22 @@ function registerIpc() {
 		},
 	});
 
+	remoteTerminalManager = createRemoteTerminalManager({
+		project: (id) => projectStore.get(id),
+		service: remoteHostServiceIfEnabled,
+		emit: (senderId, channel, payload) => {
+			const sender = webContents.fromId(senderId);
+			if (sender && !sender.isDestroyed()) sender.send(channel, payload);
+		},
+	});
+	quitCleanup.register("remote-terminal", () => remoteTerminalManager?.closeAll());
 	registerTerminalIpc({
 		appLogger,
 		projectStore,
 		sessionRuntimeCoordinator,
 		terminalManager,
+		remoteTerminalManager,
+		projectIdForSession: (sessionId) => sessionCatalog.get(sessionId)?.projectId,
 		toSessionCommandIpcError: sessionCommandIpcError,
 	});
 

@@ -28,6 +28,7 @@ export function ProjectEmptyState(props: {
 	projects: Project[];
 	onAddProject: () => void;
 	onSelectProject: (projectId: string) => void;
+	onOpenTerminal?: () => void;
 }) {
 	// 远端登记弹框由 App 统一挂载，这里只打开开关（与侧栏「+」同一条路径）。
 	const setRemoteEnrollOpen = useSetAtom(remoteEnrollDialogOpenAtom);
@@ -60,7 +61,7 @@ export function ProjectEmptyState(props: {
 	// 远端项目没有本机路径：使用同源远端目录/文本编辑宿主，各本机IPC仍按locator拒绝。
 	// 会话创建仍由项目行入口负责，不把无会话引导页当成本机项目。
 	if (isRemoteProject(props.activeProject)) {
-		return <RemoteProjectPanel projectId={props.activeProject.id} projectName={props.activeProject.name} />;
+		return <RemoteProjectPanel projectId={props.activeProject.id} projectName={props.activeProject.name} onOpenTerminal={props.onOpenTerminal} />;
 	}
 
 	return (

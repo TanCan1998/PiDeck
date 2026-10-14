@@ -1557,6 +1557,7 @@ export function createPreviewApi(): PiDesktopApi {
 					listener({ tabId, data });
 				}
 			},
+			acknowledge: async () => undefined,
 			resize: async () => undefined,
 			close: async (tabId) => {
 				const index = terminalTabs.findIndex((tab) => tab.id === tabId);

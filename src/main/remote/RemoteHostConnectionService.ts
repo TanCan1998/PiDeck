@@ -1,4 +1,4 @@
-import { buildPinnedSshInvocation } from "./SshVerifiedConnection";
+import { buildPinnedSshInvocation, type PinnedSshInvocation } from "./SshVerifiedConnection";
 import { randomBytes } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { RemoteHostStore } from "./RemoteHostStore";
@@ -66,6 +66,8 @@ export type RemoteHostConnectionServiceOptions = {
 	 * returns — a later degradation, a reconnect, or the shutdown that follows a successful ready.
 	 */
 	onStateChange?: (entry: { hostId: string; state: ConnectionMachineState }) => void;
+	/** Explicit disconnect closes independent terminal PTYs, not ordinary helper root switches. */
+	onDisconnect?: (hostId: string) => void;
 	ports?: Partial<RemoteHostConnectionPorts>;
 };
 
@@ -84,6 +86,8 @@ export type RemoteProjectSession = {
 	readonly nodePath: string;
 	readonly hostRevision: number;
 	runCommand(remoteCommand: string): Promise<{ exitCode: number; stdout: string }>;
+	/** Build and consume an interactive invocation under the host lock; no escaped stale spawn plan. */
+	withTerminalInvocation<T>(remoteCommand: string, launch: (invocation: PinnedSshInvocation, assertCurrent: () => Promise<void>) => T): Promise<T>;
 	request(method: string, params?: unknown, options?: { timeoutMs?: number; onRequestId?: (requestId: string) => void }): Promise<unknown>;
 	cancel(requestId: string, options?: { timeoutMs?: number }): Promise<unknown>;
 };
@@ -331,8 +335,7 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 		if (disposed) return { ok: false, hostId, code: "REMOTE_CONNECTION_SERVICE_DISPOSED" };
 		if (!HOST_ID.test(hostId)) return { ok: false, hostId, code: "REMOTE_CONNECTION_HOST_ID_INVALID" };
 		const entry = entryFor(hostId);
-		// An explicit connect is the user re-asserting this host, so later background reads may use it again.
-		explicitlyDisconnected.delete(hostId);
+		if (explicitlyDisconnected.has(hostId)) return { ok: false, hostId, code: "SSH_HOST_DISCONNECTED" };
 		entry.generation += 1;
 		try {
 			// A machine latched by an explicit disconnect can never be revived — the reducer drops every later
@@ -472,6 +475,19 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 					const result = await options.client.run(invocation.executable, invocation.args);
 					return { exitCode: result.exitCode, stdout: result.stdout };
 				},
+				async withTerminalInvocation(remoteCommand, launch) {
+					const assertBound = async () => {
+						if (disposed || explicitlyDisconnected.has(hostId) || hosts.get(hostId)?.manager !== bound || bound.getState(hostId).state !== "ready" || (await readRevision()) !== held.revision) throw new Error("SSH_HOST_NOT_READY");
+					};
+					await assertBound();
+					const invocation = await buildPinnedSshInvocation(options.userDataDir, hostId, "ssh-terminal", { client: options.client, remoteCommand });
+					await assertBound();
+					// The PTY outlives helper-root switches, but never a host rebind, explicit disconnect or disposal.
+					const assertCurrent = async () => {
+						if (disposed || explicitlyDisconnected.has(hostId) || (await readRevision()) !== held.revision) throw new Error("SSH_HOST_NOT_READY");
+					};
+					return launch(invocation, assertCurrent);
+				},
 				request(method, params, options) {
 					if (hosts.get(hostId)?.manager !== bound) return Promise.reject(new Error("SSH_HOST_NOT_READY"));
 					return bound.request(hostId, method, params, options);
@@ -512,6 +528,7 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 	 * 这里 connect 不是额外开销：扫描本来就要做远端 I/O。**UI 用的 `remoteHome` 保持只读不变**。
 	 */
 	const readHomeEnsuring = async (hostId: string): Promise<string | undefined> => {
+		if (disposed || explicitlyDisconnected.has(hostId)) return undefined;
 		const cached = await readCachedHome(hostId);
 		if (cached !== undefined) return cached;
 		const entry = entryFor(hostId);
@@ -548,9 +565,11 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 		/** Bootstrap-then-connect one host. Every failure is a stable code, never a thrown message. */
 		async connect(hostId: string): Promise<RemoteHostConnectResult> {
 			const entry = entryFor(hostId);
-			// Queued behind any read of this host: tearing the session down under a read is the defect this
-			// batch removes, and an explicit connect would do exactly that.
-			const run = operationLock.run(hostId, () => connectLocked(hostId));
+			// Only this explicit user boundary may undo a disconnect; session scanning also uses connectLocked.
+			const run = operationLock.run(hostId, () => {
+				explicitlyDisconnected.delete(hostId);
+				return connectLocked(hostId);
+			});
 			entry.inFlight = run;
 			try {
 				return await run;
@@ -621,6 +640,7 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 		async disconnect(hostId: string, reason: "abort" | "shutdown"): Promise<void> {
 			await operationLock.run(hostId, async () => {
 				if (HOST_ID.test(hostId)) explicitlyDisconnected.add(hostId);
+				options.onDisconnect?.(hostId);
 				const entry = hosts.get(hostId);
 				const manager = entry?.manager;
 				if (manager !== undefined) await manager.disconnect(hostId, reason).catch(() => undefined);
@@ -737,6 +757,7 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 		dispose(): Promise<void> {
 			disposing ??= (async () => {
 				disposed = true;
+				for (const hostId of hosts.keys()) options.onDisconnect?.(hostId);
 				const entries = [...hosts.values()];
 				const pending = entries.flatMap((entry) => (entry.inFlight === undefined ? [] : [entry.inFlight.catch(() => undefined)]));
 				await Promise.all(pending);

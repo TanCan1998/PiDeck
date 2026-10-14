@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertTriangle, FileText, Folder, Link2, Loader2, Search, X } from "lucide-react";
+import { AlertTriangle, FileText, Folder, Link2, Loader2, Search, TerminalSquare, X } from "lucide-react";
 import type { RemoteWorkspaceEntry } from "../../../../shared/types/remoteHost";
 import { desktopApi } from "../../desktopApi";
 import { useRemoteProjectSearch, REMOTE_SEARCH_UNWIRED_CODE } from "../../hooks/useRemoteProjectSearch";
@@ -23,8 +23,8 @@ function isNotConnectedCode(code: string): boolean {
  * \`remotePath\`，因此**跨重启恢复**——它不依赖设置页那个临时的已确认 root。渲染层只给
  * \`projectId\` 与**相对路径**，主进程解析 host/root 并串行切换会话。
  *
- * 文件名搜索仍走只读helper；已有文本文件在独立编辑宿主中显式保存，不开放新建/删除/Git/终端。
- * 远端路径绝不进本地 fs/Git/终端。
+ * 文件名搜索仍走只读helper；已有文本文件在独立编辑宿主中显式保存，不开放新建/删除/Git。项目终端只转发已有终端域入口。
+ * 远端路径绝不进本地 fs/Git/shell。
  *
  * 请求代次：切项目、刷新、读文件都开启新一代。IPC 不能中途取消，但迟到的结果可以作废——
  * 旧代次的成功/失败/reject 一律丢弃，绝不能覆盖新项目的状态。搜索用的是同一个闸门（\`remoteRequestGate\`
@@ -33,7 +33,7 @@ function isNotConnectedCode(code: string): boolean {
  * 失败与空目录分开呈现：error 只在请求失败时出现，空目录提示只在**列出成功且为空**时出现，
  * 两者不同时出现。搜索同理：空结果、被截断、错误是三种不同呈现——**截断绝不假装完整**。
  */
-export function RemoteProjectPanel(props: { projectId: string; projectName: string }) {
+export function RemoteProjectPanel(props: { projectId: string; projectName: string; onOpenTerminal?: () => void }) {
 	const [entries, setEntries] = useState<RemoteWorkspaceEntry[]>([]);
 	const [relative, setRelative] = useState<string[]>([]);
 	const [file, setFile] = useState<{ projectId: string; path: string } | null>(null);
@@ -134,6 +134,12 @@ export function RemoteProjectPanel(props: { projectId: string; projectName: stri
 				<span className="rounded bg-muted px-1.5 py-0.5 font-medium text-muted-foreground">{t("project.remote.badge")}</span>
 				<strong className="text-body font-semibold text-foreground">{props.projectName}</strong>
 				<span className="text-muted-foreground">{t("project.remote.title")}</span>
+				{props.onOpenTerminal && (
+					<Button variant="ghost" size="sm" onClick={props.onOpenTerminal}>
+						<TerminalSquare className="size-4" aria-hidden="true" />
+						{t("app.terminal")}
+					</Button>
+				)}
 			</div>
 			<nav className="flex flex-wrap items-center gap-1 text-label">
 				<button type="button" className="underline" disabled={busy} onClick={() => void loadDirectory([])}>

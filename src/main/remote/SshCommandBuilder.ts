@@ -77,7 +77,8 @@ export function buildVerifiedSshArgv(target: VerifiedSshArgvInput, kind: Verifie
 	if (kind !== "ssh-batch" && kind !== "ssh-terminal" && kind !== "scp") throw new Error("INVALID_SSH_COMMAND_KIND");
 	const globalHostsFile = process.platform === "win32" ? "NUL" : "/dev/null";
 	const args = [
-		...(kind === "ssh-batch" ? ["-T"] : kind === "ssh-terminal" ? ["-tt"] : []),
+		// Interactive bytes are remote shell input, never OpenSSH's local escape/forwarding console.
+		...(kind === "ssh-batch" ? ["-T"] : kind === "ssh-terminal" ? ["-tt", "-e", "none"] : []),
 		// A direct IP needs no Host alias expansion. Ignore inherited SendEnv/Match rules on this route.
 		...(isIP(target.sshHost) !== 0 && target.proxyJump === undefined ? ["-F", process.platform === "win32" ? "NUL" : "/dev/null"] : []),
 		"-o",

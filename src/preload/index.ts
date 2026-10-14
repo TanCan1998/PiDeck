@@ -1296,6 +1296,7 @@ const api = {
 		ensure: (target: TerminalTarget) => ipcRenderer.invoke(ipcChannels.terminalEnsure, target) as Promise<TerminalTab[]>,
 		create: (target: TerminalTarget, shell?: TerminalShell) => ipcRenderer.invoke(ipcChannels.terminalCreate, target, shell) as Promise<TerminalTab>,
 		input: (tabId: string, data: string) => ipcRenderer.invoke(ipcChannels.terminalInput, tabId, data) as Promise<void>,
+		acknowledge: (tabId: string, sequence: number) => ipcRenderer.invoke(ipcChannels.terminalAcknowledge, tabId, sequence) as Promise<void>,
 		resize: (tabId: string, cols: number, rows: number) => ipcRenderer.invoke(ipcChannels.terminalResize, tabId, cols, rows) as Promise<void>,
 		close: (tabId: string) => ipcRenderer.invoke(ipcChannels.terminalClose, tabId) as Promise<void>,
 		shells: () => ipcRenderer.invoke(ipcChannels.terminalShells) as Promise<{ shell: string; label: string; available: boolean }[]>,

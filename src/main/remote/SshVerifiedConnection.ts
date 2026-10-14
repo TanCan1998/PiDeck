@@ -182,7 +182,7 @@ function readBootstrapCommand(input: BootstrapCommandInput, other: unknown, kind
 /** The ordinary remote command remains small and one already-quoted token sequence. */
 function readRemoteCommand(value: unknown, kind: VerifiedSshCommandKind): string | undefined {
 	if (value === undefined) return undefined;
-	if (kind !== "ssh-batch") throw new Error("SSH_REMOTE_COMMAND_NOT_ALLOWED");
+	if (kind !== "ssh-batch" && kind !== "ssh-terminal") throw new Error("SSH_REMOTE_COMMAND_NOT_ALLOWED");
 	if (typeof value !== "string" || value.length === 0 || value.length > REMOTE_HELPER_MAX_REMOTE_COMMAND_LENGTH || /[\x00\n\r]/.test(value)) throw new Error("SSH_REMOTE_COMMAND_INVALID");
 	return value;
 }

@@ -35,7 +35,9 @@ export function terminalOwnerKey(owner: TerminalDockOwner): string {
  * 单按钮双作用域：有 agent 优先挂 agent，否则挂当前项目。
  * 与「项目空引导页也能开终端」的产品规则对齐。
  */
-export function resolveTerminalOwner(activeAgentId: string | undefined, activeProjectId: string | undefined): TerminalDockOwner | undefined {
+export function resolveTerminalOwner(activeAgentId: string | undefined, activeProjectId: string | undefined, remoteProject = false): TerminalDockOwner | undefined {
+	// Remote terminals belong to the project and survive stopping/replacing its Agent.
+	if (remoteProject) return activeProjectId ? { kind: "project", id: activeProjectId } : undefined;
 	// pending-* 只是渲染层占位 id，主进程 agents map 里还不存在。
 	// 若把 Dock 挂到 pending owner 上，ensure/create 会立刻抛 Agent not found。
 	if (activeAgentId && !activeAgentId.startsWith("pending-")) {
@@ -167,9 +169,9 @@ export function resolvePaneTerminal(input: {
 		  }
 		| undefined;
 	projectId?: string;
-	project?: { id: string; kind?: string } | undefined;
+	project?: { id: string; kind?: string; locator?: { kind: string } } | undefined;
 }): { owner: TerminalDockOwner; target: TerminalTarget } | undefined {
-	const owner = resolveTerminalOwner(input.runtime?.agentId, input.projectId);
+	const owner = resolveTerminalOwner(input.runtime?.agentId, input.projectId, input.project?.locator?.kind === "ssh");
 	if (!owner) return undefined;
 	if (owner.kind === "agent") {
 		// 与 shared 层 toSessionRuntimeTarget 同构：target 只表达「会话→当前绑定运行实例」句柄
