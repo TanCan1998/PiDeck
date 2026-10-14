@@ -3,7 +3,8 @@ import { relative, resolve } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { ipcChannels } from "../../shared/ipc";
 import type { CommitDetail, GitChangedFile, GitCommitFileDiff, GitDiscardResource, GitGenerateCommitMessageResult, GitRepoInfo, GitResource, GitResourceGroups, GitWorkspaceDiffGroup, GitWorkspaceFileDiff, LocalProject, ProjectFileTarget, WorktreeEntry } from "../../shared/types";
-import { isLocalProject } from "../../shared/projectLocation";
+import { isLocalProject, isRemoteProject } from "../../shared/projectLocation";
+import type { RemoteGitReadIpc } from "./remoteGitReadIpc";
 import { parseProjectFileTarget } from "../files/projectFileTarget";
 import { GitBackendRouter, LocalGitBackend, resolveRelativeGitPath, type GitBackend, type GitRepositoryContext } from "../git/GitBackend";
 import type { LocalGitChangedFile, LocalGitCommitDetail, LocalGitCommitFileDiff, LocalGitResource, LocalGitResourceGroups, LocalGitWorkspaceFileDiff, LocalWorktreeEntry } from "../git/localGitTypes";
@@ -36,6 +37,8 @@ export type GitIpcDeps = {
 	projectStore: ProjectStore;
 	settingsStore: SettingsStore;
 	worktreeService: WorktreeService;
+	/** Optional only for local-only callers/tests; SSH reads must never fall back to GitService. */
+	remoteGitReads?: Pick<RemoteGitReadIpc, "status" | "workspaceDiff">;
 };
 
 // ── QuickGen：持久化轻量 pi 进程，通过 RPC 生成提交摘要 ──────────────
@@ -245,7 +248,7 @@ async function quickGenerate(projectPath: string, prompt: string, piLocator: PiL
 
 // ── IPC 注册 ────────────────────────────────────────────────────────
 
-export function registerGitIpc({ appLogger, mainCopy, gitService, gitRefsWatcher, getMainWindow, piLocator, projectStore, settingsStore, worktreeService }: GitIpcDeps): void {
+export function registerGitIpc({ appLogger, mainCopy, gitService, gitRefsWatcher, getMainWindow, piLocator, projectStore, settingsStore, worktreeService, remoteGitReads }: GitIpcDeps): void {
 	const hostPath = (path: string): string => {
 		const settings = settingsStore.get();
 		if (process.platform !== "win32" || !settings.wslEnabled || !settings.wslDistro || (!path.startsWith("/") && !parseWslUncPath(path))) {
@@ -568,13 +571,23 @@ export function registerGitIpc({ appLogger, mainCopy, gitService, gitRefsWatcher
 	});
 
 	// Git 工作区状态 + Stage/Unstage
-	ipcMain.handle(ipcChannels.gitStatus, async (_event, projectId: string, repoPath?: unknown): Promise<GitResourceGroups> => {
+	ipcMain.handle(ipcChannels.gitStatus, async (event, projectId: string, repoPath?: unknown): Promise<GitResourceGroups> => {
+		const project = projectStore.get(projectId);
+		if (project && isRemoteProject(project)) {
+			if (!remoteGitReads) throw new Error("UNSUPPORTED_CAPABILITY");
+			return remoteGitReads.status(event, projectId, repoPath);
+		}
 		const context = await findGitRepository(projectId, repoPath);
 		if (!context) return { merge: [], index: [], workingTree: [], untracked: [] };
 		return decorateResourceGroups(context, await gitService.getStatus(context.repoRoot));
 	});
 
-	ipcMain.handle(ipcChannels.gitWorkspaceFileDiff, async (_event, projectId: string, group: unknown, rawFileTarget: unknown, repoPath?: unknown): Promise<GitWorkspaceFileDiff | null> => {
+	ipcMain.handle(ipcChannels.gitWorkspaceFileDiff, async (event, projectId: string, group: unknown, rawFileTarget: unknown, repoPath?: unknown): Promise<GitWorkspaceFileDiff | null> => {
+		const project = projectStore.get(projectId);
+		if (project && isRemoteProject(project)) {
+			if (!remoteGitReads) throw new Error("UNSUPPORTED_CAPABILITY");
+			return remoteGitReads.workspaceDiff(event, projectId, group, rawFileTarget, repoPath);
+		}
 		if (group !== "merge" && group !== "index" && group !== "workingTree" && group !== "untracked") throw new Error("INVALID_GIT_RESOURCE_GROUP");
 		const context = await findGitRepository(projectId, repoPath);
 		if (!context) return null;

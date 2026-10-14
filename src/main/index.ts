@@ -292,6 +292,7 @@ import { constrainWindowBoundsToWorkArea, type LastWindowBounds, MIN_WINDOW_HEIG
 import { createRendererCrashRecoveryGuard } from "./window/rendererCrashRecovery";
 import { registerBackgroundImageProtocol, registerBackgroundsIpc } from "./ipc/backgroundsIpc";
 import { registerGitIpc } from "./ipc/gitIpc";
+import { registerRemoteGitReadIpc } from "./ipc/remoteGitReadIpc";
 import { registerStoreIpc } from "./ipc/storeIpc";
 import { registerTerminalIpc } from "./ipc/terminalIpc";
 import { registerScratchPadIpc } from "./ipc/scratchPadIpc";
@@ -2453,6 +2454,16 @@ function registerIpc() {
 			},
 		},
 	});
+	const remoteGitReads = registerRemoteGitReadIpc({
+		enabled: remoteExperimentEnabled,
+		service: remoteHostServiceIfEnabled,
+		trusted: async (target) => (await remoteProjectTrustService?.trustOverride({ hostId: target.hostId, remoteRoot: target.remotePath })) === "approve",
+		locator: (projectId) => {
+			const project = projectStore.get(projectId);
+			return project && isRemoteProject(project) ? project.locator : undefined;
+		},
+	});
+	quitCleanup.register("remote-git-reads", remoteGitReads.dispose);
 	registerRemoteProjectFileIpc({
 		enabled: remoteExperimentEnabled,
 		service: remoteHostServiceIfEnabled,
@@ -3062,6 +3073,7 @@ function registerIpc() {
 		projectStore,
 		settingsStore,
 		worktreeService,
+		remoteGitReads,
 	});
 
 	// Phase 3.7 拆出 systemIpc 后这些可选依赖必须显式注入；

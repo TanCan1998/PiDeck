@@ -1,14 +1,14 @@
 # 远端 Git：调研结论与分阶段实施计划
 
-> 状态：G0 调研完成；G1 只读公共协议/IPC 实施范围已获用户确认，实施准备中；G1–G6 尚未交付。本计划不代表远端 Git 已可用或 Remote v1 已收口。
-> 核对基线：`feat/remote-development`，`101b9b82c`。
+> 状态：G0 调研完成；G1 Linux 开发态只读 status/diff 已完成接线、针对性回归与真实 Electron＋SSH 验收；G2–G6 未实施。仍受开发态实验门禁约束，不代表 Git parity 或 Remote v1 已收口。
+> 核对基线：`feat/remote-development`，G0 调研基线 `101b9b82c`；G1 从 `bc25ebe20` 实施。
 > 范围：落实总计划 §6.3 的 Git 能力；近期顺序仍为 **status/diff → stage/unstage/commit → 跨平台与稳定性**，不一次性搬运所有本机操作。
 
 ## 1. 技术结论：继续使用 Git CLI，不更换引擎或新增 Git 依赖
 
 Git 算法、对象库、index、refs 和提交仍由原生 Git 实现。PiDeck 已有自己的命令封装、结果解析、位置边界、IPC 与 UI；需要补的是这些产品层的远端执行能力，而不是重新实现 Git。
 
-### 1.1 当前代码事实
+### 1.1 G0 开工前代码事实（G1 实施结果见 §4.6）
 
 | 层 | 已有实现 | 远端断点 / 复用判断 |
 | --- | --- | --- |
@@ -104,6 +104,7 @@ Git 算法、对象库、index、refs 和提交仍由原生 Git 实现。PiDeck 
 
 - 单次 status 原始输出 ≤ 1 MiB，资源记录 ≤ 4096；超过任一上限整次明确拒绝，不返回“看似完整”的截断状态。
 - 单侧 diff 原始正文 ≤ 256 KiB，两侧合计 ≤ 512 KiB；考虑 JSON/base64 开销后仍严格低于现有 8 MiB frame。二进制/大文件返回不可预览原因，不截断成可编辑文本。
+- index 一致性检查最多读取 16 MiB；metadata 使用有界目录 cursor，最多 20000 条、32 层；超限拒绝，避免在大对象库中无界遍历。sparse/split index、partial clone/promisor、submodule 和外置 metadata 不在 G1 支持范围。
 - 读取 Git 进程 deadline 30s，stderr ≤ 64 KiB；超限立即中止，timeout/cancel 使用有界 settle。预算按 UTF-8 字节而非字符计。
 - 列表不携带正文；diff 仅当前点击文件按需读；renderer 不缓存全仓所有 diff。
 - 请求不得重叠轮询；切项目或断线后丢弃迟到结果，不把旧快照当成新项目状态。
@@ -124,6 +125,20 @@ Git 算法、对象库、index、refs 和提交仍由原生 Git 实现。PiDeck 
 - 真机新建本次唯一专用仓库，通过 UI 读分组及 diff，两侧内容与独立远端 Git/blob/files oracle 一致；前后 HEAD/index/工作区及本机对照仓不变。
 - 双项目同名文件、切换迟到、手动断开后零隐式连接、明确重连刷新；关闭窗口/退出后进程与订阅清理。
 - `npm run typecheck`、触达 Biome、相关有界单测、spec `--list`、触达 main/preload 与 production renderer 构建、真实产品路径、diff/status 复核。只编译触达目标，不全量构建/测试。
+
+### 4.6 实施证据（2026-10-14，Linux 开发态只读切片）
+
+- `RemoteGitReadSource.ts` 的自包含程序嵌入冻结 helper **1.7.0**，只加载 Node 内置模块；新 method 为 `git.status` / `git.workspaceDiff`。没有部署第三方 Git 引擎或新增写/网络 method。
+- `RemoteGitService.ts` 绑定当前项目值、现读 trust、已确认 root 与 helper capability，严格验证完整协议数据；取消仅命中当前请求 id，迟到/改指结果拒绝。
+- `gitStatusParser.ts` 为本机既有纯 SCM parser 的等价提取；远端单独补 intent-to-add 展示，不顺手改变本机 stage/diff 行为。
+- 核心有界针对性测试 **9 文件 94/94**；涵盖真实 helper/Git 的 HEAD/index/worktree、rename/delete/intent/unborn/detached/conflict、BOM/CRLF、二进制/预算/metadata/filter 拒绝、fsmonitor/external-diff/textconv 零执行、取消/timeout/EOF/overflow 实际子进程回收，以及 main service trust/capability/身份/数据校验。证据：`/tmp/remote-git-g1-core-tests2.log`。类型检查通过：`/tmp/remote-git-g1-core-typecheck.log`。
+- **产品接线**：`remoteGitReadIpc` 提供结构化 snapshot，既有 status/workspace-diff IPC 在本机 repository 解析前分流。总32在途／每窗口4；sender销毁、项目视图卸载和quit配对取消，cancel authority只接受sender＋project，不让renderer指定helper id。`withProjectSession` 在主机锁内应用 `requireReady`，只允许已有ready主机切helper根，不自动连接离线主机；排队取消后零Git请求。旧helper能力缺失不执行Git。
+- **UI**：仅可见SSH Git抽屉挂载`RemoteGitPanel`，复用`FileTree`与已有`FileDiffViewer`。按需读取双侧正文，不挂载原生repo发现／history／graph／branch／fetch／refs watch或轮询；会话底栏SSH branch polling也被阻断。文件行不提供stage/unstage/discard/delete。失败刷新清旧快照、跨project/root切换丢弃迟到结果；主机状态失效清快照，明确connect本身不重放Git读取。root切换销毁旧helper的迟到disconnect事件不再伪造新主机故障。
+- **授权入口**：Git未授权时只显示说明和明确按钮，复用既有项目trust决策；原样列出目录，说明也会在下一次pi启动允许该项目`.pi`资源。没有隐式授权，也不把approve解释成Git hook/filter权限；所有Git读取仍现读有效host-endpoint-root材料。
+- **最终回归**：25个针对性测试文件 **207/207**，覆盖上述核心、注册后的全Git IPC SSH零本机负对照、sender/project精确取消、离线零bootstrap、旧helper零Git、UI只读控件/挂载、异步身份失效、trust明确按钮/迟到结果，以及本机Git、终端、远端文件与root邻域。项目typecheck、触达Biome、diff检查、spec `--list`、main/preload与production renderer构建通过。证据：`/tmp/remote-git-g1-regression-final.log`、`/tmp/remote-git-g1-typecheck-final.log`、`/tmp/remote-git-g1-build-main.log`、`/tmp/remote-git-g1-build-renderer2.log`。
+- **真实Electron＋SSH**：本次唯一双仓库通过真实UI授权与SCM分组，核对MM、staged rename/delete、untracked；HEAD→index、index→工作区、空→untracked的显示正文对应独立Git/blob/file oracle；二进制明确拒绝。双项目同名文件往返不串正文，实际断开后刷新不隐式连接、快照清空，明确重连不重放，用户刷新才恢复。读取前后两个仓库每个文件SHA-256和mode/size/inode/mtime/ctime（含HEAD/index/metadata/工作区）逐字一致，本机临时对照仓index字节/metadata与文件不变。仅本次唯一夹具被创建和清理，不依赖模型回复或修改用户Git设置。Git专项最终复验与原trust专项 **2 passed（3.7m）**；证据`/tmp/remote-git-g1-ui-final.log`、`/tmp/remote-git-g1-ui-final-artifacts/`（独立前后oracle附件），此前Git单项1 passed/1.9m。
+- **失败记录**：第一轮卡在跨项目抽屉关闭动画上，按项目保存的chrome重新打开并核对DOM projectId，未force点击；连接设置页既有local state在remount后丢失，沿终端验收先明确连接再实际断开，不把旧label作为连接事实。另一次定位到状态文字包含主机前缀，移除错误的exact选择器而不放宽连接/断开断言。`/tmp/remote-git-g1-ui1…ui3.log`及对应artifacts保留失败；未顺手改连接设置页状态设计。`/tmp`无长期保留承诺。
+- **未验证／未开放**：真实UI证据仅Linux客户端→Linux主机；unborn/detached/conflict/无Git/复杂配置/进程组取消等由生产helper子进程测试覆盖，不称这些全部经过真机UI。完整默认会话/模型流程未重跑，旧模型额度、DSH、本机旧Agent入口基线问题不被本轮绿灯覆盖。G2写面、G3–G5、Windows/macOS、长稳、多窗口、打包、dev集成及独立安全审查仍未完成；前后复核不是内核原子快照，也不保证所有外部Git writer并发。没有新增Git库、升级Git/pi或安装服务器依赖。
 
 ## 5. G2 写面：先定语义和工程门禁，再实现
 

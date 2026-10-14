@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { encodePiSessionDirectory } from "../src/main/remote/remoteSessionProjectMatch";
 import { initializeRemoteCodeFixture, verifyRemoteCodeEditing, verifyRemoteCodeIsolation, verifyRemoteCodeDisconnect, assertRemoteNodeTestExecuted } from "./remote-file-editing";
 import { verifyRemoteTerminals } from "./remote-terminal";
+import { createLocalGitReadControl, initializeRemoteGitFixture, verifyRemoteGitRead } from "./remote-git";
 import { verifyRemoteHistoryMutations } from "./remote-history-mutations";
 import { REMOTE_ACCEPTANCE_ENV, createRemoteSessionInProject, matchesRemoteFingerprint, readRemoteAcceptanceCredentials, readRemoteAcceptanceTimeouts, remoteProjectRow, runRemoteCommand, test, type RemoteAcceptanceCredentials, type RemoteAcceptanceTimeouts } from "./remote-fixtures";
 
@@ -616,6 +617,34 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 				}
 			}
 			preserveAppLogs(remoteUserDataRoot, paths.runId);
+			await cleanupRemoteRun(creds, paths, "");
+		}
+	});
+
+	test("远端 Git G1：只读SCM与差异 → 双项目隔离 → 断开不重连 → Git字节不变", async ({ remoteWindow, remoteUserDataRoot }, testInfo) => {
+		test.setTimeout(600_000);
+		const creds = credentials;
+		if (!creds) {
+			test.skip(true, HELP_TEXT);
+			return;
+		}
+		const paths = await createRemoteRunPaths(creds);
+		const neighbor = paths.e2eRoot + "/git-neighbor-" + paths.runId;
+		const localControl = await createLocalGitReadControl();
+		try {
+			await dismissOnboarding(remoteWindow, 8_000);
+			await createRemoteProjectDirectory(creds, paths);
+			await initializeRemoteGitFixture(creds, paths.projectPath, neighbor);
+			await addVerifiedRemoteHostAndConnect(remoteWindow, creds, timeouts);
+			await enrollRemoteProjectInSidebar(remoteWindow, neighbor, timeouts);
+			await enrollRemoteProjectInSidebar(remoteWindow, paths.projectPath, timeouts);
+			// A draft exposes shared workspace chrome, without starting pi or relying on model quota.
+			await createRemoteSessionAndReadId(remoteWindow, paths.projectName, timeouts);
+			await verifyRemoteGitRead({ window: remoteWindow, credentials: creds, root: paths.projectPath, neighbor, timeoutMs: 40_000, testInfo });
+			await localControl.verify();
+		} finally {
+			preserveAppLogs(remoteUserDataRoot, paths.runId);
+			await localControl.dispose();
 			await cleanupRemoteRun(creds, paths, "");
 		}
 	});

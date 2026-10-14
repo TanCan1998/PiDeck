@@ -2,7 +2,7 @@
 
 > 当前开发分支：`feat/remote-development`。代码核对基线：`f7b18947`（第一次协作交接点）；首次交接提交：`a663947c`。
 >
-> 下方早期批次保留历史时点，不把其中「尚未完成」直接当成现状。消息写面安全边界见本文末尾「权限与冲突加固」；最新已有远端文件编辑保存见「远端代码文件编辑保存」及 `remote-write-plan.md` §6。下一批 Git 的现状审查、成熟库比较、完整能力分期与 G1/G2 门禁见 [远端 Git 计划](remote-git-plan.md)；目前仅调研/规划完成，未实现远端 Git。
+> 下方早期批次保留历史时点，不把其中「尚未完成」直接当成现状。消息写面安全边界见本文末尾「权限与冲突加固」；最新已有远端文件编辑保存见「远端代码文件编辑保存」及 `remote-write-plan.md` §6。下一批 Git 的选型、完整能力分期与 G1/G2 门禁见 [远端 Git 计划](remote-git-plan.md)；**G1 Linux 开发态 status/diff 已接通并完成真实 Electron＋SSH 验收**，最新证据见本文末尾「远端 Git G1」。G2 写面与更广发布门禁仍未完成。
 >
 > ## 交接摘要（面向接手人，2026-10-11 收口）
 >
@@ -596,3 +596,14 @@ P4.5b 的单会话归档/恢复已完成真实 Electron＋SSH 验证，不能据
 - **未通过的更广验证**：默认4用例跑出3失败/1通过，其中原会话和Agent执行代码测试因远端`Codex error: The usage limit has been reached`无正文；终端用例在手动断开保护处暴露上述产品bug，修复后最终终端/trust专项通过，**未宣称默认4项全绿**。本机`layout-terminal.spec.ts`两项停在不存在的旧“启动 Agent”入口（尚未挂载终端），已在独立HEAD `ef1a77eea`工作区仅构建相同main/renderer并复跑，基线同两处失败；不改旧断言，也不把它算本机终端实机通过。一次首次启动未出现tab的失败未稳定复现，现保留40s有界wait及即时产品错误toast捕获，不据最终单次成功宣称长稳。
 - **证据路径**：`/tmp/remote-terminal-regression-verified.log`（180项）、`/tmp/remote-terminal-typecheck-verified.log`、`/tmp/remote-terminal-ui-verified.log`及`/tmp/remote-terminal-ui-verified-artifacts/`（最终两项trace/附件）。`/tmp/remote-terminal-ui-full-failed-artifacts/`和`/tmp/remote-terminal-ui-final.log`保留默认4项失败；`/tmp/remote-terminal-shell-menu-red.log`及对应artifacts、`/tmp/remote-terminal-focus-red-artifacts/`保留UI红例；`/tmp/remote-terminal-disconnect-red.log`、`/tmp/remote-terminal-unicode-red.log`、`/tmp/remote-terminal-native-paste-red.log`、`/tmp/remote-terminal-spawn-fence-red.log`、`/tmp/remote-terminal-ssh-escape-red.log`保留生产单测红例。`/tmp/remote-terminal-native-ui.log`与`/tmp/remote-terminal-native-baseline-ui.log`及各自artifacts证明旧入口基线问题；`/tmp`无长期保留承诺，临时基线worktree收尾删除，当前工作区不用stash。
 - **不能外推**：初始cwd校验不是chroot，用户交互shell仍拥有远端账号权限；前台shell清理证据不保证杀掉主动daemonize/disown的后台任务。未实现`terminal.prepare`、launch ticket、manifest runner或统一launcher（总计划§6.5.2仍为远期设计），无shell切换/端口转发/后台恢复/自动重连/命令重放。仅Linux客户端→Linux远端实测，未验证Windows/macOS客户端、打包、dev集成或长稳；未新增依赖/升级pi，独立reviewer依赖环境仍不可用，本轮由主代理复核，不能声称独立安全审查通过。下一批仍是Git status/diff，再stage/unstage/commit；不是Remote v1完成或可合并发布声明。
+
+## 远端 Git G1（2026-10-14，Linux 开发态只读）
+
+- **选择与范围**：保留原生Git CLI，无新Git库、第二引擎、Agent代理Git或服务器安装。普通non-bare项目根仓库的status和按需双侧文本diff；gitfile/worktree/submodule/外置metadata/partial/sparse/split index与clean/process filter明确拒绝。helper升级1.7.0，新增可协商`git.status`／`git.workspaceDiff`，冻结hash与独立契约同步。
+- **生效链**：main-owned `RemoteGitService`现读project locator与host-endpoint-root trust，经`remoteGitReadIpc`／既有status-diff IPC在本机repository解析前分流；仍复用verified SSH executable/pin/route与`withProjectSession`主机锁。只读请求要求host已ready，不隐式连接离线主机；窗口销毁、视图卸载、project切换与quit配对取消，精确helper requestId不由renderer自报。所有未实现Git IPC对SSH拒绝，注册handler测试证明零本机fs/process/Git与零remote write。
+- **只读预算与执行面**：status1 MiB／4096资源，单侧UTF-8正文256 KiB，index16 MiB，metadata20000条／32层，stderr64 KiB，deadline30s。超限完整拒绝，不截断状态或伪造空正文。固定argv、shell:false、literal pathspec、no-optional-locks，清继承Git注入、关闭fsmonitor/pager/external diff/textconv；不设置safe.directory=*或自动改配置。root FD/普通文件no-follow、HEAD/index与正文前后复核；不声称内核原子快照或锁住所有外部writer。
+- **UI与授权**：SSH抽屉只挂`RemoteGitPanel`，复用现有FileTree与FileDiffViewer；不挂原生repo发现、图谱、历史、refs watch、branch polling或fetch，也无stage/commit/discard/delete按钮。授权按钮明确说明此决策也会影响下一次pi加载项目`.pi`资源，但不授予Git hooks/filter；不自动批准。清除失败/断线快照，取消或丢弃迟到结果，明确connect不重放，用户刷新才继续。共享服务抑制已被root切换丢弃的旧helper shutdown事件，避免其冒充当前主机故障。
+- **验证**：最终25个针对性测试文件 **207/207**，typecheck、触达Biome/diff检查、e2e `--list`、main/preload＋production renderer构建通过。核心真实helper子进程覆盖unborn/detached/conflict/rename/delete/intent/BOM/CRLF、执行面零触发、预算/无Git/非法数据、timeout/cancel/EOF/overflow实际进程组回收；IPC/renderer/main身份与能力负对照和本机Git/远端文件/终端/root邻域通过。
+- **真实Electron＋SSH**：本次专用双仓库证明SCM分组、HEAD→index／index→worktree／空→untracked正文与独立Git/blob/file事实相符，二进制拒绝、双项目同名隔离、实际断开不隐式连接、明确connect不重放、手动刷新恢复。前后全部fixture文件SHA与mode/size/inode/mtime/ctime（包括HEAD/index/metadata/工作区）逐字一致，本机临时负对照repo的index字节/metadata与工作区文件不变。最终Git＋原trust专项 **2 passed（3.7m）**，Git本身不依赖模型或启动Agent；仅清理本次唯一夹具。
+- **证据与失败口径**：`/tmp/remote-git-g1-regression-final.log`、`/tmp/remote-git-g1-typecheck-final.log`、`/tmp/remote-git-g1-ui-final.log`及`/tmp/remote-git-g1-ui-final-artifacts/`（独立前后oracle附件）。前三轮UI失败分别为per-project抽屉动画、新挂载连接设置页丢local state、状态文本带主机前缀；修正真实操作/选择器，不force、不改断言成恒真，保留`ui1…ui3`日志/artifacts。沿既有terminal验收先明确connect再执行实际disconnect；未顺手修设置页状态设计。`/tmp`非长期存储承诺。
+- **仍未完成**：G2写面、history/branches/sync与所有危险历史操作、跨平台/长稳/打包、多窗口/dev集成和独立安全审查。真实UI未覆盖所有helper边界；完整默认模型/会话spec未重跑，旧模型额度和DSH问题不归因Git、也未因本次绿灯被解决。下一批按计划先stage/unstage并单独满足commit完整index确认／工程门禁；不是Git parity、Remote v1或发布完成。

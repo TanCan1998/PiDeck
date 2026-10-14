@@ -68,6 +68,16 @@ export const REMOTE_HELPER_ERROR_CODES = [
 	"HELPER_INTERNAL",
 	"REMOTE_CONNECTION_LOST",
 	"TOO_MANY_REQUESTS",
+	"GIT_NOT_FOUND",
+	"GIT_VERSION_UNSUPPORTED",
+	"GIT_NOT_REPOSITORY",
+	"GIT_UNSUPPORTED_REPOSITORY",
+	"GIT_PLATFORM_UNSUPPORTED",
+	"GIT_CONFIG_UNSUPPORTED",
+	"GIT_COMMAND_FAILED",
+	"GIT_RESULT_INVALID",
+	"GIT_RESOURCE_CHANGED",
+	"GIT_NOT_TEXT",
 ] as const;
 export type RemoteHelperErrorCode = (typeof REMOTE_HELPER_ERROR_CODES)[number];
 
@@ -85,7 +95,23 @@ export const REMOTE_HELPER_METHOD_FS_READ = "fs.read";
  * holds a concurrency slot and can be cancelled while it runs (the other three run inline in dispatch).
  */
 export const REMOTE_HELPER_METHOD_FS_SEARCH_NAMES = "fs.searchNames";
-export const REMOTE_HELPER_CAPABILITIES = ["echo", "fs.stat", "fs.list", "fs.read", "fs.searchNames"] as const;
+/** Optional read-only Git methods; they share the helper concurrency/cancellation lifecycle. */
+export const REMOTE_HELPER_METHOD_GIT_STATUS = "git.status";
+export const REMOTE_HELPER_METHOD_GIT_WORKSPACE_DIFF = "git.workspaceDiff";
+export const REMOTE_GIT_STATUS_MAX_BYTES = 1024 * 1024;
+export const REMOTE_GIT_MAX_RESOURCES = 4096;
+export const REMOTE_GIT_TEXT_MAX_BYTES = 256 * 1024;
+export const REMOTE_GIT_STDERR_MAX_BYTES = 64 * 1024;
+export const REMOTE_GIT_INDEX_MAX_BYTES = 16 * 1024 * 1024;
+export const REMOTE_GIT_METADATA_MAX_ENTRIES = 20_000;
+export const REMOTE_GIT_METADATA_MAX_DEPTH = 32;
+export const REMOTE_GIT_READ_TIMEOUT_MS = 30_000;
+
+export type RemoteGitStatusResult = { status: string; head: string | null; branch: string | null };
+export type RemoteGitWorkspaceDiffParams = { group: "merge" | "index" | "workingTree" | "untracked"; path: string };
+export type RemoteGitWorkspaceDiffResult = { originalContent: string; modifiedContent: string };
+
+export const REMOTE_HELPER_CAPABILITIES = ["echo", "fs.stat", "fs.list", "fs.read", "fs.searchNames", "git.status", "git.workspaceDiff"] as const;
 export type RemoteHelperCapability = (typeof REMOTE_HELPER_CAPABILITIES)[number];
 /**
  * Ceiling for one requested relative path. It is applied to the raw string before any filesystem access,

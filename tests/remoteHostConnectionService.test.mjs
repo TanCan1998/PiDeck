@@ -601,3 +601,65 @@ test("a refused root re-check is recorded per project and never moves the host",
 		assert.equal(ports.calls.createManager.length, 1, "复核通过后才建立会话");
 	});
 });
+
+test("discarded project helpers cannot publish a false host disconnect into the current Git view", async () => {
+	await withUserData(async (userDataDir) => {
+		await writeStore(userDataDir, 7, [{ id: HOST_ID }]);
+		const ports = fakePorts();
+		const changes = [];
+		const service = createRemoteHostConnectionService({ userDataDir, client: CLIENT, nodePath: "/usr/bin/node", ports, onStateChange: (change) => changes.push(change) });
+		service.setWorkspaceRoot(HOST_ID, "/srv/app");
+		assert.equal((await service.connect(HOST_ID)).ok, true);
+		const old = ports.calls.createManager[0].onStateChange;
+		old({ hostId: HOST_ID, state: "ready" });
+		assert.equal(changes.length, 1);
+		service.setWorkspaceRoot(HOST_ID, "/srv/other");
+		old({ hostId: HOST_ID, state: "disconnected" });
+		assert.equal(changes.length, 1, "disposed helper must not invalidate a ready project's status");
+		assert.equal((await service.connect(HOST_ID)).ok, true);
+		ports.calls.createManager[1].onStateChange({ hostId: HOST_ID, state: "offline" });
+		assert.equal(changes.length, 2);
+		assert.equal(changes.at(-1).state, "offline");
+		await service.dispose();
+	});
+});
+
+test("ready-only project reads never bootstrap an unconnected host or revive an offline manager", async () => {
+	await withUserData(async (userDataDir) => {
+		await writeStore(userDataDir, 7, [{ id: HOST_ID }]);
+		const ports = fakePorts();
+		const service = createRemoteHostConnectionService({ userDataDir, client: CLIENT, nodePath: "/usr/bin/node", ports });
+		const task = async () => assert.fail("offline operation was admitted");
+		const initial = await service.withProjectSession(HOST_ID, "/srv/app", task, { requireReady: true });
+		assert.equal(initial.ok, false);
+		assert.equal(initial.code, "SSH_HOST_NOT_READY");
+		assert.equal(ports.calls.bootstrap.length, 0);
+		service.setWorkspaceRoot(HOST_ID, "/srv/app");
+		assert.equal((await service.connect(HOST_ID)).ok, true);
+		const manager = ports.managers[0];
+		const connects = manager.connected.length;
+		manager.state = "offline";
+		const offline = await service.withProjectSession(HOST_ID, "/srv/app", task, { requireReady: true });
+		assert.equal(offline.ok, false);
+		assert.equal(offline.code, "SSH_HOST_NOT_READY");
+		assert.equal(manager.connected.length, connects);
+		assert.equal(ports.calls.bootstrap.length, 1);
+		await service.dispose();
+	});
+});
+
+test("cancelled queued project reads never probe or create a helper session", async () => {
+	await withUserData(async (userDataDir) => {
+		await writeStore(userDataDir, 7, [{ id: HOST_ID }]);
+		const ports = fakePorts();
+		const service = createRemoteHostConnectionService({ userDataDir, client: CLIENT, nodePath: "/usr/bin/node", ports });
+		const controller = new AbortController();
+		controller.abort();
+		const result = await service.withProjectSession(HOST_ID, "/srv/app", async () => assert.fail("cancelled task was admitted"), { signal: controller.signal });
+		assert.equal(result.ok, false);
+		assert.equal(result.code, "REQUEST_CANCELLED");
+		assert.equal(ports.calls.bootstrap.length, 0);
+		assert.equal(ports.calls.createManager.length, 0);
+		await service.dispose();
+	});
+});

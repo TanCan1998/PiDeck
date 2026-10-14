@@ -275,7 +275,22 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 
 	/** Build the per-host connection manager over one verified helper session. */
 	function managerFor(held: HeldBootstrap): SshConnectionManager {
-		return ports.createManager({ userDataDir: options.userDataDir, client: options.client, launcher, helperSession: held.session, ...(options.onStateChange === undefined ? {} : { onStateChange: options.onStateChange }) });
+		let manager: SshConnectionManager | undefined;
+		manager = ports.createManager({
+			userDataDir: options.userDataDir,
+			client: options.client,
+			launcher,
+			helperSession: held.session,
+			...(options.onStateChange === undefined
+				? {}
+				: {
+						onStateChange: (change: { hostId: string; state: ConnectionMachineState }) => {
+							// Root switches dispose the old helper asynchronously. Its shutdown is not a new host outage.
+							if (manager && hosts.get(change.hostId)?.manager === manager) options.onStateChange?.(change);
+						},
+					}),
+		});
+		return manager;
 	}
 
 	/** Drop every resource of one host. The manager owns its attempts, so it is disposed first. */
@@ -730,12 +745,16 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 		 * Setup failures settle as `{ ok: false, code }`; a failure of the operation itself rejects so the
 		 * caller keeps the reader's own stable codes.
 		 */
-		async withProjectSession<T>(hostId: string, root: string, task: (session: RemoteProjectSession) => Promise<T>): Promise<{ ok: true; value: T } | { ok: false; code: string }> {
+		async withProjectSession<T>(hostId: string, root: string, task: (session: RemoteProjectSession) => Promise<T>, readOptions?: { requireReady?: boolean; signal?: AbortSignal }): Promise<{ ok: true; value: T } | { ok: false; code: string }> {
 			if (disposed) return { ok: false, code: "REMOTE_CONNECTION_SERVICE_DISPOSED" };
 			if (!HOST_ID.test(hostId) || typeof root !== "string" || root.length === 0) return { ok: false, code: "SSH_HOST_NOT_READY" };
 			return operationLock.run(hostId, async () => {
 				// The user's explicit disconnect outranks a background read: report it rather than reconnecting.
 				if (explicitlyDisconnected.has(hostId)) return { ok: false, code: "SSH_HOST_DISCONNECTED" };
+				// Git panel reads may switch a ready helper's project root, but never revive an offline host.
+				// Apply this inside the same host lock, not just in a renderer/preflight state check.
+				if (readOptions?.signal?.aborted) return { ok: false, code: "REQUEST_CANCELLED" };
+				if (readOptions?.requireReady && hosts.get(hostId)?.manager?.getState(hostId).state !== "ready") return { ok: false, code: "SSH_HOST_NOT_READY" };
 				let session: RemoteProjectSession;
 				try {
 					const established = await establishProjectSession(hostId, root);
@@ -747,6 +766,7 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 					// surprise would otherwise be flattened into a generic read failure by the caller.
 					return { ok: false, code: diagnosticCodeFromError(error) };
 				}
+				if (readOptions?.signal?.aborted) return { ok: false, code: "REQUEST_CANCELLED" };
 				return { ok: true, value: await task(session) };
 			});
 		},

@@ -786,6 +786,8 @@ const api = {
 		// 两个 ref 间单个文件的 diff
 		diffFileBetween: (projectId: string, ref1: string, ref2: string, fileTarget: ProjectFileTarget, repoPath?: ProjectFileTarget) => ipcRenderer.invoke(ipcChannels.gitDiffFileBetween, projectId, ref1, ref2, fileTarget, repoPath) as Promise<string>,
 		// Git 工作区状态（VS Code 风格分组：Staged/Unstaged/Untracked/Merge）
+		cancelRemoteReads: (projectId: string) => ipcRenderer.invoke(ipcChannels.gitRemoteCancelReads, projectId) as Promise<void>,
+		remoteSnapshot: (projectId: string) => ipcRenderer.invoke(ipcChannels.gitRemoteSnapshot, projectId) as Promise<import("../shared/types").GitReadSnapshotResult>,
 		status: (projectId: string, repoPath?: ProjectFileTarget) => ipcRenderer.invoke(ipcChannels.gitStatus, projectId, repoPath) as Promise<import("../shared/types").GitResourceGroups>,
 		// Git Changes 中单个文件的两侧快照（按点击惰性读取）
 		workspaceFileDiff: (projectId: string, group: GitWorkspaceDiffGroup, fileTarget: ProjectFileTarget, repoPath?: ProjectFileTarget) => ipcRenderer.invoke(ipcChannels.gitWorkspaceFileDiff, projectId, group, fileTarget, repoPath) as Promise<GitWorkspaceFileDiff | null>,

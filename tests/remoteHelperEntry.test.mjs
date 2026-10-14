@@ -59,7 +59,7 @@ const HOST_ID = "01234567-89ab-4def-8123-456789abcdef";
 /** The helper never resolves HOME into a path, so a POSIX literal is the honest fixture on any platform. */
 const HELPER_HOME = "/home/pideck-helper";
 /** Frozen digest, pinned here as well as in the module: editing the source means editing both. */
-const FROZEN_SHA256 = "66b041d2675f9276f0ea03a29ed0f3d34a261fc2184546cb95c6928ca4fc538f";
+const FROZEN_SHA256 = "37e2b354fe322ee6d161bcf79409b511384ae4335322718d229dc625220c5df0";
 const MAX_TEXT = 4096;
 const TEST_TIMEOUT_MS = 30_000;
 const GUARD_TIMEOUT_MS = 10_000;
@@ -419,13 +419,13 @@ helperTest("the frozen helper source is one byte-frozen ASCII line", () => {
 	assert.ok(!/[\r\n]/.test(REMOTE_HELPER_INLINE_SOURCE), "the source is one line");
 	assert.ok(!/[\u0000-\u001f\u007f]/.test(REMOTE_HELPER_INLINE_SOURCE), "no control byte may reach stdin or an argv token");
 	assert.ok(!REMOTE_HELPER_INLINE_SOURCE.includes("console."), "stdout carries protocol frames only");
-	// The deployed artifact is an ES module, where require does not exist, so the body loads its two
-	// builtins through process.getBuiltinModule - and it must load nothing else.
+	// The deployed artifact uses four audited builtins; Git's process/crypto imports are optional reads.
+	// No package or SDK is loaded.
 	assert.ok(!REMOTE_HELPER_INLINE_SOURCE.includes("require("), "the helper needs nothing but process and its stdio");
 	assert.deepEqual(
 		Array.from(REMOTE_HELPER_INLINE_SOURCE.matchAll(/getBuiltinModule\("([^"]+)"\)/g)).map((match) => match[1]),
-		["node:fs", "node:path"],
-		"the helper may load exactly the two builtins the read-only batch needs",
+		["node:fs", "node:path", "node:child_process", "node:crypto"],
+		"the helper may load exactly the four builtins its fs/Git read batches need",
 	);
 	// Two size facts, deliberately different in kind. This one is a review bound on a frozen single-line
 	// artifact, not a startup constraint: everything below starts the body from a file, where no command line

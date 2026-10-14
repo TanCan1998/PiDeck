@@ -3,6 +3,7 @@ import { isRemoteProject } from "../../../../shared/projectLocation";
 import type { Project } from "../../../../shared/types";
 import { BrowserSurface } from "./BrowserSurface";
 import { GitDrawerHost } from "./GitDrawerHost";
+import { RemoteGitPanel } from "./RemoteGitPanel";
 import { RewindPanel } from "./RewindPanel";
 import { DrawerContent } from "../app/AppParts";
 import { SessionTrajectoryPanel } from "../session/trajectory/SessionTrajectoryPanel";
@@ -112,16 +113,20 @@ export function DrawerSurface(props: DrawerSurfaceProps) {
 				<div className="drawer-content-frame flex min-h-0 flex-1 flex-col overflow-hidden">
 					<div className="git-drawer-stack">
 						<div className="git-drawer-source">
-							<GitDrawerHost
-								projectId={git.activeProjectId}
-								gitApi={git.gitApi}
-								fallbackGitInfo={git.gitInfo}
-								fallbackSwitchBranch={git.switchBranch}
-								fallbackCreateBranch={git.createBranch}
-								onOpenCommitFileDiff={git.openCommitFileDiff}
-								onOpenWorkspaceFileDiff={git.openWorkspaceFileDiff}
-								onOpenFile={files.openEditorTab}
-							/>
+							{files.activeProject && files.activeProject.id === git.activeProjectId && isRemoteProject(files.activeProject) ? (
+								<RemoteGitPanel key={JSON.stringify([files.activeProject.id, files.activeProject.locator.hostId, files.activeProject.locator.remotePath])} project={files.activeProject} />
+							) : (
+								<GitDrawerHost
+									projectId={git.activeProjectId}
+									gitApi={git.gitApi}
+									fallbackGitInfo={git.gitInfo}
+									fallbackSwitchBranch={git.switchBranch}
+									fallbackCreateBranch={git.createBranch}
+									onOpenCommitFileDiff={git.openCommitFileDiff}
+									onOpenWorkspaceFileDiff={git.openWorkspaceFileDiff}
+									onOpenFile={files.openEditorTab}
+								/>
+							)}
 						</div>
 					</div>
 				</div>

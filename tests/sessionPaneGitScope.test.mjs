@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import vm from "node:vm";
-import ts from "typescript";
+import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
 const injector = readFileSync("src/renderer/src/components/session/SessionRuntimeInjector.tsx", "utf8");
 const services = readFileSync("src/renderer/src/components/session/SessionPaneServices.tsx", "utf8");
@@ -37,7 +36,7 @@ describe("session pane git project scope", () => {
 
 	describe("usePaneGitInfo behavior", () => {
 		/** 构造可注入 React hooks 与 desktopApi 的沙箱，驱动 hook 行为。 */
-		function runHook() {
+		function runHook(remote = false) {
 			// 模拟 React:state 按调用序存取;effects 收集后由测试手动驱动(充当挂载效应)。
 			const states = [];
 			const effects = [];
@@ -76,30 +75,15 @@ describe("session pane git project scope", () => {
 					return { current: branch, branches: ["branch-a", "branch-b"] };
 				},
 			};
-			const js = ts.transpileModule(hookSource, {
-				compilerOptions: {
-					module: ts.ModuleKind.CommonJS,
-					target: ts.ScriptTarget.ES2020,
-					esModuleInterop: true,
+			const { usePaneGitInfo: bareHook } = loadTsCommonJs("src/renderer/src/hooks/usePaneGitInfo.ts", {
+				stubs: {
+					react: reactMock,
+					jotai: { useAtomValue: (projectId) => (remote ? { id: projectId, locator: { kind: "ssh", hostId: "host", remotePath: "/srv/app" } } : { id: projectId, path: "/local/project" }) },
+					"../atoms/project-atoms": { projectByIdAtomFamily: (projectId) => projectId },
+					"../desktopApi": { desktopApi: { git: gitApiMock } },
 				},
-			}).outputText;
-			const context = vm.createContext({
-				module: { exports: {} },
-				exports: {},
-				require(spec) {
-					if (spec === "react") return reactMock;
-					if (spec.endsWith("desktopApi")) return { desktopApi: { git: gitApiMock } };
-					throw new Error(`unexpected require: ${spec}`);
-				},
-				window: {
-					setInterval: () => 1,
-					clearInterval: () => {},
-				},
-				Promise,
+				globals: { window: { setInterval: () => 1, clearInterval: () => {} }, Promise },
 			});
-			const wrapped = `const module = { exports: {} };\nconst exports = module.exports;\n${js}\nmodule.exports.usePaneGitInfo;`;
-			// vm.runInContext 返回最后一个表达式的值，避免被 const module 词法声明遮蔽读不回 exports。
-			const bareHook = vm.runInContext(wrapped, context);
 			// 每次调用视为一次渲染：state slot 按调用序从 0 复用（与 React 一致），
 			// 测试可重渲染读取最新状态；effect 仍被收集进本次实例的 effects 数组。
 			const usePaneGitInfo = (projectId, options) => {
@@ -125,6 +109,14 @@ describe("session pane git project scope", () => {
 				},
 			};
 		}
+
+		it("remote panes never poll branches or attempt checkout", async () => {
+			const pane = runHook(true);
+			const hook = pane.usePaneGitInfo("remote-project");
+			await pane.runEffects();
+			await hook.switchBranch("main");
+			assert.deepEqual(pane.gitCalls, []);
+		});
 
 		it("polls and checks out strictly with its own pane project id", async () => {
 			const paneA = runHook();

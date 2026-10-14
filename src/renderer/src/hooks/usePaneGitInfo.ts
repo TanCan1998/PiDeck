@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { GitBranchInfo } from "../../../shared/types";
 import { desktopApi } from "../desktopApi";
+import { useAtomValue } from "jotai";
+import { projectByIdAtomFamily } from "../atoms/project-atoms";
+import { isLocalProject } from "../../../shared/projectLocation";
 
 /** 分支信息轮询周期：与 App Git 抽屉同一节奏，外部终端/IDE 切分支 4s 内追平。 */
 const GIT_INFO_POLL_MS = 4000;
@@ -19,6 +22,8 @@ type UsePaneGitInfoOptions = {
  * 状态为栏内 local state：栏间互不重渲染；无 projectId 时保持空态（chip 隐藏）。
  */
 export function usePaneGitInfo(projectId: string | undefined, options?: UsePaneGitInfoOptions) {
+	const project = useAtomValue(projectByIdAtomFamily(projectId ?? ""));
+	const enabled = project !== undefined && isLocalProject(project);
 	const [gitInfo, setGitInfo] = useState<GitBranchInfo>({ current: null, branches: [] });
 	// 回调走 ref：轮询 effect 只依赖 projectId，回调身份变化不重启定时器。
 	const onChangedRef = useRef(options?.onChanged);
@@ -27,7 +32,7 @@ export function usePaneGitInfo(projectId: string | undefined, options?: UsePaneG
 	onSwitchErrorRef.current = options?.onSwitchError;
 
 	useEffect(() => {
-		if (!projectId) {
+		if (!projectId || !enabled) {
 			setGitInfo({ current: null, branches: [] });
 			return;
 		}
@@ -52,12 +57,12 @@ export function usePaneGitInfo(projectId: string | undefined, options?: UsePaneG
 			stopped = true;
 			window.clearInterval(timer);
 		};
-	}, [projectId]);
+	}, [projectId, enabled]);
 
 	/** 切换分支：目标写死为本栏 projectId，绝不落到全局聚焦项目；成功/回读后通知 App 同步。 */
 	const switchBranch = useCallback(
 		async (branch: string) => {
-			if (!projectId || !branch || branch === gitInfo.current) return;
+			if (!enabled || !projectId || !branch || branch === gitInfo.current) return;
 			try {
 				const next = await desktopApi.git.checkout(projectId, branch);
 				setGitInfo(next);
@@ -70,7 +75,7 @@ export function usePaneGitInfo(projectId: string | undefined, options?: UsePaneG
 				onSwitchErrorRef.current?.(error);
 			}
 		},
-		[projectId, gitInfo.current],
+		[projectId, enabled, gitInfo.current],
 	);
 
 	return { gitInfo, switchBranch };

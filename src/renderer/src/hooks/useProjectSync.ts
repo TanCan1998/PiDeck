@@ -4,6 +4,7 @@ import type { SessionLoadState } from "../atoms/session-atoms";
 import { sessionRecordToSummary } from "../atoms/session-selectors";
 import { loadProjectFileTree } from "../utils/fileTreeLazy";
 import { createKeyedWatchdog } from "../utils/catalogLoadWatchdog";
+import { isLocalProject, isRemoteProject } from "../../../shared/projectLocation";
 
 const SESSION_REFRESH_TIMEOUT_MS = 20_000;
 const SIDEBAR_PROJECT_CHILD_PAGE_SIZE = 5;
@@ -123,7 +124,7 @@ export function useProjectSync(input: UseProjectSyncInput) {
 		// 失效目录与内置 Chat 不能继续触发 Git 扫描，否则手动刷新项目后仍会产生 ENOENT 噪音。
 		// 工作区模式的项目分支随 worktree 列表一起取（refreshWorktrees），供 worktree 主工作区行展示。
 		for (const p of next) {
-			if (p.missing || p.kind === "chat") continue;
+			if (p.missing || p.kind === "chat" || !isLocalProject(p)) continue;
 			if (p.worktreeEnabled) void refreshWorktrees(p.id);
 		}
 		return next;
@@ -146,6 +147,8 @@ export function useProjectSync(input: UseProjectSyncInput) {
 	}
 
 	async function refreshWorktrees(projectId: string) {
+		const project = projects.find((entry) => entry.id === projectId);
+		if (project && isRemoteProject(project)) return;
 		try {
 			const [entries, branchInfo] = await Promise.all([api.git.worktreeList(projectId), api.git.branches(projectId).catch(() => ({ current: null, branches: [] }))]);
 			setWorktreesByProject((prev) => ({ ...prev, [projectId]: entries }));
@@ -334,7 +337,7 @@ export function useProjectSync(input: UseProjectSyncInput) {
 			return;
 		}
 		await refreshProjectSessions(latestProject.id);
-		if (latestProject.worktreeEnabled) {
+		if (isLocalProject(latestProject) && latestProject.worktreeEnabled) {
 			await refreshWorktrees(latestProject.id);
 			const projectsAfterWorktreeRefresh = await api.projects.list();
 			setProjects(projectsAfterWorktreeRefresh);

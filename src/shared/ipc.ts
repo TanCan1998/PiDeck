@@ -457,6 +457,9 @@ export const ipcChannels = {
 	gitCommitFileDiff: "git:commit-file-diff",
 	gitDiffFileBetween: "git:diff-file-between",
 	gitStatus: "git:status",
+	/** SSH root repository facts plus SCM groups; writes/history/sync remain capability-blocked. */
+	gitRemoteSnapshot: "git:remote-snapshot",
+	gitRemoteCancelReads: "git:remote-cancel-reads",
 	gitWorkspaceFileDiff: "git:workspace-file-diff",
 	gitStage: "git:stage",
 	gitUnstage: "git:unstage",

@@ -45,6 +45,8 @@ export function getCollapsibleChangeDirs(resources: GitResource[]): string[] {
 export function FileTree(props: {
 	resources: GitResource[];
 	groupType: GitResourceGroupType;
+	/** A read-only capability omits mutation controls instead of rendering no-op actions. */
+	readOnly?: boolean;
 	stageFile?: (target: ProjectFileTarget) => void;
 	/** 目录级暂存只传当前目录资源，避免影响其他目录。 */
 	stageDir?: (targets: ProjectFileTarget[]) => void;
@@ -98,7 +100,7 @@ export function FileTree(props: {
 										}));
 									return (
 										<span className="ml-auto flex items-center gap-0.5">
-											{props.stageDir && stageable.length > 0 && (
+											{!props.readOnly && props.stageDir && stageable.length > 0 && (
 												<Button
 													type="button"
 													variant="ghost"
@@ -115,7 +117,7 @@ export function FileTree(props: {
 													<Plus size={13} aria-hidden="true" />
 												</Button>
 											)}
-											{props.discardDir && discardable.length > 0 && (
+											{!props.readOnly && props.discardDir && discardable.length > 0 && (
 												<Button
 													type="button"
 													variant="ghost"
@@ -146,14 +148,14 @@ export function FileTree(props: {
 									disabled?: boolean;
 									run: () => void;
 								}> = [];
-								if (props.groupType === "index") {
+								if (!props.readOnly && props.groupType === "index") {
 									actions.push({
 										label: t("git.unstage"),
 										kind: "unstage",
 										disabled: props.mutating,
 										run: () => props.unstageFile?.(r.target),
 									});
-								} else if (props.groupType === "workingTree" || props.groupType === "untracked") {
+								} else if (!props.readOnly && (props.groupType === "workingTree" || props.groupType === "untracked")) {
 									// 已暂存文件在 Changes 组仅保留打开按钮，暂存/回滚归 Staged 组（VS Code 语义）
 									if (!props.stagedPaths?.has(r.path)) {
 										actions.push({
@@ -194,7 +196,7 @@ export function FileTree(props: {
 											)
 										}
 										actions={actions}
-										deleteFile={props.deleteFile ? (target) => props.deleteFile?.(target) : undefined}
+										deleteFile={!props.readOnly && props.deleteFile ? (target) => props.deleteFile?.(target) : undefined}
 									/>
 								);
 							})}
