@@ -1,3 +1,4 @@
+import { buildPinnedSshInvocation } from "./SshVerifiedConnection";
 import { randomBytes } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { RemoteHostStore } from "./RemoteHostStore";
@@ -79,6 +80,10 @@ export type RemoteHostConnectResult = { ok: true; hostId: string; state: Connect
  */
 export type RemoteProjectSession = {
 	readonly hostId: string;
+	/** 已验证且与本次会话同代的Node/主机版本，仅供main受控文件命令使用。 */
+	readonly nodePath: string;
+	readonly hostRevision: number;
+	runCommand(remoteCommand: string): Promise<{ exitCode: number; stdout: string }>;
 	request(method: string, params?: unknown, options?: { timeoutMs?: number; onRequestId?: (requestId: string) => void }): Promise<unknown>;
 	cancel(requestId: string, options?: { timeoutMs?: number }): Promise<unknown>;
 };
@@ -386,6 +391,8 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 
 	async function establishProjectSession(hostId: string, root: string): Promise<{ ok: true; session: RemoteProjectSession } | { ok: false; code: string }> {
 		const entry = entryFor(hostId);
+		// 保存令牌绑定host store代数；登记/重绑后不能一直复用旧held使所有重载永久失败。
+		if (entry.held && entry.held.revision !== (await readRevision())) discard(entry);
 		if ((workspaceRoots.get(hostId) ?? options.root) !== root) {
 			// A different root means a different helper session: the running one was started with the old
 			// `--root` (possibly none), so nothing about it can be reused.
@@ -448,10 +455,23 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 			if (revived.state !== "ready") return { ok: false, code: revived.lastCode ?? "SSH_HOST_NOT_READY" };
 		}
 		const bound = manager;
+		const held = entry.held;
+		if (!held) return { ok: false, code: "SSH_HOST_NOT_READY" };
 		return {
 			ok: true,
 			session: {
 				hostId,
+				nodePath: held.session.nodePath,
+				hostRevision: held.revision,
+				async runCommand(remoteCommand) {
+					// 每块重新校验pin和host store代数；不能拿旧Node路径向重绑后的主机发写命令。
+					if (disposed || hosts.get(hostId)?.manager !== bound || bound.getState(hostId).state !== "ready" || (await readRevision()) !== held.revision) throw new Error("SSH_HOST_NOT_READY");
+					const invocation = await buildPinnedSshInvocation(options.userDataDir, hostId, "ssh-batch", { client: options.client, remoteCommand });
+					// pin/route构造本身有await；必须在真正启动写命令前再次把host代数绑定到已验证Node。
+					if (disposed || hosts.get(hostId)?.manager !== bound || bound.getState(hostId).state !== "ready" || (await readRevision()) !== held.revision) throw new Error("SSH_HOST_NOT_READY");
+					const result = await options.client.run(invocation.executable, invocation.args);
+					return { exitCode: result.exitCode, stdout: result.stdout };
+				},
 				request(method, params, options) {
 					if (hosts.get(hostId)?.manager !== bound) return Promise.reject(new Error("SSH_HOST_NOT_READY"));
 					return bound.request(hostId, method, params, options);

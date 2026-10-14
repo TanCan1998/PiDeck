@@ -8,6 +8,7 @@ import { Button } from "../ui-shadcn/button";
 import { Input } from "../ui-shadcn/input";
 import { sortRemoteEntries } from "./remoteProjectEntries";
 import { createRequestGate } from "./remoteRequestGate";
+import { RemoteFileEditor } from "../workspace/RemoteFileEditor";
 import type { RemoteSearchEntryView } from "./remoteProjectSearchState";
 
 /** 主机未连接是最常见的失败，且与「路径有问题」完全不同：直接说怎么办，而不是只扔稳定码。 */
@@ -16,14 +17,14 @@ function isNotConnectedCode(code: string): boolean {
 }
 
 /**
- * 远端项目只读浏览 + 文件名搜索（Phase 3 第二段 / F2）。
+ * 远端项目目录浏览 + 文件名搜索 + 已有文本文件编辑。
  *
  * 与设置页的「远端工作区」不同：这个视图的根来自 \`ProjectStore\` 中该项目持有的 canonical
  * \`remotePath\`，因此**跨重启恢复**——它不依赖设置页那个临时的已确认 root。渲染层只给
  * \`projectId\` 与**相对路径**，主进程解析 host/root 并串行切换会话。
  *
- * 只读：不开放写入、Git、终端或 Agent。搜索只走 helper 的 \`fs.searchNames\`（渲染层不新开第二套
- * 搜索实现），远端路径绝不进本地 fs/Git/终端。
+ * 文件名搜索仍走只读helper；已有文本文件在独立编辑宿主中显式保存，不开放新建/删除/Git/终端。
+ * 远端路径绝不进本地 fs/Git/终端。
  *
  * 请求代次：切项目、刷新、读文件都开启新一代。IPC 不能中途取消，但迟到的结果可以作废——
  * 旧代次的成功/失败/reject 一律丢弃，绝不能覆盖新项目的状态。搜索用的是同一个闸门（\`remoteRequestGate\`
@@ -35,7 +36,7 @@ function isNotConnectedCode(code: string): boolean {
 export function RemoteProjectPanel(props: { projectId: string; projectName: string }) {
 	const [entries, setEntries] = useState<RemoteWorkspaceEntry[]>([]);
 	const [relative, setRelative] = useState<string[]>([]);
-	const [file, setFile] = useState<{ path: string; text: string; bytes: number } | null>(null);
+	const [file, setFile] = useState<{ projectId: string; path: string } | null>(null);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [listed, setListed] = useState(false);
@@ -52,7 +53,6 @@ export function RemoteProjectPanel(props: { projectId: string; projectName: stri
 		[],
 	);
 
-	const relativePath = relative.join("/");
 	const searching = search.phase !== "idle";
 
 	const loadDirectory = useCallback(
@@ -92,30 +92,11 @@ export function RemoteProjectPanel(props: { projectId: string; projectName: stri
 	);
 
 	const openFile = useCallback(
-		async (segments: string[]) => {
-			const gate = gateRef.current;
-			const generation = gate.begin();
-			setBusy(true);
+		(segments: string[]) => {
+			gateRef.current.invalidate();
+			setBusy(false);
 			setError(null);
-			let result: Awaited<ReturnType<typeof desktopApi.remoteHosts.readProjectFile>>;
-			try {
-				result = await desktopApi.remoteHosts.readProjectFile(props.projectId, segments.join("/"));
-			} catch {
-				if (gate.isCurrent(generation)) setError(t("project.remote.requestFailed"));
-				return;
-			} finally {
-				if (gate.isCurrent(generation)) setBusy(false);
-			}
-			if (!gate.isCurrent(generation)) return;
-			if (!result.ok) {
-				setError(t("project.remote.readFailed", { code: result.code }));
-				return;
-			}
-			// 只读文本预览：二进制在这里没有意义，直接说明而不是渲染乱码。
-			const bytes = Uint8Array.from(atob(result.contentBase64), (char) => char.charCodeAt(0));
-			const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-			setError(null);
-			setFile({ path: segments.join("/"), text: text.includes("\u0000") ? t("project.remote.binary") : text, bytes: result.bytes });
+			setFile({ projectId: props.projectId, path: segments.join("/") });
 		},
 		[props.projectId],
 	);
@@ -249,14 +230,7 @@ export function RemoteProjectPanel(props: { projectId: string; projectName: stri
 					) : null}
 				</div>
 			)}
-			{file !== null ? (
-				<div className="flex flex-col gap-1">
-					<span className="font-mono text-label text-muted-foreground">
-						{file.path === "" ? relativePath : file.path} · {file.bytes} B
-					</span>
-					<pre className="overflow-auto rounded bg-muted/40 p-2 text-label">{file.text.slice(0, 100_000)}</pre>
-				</div>
-			) : null}
+			{file !== null && file.projectId === props.projectId ? <RemoteFileEditor key={JSON.stringify([file.projectId, file.path])} projectId={file.projectId} path={file.path} /> : null}
 			<Button variant="ghost" size="sm" className="self-start" disabled={busy} onClick={() => void loadDirectory(relative)}>
 				{t("common.refresh")}
 			</Button>

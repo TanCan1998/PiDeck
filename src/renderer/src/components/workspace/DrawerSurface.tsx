@@ -1,3 +1,6 @@
+import { RemoteProjectPanel } from "../session/RemoteProjectPanel";
+import { isRemoteProject } from "../../../../shared/projectLocation";
+import type { Project } from "../../../../shared/types";
 import { BrowserSurface } from "./BrowserSurface";
 import { GitDrawerHost } from "./GitDrawerHost";
 import { RewindPanel } from "./RewindPanel";
@@ -40,6 +43,7 @@ export interface DrawerBrowserPort {
 }
 
 export interface DrawerFilesPort {
+	activeProject?: Project;
 	sessionsProject: any;
 	sessionsProjectId: string | undefined;
 	files: any[];
@@ -90,7 +94,9 @@ export function DrawerSurface(props: DrawerSurfaceProps) {
 	return (
 		<>
 			{/* 各面板不再挂「标题 + ×」顶栏：关闭/切换改走会话 Tab 栏右侧活动图标。 */}
-			{drawer === "trajectory" && !drawerCollapsed ? (
+			{drawer === "files" && !drawerCollapsed && files.activeProject && isRemoteProject(files.activeProject) ? (
+				<RemoteProjectPanel projectId={files.activeProject.id} projectName={files.activeProject.name} />
+			) : drawer === "trajectory" && !drawerCollapsed ? (
 				<div className="drawer-content-frame flex min-h-0 flex-1 flex-col overflow-hidden">
 					<SessionTrajectoryPanel />
 				</div>

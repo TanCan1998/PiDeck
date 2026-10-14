@@ -136,6 +136,66 @@ function fakePorts(overrides = {}) {
 	return ports;
 }
 
+test("project file session replaces stale host facts after a store revision change", async () => {
+	await withUserData(async (userDataDir) => {
+		await writeStore(userDataDir, 7, [HOST_ID]);
+		const ports = fakePorts({ verifyRoot: async ({ userPath }) => ({ canonicalPath: userPath }) });
+		const service = createRemoteHostConnectionService({ userDataDir, client: CLIENT, nodePath: "/usr/bin/node", ports });
+		try {
+			const first = await service.withProjectSession(HOST_ID, "/repo", async (session) => ({ revision: session.hostRevision, node: session.nodePath }));
+			assert.equal(first.ok, true);
+			assert.equal(first.value.revision, 7);
+			await writeStore(userDataDir, 8, [HOST_ID]);
+			const second = await service.withProjectSession(HOST_ID, "/repo", async (session) => ({ revision: session.hostRevision, node: session.nodePath }));
+			assert.equal(second.ok, true);
+			assert.equal(second.value.revision, 8);
+			assert.equal(second.value.node, "/usr/bin/node");
+			assert.equal(ports.calls.bootstrap.length, 2);
+		} finally {
+			await service.dispose();
+		}
+	});
+});
+
+test("project file command refuses a host revision change during fresh pin/route construction", async () => {
+	await withUserData(async (userDataDir) => {
+		await writeStore(userDataDir, 7, [HOST_ID]);
+		let runs = 0;
+		const { createRemoteHostConnectionService: createService } = loadTsCommonJs("src/main/remote/RemoteHostConnectionService.ts", {
+			stubs: {
+				"./SshVerifiedConnection": {
+					buildPinnedSshInvocation: async () => {
+						await writeStore(userDataDir, 8, [HOST_ID]);
+						return { executable: "/usr/bin/ssh", args: ["verified-command"] };
+					},
+				},
+			},
+		});
+		const ports = fakePorts({ verifyRoot: async ({ userPath }) => ({ canonicalPath: userPath }) });
+		const service = createService({
+			userDataDir,
+			client: {
+				...CLIENT,
+				run: async () => {
+					runs++;
+					return { exitCode: 0, stdout: "", stderr: "" };
+				},
+			},
+			nodePath: "/usr/bin/node",
+			ports,
+		});
+		try {
+			await assert.rejects(
+				service.withProjectSession(HOST_ID, "/repo", (session) => session.runCommand("test-command")),
+				/SSH_HOST_NOT_READY/,
+			);
+			assert.equal(runs, 0);
+		} finally {
+			await service.dispose();
+		}
+	});
+});
+
 test("an unknown host id is refused without reading the store or starting a bootstrap", async () => {
 	await withUserData(async (userDataDir) => {
 		await writeStore(userDataDir, 7, []);

@@ -3843,6 +3843,7 @@ export function App() {
 	const drawerPorts = useDrawerPorts({
 		enableGitManagement: settings.enableGitManagement,
 		activeProjectId,
+		activeProject: activeProject ?? undefined,
 		gitDrawerDiff,
 		gitDiffDisplayMode,
 		openCommitFileDiff,

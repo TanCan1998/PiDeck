@@ -3,6 +3,7 @@ import { cpSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { encodePiSessionDirectory } from "../src/main/remote/remoteSessionProjectMatch";
+import { initializeRemoteCodeFixture, verifyRemoteCodeEditing, verifyRemoteCodeIsolation, verifyRemoteCodeDisconnect, assertRemoteNodeTestExecuted } from "./remote-file-editing";
 import { verifyRemoteHistoryMutations } from "./remote-history-mutations";
 import { REMOTE_ACCEPTANCE_ENV, createRemoteSessionInProject, matchesRemoteFingerprint, readRemoteAcceptanceCredentials, readRemoteAcceptanceTimeouts, remoteProjectRow, runRemoteCommand, test, type RemoteAcceptanceCredentials, type RemoteAcceptanceTimeouts } from "./remote-fixtures";
 
@@ -296,7 +297,7 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 			});
 			await test.step("侧栏登记远端项目（canonical 确认 + 立即选中）", async () => {
 				await enrollRemoteProjectInSidebar(window, paths.projectPath, timeouts);
-				await expect(window.getByText("远端项目（只读）")).toBeVisible({ timeout: timeouts.helperMs });
+				await expect(window.getByText("远端项目", { exact: true })).toBeVisible({ timeout: timeouts.helperMs });
 			});
 			await test.step("在该远端项目里新建会话（项目行 + →「普通会话」）", async () => {
 				sessionId = await createRemoteSessionAndReadId(window, paths.projectName, timeouts);
@@ -553,6 +554,68 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 			if (consoleErrors.length > 0) console.log("[p42-acceptance] renderer console errors:\n" + consoleErrors.join("\n"));
 			preserveAppLogs(remoteUserDataRoot, paths.runId);
 			await cleanupRemoteRun(creds, paths, remoteSessionEvidence);
+		}
+	});
+
+	test("远端代码文件：UI编辑保存 → 外部冲突保留草稿 → 双项目隔离 → Agent真实运行测试", async ({ remoteWindow, remoteUserDataRoot }, testInfo) => {
+		test.setTimeout(1_200_000);
+		const creds = credentials;
+		if (!creds) {
+			test.skip(true, HELP_TEXT);
+			return;
+		}
+		const window = remoteWindow;
+		const paths = await createRemoteRunPaths(creds);
+		const neighborPath = paths.e2eRoot + "/neighbor-" + paths.runId;
+		let started = false;
+		try {
+			await dismissOnboarding(window, 8_000);
+			await createRemoteProjectDirectory(creds, paths);
+			await initializeRemoteCodeFixture(creds, paths.projectPath);
+			await runRemoteCommand(creds, "mkdir -p '" + neighborPath + "'; umask 077; printf '%s' '" + Buffer.from("module.exports = { value: 101 };\n").toString("base64") + "' | base64 -d > '" + neighborPath + "/calc.cjs'", 20_000);
+			await addVerifiedRemoteHostAndConnect(window, creds, timeouts);
+			await enrollRemoteProjectInSidebar(window, paths.projectPath, timeouts);
+			await verifyRemoteCodeEditing({ window, credentials: creds, projectPath: paths.projectPath, testInfo, timeoutMs: timeouts.helperMs });
+			await enrollRemoteProjectInSidebar(window, neighborPath, timeouts);
+			await verifyRemoteCodeIsolation(window, creds, paths.projectPath, neighborPath, timeouts.helperMs);
+			await verifyRemoteCodeDisconnect(window, creds, paths.projectPath, timeouts.helperMs);
+			await createRemoteSessionAndReadId(window, paths.projectName, timeouts);
+			started = true;
+			// 会话已打开时走文件抽屉，不只证明无会话空态能编辑。
+			await window.locator(".header-drawer-toggle").first().click();
+			await expect(window.getByTestId("drawer-rail-files")).toHaveAttribute("aria-selected", "true");
+			await window.getByRole("button", { name: "calc.cjs", exact: false }).click();
+			await expect(window.getByRole("region", { name: "远端文件编辑器" }).locator(".cm-content")).toContainText("value: 2", { timeout: timeouts.helperMs });
+			await window.locator(".header-drawer-toggle").first().click();
+			console.log("[remote-file-acceptance] activeSessionFileDrawer=true");
+			const prompt = "请读取 calc.cjs 和 test.cjs，然后用 bash 执行 node test.cjs。不要修改任何文件，必须真实运行测试，测试通过后回复 REMOTE_FILE_TEST_OK。";
+			await window.locator(".composer .rich-input").click();
+			await window.keyboard.insertText(prompt);
+			await window.keyboard.press("Enter");
+			await expect(window.locator(".message-timeline .assistant-text").filter({ hasText: "REMOTE_FILE_TEST_OK" })).toBeVisible({ timeout: timeouts.helperMs });
+			await expect(window.locator(".composer-send-primary")).toHaveAttribute("aria-label", "发送", { timeout: timeouts.helperMs });
+			await openTabsActionMenu(window);
+			await window.getByRole("menuitem", { name: "关闭 Agent", exact: true }).click();
+			started = false;
+			const file = (await runRemoteCommand(creds, "find '" + paths.sessionEvidenceDir + "' -maxdepth 1 -name '*.jsonl' -print", 20_000)).stdout.trim();
+			expect(file.split("\n")).toHaveLength(1);
+			expect(file.startsWith(paths.sessionEvidenceDir + "/")).toBe(true);
+			const bounded = await runRemoteCommand(creds, "test $(wc -c < '" + file + "') -le 262144 && cat -- '" + file + "'", 20_000);
+			await testInfo.attach("remote-code-agent-tool-evidence", { body: Buffer.from(bounded.stdout), contentType: "application/jsonl" });
+			assertRemoteNodeTestExecuted(bounded.stdout);
+			console.log("[remote-file-acceptance] agentReadAndNodeTest=true");
+		} finally {
+			if (started) {
+				try {
+					await window.keyboard.press("Escape");
+					await openTabsActionMenu(window);
+					await window.getByRole("menuitem", { name: "关闭 Agent", exact: true }).click();
+				} catch (error) {
+					console.warn("[remote-file-acceptance] cleanup stop was not confirmed", error instanceof Error ? error.message : String(error));
+				}
+			}
+			preserveAppLogs(remoteUserDataRoot, paths.runId);
+			await cleanupRemoteRun(creds, paths, "");
 		}
 	});
 

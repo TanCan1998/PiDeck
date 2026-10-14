@@ -17,6 +17,8 @@ export type CodeMirrorEditorProps = {
 	/** 文件扩展名（"ts"）或旧 Monaco 语言 id（"markdown"），解析见 resolveEditorLanguage。 */
 	language?: string;
 	height?: string;
+	/** 指定文件原有换行形式；未指定时保持现有默认LF。 */
+	lineSeparator?: "\n" | "\r\n";
 	readOnly?: boolean;
 	/** 鼠标选中文本后右键菜单「引用选中内容」：携带选区起止行号（1 起），由调用方插入输入框。 */
 	onAttachSelection?: (startLine: number, endLine: number) => void;
@@ -37,7 +39,7 @@ type SelectionMenu = {
 /** 统一封装：与旧 MonacoEditor 的 props 完全兼容（value/onChange/language/height/readOnly），
  * 外部切换时零成本替换。EditorView 生命周期由本组件托管：卸载 dispose、外部 value 变化
  * 以「与当前文档不同才替换」的方式同步，避免覆盖用户正在输入的内容。 */
-export const CodeMirrorEditor = memo(function CodeMirrorEditor({ value, onChange, language, height = "100%", readOnly = false, onAttachSelection, initialLine }: CodeMirrorEditorProps) {
+export const CodeMirrorEditor = memo(function CodeMirrorEditor({ value, onChange, language, height = "100%", readOnly = false, lineSeparator, onAttachSelection, initialLine }: CodeMirrorEditorProps) {
 	const hostRef = useRef<HTMLDivElement | null>(null);
 	const viewRef = useRef<EditorView | null>(null);
 	const onChangeRef = useRef(onChange);
@@ -73,6 +75,7 @@ export const CodeMirrorEditor = memo(function CodeMirrorEditor({ value, onChange
 			state: EditorState.create({
 				doc: value,
 				extensions: [
+					...(lineSeparator ? [EditorState.lineSeparator.of(lineSeparator)] : []),
 					...baseEditorExtensions({ readOnly, wordWrap: true, language: resolvedLanguage }),
 					// 与 Monaco 默认一致的编辑体验：行号/折叠/自动换行/括号匹配/补全/查找
 					lineNumbers(),
@@ -105,7 +108,7 @@ export const CodeMirrorEditor = memo(function CodeMirrorEditor({ value, onChange
 					]),
 					EditorView.updateListener.of((update) => {
 						if (update.docChanged) {
-							const next = update.state.doc.toString();
+							const next = update.state.sliceDoc();
 							lastValueRef.current = next;
 							onChangeRef.current?.(next);
 						}
@@ -129,7 +132,7 @@ export const CodeMirrorEditor = memo(function CodeMirrorEditor({ value, onChange
 			viewRef.current = null;
 		};
 		// 语言/只读变化需重建实例（CM6 无热切换语言的标准路径，重建成本低且简单可靠）
-	}, [language, readOnly]);
+	}, [language, readOnly, lineSeparator]);
 
 	// initialLine 变化（重新点击同文件链接/切换 tab）：文档未变时重新定位
 	useEffect(() => {
@@ -146,7 +149,7 @@ export const CodeMirrorEditor = memo(function CodeMirrorEditor({ value, onChange
 	// 外部 value 同步：只在文档确实不同时替换（防止覆盖用户输入、防止 onChange 回环）
 	useEffect(() => {
 		const view = viewRef.current;
-		if (!view || view.state.doc.toString() === value) return;
+		if (!view || view.state.sliceDoc() === value) return;
 		view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: value } });
 		// 内容替换完成后再定位：mount 时 doc 可能为空，这里拿走目标行
 		const targetLine = initialLineRef.current;

@@ -79,3 +79,15 @@
 - `RemoteSessionWriteGuard` 固定脚本只使用远端 Node 标准库，经既有 pinned SSH 短命令运行，Node 路径来自 `remotePiRuntimeFacts`；缺失即拒绝，不尝试系统 Node、不依赖 pi SDK、不升级远端软件、不改 helper 协议。保留每条命令长度门禁与 256 KiB 输入/输出上界。
 - Windows/macOS 客户端、非 Linux 远端及 ACL/xattr 未在本切片验收；不能外推为完整并发锁或全部元数据 parity。
 - 真删远端数据、批量操作、跨项目移动：**不在本计划内**，另行评估与授权。
+
+## 6. 已有远端代码文件编辑保存（2026-10-14，已实现）
+
+用户选择「按照计划」推进的最小切片，不扩展新建/重命名/删除、watch、Git、终端或依赖升级。原会话写面与下面代码文件协议分别拥有边界，不能把 JSONL 专用写入器当通用文件 API。
+
+- **入口与契约**：`remote:project-text-open/save` → `remoteProjectFileIpc` → `RemoteProjectFileService`；跨进程类型在 `shared/types/remoteFiles.ts`，preload 只暴露 projectId、项目相对路径、正文与不透明版本令牌。main 从 ProjectStore 获取 host/root，不接受 renderer 自报绝对路径、摘要或主机身份；非 SSH 项目不回落本机 files API。
+- **项目边界**：只编辑已有普通文件。固定 Node 标准库命令每次复核 canonical root 和逐级非链接父目录，Linux `/proc/self/fd` 锚定父目录，叶文件使用 `O_NOFOLLOW`；拒绝越界、根漂移、父/叶软链接，不创建目录或目标文件。Node 是同一 helper 会话已验证的绝对路径，沿用 pinned SSH 与单主机锁；每块在构造 pin/route 前后复核 host store 代数，不新增 helper op/通信协议。
+- **有界文本**：源/结果最大 **256 KiB UTF-8 字节**，读取块 96 KiB，上传块 **3072 B**（为长路径保留命令预算），每条命令仍 ≤8192 字符；超限拒绝，不截断。保留 BOM、一致 LF/CRLF；无效 UTF-8、NUL、裸 CR 或混合换行拒绝，不能静默规整原文。渲染草稿另有单文件256 Ki字符与总共5文件的内存预算，超限输入被拒绝并提示，不落盘正文。
+- **版本与提交**：main 的128个/30分钟不透明令牌绑定窗口、项目、host/root值快照、相对路径、host store代数和 mode/size/dev/ino/uid/gid/mtimeNs/ctimeNs/SHA-256。保存在任何 await 前消耗令牌，先复核源，再上传同目录随机排他 `0600` 临时文件；提交校验上传摘要/归属、再次复核源，恢复原mode、fsync后rename。失败不自动重试/清理残留temp；rename失败尝试恢复temp为0600。成功签发新令牌。
+- **UX 与草稿**：无会话项目面板及已有会话文件抽屉共用 `RemoteFileEditor`，CodeMirror显式保存/Ctrl或Cmd+S，无本机autosave。Jotai草稿按projectId＋相对路径隔离，切文件/项目、关抽屉或保存失败保留；保存完成只推进已发送正文的基准，不盖掉保存期间的新编辑。冲突/回执未知/过期阻止再次保存，要求显式重载；丢弃脏草稿前确认，重载失败仍保留。只回收干净且无在途IO的条目，不驱逐脏草稿。退出应用不持久化草稿，关闭前请保存或复制。
+- **真实边界**：不是跨机器内核CAS，最后版本检查到rename仍有非协作写者竞态；SSH提交后回执丢失或提交后读回失配可能已经提交，须重载核对，不能保证所有错误都意味着未写。保留POSIX mode与一致uid/gid，不复制ACL/xattr；原inode被替换，硬链接的其他路径不会同步。仅Linux远端，有`/proc`前提；macOS/Windows客户端与正式安装包未验收。
+- **验证**：生产命令在一次性POSIX目录验证权限600/640/644、重复/空保存、同长度/追加/inode/权限/删除冲突、上传期修改、私密残留、窗口/身份/代数/过期令牌、根/软链/路径/编码/上限与草稿策略。真机默认spec增加独立代码文件用例：显式保存/重读字节相等、BOM/CRLF保留、外部修改拒绝且草稿切换后仍在、取消/确认重载、双项目同名隔离、手动断开零隐式重连/写、已有会话抽屉可达；最后远端Agent读源码并实际执行`node test.cjs`。oracle必须看到对应bash toolCall与成功toolResult，不接受模型口头成功。完整spec首次 **3 passed（4.1m）**，最终构建复跑 **3 passed（5.5m）**；提交后读回失配专项加固后定向复跑代码用例 **1 passed（1.2m）**，18个相关测试文件 **202/202**、项目typecheck通过；旧会话/trust门禁不变，最终证据见handoff。

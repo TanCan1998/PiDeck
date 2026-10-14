@@ -203,7 +203,7 @@ test.describe("远端主机功能级验收（真机）", () => {
 				await expect(projectRow(window, projectAName)).toBeVisible();
 				await expect(projectRow(window, projectBName)).toBeVisible();
 				// 登记成功后项目被选中：远端项目页面出现在中栏（这是「立即打开」的用户可见结果）。
-				await expect(window.getByText("远端项目（只读）")).toBeVisible({ timeout: timeouts.helperMs });
+				await expect(window.getByText("远端项目", { exact: true })).toBeVisible({ timeout: timeouts.helperMs });
 			});
 			await test.step("展开项目 A 行：远端会话 列表按主机只读列出夹具会话", async () => {
 				try {

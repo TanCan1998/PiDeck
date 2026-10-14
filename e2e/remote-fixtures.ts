@@ -325,6 +325,8 @@ export async function createRemoteSessionInProject(window: Page, projectName: st
 	const row = remoteProjectRow(window, projectName);
 	await expect(row).toBeVisible();
 	await row.hover();
+	// 展开的项目组中心落在会话列表上，hover浮层所属的标题行才能真的解除命中屏蔽。
+	await row.locator(".project-draggable").hover();
 	// aria-label 来自 i18n `app.newNormalSession`（项目行「+」与 Chat 标题栏「+」共用同一文案），
 	// 所以必须限定在项目行内取，避免命中 Chat 区那个同名按钮。
 	const newSession = row.getByRole("button", { name: "普通会话", exact: true });

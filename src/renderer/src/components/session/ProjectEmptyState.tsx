@@ -57,8 +57,8 @@ export function ProjectEmptyState(props: {
 	// 项目下拉只切换 activeProjectId——切项目后仍留在引导页（currentSessionId 保持
 	// 空），发送时按选中项目创建；下拉列表 = 已加入的全部项目（含内置 Chat）。
 	//
-	// 远端项目例外：它没有本机路径，发送即创建本地会话的路径不适用于它。只读浏览远端
-	// 目录，把写入/Agent 留到后续阶段（各本地 IPC 也已按 locator 拒绝）。
+	// 远端项目没有本机路径：使用同源远端目录/文本编辑宿主，各本机IPC仍按locator拒绝。
+	// 会话创建仍由项目行入口负责，不把无会话引导页当成本机项目。
 	if (isRemoteProject(props.activeProject)) {
 		return <RemoteProjectPanel projectId={props.activeProject.id} projectName={props.activeProject.name} />;
 	}

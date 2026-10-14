@@ -34,6 +34,9 @@ export const ipcChannels = {
 	remoteProjectList: "remote:project-list",
 	/** 按 projectId 读文件（相对路径）。 */
 	remoteProjectRead: "remote:project-read",
+	/** 已有远端文本文件编辑：main持有版本，保存必须携带打开时签发的令牌。 */
+	remoteProjectTextOpen: "remote:project-text-open",
+	remoteProjectTextSave: "remote:project-text-save",
 	/** 按 projectId 在项目内做**文件名**搜索（不含内容搜索）；query 在 main 边界重新校验。 */
 	remoteProjectSearch: "remote:project-search",
 	/** 项目已确认 root 的最近一次复核结果（只读、不建会话、无 helper 请求）。 */

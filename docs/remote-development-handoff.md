@@ -2,7 +2,7 @@
 
 > 当前开发分支：`feat/remote-development`。代码核对基线：`f7b18947`（第一次协作交接点）；首次交接提交：`a663947c`。
 >
-> 下方早期批次保留历史时点，不把其中「尚未完成」直接当成现状。消息写面最新安全边界见本文末尾「权限与冲突加固」及 `remote-write-plan.md`。
+> 下方早期批次保留历史时点，不把其中「尚未完成」直接当成现状。消息写面安全边界见本文末尾「权限与冲突加固」；最新已有远端文件编辑保存见「远端代码文件编辑保存」及 `remote-write-plan.md` §6。
 >
 > ## 交接摘要（面向接手人，2026-10-11 收口）
 >
@@ -572,3 +572,15 @@ P4.5b 的单会话归档/恢复已完成真实 Electron＋SSH 验证，不能据
 - **证据保留**：`/tmp/remote-write-guard-red.log`（初始16条红）、`/tmp/remote-write-hardening-regression.log`（227条）、`/tmp/remote-write-hardening-ui-final-artifacts/`（trace 与 JSONL 附件）；`/tmp` 无长期保留承诺。
 - **边界不外推**：最终版本复核到 rename 之间仍有非协作写者竞态，不是内核 CAS/严格跨机器互锁。提交后 SSH 回执丢失可能结果未知，须重载核对；ACL/xattr 未复制/验证，跨平台、真实参考图和工具过程链未在本切片验收。超256KiB仍明确拒绝，不截断覆盖。
 - **dev/版本集成风险**：本切片从 `dd35b2f0f` 开始；核对时本分支独有157提交、origin/dev独有764提交（`7fb3d74b4`）。本机 pi 为 **1.2.0**，本分支 pi-ai 依赖 **0.86.1**，dev 为 **1.2.0**，本轮真机远端仍为 **0.85.1**。此组合下本切片验收通过，但不证明 dev 合并或远端 pi 1.2.0 兼容；会话文件结构、RPC事件/模型/扩展、trust flag、打包与迁移应在单独集成批次验证，不能把代码堆完后直接声称可合并发布。
+
+## 远端代码文件编辑保存（2026-10-14，已交付切片）
+
+- **可用入口**：无会话时的远端项目面板，以及已有会话的右侧文件抽屉；两处复用 `RemoteFileEditor`。点已有文件打开CodeMirror，修改后点「保存远端文件」或Ctrl/Cmd+S，明确不自动保存。项目标题去掉旧「只读」标签；目录/文件名搜索仍是原只读helper。
+- **身份与安全**：两个新IPC在shared/preload/main同源，renderer只发projectId、相对路径、正文与不透明令牌；main解析SSH locator值快照，版本绑定窗口/项目/主机/根/路径/host store代数/源文件版本，令牌30分钟、总上限128，窗口销毁撤销。每块在pin/route构造前后复核代数，主机资料变化后重建旧held，不向新路由使用旧Node。所有远端I/O经已有pinned SSH、已验证Node和单主机操作锁，不新增helper op或pi API桥，不走本机fs兜底。
+- **文件约束**：仅Linux远端已有普通UTF-8文本，256 KiB字节上限，支持BOM及一致LF/CRLF；NUL/无效编码/混合换行/裸CR/软链接/越界拒绝，超限不截断。固定Node命令用`/proc/self/fd`锚定非链接父目录、`O_NOFOLLOW`打开叶；上传同目录随机排他0600临时文件，复核原文件摘要/身份和上传内容/uid/gid，再恢复mode、fsync和rename。上传块3072 B，为长路径保留8192字符命令预算。
+- **草稿规则**：Jotai按项目＋相对路径保存最多5个内存草稿，单文件256 Ki字符预算；不驱逐脏文件或在途IO。失败打开的干净空条目可回收，避免点5个二进制文件永久占满预算。切文件/项目/关抽屉与保存失败不丢草稿；保存期间继续输入，完成只推进旧请求正文基准。冲突/断开/回执未知/令牌过期不自动重试，需重新加载核对；丢弃脏草稿前确认，重载失败保留原草稿。退出应用不持久化草稿，界面提示先保存/复制。
+- **不能外推**：不是文件系统CAS/严格跨机器互锁；最后复核→rename间仍有非协作写者竞态，提交后回执丢失或读回失配可能已提交。失败temp不自动清理，rename失败尝试恢复0600；ACL/xattr不复制、硬链接其他路径不同步。没有新建/删除/重命名、批量/watch、Git、终端、安装包或跨平台客户端验收，也未合并dev/升级依赖；仍是显式开发态实验功能，不是Remote v1。
+- **回归**：18个针对性测试文件 **202/202**，项目typecheck、触达文件Biome、spec `--list`与diff检查通过。回归包括源/结果超限、编码/BOM/换行、600/640/644、同长度/追加/替换inode/chmod/删除和上传期修改、私密残留、权限/rename失败及提交后读回失配、引号路径、身份冻结/窗口/代数/过期令牌、host变更发生在pin构造期间、项目/草稿隔离、迟到结果与保存期输入；本机编辑/引用/抽屉及原远端读面门禁保持绿。
+- **真实Electron＋SSH**：新增默认代码文件用例验证明确保存→远端字节相等→重读、BOM/CRLF保留、外部改写拒绝且草稿跨文件导航保留、取消/确认重载、双项目同名隔离、手动断开不隐式重连/写、显式重连重载、已有会话文件抽屉可达。随后远端Agent真实read源码并bash运行`node test.cjs`；从专用JSONL关联bash toolCall和成功toolResult，不能只凭模型口头成功。最终main/preload＋renderer构建复跑 **3 passed（5.5m）**，此前完整跑 **3 passed（4.1m）**；补齐提交后异常不得谎称拒绝覆盖的生产回归后，仅重建触达main/preload并复跑代码用例 **1 passed（1.2m）**，原会话历史/fork/消息edit/resend/delete/冲突/trust断言未降低。仅操作并清理本次唯一e2e目录。
+- **失败考证**：连接页在切项目重建helper后可能显示上次显式操作的断开状态，测试先显式连接再断开；项目组展开后中心hover不在标题浮层，夹具改hover真实`.project-draggable`，不force点击。Agent bash继承的系统Node仍是旧版本，`node:assert/strict`报MODULE_NOT_FOUND；模型虽口头输出成功，工具oracle正确报红。测试夹具改用旧Node也支持的标准`assert.strictEqual`后实际工具执行转绿，不修改服务器Node/PATH。首次抽屉选择器错用了button而实际rail是tab，改走真实标题栏开关与rail断言；均未弱化产品断言。
+- **证据**：`/tmp/remote-file-editor-regression-final.log`（202项）、`/tmp/remote-file-editor-typecheck-final.log`、`/tmp/remote-file-editor-ui-final-build.log`（最终3项）、`/tmp/remote-file-editor-ui-final-build-artifacts/`（完整trace、保存后源码及Agent JSONL）、`/tmp/remote-file-editor-ui-delivery.log`与`/tmp/remote-file-editor-ui-delivery-artifacts/`（最终代码用例）；`/tmp/remote-file-editor-ui1…ui5.log`及对应artifacts保留失败定位，`/tmp`无长期保留承诺。e2e独立严格检查发现既存`timeouts.stepMs`两处和fixture依赖类型错误，已与HEAD比对；新增`remote-file-editing.ts`自身无严格类型诊断，未扩大范围修旧错误。

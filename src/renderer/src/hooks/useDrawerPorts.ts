@@ -1,3 +1,4 @@
+import type { Project } from "../../../shared/types";
 import { useMemo } from "react";
 import type { WorkspaceDrawerPanel } from "./useWorkspacePanels";
 import type { SessionFilterPill } from "../sessionFilterPills";
@@ -8,6 +9,7 @@ interface UseDrawerPortsInput {
 	// Git
 	enableGitManagement: boolean;
 	activeProjectId: string | undefined;
+	activeProject?: Project;
 	gitDrawerDiff: any;
 	gitDiffDisplayMode: string;
 	openCommitFileDiff: any;
@@ -100,6 +102,7 @@ export function useDrawerPorts(input: UseDrawerPortsInput) {
 		};
 
 		const files: DrawerFilesPort = {
+			activeProject: input.activeProject,
 			sessionsProject: input.sessionsProject,
 			sessionsProjectId: input.sessionsProjectId,
 			files: input.files,
@@ -136,6 +139,7 @@ export function useDrawerPorts(input: UseDrawerPortsInput) {
 	}, [
 		input.enableGitManagement,
 		input.activeProjectId,
+		input.activeProject,
 		input.gitDrawerDiff,
 		input.gitDiffDisplayMode,
 		input.openCommitFileDiff,
