@@ -421,6 +421,8 @@ export interface PiRuntimeLauncher {
 
 ### 6.3 文件、Git 与 Session 存储后端
 
+Git 调研、选型和分批实施细节见 [远端 Git 计划](remote-git-plan.md)：当前保留原生 Git CLI，不新增 Git 库；G1 status/diff 与 G2 stage/unstage/commit 尚未实施，完整历史/分支/同步与发布门禁不能因最小切片完成而省略。
+
 - `filesIpc.ts` 的新输入统一为 `ProjectFileTarget = { projectId: string; relativePath: string }`；main 根据 projectId 解析 location 和可信 root，再选择 local/remote backend。
 - 输出契约也要迁移：`FileTreeNode` / search result 必须携带 `projectId + relativePath`，`displayPath` 只用于展示。远端节点不得伪造本地绝对 `path` 或 `file://` URI。
 - 本地旧 IPC 可保留一个发布周期的 adapter，但 remote project 只允许新 target；Phase 1 所谓“无回归”指 UI 行为不变，不是继续保留不安全的 root/path 参数。
@@ -428,7 +430,7 @@ export interface PiRuntimeLauncher {
 - root 分为 `browse`、`project`、`session` 和 `runtime-artifact` scope；不同 scope 的 method 不可混用。Session root 由远端 Pi 配置/探测结果产生，不能由 renderer 指定。
 - 规范化路径后必须仍位于对应 root 内；创建目标不存在时，从最近存在的父目录开始 `realpath` 校验；写入最终组件在平台支持时使用 `O_NOFOLLOW`，并在操作前后复核父链与结果。该检查防止普通 `..`/symlink 逃逸和错误路由，但不宣称能抵御同一 Unix 账号下恶意进程在检查与使用之间竞态替换目录；这项边界在 8.1 明确限定。
 - Git backend 不能直接复用当前所有共享 DTO：现有 `GitResource.path` 等字段可能含本机绝对路径。先审计每个 path-bearing 字段并迁移为 `projectId + relativePath`（另有只展示用的 `displayPath`）；只有 commit hash、branch、计数等 location-neutral DTO 才可原样复用。remote helper method 只接收结构化 DTO，不能接收 renderer 或 main 透传的自由 argv。每个 method 使用独立 argv builder 和固定 subcommand/option allowlist；路径必须是 project-relative、拒绝 NUL/换行/前导 `-` 并在支持处置于 `--` 后，branch/ref 拒绝 option-like 输入并先用 `git check-ref-format` 验证。
-- 所有 Git 操作都要求 project trust；设置 `GIT_TERMINAL_PROMPT=0`、`GIT_PAGER=cat`、`GIT_EXTERNAL_DIFF` 为空和有界 timeout/output。读取 diff 固定使用 `--no-ext-diff --no-textconv`；PiDeck UI 发起的写操作使用 helper 管理的空 hooks 目录并关闭自动签名，避免 repo hooks、pager、signer 或 external diff 成为隐藏执行面。需要完整原生 Git 行为时用户使用远端终端，后续若开放 hooks/signing 必须单独提示并评审。
+- 所有 Git 操作都要求 project trust；设置 `GIT_TERMINAL_PROMPT=0`、`GIT_PAGER=cat`、`GIT_EXTERNAL_DIFF` 为空和有界 timeout/output。读取 diff 固定使用 `--no-ext-diff --no-textconv`。UI 写面的工程门禁以 [Git 计划 §5.3](remote-git-plan.md#53-hooksfilterssigning不偷偷绕过工程门禁) 为准：未支持的 hooks/filter/签名要求明确拒绝并提示使用远端终端，不默默跳过 hooks、关闭签名或修改配置来让提交成功；后续支持这些执行面须单独设计授权与生命周期。
 
 现有 `src/shared/ipc.ts` Git surface 必须逐项有结论，不能让 UI 因漏路由而落到本地 `GitService`：
 
@@ -547,7 +549,7 @@ Phase 5 helper method 与 preload/UI capability 必须从这张表生成同一�
 
 - PiDeck 信任本机 Electron main、系统 OpenSSH 客户端以及用户明确选择的远端 Unix 账号；renderer 输入、网络、远端项目内容、协议帧和命令输出都按不可信数据校验。
 - 远端 Pi、helper、runner、Git 和终端首版运行在同一 Unix 账号。该账号本来就能通过 Pi/bash 读写其权限覆盖的文件，因此项目 root、sha256、owner 和 lease 校验是产品路由、误操作防护与完整性检测，不是抵御同账号恶意进程的 OS sandbox。
-- 项目在确认 trust 前不启动 Pi、不执行 Git，也不运行项目配置、hook、filter、skill 或 extension；确认意味着用户允许该项目以远端账号权限执行代码。PiDeck 管理的 Git UI 仍默认禁用 hooks、external diff/textconv 和 signer，避免 trust 被无关配置隐式扩大。
+- 项目在确认 trust 前不启动 Pi、不执行 Git，也不运行项目配置、hook、filter、skill 或 extension；确认意味着用户允许该项目以远端账号权限执行代码。PiDeck 管理的 Git UI 不隐式执行 external diff/textconv/pager，也不以默认跳过 hooks/关闭签名的方式绕过工程门禁；未支持的 hooks/filter/签名要求按 Git 分批计划明确拒绝。
 - 同账号恶意进程可以制造 symlink TOCTOU、改写 helper artifact 或伪造 lease；首版对此明确不提供多租户安全保证。需要运行不可信 workload 时必须使用独立远端账号、容器或 VM；若未来要把 root confinement 提升为安全边界，应引入受保护的独立 helper 身份以及 `openat2(RESOLVE_BENEATH...)`/平台等价实现，不能只加强 Node path 字符串检查。
 - 网络端点在首次用户确认后由 profile 专用 known-hosts pin 保护；首次连接仍是显式 TOFU，UI 必须展示解析后的 endpoint 和 fingerprint，不能把“认证成功”描述成第三方身份背书。
 - 所有高风险确认都由 main 的 `PendingConfirmationBroker` 持有状态，不能相信 renderer 自报的 `confirmed: true`。主机 fingerprint、添加 `/` browse root、project trust、host rebind 和远端删除开始时，main 生成短期随机 `requestId`，在 pending map 中绑定发起的 `webContents.id`、action type、host/project/session stable id、route/fingerprint/canonical path/expectedVersion 等不可变字段的 digest 和过期时间；preload 只暴露“回答该 requestId”的窄 API。未知、过期、sender 不同、digest 已变化或已消费的回答一律 fail closed，窗口销毁等同拒绝；执行前 main 再校验当前状态并原子消费 request。broker 在窗口销毁和 app shutdown 时清空 timer/pending entry。
@@ -912,7 +914,7 @@ tests/remoteIpcContract.test.mjs
 | 本地 security/trust/resource 路径误传到远端 Pi | location-aware launch plan；security artifact 上传、trust 远端检查、资源路径翻译，并断言 remote plan 无本机绝对路径 | `SshPiRuntimeLauncher`、artifact deployer | launch plan 快照不得含本机路径；阻塞 Phase 4 |
 | renderer 伪造或重放高风险确认 | main-only pending request 绑定 sender、action 与当前状态 digest；执行前复核并原子消费 | `PendingConfirmationBroker` + 各域 IPC | 未知/过期/跨窗口/字段变化/重复回答与 shutdown 清理 fixture；阻塞 Phase 2，并阻塞各后续破坏性能力 |
 | renderer 利用 IPC 读取任意远端文件 | browse root 只在已 pin 连接上 canonicalize/确认/注册；add/create-project 在 main 重做 containment；projectId/hostId 在 main 解析，project root 二次限制 | `RemoteProjectEnrollmentService`、workspace IPC | add 绕过 picker/root 外路径/symlink/重连漂移测试阻塞 Phase 3；create 等价测试阻塞 Phase 5 |
-| Git UI 在 remote project 上误跑本地 Git 或隐式执行 hook | 逐 IPC capability 矩阵和 target router；unsupported fail closed；managed UI 禁用 hooks/signing/pager/textconv | `RemoteGitBackend`、git IPC | 所有 Git IPC remote parity + hook/signing 注入测试；阻塞 Phase 5 |
+| Git UI 在 remote project 上误跑本地 Git 或隐式执行 hook | 逐 IPC capability 矩阵和 target router；unsupported fail closed；读取禁用隐式执行面，写面拒绝未支持的 hooks/filter/签名要求 | `RemoteGitBackend`、git IPC | 所有 Git IPC remote parity + hook/signing 注入测试；阻塞 Phase 5 |
 | helper/扩展更新留下半成品或误删活跃版本 | manifest + extraResources build 门禁、sha256、临时目录、原子 rename/fsync、active（按活跃连接注册计算，非全局单指针）/rollback/lease 可达性清理；验证失败 fail closed | artifact deployer、packaging | 中断上传/坏 hash/并发启动/多客户端并存 + `npm run pack`；helper 部署阻塞 Phase 2，runtime/扩展快照阻塞 Phase 4，打包发布阻塞 Phase 5 |
 | ProjectStore 半写入使项目“消失” | version/revision envelope、串行 mutator、跨平台 durable replace、temp+backup、启动选择最高有效 revision；双损坏进入 `needs-repair` | `ProjectStore` | file sync/rename/支持平台的 directory sync crash point、Windows fallback + 双损坏；阻塞 Phase 1 |
 | 远端凭据和本地凭据混淆 | 设置归属表；默认不复制任何 auth 数据 | `RemotePiConfigBackend`、settings UI | launch/env/artifact 扫描无 auth/token；阻塞 Phase 4 |
