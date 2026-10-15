@@ -8,9 +8,9 @@ import { loadTsCommonJs } from "./loadTsCommonJs.mjs";
 const { REMOTE_HELPER_INLINE_SOURCE } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
 const HOST_ID = "01234567-89ab-4def-8123-456789abcdef";
 /** Drive the deployed helper bytes, with an isolated HOME and an owned repository only. */
-function fixture(t, initialize = true, helperEnv = {}) {
+function fixture(t, initialize = true, helperEnv = {}, rootName = "project") {
 	const directory = mkdtempSync(join(tmpdir(), "pideck-remote-git-read-"));
-	const root = join(directory, "project");
+	const root = join(directory, rootName);
 	const home = join(directory, "home");
 	const templates = join(directory, "templates");
 	for (const path of [root, home, templates]) mkdirSync(path);

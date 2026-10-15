@@ -40,14 +40,17 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			const generation = ++epoch;
 			diffEpoch += 1;
 			// Clear previous facts during refresh; a failed read must not display a stale clean repository.
-			update({ projectKey, loading: true, diffLoading: false });
+			const uncertainWrite = state.errorCode === "GIT_WRITE_RESULT_UNCONFIRMED";
+			const failureCode = (code: string) => (uncertainWrite ? "GIT_WRITE_RESULT_UNCONFIRMED" : code);
+			// A failed refresh cannot resolve an uncertain write; only fresh repository facts can.
+			update({ projectKey, loading: true, diffLoading: false, ...(uncertainWrite ? { errorCode: "GIT_WRITE_RESULT_UNCONFIRMED" } : {}) });
 			try {
 				const result = await api.remoteSnapshot(projectId);
 				if (!active || generation !== epoch) return;
 				if (result.ok) update({ projectKey, loading: false, diffLoading: false, snapshot: result.snapshot });
-				else update({ projectKey, loading: false, diffLoading: false, errorCode: result.code });
+				else update({ projectKey, loading: false, diffLoading: false, errorCode: failureCode(result.code) });
 			} catch (error) {
-				if (active && generation === epoch) update({ projectKey, loading: false, diffLoading: false, errorCode: errorCode(error) });
+				if (active && generation === epoch) update({ projectKey, loading: false, diffLoading: false, errorCode: failureCode(errorCode(error)) });
 			}
 		},
 		async mutate(operation: "stage" | "unstage", group: GitResourceGroupType, target: ProjectFileTarget): Promise<void> {
@@ -95,7 +98,9 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			epoch += 1;
 			diffEpoch += 1;
 			void api.cancelRemoteReads(projectId).catch(() => undefined);
-			update({ projectKey, loading: false, diffLoading: false, errorCode: state.mutating ? "GIT_WRITE_RESULT_UNCONFIRMED" : "REMOTE_CONNECTION_LOST" });
+			// Reconnect may emit several failure states; retain uncertainty until a successful explicit refresh.
+			const uncertainWrite = state.mutating || state.errorCode === "GIT_WRITE_RESULT_UNCONFIRMED";
+			update({ projectKey, loading: false, diffLoading: false, errorCode: uncertainWrite ? "GIT_WRITE_RESULT_UNCONFIRMED" : "REMOTE_CONNECTION_LOST" });
 		},
 		/** Component/project identity changes invalidate results; they never connect/replay automatically. */
 		dispose() {

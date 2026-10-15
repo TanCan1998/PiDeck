@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { constants, readFileSync } from "node:fs";
+import { win32 } from "node:path";
 import test from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
@@ -13,11 +14,51 @@ import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
  */
 const { resolveVerifiedSshClient } = loadTsCommonJs("src/main/remote/SshClientRuntime.ts");
 
-test("windows resolves its own OpenSSH client instead of throwing", async () => {
+/** Model Windows path/filesystem contracts explicitly; Linux CI must not require a real System32 tree. */
+function windowsResolver(missingScp = false) {
+	const opened = [],
+		closed = [];
+	const ssh = "C:\\Windows\\System32\\OpenSSH\\ssh.exe",
+		scp = "C:\\Windows\\System32\\OpenSSH\\scp.exe";
+	const exists = (path) => {
+		if ((path !== ssh && path !== scp) || (missingScp && path === scp)) throw new Error("ENOENT");
+	};
+	const loaded = loadTsCommonJs("src/main/remote/SshClientRuntime.ts", {
+		stubs: {
+			"node:path": win32,
+			"node:fs": {
+				constants,
+				lstatSync: (path) => {
+					exists(path);
+					return { isFile: () => true, isSymbolicLink: () => false };
+				},
+				openSync: (path) => {
+					exists(path);
+					opened.push(path);
+					return opened.length;
+				},
+				closeSync: (fd) => closed.push(fd),
+			},
+		},
+	});
+	return { resolve: loaded.resolveVerifiedSshClient, opened, closed, ssh, scp };
+}
+
+test("Windows resolver selects and validates its own OpenSSH pair (simulated Windows filesystem, not native execution)", async () => {
 	assert.equal(typeof resolveVerifiedSshClient, "function", "resolveVerifiedSshClient must exist as the single platform decision");
-	const client = await resolveVerifiedSshClient({ platform: "win32" });
-	assert.match(client.sshPath, /ssh\.exe$/i, "win32 必须解析到 ssh.exe");
+	const f = windowsResolver();
+	const client = await f.resolve({ platform: "win32", env: { SystemRoot: "C:\\Windows", PATH: "C:\\untrusted-path" } });
+	assert.equal(client.sshPath, f.ssh);
+	assert.equal(client.scpPath, f.scp);
 	assert.equal(typeof client.run, "function");
+	assert.deepEqual(f.opened, [f.ssh, f.scp]);
+	assert.deepEqual(f.closed, [1, 2]);
+});
+
+test("Windows resolver simulation refuses a missing SCP sibling without falling back to PATH", async () => {
+	const f = windowsResolver(true);
+	await assert.rejects(f.resolve({ platform: "win32", env: { SystemRoot: "C:\\Windows", PATH: "C:\\untrusted-path" } }), /SSH_CLIENT_MISSING/);
+	assert.deepEqual(f.opened, [f.ssh]);
 });
 
 test("posix still goes through the verified discovery, not a bare runtime", async () => {

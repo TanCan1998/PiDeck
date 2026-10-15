@@ -618,3 +618,13 @@ P4.5b 的单会话归档/恢复已完成真实 Electron＋SSH 验证，不能据
 - **真实Electron＋SSH**：G2a首轮1 passed/1.7m；补stage后UI diff正文，最终G1只读双仓＋G2a **2 passed（3.5m）**。验证精确stage→diff→unstage、untracked与rename取消、unborn另一条暂存blob保持、外部index SHA不被覆盖、hook零执行、签名和锁拒绝且锁内容保持。HEAD不动，工作区SHA/mode/size/inode/mtime/ctime与本机对照index/文件前后不变；独立原生Git/blob事实与UI匹配，两项`CLEANUP_OK`。不启动Agent、不依赖模型、不碰原有用户仓库。
 - **证据**：`/tmp/remote-git-g2a-regression-final.log`、`/tmp/remote-git-g2a-typecheck-final.log`、`/tmp/remote-git-g2a-build-main.log`、`/tmp/remote-git-g2a-build-renderer.log`、`/tmp/remote-git-g2a-ui-final.log`与`/tmp/remote-git-g2a-ui-final-artifacts/`（独立oracle附件）。红例write/ipc/view保留；中期错误归类/重复builtin/source-size失败通过修代码／去重复注释解决，未放宽断言；真实UI两轮均通过，DSH旧错误仍存在。`/tmp`不承诺长期保留。
 - **后续**：commit完整index确认/expected HEAD门禁未满足；优先跨平台和稳定性。Windows/macOS、长稳、多窗口、打包/dev集成、独立安全审查及G3–G5仍未验收；无法提供对应平台就明确记缺口，不把本次Linux绿灯当作Remote v1完成。完整默认模型/会话spec亦未重跑。
+
+## 远端 Git G6a（稳定性切片，不是完整 G6）
+
+- **产品修复**：重复断线／重连状态以及失败的手动刷新，会把 `GIT_WRITE_RESULT_UNCONFIRMED` 覆盖成普通连接错误；两个永久红例先复现。`remoteGitViewState.ts` 现在保留该警告直到成功显式刷新，迟到写成功仍丢弃，不自动读写重放。不扩大远端能力、不变更 IPC／helper 协议；helper 保持 1.8.0 和 G2a hash。
+- **新增生产链回归**：`tests/remoteGitStability.test.mjs` 通过真实 controller→注册 IPC/service→主机锁→NDJSON client→本机 helper 子进程→原生 Git，模拟已发布 index 的回执丢失和 generation 切换，核对真实 blob 已生效但写请求不重放、离线刷新不能清未知提示。两个逻辑 sender 同 revision 并发只发布首个、第二个 stale；锁队列取消零写且另一 sender grant 不受影响。Electron sender 和 withProjectSession 外层为替身，不能称真实双窗口或 SSH 故障验收。
+- **短周期资源证据**：中文／空格／单引号根和相对路径，24 轮 stage/diff/unstage（48 写）逐轮 helper FD 数不增长、listener 保持 1、pending=0、host lock 释放、无 owned scratch/lock 残留；HEAD、其他 index blob、工作区内容与 inode/mode/size/mtime/ctime 独立核对不变。约 6 秒不是长稳或内存/RSS 证明。
+- **平台测试**：旧 Windows resolver 测试在 Linux 查找真实 System32 失败，已保留日志；改明确 win32 path/fs 模拟，断言 SSH/SCP 绝对路径和打开关闭，新增缺 SCP 拒绝／不回退 PATH。产品解析器未改，Windows 原生四项依旧按平台跳过；没有 Windows/macOS 真机通过声明。
+- **最终验证**：39 文件 **418 passed／5 skipped／0 fail/cancel，5 suites（423 项）**，约 19.1 秒；typecheck、触达 Biome/diff 与 production renderer 构建通过（没有重建未改 main/preload）。五项跳过为四项 Windows 原生＋未启用约 155 秒生存探针。真实 Linux Electron＋SSH 的既有 G1/G2a **2 passed（2.7m）**、两项 `CLEANUP_OK`，独立 oracle 不变；该真机复验没有注入网络丢包，不外推故障注入的真实性。
+- **证据**：`/tmp/remote-git-g6a-warning-red.log`、`/tmp/remote-git-g6a-refresh-red.log`、`/tmp/remote-git-g6a-platform-transport.log` 保留红例／旧平台失败；`/tmp/remote-git-g6a-regression-final.log`、`/tmp/remote-git-g6a-typecheck-final.log`、`/tmp/remote-git-g6a-build-renderer.log`、`/tmp/remote-git-g6a-ui-final.log`、`/tmp/remote-git-g6a-ui-final-artifacts/` 保留最终证据。永久重跑命令与完整边界见 [Git 计划 §5.6](remote-git-plan.md)；`/tmp` 不承诺长期保留。
+- **仍缺**：真实跨平台、双窗口／双实例、真实网络黑洞／延迟、小时级长稳、打包/dev 集成和独立安全审查。commit、G3–G5 和完整 Remote v1 不因本切片完成而解锁。

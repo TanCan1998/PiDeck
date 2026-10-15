@@ -5,7 +5,7 @@ const { createRemoteGitViewController } = loadTsCommonJs("src/renderer/src/utils
 const target = { projectId: "project", relativePath: "one.txt" };
 const resource = { target, path: "one.txt", displayPath: "one.txt", status: 5, letter: "M" };
 const snapshot = { head: "a".repeat(40), branch: "main", mutationToken: "b".repeat(32), groups: { merge: [], index: [], workingTree: [resource], untracked: [] } };
-function fixture(mutation) {
+function fixture(mutation, read = () => ({ ok: true, snapshot })) {
 	const states = [],
 		calls = [];
 	const controller = createRemoteGitViewController(
@@ -15,7 +15,7 @@ function fixture(mutation) {
 			cancelRemoteReads: async () => calls.push("cancel"),
 			remoteSnapshot: async () => {
 				calls.push("read");
-				return { ok: true, snapshot };
+				return read();
 			},
 			workspaceFileDiff: async () => null,
 			mutateRemoteIndex: async (...args) => {
@@ -83,6 +83,44 @@ test("connection loss during write becomes unconfirmed, and late success cannot 
 	assert.equal(f.current().errorCode, "GIT_WRITE_RESULT_UNCONFIRMED");
 	assert.equal(f.current().snapshot, undefined);
 	assert.equal(f.calls.filter((call) => call === "read").length, 1);
+});
+
+test("repeated reconnect/offline events cannot erase an uncertain index-write warning", async () => {
+	let resolve;
+	const f = fixture(
+		() =>
+			new Promise((accept) => {
+				resolve = accept;
+			}),
+	);
+	await f.controller.refresh();
+	const pending = f.controller.mutate("stage", "workingTree", target);
+	for (let transition = 0; transition < 4; transition++) {
+		f.controller.invalidateConnection();
+		assert.equal(f.current().errorCode, "GIT_WRITE_RESULT_UNCONFIRMED");
+		assert.equal(f.current().snapshot, undefined);
+	}
+	resolve({ ok: true });
+	await pending;
+	assert.equal(f.current().errorCode, "GIT_WRITE_RESULT_UNCONFIRMED");
+	assert.equal(f.calls.filter((call) => call === "read").length, 1);
+	await f.controller.refresh();
+	assert.equal(f.current().errorCode, undefined);
+	assert.equal(f.current().snapshot.mutationToken, snapshot.mutationToken);
+});
+
+test("a failed manual refresh cannot claim to have resolved an uncertain write", async () => {
+	let readCount = 0;
+	const f = fixture(
+		() => ({ ok: false, code: "GIT_WRITE_RESULT_UNCONFIRMED" }),
+		() => (++readCount === 1 ? { ok: true, snapshot } : { ok: false, code: "SSH_HOST_DISCONNECTED" }),
+	);
+	await f.controller.refresh();
+	await f.controller.mutate("stage", "workingTree", target);
+	await f.controller.refresh();
+	assert.equal(f.current().errorCode, "GIT_WRITE_RESULT_UNCONFIRMED");
+	assert.equal(f.current().snapshot, undefined);
+	assert.equal(f.calls.filter((call) => Array.isArray(call)).length, 1);
 });
 
 test("disposing an idle remote index view revokes its issued grant", async () => {

@@ -1,6 +1,6 @@
 # 远端 Git：调研结论与分阶段实施计划
 
-> 状态：G0 调研、G1 status/diff 与 G2a 单文件 stage/unstage 已完成 Linux 开发态实现、针对性回归及真实 Electron＋SSH 验收；commit 仍禁用，G3–G6 未完成。仍受开发态实验门禁约束，不代表 Git parity 或 Remote v1 已收口。
+> 状态：G0 调研、G1 status/diff 与 G2a 单文件 stage/unstage 已完成 Linux 开发态实现、针对性回归及真实 Electron＋SSH 验收；G6a 已补故障／并发／短周期资源回归并修复未知结果提示，详见 §5.6。commit 仍禁用，G3–G5 与完整 G6 未完成。仍受开发态实验门禁约束，不代表 Git parity 或 Remote v1 已收口。
 > 核对基线：`feat/remote-development`，G0 调研基线 `101b9b82c`；G1 从 `bc25ebe20` 实施，G2a 从 `f83f9d550` 实施。
 > 范围：落实总计划 §6.3 的 Git 能力；近期顺序仍为 **status/diff → stage/unstage/commit → 跨平台与稳定性**，不一次性搬运所有本机操作。
 
@@ -195,6 +195,16 @@ G2 真机只操作本次创建的 repo：stage→diff→unstage 字节不变→�
 - **真实产品验收**：G2a首轮 **1 passed（1.7m）**；加入stage后真实diff正文断言，再与G1双仓只读专项最终复验 **2 passed（3.5m）**。普通仓stage→HEAD/index diff→unstage、untracked往返、rename双路径取消、外部index变化拒绝且外部index SHA不变、hooks/signing/已有锁拒绝并保留锁内容、unborn stage/unstage保留另一条暂存blob；独立原生Git/index/blob事实匹配UI，不依赖模型或直接IPC。HEAD不动，工作区SHA与mode/size/inode/mtime/ctime前后一致，本机对照index/文件不变；只操作本次唯一夹具，两项均`CLEANUP_OK`。
 - **证据**：`/tmp/remote-git-g2a-regression-final.log`、`/tmp/remote-git-g2a-typecheck-final.log`、`/tmp/remote-git-g2a-build-main.log`、`/tmp/remote-git-g2a-build-renderer.log`、`/tmp/remote-git-g2a-ui-final.log`、`/tmp/remote-git-g2a-ui-final-artifacts/`（独立oracle附件）。红例`write-red`／`ipc-red`／`view-red`保留；中期测试曾发现外部损坏index先被Git读到导致错误归类、以及helper重复builtin／source size不符，修代码与去重复注释，不降低门禁。UI两轮均通过；DSH既存报错不被本轮修复。`/tmp`非长期保留。
 - **仍未完成**：commit完整index确认＋expected HEAD并发门禁，Windows/macOS客户端、断网后的多实例长稳、打包/dev集成、独立安全审查、G3–G5。权限/owner异常、不可回收native进程／OS崩溃、所有非协作并发场景没有全部经过真实UI，不以子进程回归冒充真机证据。后续优先跨平台/稳定性验证；若当前环境没有对应平台，不假装通过，也不借此绕过commit门禁。
+
+### 5.6 G6a 稳定性切片：未知结果提示与生产链故障回归
+
+- **最小产品修复**：`remoteGitViewState.ts` 原先第一次断线设为 `GIT_WRITE_RESULT_UNCONFIRMED`，后续连接失败事件会覆盖成普通断线；手动刷新失败也会丢掉警告。两个独立红例先复现，再改为跨连续状态、刷新中及刷新失败均保留未知提示，只有成功读回仓库事实才清除；旧代迟到成功仍不能刷新、没有自动重放。未改 IPC／helper 协议、写能力、trust、预算或工程门禁；helper 仍为 1.8.0 与原冻结 hash。
+- **生产链故障注入**：新增 `tests/remoteGitStability.test.mjs`，调用生产 renderer controller、注册 IPC／service、主机操作锁、`RemoteControlClient`，经真实 NDJSON 连接本机 helper 子进程并运行原生 Git；Electron sender 和 `withProjectSession` 外层是替身，不是实际 SSH 或两个 Electron 窗口。确认 index 已发布后丢弃成功回执、切 generation：真实 staged blob 存在，迟到帧被拒，三次连接失效及离线刷新仍保留未知提示，明确重连＋刷新才恢复，写请求始终只有一次。两个不同 sender 从同一 revision 并发写，首个成功、第二个 stale 拒绝且不能覆盖；排队请求被取消时零 Git 写，另一 sender 的 grant 仍有效。
+- **短周期资源与路径**：同一链路完成 24 轮 stage→diff→unstage（48 次 index 写），每轮 helper FD 数等于初始值、sender destroyed listener 保持 1、client pending 为 0、host lock 释放、owned scratch／index.lock 无残留。独立原生 Git 核对 HEAD／其他 index blob 和工作区内容、inode/mode/size/mtime/ctime 不变。夹具根和目标文件均含中文、空格、单引号，正文保留 CRLF。测试耗时约 6 秒，**不是小时级长稳、内存/RSS 或跨进程多实例验收**。
+- **平台证据修正**：既有 `sshHostPinStorePlatform.test.mjs` 在 Linux 直接要求本机存在 Windows System32 OpenSSH，实跑失败 `SSH_CLIENT_MISSING`；对应源码与测试在 HEAD 均无改动，属旧测试环境耦合。改用明确的 Windows `path.win32`／fs 替身，保留 SSH/SCP 路径与打开关闭校验，并新增 SCP 缺失时拒绝且不回退 PATH 的反例。产品 `SshClientRuntime.ts` 不改；模拟通过不等于 Windows executable 可运行，更不是 Windows/macOS 真机通过。
+- **最终验证**：39 个针对性测试文件，共 **423 项：418 passed、5 skipped、0 fail/cancel，5 suites**，约 19.1 秒；跳过的四项需原生 Windows，第五项为未开启的约 155 秒进程生存探针。typecheck、触达 Biome／diff 与仅触达 production renderer 构建通过。真实 Linux Electron＋SSH 复跑已有 G1/G2a **2 passed（2.7m）**，两项 `CLEANUP_OK`；独立 Git/blob/index/工作区 oracle 保持，不启动 Agent／依赖模型。真机回归没有注入已发布回执丢失，不能混称该故障已在真实网络复现。
+- **证据与复现**：永久测试为 `tests/remoteGitStability.test.mjs`、`tests/remoteGitMutationView.test.mjs`、`tests/sshHostPinStorePlatform.test.mjs`；最窄重跑 `timeout 90 node --test --test-concurrency=4 tests/remoteGitStability.test.mjs tests/remoteGitMutationView.test.mjs tests/sshHostPinStorePlatform.test.mjs`。红例 `/tmp/remote-git-g6a-warning-red.log`、`/tmp/remote-git-g6a-refresh-red.log`；旧平台失败 `/tmp/remote-git-g6a-platform-transport.log`；最终 `/tmp/remote-git-g6a-regression-final.log`、`/tmp/remote-git-g6a-typecheck-final.log`、`/tmp/remote-git-g6a-build-renderer.log`、`/tmp/remote-git-g6a-ui-final.log`、`/tmp/remote-git-g6a-ui-final-artifacts/`。`/tmp` 不承诺长期保留。
+- **未完成门禁**：Windows/macOS 客户端及打包资源／dev 集成，真实双窗口／双应用实例、网络黑洞与延迟、长时内存／进程回收、独立安全审查仍需分别给证据；不因本切片完成将整个 G6 标绿。commit 完整 index 确认与 expected HEAD 门禁保持禁用，后续不能借稳定性绿灯绕过。
 
 ## 6. 完整路线的剩余门禁
 
