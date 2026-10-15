@@ -1,6 +1,6 @@
 # 远端 Git：调研结论与分阶段实施计划
 
-> 状态：G0 调研、G1 status/diff 与 G2a 单文件 stage/unstage 已完成 Linux 开发态实现、针对性回归及真实 Electron＋SSH 验收；G6a 已补故障／并发／短周期资源回归并修复未知结果提示，详见 §5.6。commit 仍禁用，G3–G5 与完整 G6 未完成。仍受开发态实验门禁约束，不代表 Git parity 或 Remote v1 已收口。
+> 状态：G0 调研、G1 status/diff 与 G2a 单文件 stage/unstage 已完成 Linux 开发态实现、针对性回归及真实 Electron＋SSH 验收；G6a 已补故障／并发／短周期资源回归并修复未知结果提示，G6b 新增真实 SSH 长稳验收并有一次完整 1 小时通过，详见 §5.6–§5.7（首轮失败未定因、资源增量仍需跟进）。commit 仍禁用，G3–G5 与完整 G6 未完成。仍受开发态实验门禁约束，不代表 Git parity 或 Remote v1 已收口。
 > 核对基线：`feat/remote-development`，G0 调研基线 `101b9b82c`；G1 从 `bc25ebe20` 实施，G2a 从 `f83f9d550` 实施。
 > 范围：落实总计划 §6.3 的 Git 能力；近期顺序仍为 **status/diff → stage/unstage/commit → 跨平台与稳定性**，不一次性搬运所有本机操作。
 
@@ -205,6 +205,18 @@ G2 真机只操作本次创建的 repo：stage→diff→unstage 字节不变→�
 - **最终验证**：39 个针对性测试文件，共 **423 项：418 passed、5 skipped、0 fail/cancel，5 suites**，约 19.1 秒；跳过的四项需原生 Windows，第五项为未开启的约 155 秒进程生存探针。typecheck、触达 Biome／diff 与仅触达 production renderer 构建通过。真实 Linux Electron＋SSH 复跑已有 G1/G2a **2 passed（2.7m）**，两项 `CLEANUP_OK`；独立 Git/blob/index/工作区 oracle 保持，不启动 Agent／依赖模型。真机回归没有注入已发布回执丢失，不能混称该故障已在真实网络复现。
 - **证据与复现**：永久测试为 `tests/remoteGitStability.test.mjs`、`tests/remoteGitMutationView.test.mjs`、`tests/sshHostPinStorePlatform.test.mjs`；最窄重跑 `timeout 90 node --test --test-concurrency=4 tests/remoteGitStability.test.mjs tests/remoteGitMutationView.test.mjs tests/sshHostPinStorePlatform.test.mjs`。红例 `/tmp/remote-git-g6a-warning-red.log`、`/tmp/remote-git-g6a-refresh-red.log`；旧平台失败 `/tmp/remote-git-g6a-platform-transport.log`；最终 `/tmp/remote-git-g6a-regression-final.log`、`/tmp/remote-git-g6a-typecheck-final.log`、`/tmp/remote-git-g6a-build-renderer.log`、`/tmp/remote-git-g6a-ui-final.log`、`/tmp/remote-git-g6a-ui-final-artifacts/`。`/tmp` 不承诺长期保留。
 - **未完成门禁**：Windows/macOS 客户端及打包资源／dev 集成，真实双窗口／双应用实例、网络黑洞与延迟、长时内存／进程回收、独立安全审查仍需分别给证据；不因本切片完成将整个 G6 标绿。commit 完整 index 确认与 expected HEAD 门禁保持禁用，后续不能借稳定性绿灯绕过。
+
+### 5.7 G6b：真实 Electron＋SSH 的有界 1 小时验收（2026-10-15）
+
+- **范围与实现**：仅新增测试，不修改生产逻辑、IPC、helper、Git 能力或实验门禁。`e2e/remote-git-soak.ts` 复用原 spec 的真实 pin／连接／登记／草稿 UI；`remote-soak-evidence.ts` 用独立原生 Git、文件 metadata 与 Linux `/proc` 采样；`remote-soak-policy.ts` 固定时长和预算。没有模型调用、假的 IPC 成功响应或主机网络配置修改。两个本次唯一根仓库，其中一个目录含中文／空格；不扩展既有 trust 对单引号根路径的拒绝。
+- **可复现入口**：预先设置既有三个 `PIDECK_E2E_REMOTE_*` 凭据变量，再运行 `PIDECK_E2E_REMOTE_GIT_SOAK=hour timeout 4500 ./node_modules/.bin/playwright test e2e/remoteSessionAcceptance.spec.ts --grep '远端 Git G6b' --trace off`。`smoke` 是独立 180,000ms 模式，不能累加或重标成 hour；未设置模式或非 Linux 时在 fixture 启动前 skip，非法模式直接失败。长测试关闭 action trace 以免观测开销污染资源测量，保留逐轮 JSONL、失败前截图／面板文本和主进程日志。
+- **事先固定的判据**：预热后主计时必须 ≥3,600,000ms；30s 一轮刷新→stage→真实 index diff 两侧正文→unstage，每五轮关开抽屉并明确点 Git，每五分钟切项目。主进程／renderer PID＋start ticks 不得替换；FD 不超过各自预热值＋16，主进程／renderer RSS 分别不超过＋64／128MiB，JS heap 分别不超过＋32／64MiB；本地后代不超过＋2，稳定采样时恰好一个匹配私有 pin/root 的 SSH 与一个匹配 helper hash 的项目 helper；SSH/helper FD 不超过＋4，helper RSS 不超过＋32MiB。每轮独立 Git 的 HEAD、所有 index stage entries、工作区 SHA／inode/mode/size/mtime/ctime 与基线一致，无 index.lock 或 owned scratch；本机对照仓库未变。预算没有根据结果提高。
+- **真实结果**：独立 smoke 第三次通过，180,006ms、6轮／8样本；最终 hour 第二次 **1 passed（1.0h）**，主计时 **3,600,017ms、120轮／240次正常 index 写、122样本**（另有预热及一次受控中断写尝试）。每五分钟按项目 scope 正常轮换，记录12个 helper 身份；同一个 helper 最长连续观测 **293,146ms**，不是声称同一 PID 连续运行一小时。已有 `PIDECK_SSH_DEADLINE_REALTIME=1 timeout 220 node --test tests/sshLongLivedSessionDeadline.test.mjs` **7/7**，真实子进程约150s仍活且配对 stop 回收；该探针是本机生产 launcher 的真实 Node 子进程，不冒称 SSH。
+- **真实连接中断／退出**：信号只发送给本测试 Electron 后代中、私有 known_hosts 路径／项目 root／SSH executable／PID start ticks 均匹配的一个客户端，发送前立即重查。stage 点击后中断本次 SSH，实际显示“结果未确认”；显式断开收敛后冻结 index SHA＋inode/size/mode/mtime/ctime，明确重连不恢复旧 SCM、不改写 index，手动刷新才重新读。smoke 与最终 hour 的该次写均未发布；**不是“已发布但回执丢失”真机证据**（那仍只有 G6a 注入）。退出后独立检查无本次项目存活 helper 或已观察到的本地存活后代，随后唯一夹具 `CLEANUP_OK` 并断言目录不存在；不保证任意 daemon/disown 的清理。
+- **资源实测（MiB 约值）**：main FD **240→253，峰值253**；renderer FD 55→52；SSH FD 恒7，helper FD恒21；本地后代5→4、最大5。main RSS **495.7→547.1，峰值550.4**；renderer RSS328.9→300.1、峰值328.9；helper RSS峰值71.1（跨正常轮换 PID，不能当同一进程的增长）；main JS heap14.8→12.7、峰值15.1，renderer JS heap61.0→48.1。均在预定预算内，**但 main FD＋13／RSS约＋51.4MiB 仍有增量，未定位，也不能据此声称无泄漏或长稳已全面收口**。
+- **保留失败与边界**：smoke1 卡在含单引号根的明确 trust 拒绝，未放宽安全门，而是使用已有支持的中文／空格根；smoke2 证明标题栏重开默认 Files，改走真实 Git rail，不强制点击。hour1 在46轮后独立 SSH/Git oracle 命令失败，保留47样本与截图，随后 fail-fast 并清理；原记录缺 code/signal/stdout/stderr，**不能区分 SSH 超时与残留检测，根因未定**。只补失败字段／残留分类诊断、未增加超时／自动重试或降低断言，再独立完整运行 hour2；后一次成功不等于首轮失败已被修复。DSH 既有 credentials/version 错误未修。后续优先定位该失败及 main FD/RSS 增量，不以单次 hour 通过覆盖它们。
+- **检查与证据**：5个针对性文件 **28/28**，typecheck、触达 Biome／diff、spec `--list` 通过；新增三个 e2e helper 独立 strict 检查无自身诊断，依赖的未修改 `remote-fixtures.ts:141` 仍有既存 `ProcessEnv` 类型错误。仅改测试，无全仓库构建，沿用上一轮已验证的 main/renderer 产物。所有权反例覆盖非后代、他人 pin/root、PID复用、非 SSH executable、权限错误不伪造零值；策略反例覆盖资源增长、renderer替换和短进程不可累加为长期存活。
+- **证据路径**：`/tmp/remote-git-g6b-session-deadline.log`、`/tmp/remote-git-g6b-regression-delivery.log`、`/tmp/remote-git-g6b-typecheck.log`、`/tmp/remote-git-g6b-e2e-strict-final.log`；`/tmp/remote-git-g6b-smoke1…smoke3.log` 及对应 artifacts；`/tmp/remote-git-g6b-hour1.log`／`/tmp/remote-git-g6b-hour1-artifacts/` 保留失败，`/tmp/remote-git-g6b-hour2.log`／`/tmp/remote-git-g6b-hour2-artifacts/` 保留最终报告、122样本与派生 `metrics-summary.json`。永久重跑入口在仓库，`/tmp` 不承诺长期保存。Windows/macOS、真实双窗口／双实例、网络黑洞／高延迟、打包/dev集成、独立安全审查与 commit 门禁仍未完成；本轮不是完整 G6／Remote v1 发布收口。
 
 ## 6. 完整路线的剩余门禁
 

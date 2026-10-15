@@ -6,6 +6,9 @@ import { encodePiSessionDirectory } from "../src/main/remote/remoteSessionProjec
 import { initializeRemoteCodeFixture, verifyRemoteCodeEditing, verifyRemoteCodeIsolation, verifyRemoteCodeDisconnect, assertRemoteNodeTestExecuted } from "./remote-file-editing";
 import { verifyRemoteTerminals } from "./remote-terminal";
 import { createLocalGitReadControl, initializeRemoteGitFixture, verifyRemoteGitRead } from "./remote-git";
+import { verifyRemoteGitSoak } from "./remote-git-soak";
+import { quoteSoakArgument } from "./remote-soak-evidence";
+import { readRemoteGitSoakMode } from "./remote-soak-policy";
 import { initializeRemoteUnbornGitFixture, verifyRemoteGitIndex } from "./remote-git-index";
 import { verifyRemoteHistoryMutations } from "./remote-history-mutations";
 import { REMOTE_ACCEPTANCE_ENV, createRemoteSessionInProject, matchesRemoteFingerprint, readRemoteAcceptanceCredentials, readRemoteAcceptanceTimeouts, remoteProjectRow, runRemoteCommand, test, type RemoteAcceptanceCredentials, type RemoteAcceptanceTimeouts } from "./remote-fixtures";
@@ -677,6 +680,37 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 			await localControl.dispose();
 			await cleanupRemoteRun(creds, paths, "");
 		}
+	});
+
+	test.describe("G6b opt-in real SSH soak", () => {
+		const mode = readRemoteGitSoakMode(process.env);
+		test.skip(mode === undefined || process.platform !== "linux", "set PIDECK_E2E_REMOTE_GIT_SOAK=hour (or smoke for a separate 3-minute check); Linux only");
+		// Invoke with --trace off: hour-long action traces distort resource measurements; persist JSONL instead.
+		test("远端 Git G6b：真实SSH长稳 → 连接中断恢复不重放 → 退出回收", async ({ remoteWindow, remoteApp, remoteUserDataRoot }, testInfo) => {
+			if (!credentials || !mode) throw new Error("REMOTE_SOAK_GATE_NOT_APPLIED");
+			expect(testInfo.project.use.trace, "run the opt-in soak with --trace off").toBe("off");
+			test.setTimeout(mode.durationMs + 900_000);
+			const paths = await createRemoteRunPaths(credentials),
+				neighbor = paths.e2eRoot + "/Git 中文 空格 soak";
+			const localControl = await createLocalGitReadControl();
+			try {
+				await dismissOnboarding(remoteWindow, 8_000);
+				await createRemoteProjectDirectory(credentials, paths);
+				await initializeRemoteGitFixture(credentials, paths.projectPath, neighbor);
+				await addVerifiedRemoteHostAndConnect(remoteWindow, credentials, timeouts);
+				await enrollRemoteProjectInSidebar(remoteWindow, neighbor, timeouts);
+				await enrollRemoteProjectInSidebar(remoteWindow, paths.projectPath, timeouts);
+				await createRemoteSessionAndReadId(remoteWindow, paths.projectName, timeouts);
+				await verifyRemoteGitSoak({ window: remoteWindow, app: remoteApp, credentials, roots: [paths.projectPath, neighbor], userDataRoot: remoteUserDataRoot, mode, testInfo });
+				await localControl.verify();
+			} finally {
+				await remoteApp.close();
+				preserveAppLogs(remoteUserDataRoot, paths.runId);
+				await localControl.dispose();
+				await cleanupRemoteRun(credentials, paths, "");
+				await runRemoteCommand(credentials, "test ! -e " + quoteSoakArgument(paths.e2eRoot), 20_000);
+			}
+		});
 	});
 
 	test("远端终端：项目隔离 → 已保存代码测试 → resize → 关闭/断开/退出清理", async ({ remoteWindow, remoteApp, remoteUserDataRoot }, testInfo) => {
