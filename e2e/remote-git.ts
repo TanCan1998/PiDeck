@@ -92,7 +92,7 @@ export async function verifyRemoteGitRead(input: { window: Page; credentials: Re
 	await expect(panel.getByTestId("remote-git-index")).toContainText("deleted.txt");
 	await expect(panel.getByTestId("remote-git-workingTree")).toContainText("tracked.txt");
 	await expect(panel.getByTestId("remote-git-untracked")).toContainText("untracked.txt");
-	await expect(panel.getByRole("button", { name: /^(暂存|取消暂存|丢弃|提交|推送|拉取|初始化)/ })).toHaveCount(0);
+	await expect(panel.getByRole("button", { name: /^(丢弃|提交|推送|拉取|初始化|全部暂存)/ })).toHaveCount(0);
 	const diff = async (group: string, name: string, old: string, next: string) => {
 		await panel
 			.getByTestId("remote-git-" + group)

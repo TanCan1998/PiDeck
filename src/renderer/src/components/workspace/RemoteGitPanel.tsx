@@ -17,6 +17,10 @@ const refuseFallbackRead = async (): Promise<string> => {
 
 /** Only stable categories are rendered; invoke wrappers, remote paths and raw stderr are never user-facing. */
 export function remoteGitErrorMessage(code: string): string {
+	if (code === "GIT_INDEX_LOCKED") return t("remoteGit.indexLocked");
+	if (code === "GIT_WRITE_UNSUPPORTED") return t("remoteGit.writeUnsupported");
+	if (code === "GIT_WRITE_RESULT_UNCONFIRMED") return t("remoteGit.writeUnknown");
+	if (code === "GIT_WRITE_SNAPSHOT_EXPIRED") return t("remoteGit.writeExpired");
 	if (code === "GIT_TRUST_REQUIRED") return t("remoteGit.trustRequired");
 	if (code === "GIT_NOT_REPOSITORY") return t("remoteGit.notRepository");
 	if (code === "GIT_NOT_FOUND" || code === "GIT_VERSION_UNSUPPORTED") return t("remoteGit.gitUnavailable");
@@ -32,7 +36,7 @@ export function remoteGitErrorMessage(code: string): string {
 
 /** Reuses SCM rows and the existing diff renderer without native graph/watch/write/background-sync APIs. */
 export function RemoteGitPanel({ project }: { project: RemoteProject }) {
-	const { state, refresh, openDiff, closeDiff } = useRemoteGitView(project);
+	const { state, refresh, openDiff, closeDiff, mutate } = useRemoteGitView(project);
 	const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
 	const snapshot = state.snapshot;
 	const viewingDiff = state.diffLoading || state.diff !== undefined || state.diffErrorCode !== undefined;
@@ -40,20 +44,20 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 		<div data-testid="remote-git-panel" data-project-id={project.id} className="flex min-h-0 flex-1 flex-col overflow-hidden text-sm text-text-primary">
 			<div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2">
 				{viewingDiff ? (
-					<Button variant="ghost" size="icon-sm" onClick={closeDiff} disabled={state.diffLoading} aria-label={t("remoteGit.back")}>
+					<Button variant="ghost" size="icon-sm" onClick={closeDiff} disabled={state.diffLoading || state.mutating} aria-label={t("remoteGit.back")}>
 						<ArrowLeft size={14} />
 					</Button>
 				) : null}
 				<span className="min-w-0 flex-1 truncate font-medium">{t("remoteGit.title")}</span>
-				<Button variant="ghost" size="icon-sm" onClick={refresh} disabled={state.loading || state.diffLoading} aria-label={t("remoteGit.refresh")}>
+				<Button variant="ghost" size="icon-sm" onClick={refresh} disabled={state.loading || state.diffLoading || state.mutating} aria-label={t("remoteGit.refresh")}>
 					<RefreshCw size={14} />
 				</Button>
 			</div>
-			<p className="shrink-0 border-b border-border px-3 py-2 text-xs text-text-secondary">{t("remoteGit.readOnly")}</p>
-			{state.loading || state.diffLoading ? (
+			<p className="shrink-0 border-b border-border px-3 py-2 text-xs text-text-secondary">{t(snapshot?.mutationToken ? "remoteGit.managedIndex" : "remoteGit.readOnly")}</p>
+			{state.loading || state.diffLoading || state.mutating ? (
 				<div role="status" className="flex items-center gap-2 p-3 text-text-secondary">
 					<LoaderCircle size={14} className="animate-spin" />
-					{t("remoteGit.loading")}
+					{t(state.mutating ? "remoteGit.writing" : "remoteGit.loading")}
 				</div>
 			) : null}
 			{state.errorCode ? (
@@ -100,10 +104,13 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 									{t(GROUP_LABELS[group])} ({snapshot.groups[group].length})
 								</h3>
 								<FileTree
-									readOnly
+									readOnly={!snapshot.mutationToken}
+									indexActionsOnly
+									stageFile={(target) => mutate("stage", group, target)}
+									unstageFile={(target) => mutate("unstage", group, target)}
 									resources={snapshot.groups[group]}
 									groupType={group}
-									mutating={false}
+									mutating={!!state.mutating}
 									collapsedDirs={collapsedDirs}
 									onToggleDir={(directory) =>
 										setCollapsedDirs((current) => {

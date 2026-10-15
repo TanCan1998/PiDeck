@@ -6,6 +6,7 @@ import { encodePiSessionDirectory } from "../src/main/remote/remoteSessionProjec
 import { initializeRemoteCodeFixture, verifyRemoteCodeEditing, verifyRemoteCodeIsolation, verifyRemoteCodeDisconnect, assertRemoteNodeTestExecuted } from "./remote-file-editing";
 import { verifyRemoteTerminals } from "./remote-terminal";
 import { createLocalGitReadControl, initializeRemoteGitFixture, verifyRemoteGitRead } from "./remote-git";
+import { initializeRemoteUnbornGitFixture, verifyRemoteGitIndex } from "./remote-git-index";
 import { verifyRemoteHistoryMutations } from "./remote-history-mutations";
 import { REMOTE_ACCEPTANCE_ENV, createRemoteSessionInProject, matchesRemoteFingerprint, readRemoteAcceptanceCredentials, readRemoteAcceptanceTimeouts, remoteProjectRow, runRemoteCommand, test, type RemoteAcceptanceCredentials, type RemoteAcceptanceTimeouts } from "./remote-fixtures";
 
@@ -641,6 +642,35 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 			// A draft exposes shared workspace chrome, without starting pi or relying on model quota.
 			await createRemoteSessionAndReadId(remoteWindow, paths.projectName, timeouts);
 			await verifyRemoteGitRead({ window: remoteWindow, credentials: creds, root: paths.projectPath, neighbor, timeoutMs: 40_000, testInfo });
+			await localControl.verify();
+		} finally {
+			preserveAppLogs(remoteUserDataRoot, paths.runId);
+			await localControl.dispose();
+			await cleanupRemoteRun(creds, paths, "");
+		}
+	});
+
+	test("远端 Git G2a：精确暂存取消 → 外部index拒绝 → hooks签名锁守卫 → unborn与工作区不变", async ({ remoteWindow, remoteUserDataRoot }, testInfo) => {
+		test.setTimeout(660_000);
+		const creds = credentials;
+		if (!creds) {
+			test.skip(true, HELP_TEXT);
+			return;
+		}
+		const paths = await createRemoteRunPaths(creds);
+		const neighbor = paths.e2eRoot + "/git-index-neighbor-" + paths.runId;
+		const unborn = paths.e2eRoot + "/git-unborn-" + paths.runId;
+		const localControl = await createLocalGitReadControl();
+		try {
+			await dismissOnboarding(remoteWindow, 8_000);
+			await createRemoteProjectDirectory(creds, paths);
+			await initializeRemoteGitFixture(creds, paths.projectPath, neighbor);
+			await initializeRemoteUnbornGitFixture(creds, unborn);
+			await addVerifiedRemoteHostAndConnect(remoteWindow, creds, timeouts);
+			await enrollRemoteProjectInSidebar(remoteWindow, unborn, timeouts);
+			await enrollRemoteProjectInSidebar(remoteWindow, paths.projectPath, timeouts);
+			await createRemoteSessionAndReadId(remoteWindow, paths.projectName, timeouts);
+			await verifyRemoteGitIndex({ window: remoteWindow, credentials: creds, root: paths.projectPath, unborn, timeoutMs: 40_000, testInfo });
 			await localControl.verify();
 		} finally {
 			preserveAppLogs(remoteUserDataRoot, paths.runId);

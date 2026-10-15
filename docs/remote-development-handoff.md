@@ -2,7 +2,7 @@
 
 > 当前开发分支：`feat/remote-development`。代码核对基线：`f7b18947`（第一次协作交接点）；首次交接提交：`a663947c`。
 >
-> 下方早期批次保留历史时点，不把其中「尚未完成」直接当成现状。消息写面安全边界见本文末尾「权限与冲突加固」；最新已有远端文件编辑保存见「远端代码文件编辑保存」及 `remote-write-plan.md` §6。下一批 Git 的选型、完整能力分期与 G1/G2 门禁见 [远端 Git 计划](remote-git-plan.md)；**G1 Linux 开发态 status/diff 已接通并完成真实 Electron＋SSH 验收**，最新证据见本文末尾「远端 Git G1」。G2 写面与更广发布门禁仍未完成。
+> 下方早期批次保留历史时点，不把其中「尚未完成」直接当成现状。消息写面安全边界见本文末尾「权限与冲突加固」；最新已有远端文件编辑保存见「远端代码文件编辑保存」及 `remote-write-plan.md` §6。下一批 Git 的选型、完整能力分期与门禁见 [远端 Git 计划](remote-git-plan.md)；**G1 status/diff 与 G2a 单文件 stage/unstage 已完成 Linux 开发态真实 Electron＋SSH 验收**，最新证据见本文末尾「远端 Git G2a」。commit 与更广发布门禁仍未完成。
 >
 > ## 交接摘要（面向接手人，2026-10-11 收口）
 >
@@ -607,3 +607,14 @@ P4.5b 的单会话归档/恢复已完成真实 Electron＋SSH 验证，不能据
 - **真实Electron＋SSH**：本次专用双仓库证明SCM分组、HEAD→index／index→worktree／空→untracked正文与独立Git/blob/file事实相符，二进制拒绝、双项目同名隔离、实际断开不隐式连接、明确connect不重放、手动刷新恢复。前后全部fixture文件SHA与mode/size/inode/mtime/ctime（包括HEAD/index/metadata/工作区）逐字一致，本机临时负对照repo的index字节/metadata与工作区文件不变。最终Git＋原trust专项 **2 passed（3.7m）**，Git本身不依赖模型或启动Agent；仅清理本次唯一夹具。
 - **证据与失败口径**：`/tmp/remote-git-g1-regression-final.log`、`/tmp/remote-git-g1-typecheck-final.log`、`/tmp/remote-git-g1-ui-final.log`及`/tmp/remote-git-g1-ui-final-artifacts/`（独立前后oracle附件）。前三轮UI失败分别为per-project抽屉动画、新挂载连接设置页丢local state、状态文本带主机前缀；修正真实操作/选择器，不force、不改断言成恒真，保留`ui1…ui3`日志/artifacts。沿既有terminal验收先明确connect再执行实际disconnect；未顺手修设置页状态设计。`/tmp`非长期存储承诺。
 - **仍未完成**：G2写面、history/branches/sync与所有危险历史操作、跨平台/长稳/打包、多窗口/dev集成和独立安全审查。真实UI未覆盖所有helper边界；完整默认模型/会话spec未重跑，旧模型额度和DSH问题不归因Git、也未因本次绿灯被解决。下一批按计划先stage/unstage并单独满足commit完整index确认／工程门禁；不是Git parity、Remote v1或发布完成。
+
+## 远端 Git G2a（2026-10-15，单文件暂存／取消暂存）
+
+- **范围**：用户确认[Git计划§5.4](remote-git-plan.md)后实施；普通Linux根仓库、单行stage/unstage。commit仍禁用，没有目录／全仓操作、discard/delete/history/refs/sync，不引库或升级Git/pi。原生本机Git与旧SSH写IPC行为不改，使用新封闭`git:remote-mutate-index`通道。
+- **helper**：1.8.0、可协商`git.stage`／`git.unstage`，hash `86db736b3e6a20f4bd98d29c498d2b732ff8bb9a9f985da2cb0291dc1d4d94ff`；保持四builtin与64KiB源码上限，移除重复大行注释而非放宽门禁。root/gitdir FD锚定、排他官方index.lock、随机0700私有metadata/index context。原生Git负责add/reset路径／unborn rm--cached；原HEAD不移动、非选中mode/OID不变，工作区字节/metadata与属性前后核对，最后写本人lock、保mode/uid/gid、不chown、fsync/rename并回读核对。现读有效hooks/hooksPath/filter/签名/进行中操作，执行前后拒绝；private context冻结白名单配置，不让late配置/hook执行，也不在工程门禁失败时发布。skip/assume/split/sparse/non-stage0拒绝。
+- **main与UI**：内存一次性令牌32hex、128条／15分钟，绑定sender/project/locator/hostRevision与helper的root/gitdir/index/HEAD/status摘要；内部expectation不下发renderer。首await前消费、刷新替换、断线/取消/窗口销毁/卸载/quit撤销。FileTree仅单行stage/unstage，即使误传callbacks也隐藏目录/discard/delete。写在途禁刷新和其他写；成功只读刷新，未知/失败清旧事实要求手动核对，不自动重试。stage取动作开始时最新整文件内容；不是旧diff内容的逐字节确认。
+- **失败边界**：timeout/cancel/EOF回收真实进程组，确认回收后只清本次owned锁／artifact；外部锁不删，无法确认的temp保留。已发写请求的transport/timeout/cancel或发布后异常统一结果未确认，不自动reset/revert/GC/replay。原生add可能已生成未引用objects；崩溃可能留下index.lock，不能称未发布即远端零磁盘变化。没有跨文件HEAD＋index原子CAS，也不保证同账号恶意目录竞态/非协作writer。commit安全门禁仍单列，不用commit-tree/update-ref拼临时替代。
+- **验证**：最终29文件 **246/246，5 suites，0 fail/cancel/skip**；typecheck、触达Biome/diff、spec `--list`、main/preload＋production renderer通过。真实helper覆盖unborn/rename/delete/intent/CRLF/autocrlf/FIFO/symlink、外部index/HEAD/hook/worktree/attributes并发、既有lock保留、hooksPath（含全局）/签名/merge/skip/split拒绝、timeout/cancel/EOF真实进程回收；main token owner/TTL/128上限/单次消费/host drift、UI未知结果和迟到成功不重放有回归。G1行为测试仅抽共享fixture，未删断言。
+- **真实Electron＋SSH**：G2a首轮1 passed/1.7m；补stage后UI diff正文，最终G1只读双仓＋G2a **2 passed（3.5m）**。验证精确stage→diff→unstage、untracked与rename取消、unborn另一条暂存blob保持、外部index SHA不被覆盖、hook零执行、签名和锁拒绝且锁内容保持。HEAD不动，工作区SHA/mode/size/inode/mtime/ctime与本机对照index/文件前后不变；独立原生Git/blob事实与UI匹配，两项`CLEANUP_OK`。不启动Agent、不依赖模型、不碰原有用户仓库。
+- **证据**：`/tmp/remote-git-g2a-regression-final.log`、`/tmp/remote-git-g2a-typecheck-final.log`、`/tmp/remote-git-g2a-build-main.log`、`/tmp/remote-git-g2a-build-renderer.log`、`/tmp/remote-git-g2a-ui-final.log`与`/tmp/remote-git-g2a-ui-final-artifacts/`（独立oracle附件）。红例write/ipc/view保留；中期错误归类/重复builtin/source-size失败通过修代码／去重复注释解决，未放宽断言；真实UI两轮均通过，DSH旧错误仍存在。`/tmp`不承诺长期保留。
+- **后续**：commit完整index确认/expected HEAD门禁未满足；优先跨平台和稳定性。Windows/macOS、长稳、多窗口、打包/dev集成、独立安全审查及G3–G5仍未验收；无法提供对应平台就明确记缺口，不把本次Linux绿灯当作Remote v1完成。完整默认模型/会话spec亦未重跑。

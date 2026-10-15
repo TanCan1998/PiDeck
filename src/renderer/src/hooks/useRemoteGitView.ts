@@ -29,6 +29,9 @@ export function useRemoteGitView(project: RemoteProject) {
 		openDiff: (group: Parameters<NonNullable<typeof controller.current>["openDiff"]>[0], target: Parameters<NonNullable<typeof controller.current>["openDiff"]>[1]) => {
 			void controller.current?.openDiff(group, target);
 		},
+		mutate: (operation: "stage" | "unstage", group: Parameters<NonNullable<typeof controller.current>["mutate"]>[1], target: Parameters<NonNullable<typeof controller.current>["mutate"]>[2]) => {
+			void controller.current?.mutate(operation, group, target);
+		},
 		closeDiff: () => controller.current?.closeDiff(),
 	};
 }

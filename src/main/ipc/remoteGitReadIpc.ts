@@ -1,8 +1,9 @@
 import { ipcMain, type IpcMainInvokeEvent } from "electron";
 import { ipcChannels } from "../../shared/ipc";
-import type { GitReadSnapshotResult, GitResourceGroups, GitWorkspaceFileDiff } from "../../shared/types/git";
+import type { GitIndexMutationResult, GitReadSnapshotResult, GitResourceGroups, GitWorkspaceFileDiff } from "../../shared/types/git";
 import type { ProjectFileTarget } from "../../shared/types/project";
 import { createRemoteGitService, remoteGitFailureCode, validateRemoteGitPath, type RemoteGitLocator } from "../git/RemoteGitService";
+import { createRemoteGitMutationTokens } from "../git/RemoteGitMutationTokens";
 import type { RemoteHostConnectionService } from "../remote/RemoteHostConnectionService";
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -21,6 +22,17 @@ function rootTarget(projectId: string, value: unknown) {
 /** Owns Git read request lifetimes; existing status/diff IPC can delegate before any local repository lookup. */
 export function registerRemoteGitReadIpc(input: { enabled: boolean; locator(projectId: string): RemoteGitLocator | undefined; trusted(target: RemoteGitLocator): Promise<boolean>; service(): RemoteHostConnectionService | undefined | Promise<RemoteHostConnectionService | undefined> }) {
 	const reads = new Map<AbortController, { senderId: number; projectId: string }>();
+	const tokens = createRemoteGitMutationTokens();
+	const senders = new Map<number, { sender: IpcMainInvokeEvent["sender"]; destroy: () => void }>();
+	function watchSender(sender: IpcMainInvokeEvent["sender"]) {
+		if (senders.has(sender.id)) return;
+		const destroy = () => {
+			tokens.revoke(sender.id);
+			senders.delete(sender.id);
+		};
+		senders.set(sender.id, { sender, destroy });
+		sender.once("destroyed", destroy);
+	}
 	let disposed = false;
 	const git = createRemoteGitService({
 		locator: input.locator,
@@ -33,7 +45,7 @@ export function registerRemoteGitReadIpc(input: { enabled: boolean; locator(proj
 			return result.value;
 		},
 	});
-	async function read<T>(event: IpcMainInvokeEvent, projectId: unknown, repo: unknown, task: (projectId: string, signal: AbortSignal) => Promise<T>): Promise<T> {
+	async function read<T>(event: IpcMainInvokeEvent, projectId: unknown, repo: unknown, task: (projectId: string, signal: AbortSignal) => Promise<T>, mutating = false): Promise<T> {
 		if (!input.enabled) throw new Error("REMOTE_FEATURE_DISABLED");
 		if (disposed) throw new Error("REQUEST_CANCELLED");
 		const sender = event.sender;
@@ -46,7 +58,7 @@ export function registerRemoteGitReadIpc(input: { enabled: boolean; locator(proj
 		sender.once("destroyed", cancel);
 		try {
 			const value = await task(projectId, controller.signal);
-			if (controller.signal.aborted || sender.isDestroyed()) throw new Error("REQUEST_CANCELLED");
+			if (controller.signal.aborted || sender.isDestroyed()) throw new Error(mutating ? "GIT_WRITE_RESULT_UNCONFIRMED" : "REQUEST_CANCELLED");
 			return value;
 		} finally {
 			sender.removeListener("destroyed", cancel);
@@ -56,11 +68,39 @@ export function registerRemoteGitReadIpc(input: { enabled: boolean; locator(proj
 	// Cancellation authority is scoped to this sender and main-owned project reads, never a helper id.
 	ipcMain.handle(ipcChannels.gitRemoteCancelReads, (event, projectId: unknown) => {
 		if (typeof projectId !== "string" || !projectId || projectId.length > 256) throw new Error("GIT_RESULT_INVALID");
+		tokens.revoke(event.sender.id, projectId);
 		for (const [controller, read] of reads) if (read.senderId === event.sender.id && read.projectId === projectId) controller.abort();
 	});
 	ipcMain.handle(ipcChannels.gitRemoteSnapshot, async (event, projectId: unknown): Promise<GitReadSnapshotResult> => {
 		try {
-			return { ok: true, snapshot: await read(event, projectId, undefined, (id, signal) => git.status(id, signal)) };
+			tokens.revoke(event.sender.id, typeof projectId === "string" ? projectId : "");
+			const { writeExpectation, ...snapshot } = await read(event, projectId, undefined, (id, signal) => git.status(id, signal));
+			if (writeExpectation && typeof projectId === "string") {
+				watchSender(event.sender);
+				snapshot.mutationToken = tokens.issue(event.sender.id, projectId, writeExpectation);
+			}
+			return { ok: true, snapshot };
+		} catch (error) {
+			return { ok: false, code: remoteGitFailureCode(error) };
+		}
+	});
+	ipcMain.handle(ipcChannels.gitRemoteMutateIndex, async (event, projectId: unknown, operation: unknown, group: unknown, value: unknown, token: unknown): Promise<GitIndexMutationResult> => {
+		try {
+			if (operation !== "stage" && operation !== "unstage") throw new Error("GIT_RESULT_INVALID");
+			if (group !== "index" && group !== "workingTree" && group !== "untracked") throw new Error("GIT_RESULT_INVALID");
+			if (operation === "unstage" ? group !== "index" : group === "index") throw new Error("GIT_RESULT_INVALID");
+			await read(
+				event,
+				projectId,
+				undefined,
+				(id, signal) => {
+					const file = fileTarget(id, value);
+					const expected = tokens.take(event.sender.id, id, token);
+					return git.mutate(id, operation, group, file, expected, signal);
+				},
+				true,
+			);
+			return { ok: true };
 		} catch (error) {
 			return { ok: false, code: remoteGitFailureCode(error) };
 		}
@@ -78,6 +118,9 @@ export function registerRemoteGitReadIpc(input: { enabled: boolean; locator(proj
 		/** Pair with quit cleanup; sender destruction separately cancels only that window's pending reads. */
 		dispose() {
 			disposed = true;
+			tokens.clear();
+			for (const { sender, destroy } of senders.values()) sender.removeListener("destroyed", destroy);
+			senders.clear();
 			for (const controller of reads.keys()) controller.abort();
 		},
 	};

@@ -5,7 +5,7 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`function createGitReadProgram(r
 	const MAX_STATUS = 1048576, MAX_RESOURCES = 4096, MAX_TEXT = 262144, MAX_STDERR = 65536;
 	const MAX_INDEX = 16777216, MAX_METADATA = 20000, MAX_DEPTH = 32, MAX_PATH = 4096;
 	const scopes = new Set();
-	const stable = new Set(["PATH_OUTSIDE_ROOT", "PATH_NOT_FOUND", "NOT_A_FILE", "PERMISSION_DENIED", "IO_ERROR", "RESULT_TOO_LARGE", "REQUEST_TIMEOUT", "REQUEST_CANCELLED", "REMOTE_CONNECTION_LOST", "GIT_NOT_FOUND", "GIT_VERSION_UNSUPPORTED", "GIT_NOT_REPOSITORY", "GIT_UNSUPPORTED_REPOSITORY", "GIT_PLATFORM_UNSUPPORTED", "GIT_CONFIG_UNSUPPORTED", "GIT_COMMAND_FAILED", "GIT_RESULT_INVALID", "GIT_RESOURCE_CHANGED", "GIT_NOT_TEXT"]);
+	const stable = new Set(["PATH_OUTSIDE_ROOT", "PATH_NOT_FOUND", "NOT_A_FILE", "PERMISSION_DENIED", "IO_ERROR", "RESULT_TOO_LARGE", "REQUEST_TIMEOUT", "REQUEST_CANCELLED", "REMOTE_CONNECTION_LOST", "GIT_NOT_FOUND", "GIT_VERSION_UNSUPPORTED", "GIT_NOT_REPOSITORY", "GIT_UNSUPPORTED_REPOSITORY", "GIT_PLATFORM_UNSUPPORTED", "GIT_CONFIG_UNSUPPORTED", "GIT_COMMAND_FAILED", "GIT_RESULT_INVALID", "GIT_RESOURCE_CHANGED", "GIT_NOT_TEXT", "GIT_INDEX_LOCKED", "GIT_WRITE_UNSUPPORTED", "GIT_WRITE_RESULT_UNCONFIRMED"]);
 	const control = /[\x00-\x1f\x7f]/;
 	function failure(code) { return new Error(code); }
 	function code(error) {
@@ -58,10 +58,14 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`function createGitReadProgram(r
 	}
 	function readFile(base, value, limit) {
 		const absolute = checkedPath(base, value);
-		const fd = fs.openSync(absolute, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+		const initial = fs.lstatSync(absolute, { bigint: true });
+		if (!initial.isFile()) throw failure("NOT_A_FILE");
+		/* NONBLOCK prevents a raced FIFO replacement from blocking the helper event loop before fstat. */
+		const fd = fs.openSync(absolute, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
 		try {
 			const before = fs.fstatSync(fd, { bigint: true });
 			if (!before.isFile()) throw failure("NOT_A_FILE");
+			if (metadata(initial) !== metadata(before)) throw failure("GIT_RESOURCE_CHANGED");
 			if (before.size > BigInt(limit)) throw failure("RESULT_TOO_LARGE");
 			const buffer = Buffer.alloc(Number(before.size) + 1);
 			let offset = 0;
@@ -207,6 +211,7 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`function createGitReadProgram(r
 		if (readsWorktree && text(readFile(ctx.cwd, current, MAX_TEXT)) !== modifiedContent) throw failure("GIT_RESOURCE_CHANGED");
 		return { originalContent: originalContent, modifiedContent: modifiedContent };
 	}
+	const writer = createGitWriteProgram(fs, { crypto: crypto, failure: failure, relative: relative, metadata: metadata, readFile: readFile, text: text, execute: execute, rawStatus: rawStatus, snapshot: snapshot, head: head, belongs: belongs, validateConfiguration: validateConfiguration });
 	async function run(ctx, params) {
 		ctx.check();
 		if (process.platform !== "linux") throw failure("GIT_PLATFORM_UNSUPPORTED");
@@ -226,8 +231,9 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`function createGitReadProgram(r
 		ctx.executable = executable(); ctx.env = environment();
 		await validateConfiguration(ctx);
 		const first = snapshot(ctx), firstHead = await head(ctx);
+		if (params.method === "git.stage" || params.method === "git.unstage") return writer.run(ctx, params, first, firstHead);
 		const status = await rawStatus(ctx);
-		const result = params.method === "git.status" ? { status: status.bytes.toString("base64"), head: firstHead.head, branch: firstHead.branch } : await readDiff(ctx, params, status, firstHead);
+		const result = params.method === "git.status" ? { status: status.bytes.toString("base64"), head: firstHead.head, branch: firstHead.branch, revision: writer.fingerprint(ctx, first, firstHead, status) } : await readDiff(ctx, params, status, firstHead);
 		const finalHead = await head(ctx);
 		if (snapshot(ctx) !== first || finalHead.head !== firstHead.head || finalHead.branch !== firstHead.branch) throw failure("GIT_RESOURCE_CHANGED");
 		ctx.check();
@@ -239,6 +245,10 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`function createGitReadProgram(r
 		if (params === null || typeof params !== "object" || Array.isArray(params)) throw failure("GIT_RESULT_INVALID");
 		const keys = Object.keys(params);
 		if (method === "git.status") { if (keys.length) throw failure("GIT_RESULT_INVALID"); return { method: method }; }
+		if (method === "git.stage" || method === "git.unstage") {
+			if (keys.length !== 3 || !keys.includes("path") || !keys.includes("group") || !keys.includes("expectedRevision") || typeof params.expectedRevision !== "string" || !/^[0-9a-f]{64}$/.test(params.expectedRevision) || !(method === "git.unstage" ? params.group === "index" : ["workingTree", "untracked"].includes(params.group))) throw failure("GIT_RESULT_INVALID");
+			return { method: method, path: relative(params.path), group: params.group, expectedRevision: params.expectedRevision };
+		}
 		if (keys.length !== 2 || !keys.includes("path") || !keys.includes("group") || !["merge", "index", "workingTree", "untracked"].includes(params.group)) throw failure("GIT_RESULT_INVALID");
 		return { method: method, path: relative(params.path), group: params.group };
 	}

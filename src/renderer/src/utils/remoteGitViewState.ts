@@ -1,4 +1,4 @@
-import type { GitReadSnapshot, GitReadSnapshotResult, GitResourceGroupType, GitWorkspaceFileDiff } from "../../../shared/types/git";
+import type { GitIndexMutationResult, GitReadSnapshot, GitReadSnapshotResult, GitResourceGroupType, GitWorkspaceFileDiff } from "../../../shared/types/git";
 import type { ProjectFileTarget } from "../../../shared/types/project";
 
 export type RemoteGitViewState = {
@@ -6,6 +6,7 @@ export type RemoteGitViewState = {
 	loading: boolean;
 	snapshot?: GitReadSnapshot;
 	errorCode?: string;
+	mutating?: boolean;
 	diffLoading: boolean;
 	diff?: GitWorkspaceFileDiff;
 	diffGroup?: GitResourceGroupType;
@@ -13,6 +14,7 @@ export type RemoteGitViewState = {
 };
 export type RemoteGitViewApi = {
 	cancelRemoteReads(projectId: string): Promise<void>;
+	mutateRemoteIndex(projectId: string, operation: "stage" | "unstage", group: GitResourceGroupType, target: ProjectFileTarget, token: string): Promise<GitIndexMutationResult>;
 	remoteSnapshot(projectId: string): Promise<GitReadSnapshotResult>;
 	workspaceFileDiff(projectId: string, group: GitResourceGroupType, target: ProjectFileTarget): Promise<GitWorkspaceFileDiff | null>;
 };
@@ -22,7 +24,7 @@ function errorCode(error: unknown): string {
 	// Electron invoke prefixes errors with the channel; only the bounded code becomes visible text.
 	return /\b(?:GIT_[A-Z_]+|SSH_[A-Z_]+|REMOTE_FEATURE_DISABLED|UNSUPPORTED_CAPABILITY|RESULT_TOO_LARGE|REQUEST_TIMEOUT|REQUEST_CANCELLED|REMOTE_CONNECTION_LOST|PERMISSION_DENIED|PATH_[A-Z_]+|NOT_A_FILE|TOO_MANY_REQUESTS)\b/.exec(raw)?.[0] ?? "GIT_COMMAND_FAILED";
 }
-/** Single-owner read controller: one refresh/diff in flight, no polling/write API, and identity-scoped late results. */
+/** Single-owner controller: explicit, one-shot index actions; no commit, polling or automatic write replay. */
 export function createRemoteGitViewController(projectId: string, projectKey: string, api: RemoteGitViewApi, publish: (state: RemoteGitViewState) => void) {
 	let active = true;
 	let epoch = 0;
@@ -32,9 +34,9 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 		state = next;
 		if (active) publish(state);
 	}
-	return {
-		async refresh() {
-			if (!active || state.loading || state.diffLoading) return;
+	const controller = {
+		async refresh(): Promise<void> {
+			if (!active || state.loading || state.diffLoading || state.mutating) return;
 			const generation = ++epoch;
 			diffEpoch += 1;
 			// Clear previous facts during refresh; a failed read must not display a stale clean repository.
@@ -48,8 +50,28 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 				if (active && generation === epoch) update({ projectKey, loading: false, diffLoading: false, errorCode: errorCode(error) });
 			}
 		},
+		async mutate(operation: "stage" | "unstage", group: GitResourceGroupType, target: ProjectFileTarget): Promise<void> {
+			if (!active || state.loading || state.diffLoading || state.mutating || !state.snapshot?.mutationToken || target.projectId !== projectId || (operation === "unstage" ? group !== "index" : group !== "workingTree" && group !== "untracked")) return;
+			if (!state.snapshot.groups[group].some((resource) => resource.target.projectId === projectId && resource.target.relativePath === target.relativePath)) return;
+			const token = state.snapshot.mutationToken;
+			const generation = ++epoch;
+			diffEpoch += 1;
+			update({ ...state, mutating: true, errorCode: undefined, diff: undefined, diffErrorCode: undefined });
+			try {
+				const result = await api.mutateRemoteIndex(projectId, operation, group, target, token);
+				if (!active || generation !== epoch) return;
+				if (!result.ok) {
+					update({ projectKey, loading: false, diffLoading: false, errorCode: result.code });
+					return;
+				}
+				update({ projectKey, loading: false, diffLoading: false });
+				await controller.refresh();
+			} catch {
+				if (active && generation === epoch) update({ projectKey, loading: false, diffLoading: false, errorCode: "GIT_WRITE_RESULT_UNCONFIRMED" });
+			}
+		},
 		async openDiff(group: GitResourceGroupType, target: ProjectFileTarget) {
-			if (!active || state.loading || state.diffLoading || !state.snapshot || target.projectId !== projectId) return;
+			if (!active || state.loading || state.diffLoading || state.mutating || !state.snapshot || target.projectId !== projectId) return;
 			const generation = epoch;
 			const request = ++diffEpoch;
 			update({ ...state, diff: undefined, diffGroup: group, diffErrorCode: undefined, diffLoading: true });
@@ -63,7 +85,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			}
 		},
 		closeDiff() {
-			if (!active || state.diffLoading) return;
+			if (!active || state.diffLoading || state.mutating) return;
 			diffEpoch += 1;
 			update({ ...state, diff: undefined, diffGroup: undefined, diffLoading: false, diffErrorCode: undefined });
 		},
@@ -73,14 +95,15 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			epoch += 1;
 			diffEpoch += 1;
 			void api.cancelRemoteReads(projectId).catch(() => undefined);
-			update({ projectKey, loading: false, diffLoading: false, errorCode: "REMOTE_CONNECTION_LOST" });
+			update({ projectKey, loading: false, diffLoading: false, errorCode: state.mutating ? "GIT_WRITE_RESULT_UNCONFIRMED" : "REMOTE_CONNECTION_LOST" });
 		},
 		/** Component/project identity changes invalidate results; they never connect/replay automatically. */
 		dispose() {
 			active = false;
-			if (state.loading || state.diffLoading) void api.cancelRemoteReads(projectId).catch(() => undefined);
+			void api.cancelRemoteReads(projectId).catch(() => undefined);
 			epoch += 1;
 			diffEpoch += 1;
 		},
 	};
+	return controller;
 }

@@ -78,6 +78,9 @@ export const REMOTE_HELPER_ERROR_CODES = [
 	"GIT_RESULT_INVALID",
 	"GIT_RESOURCE_CHANGED",
 	"GIT_NOT_TEXT",
+	"GIT_INDEX_LOCKED",
+	"GIT_WRITE_UNSUPPORTED",
+	"GIT_WRITE_RESULT_UNCONFIRMED",
 ] as const;
 export type RemoteHelperErrorCode = (typeof REMOTE_HELPER_ERROR_CODES)[number];
 
@@ -107,11 +110,14 @@ export const REMOTE_GIT_METADATA_MAX_ENTRIES = 20_000;
 export const REMOTE_GIT_METADATA_MAX_DEPTH = 32;
 export const REMOTE_GIT_READ_TIMEOUT_MS = 30_000;
 
-export type RemoteGitStatusResult = { status: string; head: string | null; branch: string | null };
+export type RemoteGitStatusResult = { status: string; head: string | null; branch: string | null; revision?: string };
+/** Managed single-resource index mutations. The expectation is main-owned, never renderer authority. */
+export type RemoteGitMutationParams = { path: string; group: "index" | "workingTree" | "untracked"; expectedRevision: string };
+export type RemoteGitMutationResult = { applied: true };
 export type RemoteGitWorkspaceDiffParams = { group: "merge" | "index" | "workingTree" | "untracked"; path: string };
 export type RemoteGitWorkspaceDiffResult = { originalContent: string; modifiedContent: string };
 
-export const REMOTE_HELPER_CAPABILITIES = ["echo", "fs.stat", "fs.list", "fs.read", "fs.searchNames", "git.status", "git.workspaceDiff"] as const;
+export const REMOTE_HELPER_CAPABILITIES = ["echo", "fs.stat", "fs.list", "fs.read", "fs.searchNames", "git.status", "git.workspaceDiff", "git.stage", "git.unstage"] as const;
 export type RemoteHelperCapability = (typeof REMOTE_HELPER_CAPABILITIES)[number];
 /**
  * Ceiling for one requested relative path. It is applied to the raw string before any filesystem access,

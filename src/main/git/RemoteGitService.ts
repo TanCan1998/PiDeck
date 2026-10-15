@@ -5,10 +5,12 @@ import { REMOTE_GIT_MAX_RESOURCES, REMOTE_GIT_READ_TIMEOUT_MS, REMOTE_GIT_STATUS
 
 export type RemoteGitLocator = { hostId: string; remotePath: string };
 export type RemoteGitSession = {
+	readonly hostRevision?: number;
 	request(method: string, params?: unknown, options?: { timeoutMs?: number; onRequestId?: (id: string) => void }): Promise<unknown>;
 	cancel(id: string, options?: { timeoutMs?: number }): Promise<unknown>;
 };
-export type RemoteGitReadSnapshot = GitReadSnapshot;
+export type RemoteGitWriteExpectation = { revision: string; hostRevision: number; target: RemoteGitLocator };
+export type RemoteGitReadSnapshot = GitReadSnapshot & { writeExpectation?: RemoteGitWriteExpectation };
 
 const ERRORS = new Set([
 	"PATH_OUTSIDE_ROOT",
@@ -30,6 +32,10 @@ const ERRORS = new Set([
 	"GIT_RESULT_INVALID",
 	"GIT_RESOURCE_CHANGED",
 	"GIT_NOT_TEXT",
+	"GIT_INDEX_LOCKED",
+	"GIT_WRITE_UNSUPPORTED",
+	"GIT_WRITE_RESULT_UNCONFIRMED",
+	"GIT_WRITE_SNAPSHOT_EXPIRED",
 	"REMOTE_FEATURE_DISABLED",
 	"TOO_MANY_REQUESTS",
 	"GIT_TRUST_REQUIRED",
@@ -117,9 +123,11 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 		const current = ports.locator(projectId);
 		if (!current || current.hostId !== expected.hostId || current.remotePath !== expected.remotePath) throw new Error("GIT_TARGET_CHANGED");
 	}
-	async function run<T>(projectId: string, method: "git.status" | "git.workspaceDiff", params: unknown, signal: AbortSignal | undefined, parse: (value: unknown) => T): Promise<T> {
+	async function run<T>(projectId: string, method: "git.status" | "git.workspaceDiff" | "git.stage" | "git.unstage", params: unknown, signal: AbortSignal | undefined, parse: (value: unknown, session: RemoteGitSession, capabilities: unknown[]) => T, expected?: RemoteGitWriteExpectation): Promise<T> {
 		const locator = target(projectId);
+		let dispatchedWrite = false;
 		try {
+			if (expected && (expected.target.hostId !== locator.hostId || expected.target.remotePath !== locator.remotePath)) throw new Error("GIT_TARGET_CHANGED");
 			if (signal?.aborted) throw new Error("REQUEST_CANCELLED");
 			if (!(await ports.trusted(locator))) throw new Error("GIT_TRUST_REQUIRED");
 			assertCurrent(projectId, locator);
@@ -136,6 +144,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 						if (signal?.aborted) throw new Error("REQUEST_CANCELLED");
 						assertCurrent(projectId, locator);
 						try {
+							if (name === "git.stage" || name === "git.unstage") dispatchedWrite = true;
 							const result = await session.request(name, input, {
 								timeoutMs: REMOTE_GIT_READ_TIMEOUT_MS,
 								onRequestId: (id) => {
@@ -155,7 +164,8 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 						if (!record(hello) || hello.protocolVersion !== REMOTE_HELPER_PROTOCOL_VERSION || hello.root !== locator.remotePath || !Array.isArray(hello.capabilities) || !hello.capabilities.includes(method)) throw new Error("UNSUPPORTED_CAPABILITY");
 						// Trust is mutable while the host lock is queued; check it at the actual operation boundary.
 						if (!(await ports.trusted(locator))) throw new Error("GIT_TRUST_REQUIRED");
-						return parse(await request(method, params));
+						if (expected && session.hostRevision !== expected.hostRevision) throw new Error("GIT_TARGET_CHANGED");
+						return parse(await request(method, params), session, hello.capabilities);
 					} finally {
 						signal?.removeEventListener("abort", cancel);
 					}
@@ -163,12 +173,36 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 				signal,
 			);
 		} catch (error) {
-			throw new Error(remoteGitFailureCode(error));
+			const code = remoteGitFailureCode(error);
+			if (dispatchedWrite && ["GIT_RESULT_INVALID", "REQUEST_TIMEOUT", "REQUEST_CANCELLED", "REMOTE_CONNECTION_LOST", "GIT_TARGET_CHANGED", "GIT_COMMAND_FAILED"].includes(code)) throw new Error("GIT_WRITE_RESULT_UNCONFIRMED");
+			throw new Error(code);
 		}
 	}
 	return {
 		status(projectId: string, signal?: AbortSignal): Promise<RemoteGitReadSnapshot> {
-			return run(projectId, "git.status", {}, signal, (value) => readRemoteGitStatus(value, projectId));
+			return run(projectId, "git.status", {}, signal, (value, session, capabilities) => {
+				const snapshot = readRemoteGitStatus(value, projectId);
+				if (record(value) && value.revision !== undefined) {
+					if (typeof value.revision !== "string" || !/^[0-9a-f]{64}$/.test(value.revision)) throw new Error("GIT_RESULT_INVALID");
+					if (capabilities.includes("git.stage") && capabilities.includes("git.unstage") && typeof session.hostRevision === "number" && Number.isSafeInteger(session.hostRevision) && session.hostRevision >= 0)
+						snapshot.writeExpectation = { revision: value.revision, hostRevision: session.hostRevision, target: target(projectId) };
+				}
+				return snapshot;
+			});
+		},
+		/** The expectation is issued by main; renderer data never becomes a host/revision authority. */
+		mutate(projectId: string, operation: "stage" | "unstage", group: GitResourceGroupType, file: ProjectFileTarget, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<void> {
+			if (file.projectId !== projectId || (operation === "unstage" ? group !== "index" : !["workingTree", "untracked"].includes(group))) throw new Error("GIT_RESULT_INVALID");
+			return run(
+				projectId,
+				operation === "stage" ? "git.stage" : "git.unstage",
+				{ path: validateRemoteGitPath(file.relativePath), group, expectedRevision: expected.revision },
+				signal,
+				(value) => {
+					if (!record(value) || value.applied !== true || Object.keys(value).length !== 1) throw new Error("GIT_RESULT_INVALID");
+				},
+				expected,
+			);
 		},
 		workspaceDiff(projectId: string, group: GitResourceGroupType, file: ProjectFileTarget, signal?: AbortSignal): Promise<GitWorkspaceFileDiff> {
 			if (file.projectId !== projectId || !["merge", "index", "workingTree", "untracked"].includes(group)) throw new Error("GIT_RESULT_INVALID");

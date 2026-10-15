@@ -47,6 +47,8 @@ export function FileTree(props: {
 	groupType: GitResourceGroupType;
 	/** A read-only capability omits mutation controls instead of rendering no-op actions. */
 	readOnly?: boolean;
+	/** Managed remote index capability: no directory, discard or delete actions even if callbacks exist. */
+	indexActionsOnly?: boolean;
 	stageFile?: (target: ProjectFileTarget) => void;
 	/** 目录级暂存只传当前目录资源，避免影响其他目录。 */
 	stageDir?: (targets: ProjectFileTarget[]) => void;
@@ -100,7 +102,7 @@ export function FileTree(props: {
 										}));
 									return (
 										<span className="ml-auto flex items-center gap-0.5">
-											{!props.readOnly && props.stageDir && stageable.length > 0 && (
+											{!props.readOnly && !props.indexActionsOnly && props.stageDir && stageable.length > 0 && (
 												<Button
 													type="button"
 													variant="ghost"
@@ -117,7 +119,7 @@ export function FileTree(props: {
 													<Plus size={13} aria-hidden="true" />
 												</Button>
 											)}
-											{!props.readOnly && props.discardDir && discardable.length > 0 && (
+											{!props.readOnly && !props.indexActionsOnly && props.discardDir && discardable.length > 0 && (
 												<Button
 													type="button"
 													variant="ghost"
@@ -148,14 +150,14 @@ export function FileTree(props: {
 									disabled?: boolean;
 									run: () => void;
 								}> = [];
-								if (!props.readOnly && props.groupType === "index") {
+								if (!props.readOnly && props.groupType === "index" && (!props.indexActionsOnly || props.unstageFile)) {
 									actions.push({
 										label: t("git.unstage"),
 										kind: "unstage",
 										disabled: props.mutating,
 										run: () => props.unstageFile?.(r.target),
 									});
-								} else if (!props.readOnly && (props.groupType === "workingTree" || props.groupType === "untracked")) {
+								} else if (!props.readOnly && (!props.indexActionsOnly || props.stageFile) && (props.groupType === "workingTree" || props.groupType === "untracked")) {
 									// 已暂存文件在 Changes 组仅保留打开按钮，暂存/回滚归 Staged 组（VS Code 语义）
 									if (!props.stagedPaths?.has(r.path)) {
 										actions.push({
@@ -165,12 +167,13 @@ export function FileTree(props: {
 											run: () => props.stageFile?.(r.target),
 										});
 										// 回滚：tracked 走 git restore，untracked 走回收站删除
-										actions.push({
-											label: t("git.discardChanges"),
-											kind: "discard",
-											disabled: props.mutating,
-											run: () => props.discardFile?.(r.target, r.status === GitStatus.UNTRACKED ? "untracked" : "workingTree"),
-										});
+										if (!props.indexActionsOnly)
+											actions.push({
+												label: t("git.discardChanges"),
+												kind: "discard",
+												disabled: props.mutating,
+												run: () => props.discardFile?.(r.target, r.status === GitStatus.UNTRACKED ? "untracked" : "workingTree"),
+											});
 									}
 								}
 								if (props.onOpenFile) {
@@ -196,7 +199,7 @@ export function FileTree(props: {
 											)
 										}
 										actions={actions}
-										deleteFile={!props.readOnly && props.deleteFile ? (target) => props.deleteFile?.(target) : undefined}
+										deleteFile={!props.readOnly && !props.indexActionsOnly && props.deleteFile ? (target) => props.deleteFile?.(target) : undefined}
 									/>
 								);
 							})}

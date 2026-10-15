@@ -15,7 +15,7 @@ const { FileTree } = loadTsCommonJs("src/renderer/src/components/app/git/GitReso
 	},
 });
 
-function render(readOnly, groupType) {
+function render(readOnly, groupType, managed = false) {
 	const projectId = "project";
 	const target = { projectId, relativePath: "file.txt" };
 	return renderToStaticMarkup(
@@ -23,6 +23,10 @@ function render(readOnly, groupType) {
 			resources: [{ path: "file.txt", target, displayPath: "file.txt", status: groupType === "index" ? GitStatus.INDEX_MODIFIED : GitStatus.MODIFIED, letter: "M" }],
 			groupType,
 			readOnly,
+			indexActionsOnly: managed,
+			stageDir: managed ? () => undefined : undefined,
+			discardDir: managed ? () => undefined : undefined,
+			deleteFile: managed ? () => undefined : undefined,
 			stageFile: () => undefined,
 			unstageFile: () => undefined,
 			discardFile: () => undefined,
@@ -40,6 +44,12 @@ test("read-only Git resource rows omit stage, unstage and discard actions", () =
 		assert.doesNotMatch(html, /git\.(?:stage|unstage|discardChanges)/);
 		assert.match(html, /file\.txt/);
 	}
+});
+
+test("managed index capability shows single-row stage/unstage but never discard, delete or directory mutations", () => {
+	assert.match(render(false, "index", true), /git\.unstage/);
+	assert.match(render(false, "workingTree", true), /git\.stage/);
+	for (const group of ["index", "workingTree", "untracked", "merge"]) assert.doesNotMatch(render(false, group, true), /git\.(?:discardChanges|stageDirectory|discardDirectory|deleteFile)/);
 });
 
 test("local Git resource rows retain their supplied mutation actions", () => {

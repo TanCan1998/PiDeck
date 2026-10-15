@@ -421,7 +421,7 @@ export interface PiRuntimeLauncher {
 
 ### 6.3 文件、Git 与 Session 存储后端
 
-Git 调研、选型和分批实施细节见 [远端 Git 计划](remote-git-plan.md)：当前保留原生 Git CLI，不新增 Git 库；G1 status/diff 与 G2 stage/unstage/commit 尚未实施，完整历史/分支/同步与发布门禁不能因最小切片完成而省略。
+Git 调研、选型和分批实施细节见 [远端 Git 计划](remote-git-plan.md)：保留原生 Git CLI，不新增 Git 库；G1 status/diff 与 G2a 单文件 stage/unstage 已完成 Linux 开发态真实 Electron＋SSH 验收。commit 仍受完整暂存区确认／expected HEAD 并发与工程门禁阻塞；跨平台/稳定性、完整历史/分支/同步与发布门禁不能因最小切片完成而省略。
 
 - `filesIpc.ts` 的新输入统一为 `ProjectFileTarget = { projectId: string; relativePath: string }`；main 根据 projectId 解析 location 和可信 root，再选择 local/remote backend。
 - 输出契约也要迁移：`FileTreeNode` / search result 必须携带 `projectId + relativePath`，`displayPath` 只用于展示。远端节点不得伪造本地绝对 `path` 或 `file://` URI。
