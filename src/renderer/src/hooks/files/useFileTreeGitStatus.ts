@@ -3,7 +3,7 @@ import { EMPTY_FILE_TREE_GIT_STATUS, buildFileTreeGitStatusLookup, dropNestedRep
 import type { GitResourceGroups } from "../../../../shared/types";
 
 /**
- * 文件树 Git 着色状态域（IDEA 风格：modified 蓝 / added 绿 / untracked 红 / conflict 琥珀）。
+ * 文件树 Git 着色状态域（IDEA 风格：modified 蓝 / added 绿 / untracked 琥珀棕 / conflict 红）。
  * 数据复用 GitPanel 同一 `git:status` IPC；非 git 项目 / git 未安装时静默退化为无着色
  * （文件树不是 git 面板，不该弹错误提示）。
  * 取数范围与 Git 抽屉对齐：

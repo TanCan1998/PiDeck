@@ -159,7 +159,7 @@ function FilesPanel(props: {
 	// 文件名搜索（issue #215）：状态域在 hook，面板只转发输入与关闭
 	const fileSearch = useFileSearch({ projectId: props.projectId });
 	const [searchOpen, setSearchOpen] = useState(false);
-	// Git 状态着色（IDEA 风格：untracked 红 / modified 蓝 / added 绿 / conflict 琥珀）：
+	// Git 状态着色（IDEA 风格：untracked 琥珀棕 / modified 蓝 / added 绿 / conflict 红）：
 	// 面板挂载（抽屉打开）与切换项目由 hook 拉取；手动刷新按钮见下方 onClick。
 	const gitStatus = useFileTreeGitStatus({ projectId: props.projectId, projectRoot: props.projectRoot });
 	// 文件树内容真的变了（复制/粘贴/移动、工具触发的重载）才重拉着色：

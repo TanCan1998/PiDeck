@@ -4,9 +4,9 @@ import { GitStatus, type GitResource, type GitResourceGroups } from "../../../sh
  * 文件树行的 Git 状态着色（IDEA 风格）：
  * - modified：已跟踪且有工作区改动（含暂存修改/重命名/类型变更/删除）→ 蓝（--color-info）
  * - added：已暂存的新文件（含 intent-to-add）→ 绿（--color-success）
- * - untracked：未纳入 git 管理 → 红（--color-danger；IDEA 同款 unversioned 语义，
- *   用户核心诉求：一眼看出哪些文件还没进 git）
- * - conflict：合并冲突 → 琥珀（--color-warning）
+ * - untracked：未纳入 git 管理 → 琥珀/棕（--color-warning；IDEA 的 unversioned 就是棕色
+ *   #993300 而非报警红，用户核心诉求是「一眼分辨」，不是「看着像出错」）
+ * - conflict：合并冲突 → 红（--color-danger；红留给真正要处理的问题）
  * 与 Git 抽屉的 `--git-*` 色（SCM 只染状态字母、modified 走琥珀）是刻意分歧：
  * 文件树按用户要求沿用 IDEA 的行名语义，两处表面各用各的色语言。
  */
@@ -15,7 +15,7 @@ export type FileTreeGitStatus = "modified" | "added" | "untracked" | "conflict";
 /** 文件行优先级：同一文件可同时进 index 与 workingTree（先暂存后又改），取信息量最大的状态。 */
 const FILE_STATUS_RANK: Record<FileTreeGitStatus, number> = { conflict: 4, added: 3, modified: 2, untracked: 1 };
 
-/** 目录行优先级：子树里有未跟踪文件时优先标红——「这个目录有东西没进 git」比「有已跟踪改动」更值得提醒。 */
+/** 目录行优先级：子树里有未跟踪文件时优先标成「未跟踪」色——「这个目录有东西没进 git」比「有已跟踪改动」更值得提醒。 */
 const DIR_STATUS_RANK: Record<FileTreeGitStatus, number> = { conflict: 4, untracked: 3, added: 2, modified: 1 };
 
 /** GitStatus → 文件树着色状态；返回 undefined 表示这一条不参与着色。 */
@@ -55,9 +55,9 @@ export function fileTreeGitStatusClass(status: FileTreeGitStatus | undefined): s
 		case "added":
 			return "text-success";
 		case "untracked":
-			return "text-danger";
-		case "conflict":
 			return "text-warning";
+		case "conflict":
+			return "text-danger";
 		default:
 			return undefined;
 	}

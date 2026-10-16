@@ -1,7 +1,7 @@
 /**
  * 文件树 Git 状态着色（IDEA 风格）：
  * 1. 路径键归一——分隔符/大小写/尾斜杠，Windows 反斜杠必须能对上树节点的键；
- * 2. GitStatus → 着色状态映射——untracked 红、added 绿、冲突琥珀、其余（修改/重命名/删除）蓝；
+ * 2. GitStatus → 着色状态映射——untracked 琥珀棕、added 绿、冲突红、其余（修改/重命名/删除）蓝；
  * 3. 查找表构建——文件行取自身状态（暂存+未暂存并存时 added 胜出）、目录行聚合子树
  *    （含未跟踪文件时红优先，呼应「没进 git 管理」的核心诉求）、祖先只标到项目根；
  * 4. 颜色映射——状态 → Tailwind 语义 token utility（不写死色值，暗色/皮肤自动适配）；
@@ -145,8 +145,8 @@ test("查找表：目录里未跟踪 + 已修改并存时，目录红优先于�
 		"/proj",
 	);
 	assert.equal(lookup("/proj/src/old.ts"), "modified", "已跟踪改动文件行保持蓝");
-	assert.equal(lookup("/proj/src/new.ts"), "untracked", "未跟踪文件行保持红");
-	assert.equal(lookup("/proj/src"), "untracked", "目录聚合：红提示「有东西没进 git」");
+	assert.equal(lookup("/proj/src/new.ts"), "untracked", "未跟踪文件行保持琥珀棕");
+	assert.equal(lookup("/proj/src"), "untracked", "目录聚合：提示「有东西没进 git」");
 });
 
 test("查找表：同一文件暂存新增后又改（index+workingTree 并存），文件行 added 胜出", () => {
@@ -239,8 +239,8 @@ test("着色类映射：四个状态各映射到语义 token utility，未命中
 	// 必须走 utility 而非写死色值：暗色与各皮肤经 token 自动适配（AGENTS.md CSS 双轨）
 	assert.equal(fileTreeGitStatusClass("modified"), "text-info");
 	assert.equal(fileTreeGitStatusClass("added"), "text-success");
-	assert.equal(fileTreeGitStatusClass("untracked"), "text-danger");
-	assert.equal(fileTreeGitStatusClass("conflict"), "text-warning");
+	assert.equal(fileTreeGitStatusClass("untracked"), "text-warning", "未跟踪用琥珀棕（IDEA unversioned 同族），不是报警红");
+	assert.equal(fileTreeGitStatusClass("conflict"), "text-danger", "红留给真正要处理的冲突");
 	assert.equal(fileTreeGitStatusClass(undefined), undefined, "未命中（干净文件/非仓库）不加类");
 });
 
