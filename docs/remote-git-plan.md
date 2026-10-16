@@ -2,6 +2,7 @@
 
 > 状态：G0 调研、G1 status/diff、G2a 单文件 stage/unstage、**G2b 单次普通提交**、**G3a 只读历史／引用**（helper 1.10.0，见 §5.10／§5.11）与 **G3b 分支写面（新建分支／切换）**（helper 1.11.0，见 §5.12）已完成 Linux 开发态实现、针对性回归及真实 Electron＋SSH 验收（G2b 见 §5.9.1）；G6a 补故障／并发／短周期资源回归并修复未知结果提示，G6b 新增真实 SSH 长稳验收且有一次完整 1 小时通过，G6c 更正暖机阶跃归因并加 steady-state 门禁（§5.6–§5.8）。G3 写面（checkout／建分支）与 G4–G5、完整 G6 未完成。仍受开发态实验门禁约束，不代表 Git parity 或 Remote v1 已收口。
 > 核对基线：`feat/remote-development`，G0 调研基线 `101b9b82c`；G1 从 `bc25ebe20` 实施，G2a 从 `f83f9d550` 实施。
+> **冻结 helper 源码编辑纪律**（2026-10-16，同一次会话内第二次踩到）：`RemoteGitReadSource.ts`／`RemoteGitWriteSource.ts` 的正文是 `String.raw` 模板，**新写的注释里出现反引号或 `${` 会提前终止模板**，结果是文件仍「像」有内容但编译产物丢掉后半段（本次现象：写入源少了整个分支程序、压平产物报 `Illegal return statement`）。改这两处之后固定三步自检：① 文件内反引号总数 == 2；② `node --check` 压平后的 helper 产物；③ `loadTsCommonJs` 读出的 `REMOTE_GIT_*_SOURCE` 里能搜到新函数名。
 > 范围：落实总计划 §6.3 的 Git 能力；近期顺序仍为 **status/diff → stage/unstage/commit → 跨平台与稳定性**，不一次性搬运所有本机操作。
 
 ## 1. 技术结论：继续使用 Git CLI，不更换引擎或新增 Git 依赖
