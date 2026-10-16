@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { fixture, options, successful } from "./helpers/remoteGitFixture.mjs";
@@ -242,5 +242,69 @@ test("a discarded nested path keeps its directory shape inside the snapshot", op
 	assert.equal(f.git("show", result.recoveryRef + ":sub/dir/nested.txt"), "nested edit\n");
 	assert.equal(readFileSync(join(f.root, "sub", "dir", "nested.txt"), "utf8"), "nested base\n");
 	assert.equal(statSync(join(f.root, "sub", "dir")).isDirectory(), true);
+	assertNoLeftovers(f);
+});
+
+/**
+ * Set a file's timestamp to exactly the one its index entry recorded, so a stat-cache-driven implementation would
+ * consider it current. The bytes still differ, so a correct implementation must rewrite the file anyway.
+ */
+function withCachedTimestamp(f, path, replacement) {
+	const debug = f.git("ls-files", "--debug", "--", path);
+	const match = /mtime: (\d+):(\d+)/.exec(debug);
+	assert.ok(match, `the index must carry stat data for ${path}: ${debug}`);
+	writeFileSync(join(f.root, path), replacement);
+	const seconds = Number(match[1]) + Number(match[2]) / 1e9;
+	utimesSync(join(f.root, path), seconds, seconds);
+	const staged = f.git("show", `:${path}`);
+	assert.notEqual(staged, replacement, "the bytes on disk must really differ from the staged version");
+	return { staged, replacement };
+}
+
+test("a discard writes the file even when its timestamp matches the cached index entry", options, async (t) => {
+	const f = fixture(t);
+	baseline(f);
+	const forged = withCachedTimestamp(f, "a.txt", "mine\n");
+	const result = successful(await f.request("git.discard", { path: "a.txt", group: "workingTree", expectedRevision: await revision(f) }));
+	assert.equal(result.applied, true);
+	assert.equal(readFileSync(join(f.root, "a.txt"), "utf8"), forged.staged, "the staged version must really be on disk, not only in git's cache");
+	assert.equal(f.git("show", `${result.recoveryRef}:a.txt`), forged.replacement);
+	assert.equal(f.git("status", "--porcelain=v1").trim(), "");
+	assertNoLeftovers(f);
+});
+
+test("a restore refuses to overwrite a file the index does not know about", options, async (t) => {
+	const f = fixture(t);
+	baseline(f);
+	writeFileSync(join(f.root, "note.txt"), "snapshot me\n");
+	const snapshot = successful(await f.request("git.discard", { path: "note.txt", group: "untracked", expectedRevision: await revision(f) }));
+	// The user creates a different file at the same path: it is untracked, so nothing in the index can vouch for it.
+	writeFileSync(join(f.root, "note.txt"), "my own new file\n");
+	const entry = successful(await f.request("git.recoveryList")).entries[0];
+	assert.equal(entry.ref, snapshot.recoveryRef);
+	const refused = await f.request("git.recoveryRestore", { ref: entry.ref, oid: entry.oid, path: entry.path, expectedRevision: await revision(f) });
+	assert.equal(refused.ok, false);
+	assert.equal(refused.error?.code, "GIT_RESTORE_CONFLICT");
+	assert.equal(readFileSync(join(f.root, "note.txt"), "utf8"), "my own new file\n", "an untracked file is never overwritten by a restore");
+	assertNoLeftovers(f);
+});
+
+test("a discard in a repository whose attributes convert the file still produces the checkout form", options, async (t) => {
+	const f = fixture(t);
+	baseline(f);
+	// The index stores the normalised (LF) form; the worktree file is checked out as CRLF. A byte comparison against
+	// the index blob would call this "not restored", while git's own comparison - with no stat cache in the way -
+	// is exactly the right verdict.
+	writeFileSync(join(f.root, ".gitattributes"), "*.txt text eol=crlf\n");
+	f.git("add", "--", ".gitattributes");
+	f.git(...IDENTITY, "commit", "-qm", "attributes");
+	writeFileSync(join(f.root, "a.txt"), "my converted edit\r\n");
+	const result = successful(await f.request("git.discard", { path: "a.txt", group: "workingTree", expectedRevision: await revision(f) }));
+	assert.equal(result.applied, true);
+	assert.equal(f.git("show", `${result.recoveryRef}:a.txt`), "my converted edit\r\n", "the snapshot keeps the bytes the user had");
+	assert.equal(readFileSync(join(f.root, "a.txt"), "utf8"), "base\r\n", "the worktree holds the checkout form of the staged version");
+	// git diff is the content verdict here: with text/eol attributes git status can still say "modified" for a file
+	// whose converted content equals the index, and the product's own post-check therefore compares through git diff.
+	assert.equal(f.git("diff", "--", "a.txt").trim(), "");
 	assertNoLeftovers(f);
 });

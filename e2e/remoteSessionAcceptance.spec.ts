@@ -13,6 +13,7 @@ import { initializeRemoteUnbornGitFixture, verifyRemoteGitIndex } from "./remote
 import { initializeRemoteGitHistoryFixture, verifyRemoteGitHistory } from "./remote-git-history";
 import { initializeRemoteGitBranchFixture, verifyRemoteGitBranch } from "./remote-git-branch";
 import { initializeRemoteGitDiscardFixture, verifyRemoteGitDiscard } from "./remote-git-discard";
+import { initializeRemoteGitRecoveryFixture, verifyRemoteGitRecovery } from "./remote-git-recovery";
 import { verifyRemoteHistoryMutations } from "./remote-history-mutations";
 import { REMOTE_ACCEPTANCE_ENV, createRemoteSessionInProject, matchesRemoteFingerprint, readRemoteAcceptanceCredentials, readRemoteAcceptanceTimeouts, remoteProjectRow, runRemoteCommand, test, type RemoteAcceptanceCredentials, type RemoteAcceptanceTimeouts } from "./remote-fixtures";
 
@@ -752,6 +753,31 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 			await enrollRemoteProjectInSidebar(remoteWindow, paths.projectPath, timeouts);
 			await createRemoteSessionAndReadId(remoteWindow, paths.projectName, timeouts);
 			await verifyRemoteGitDiscard({ window: remoteWindow, credentials: creds, root: paths.projectPath, timeoutMs: 40_000, testInfo });
+			await localControl.verify();
+		} finally {
+			preserveAppLogs(remoteUserDataRoot, paths.runId);
+			await localControl.dispose();
+			await cleanupRemoteRun(creds, paths, "");
+		}
+	});
+
+	test("远端 Git G4b：丢弃留快照 → 恢复区列出 → 一键还原字节一致 → 确认后删除快照", async ({ remoteWindow, remoteUserDataRoot }, testInfo) => {
+		test.setTimeout(600_000);
+		const creds = credentials;
+		if (!creds) {
+			test.skip(true, HELP_TEXT);
+			return;
+		}
+		const paths = await createRemoteRunPaths(creds);
+		const localControl = await createLocalGitReadControl();
+		try {
+			await dismissOnboarding(remoteWindow, 8_000);
+			await createRemoteProjectDirectory(creds, paths);
+			await initializeRemoteGitRecoveryFixture(creds, paths.projectPath);
+			await addVerifiedRemoteHostAndConnect(remoteWindow, creds, timeouts);
+			await enrollRemoteProjectInSidebar(remoteWindow, paths.projectPath, timeouts);
+			await createRemoteSessionAndReadId(remoteWindow, paths.projectName, timeouts);
+			await verifyRemoteGitRecovery({ window: remoteWindow, credentials: creds, root: paths.projectPath, timeoutMs: 40_000, testInfo });
 			await localControl.verify();
 		} finally {
 			preserveAppLogs(remoteUserDataRoot, paths.runId);

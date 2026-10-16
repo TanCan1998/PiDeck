@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
+import type { RemoteGitRecoveryEntryView } from "../../../../shared/types/git";
 import type { ProjectFileTarget, RemoteProject } from "../../../../shared/types/project";
 import type { GitResourceGroupType } from "../../../../shared/types/git";
 import { useRemoteGitView } from "../../hooks/useRemoteGitView";
@@ -52,13 +53,15 @@ export function remoteGitErrorMessage(code: string): string {
 
 /** Reuses SCM rows and the existing diff renderer without native graph/watch/write/background-sync APIs. */
 export function RemoteGitPanel({ project }: { project: RemoteProject }) {
-	const { state, refresh, openDiff, closeDiff, mutate, commit, loadHistory, loadMoreHistory, openCommitDetail, loadRefs, openHistoryFileDiff, createBranch, switchBranch, discard } = useRemoteGitView(project);
+	const { state, refresh, openDiff, closeDiff, mutate, commit, loadHistory, loadMoreHistory, openCommitDetail, loadRefs, openHistoryFileDiff, createBranch, switchBranch, discard, loadRecovery, restoreRecovery, dropRecovery } = useRemoteGitView(project);
 	const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
 	const [message, setMessage] = useState("");
 	const [historyOpen, setHistoryOpen] = useState(false);
 	const [refsOpen, setRefsOpen] = useState(false);
 	const [newBranch, setNewBranch] = useState("");
 	const [pendingDiscard, setPendingDiscard] = useState<{ group: "workingTree" | "untracked"; path: string; target: ProjectFileTarget } | null>(null);
+	const [recoveryOpen, setRecoveryOpen] = useState(false);
+	const [pendingDrop, setPendingDrop] = useState<RemoteGitRecoveryEntryView | null>(null);
 	const confirmedCommits = state.confirmedCommits ?? 0;
 	// A confirmed commit clears the box; a refusal or an unknown result keeps the text so nothing is retyped.
 	useEffect(() => {
@@ -74,6 +77,8 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 	const canCreateBranch = snapshot?.branchToken !== undefined && !busy && validRemoteGitBranchName(newBranch);
 	const canSwitchBranch = snapshot?.switchToken !== undefined && !busy;
 	const canDiscard = snapshot?.discardToken !== undefined && !busy;
+	const canRestore = snapshot?.restoreToken !== undefined && !busy;
+	const canDrop = snapshot?.dropToken !== undefined && !busy;
 	// The tree offers index actions and the recoverable discard as separate capabilities: either grant is enough.
 	const writable = snapshot?.mutationToken !== undefined || snapshot?.discardToken !== undefined;
 	// Expanding a section is the user action that loads it; an error stays until the header is clicked again.
@@ -83,6 +88,9 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 	useEffect(() => {
 		if (refsOpen && snapshot !== undefined && state.refs === undefined && !state.refsLoading && state.refsErrorCode === undefined && !state.loading && !state.mutating) loadRefs();
 	}, [refsOpen, snapshot, state.refs, state.refsLoading, state.refsErrorCode, state.loading, state.mutating, loadRefs]);
+	useEffect(() => {
+		if (recoveryOpen && snapshot !== undefined && state.recovery === undefined && !state.recoveryLoading && state.recoveryErrorCode === undefined && !state.loading && !state.mutating) loadRecovery();
+	}, [recoveryOpen, snapshot, state.recovery, state.recoveryLoading, state.recoveryErrorCode, state.loading, state.mutating, loadRecovery]);
 	return (
 		<div data-testid="remote-git-panel" data-project-id={project.id} className="flex min-h-0 flex-1 flex-col overflow-hidden text-sm text-text-primary">
 			<div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2">
@@ -113,7 +121,21 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 				<div role="status" className="flex items-center gap-2 p-3 text-text-secondary">
 					<LoaderCircle size={14} className="animate-spin" />
 					{t(
-						state.mutating ? (state.mutatingKind === "commit" ? "remoteGit.committing" : state.mutatingKind === "branch" ? "remoteGit.creatingBranch" : state.mutatingKind === "switch" ? "remoteGit.switchingBranch" : state.mutatingKind === "discard" ? "remoteGit.discarding" : "remoteGit.writing") : "remoteGit.loading",
+						state.mutating
+							? state.mutatingKind === "commit"
+								? "remoteGit.committing"
+								: state.mutatingKind === "branch"
+									? "remoteGit.creatingBranch"
+									: state.mutatingKind === "switch"
+										? "remoteGit.switchingBranch"
+										: state.mutatingKind === "discard"
+											? "remoteGit.discarding"
+											: state.mutatingKind === "restore"
+												? "remoteGit.restoring"
+												: state.mutatingKind === "drop"
+													? "remoteGit.dropping"
+													: "remoteGit.writing"
+							: "remoteGit.loading",
 					)}
 				</div>
 			) : null}
@@ -209,6 +231,65 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 							{state.discardRecovery.ref === null ? t("remoteGit.discardRestored", { path: state.discardRecovery.path }) : t("remoteGit.discardRecovered", { ref: state.discardRecovery.ref, path: state.discardRecovery.path })}
 						</p>
 					) : null}
+					{/* G4b: the recovery store. Expanding it is the user action that loads it; drop asks once, restore does not. */}
+					<section data-testid="remote-git-recovery" className="pb-2">
+						<button type="button" className="flex w-full items-center gap-1 px-3 py-1 text-xs font-medium text-text-secondary" aria-expanded={recoveryOpen} onClick={() => (recoveryOpen ? (state.recoveryErrorCode ? loadRecovery() : setRecoveryOpen(false)) : setRecoveryOpen(true))}>
+							{t("remoteGit.recoveryTitle")}
+						</button>
+						{recoveryOpen ? (
+							<>
+								{state.recoveryLoading ? <p className="px-3 text-xs text-text-secondary">{t("remoteGit.loading")}</p> : null}
+								{state.recoveryErrorCode ? (
+									<p role="alert" className="px-3 text-xs text-danger">
+										{remoteGitErrorMessage(state.recoveryErrorCode)}
+									</p>
+								) : null}
+								{state.recovery && state.recovery.entries.length === 0 ? <p className="px-3 text-xs text-text-secondary">{t("remoteGit.recoveryEmpty")}</p> : null}
+								{state.recovery?.truncated ? <p className="px-3 text-xs text-text-secondary">{t("remoteGit.recoveryTruncated")}</p> : null}
+								{state.recovery?.entries.map((entry) => (
+									<div key={entry.ref} data-testid="remote-git-recovery-row" className="flex items-center gap-2 px-3 py-0.5 text-xs">
+										<span className="min-w-0 flex-1 truncate">{entry.path}</span>
+										<span className="shrink-0 text-text-secondary">
+											{Math.max(1, Math.round(entry.bytes / 1024))} KiB · {historyTime(entry.at)}
+										</span>
+										<Button type="button" variant="ghost" size="sm" data-testid="remote-git-recovery-restore" disabled={!canRestore} onClick={() => restoreRecovery(entry)}>
+											{t("remoteGit.recoveryRestore")}
+										</Button>
+										<Button type="button" variant="ghost" size="sm" data-testid="remote-git-recovery-drop" disabled={!canDrop} onClick={() => setPendingDrop(entry)}>
+											{t("remoteGit.recoveryDrop")}
+										</Button>
+									</div>
+								))}
+								{pendingDrop ? (
+									<div data-testid="remote-git-recovery-drop-confirm-bar" className="mx-3 my-1 rounded border border-danger p-2 text-xs">
+										<p>{t("remoteGit.recoveryDropConfirm", { path: pendingDrop.path })}</p>
+										<div className="flex items-center gap-2 pt-1">
+											<Button
+												type="button"
+												size="sm"
+												data-testid="remote-git-recovery-drop-confirm"
+												onClick={() => {
+													const pending = pendingDrop;
+													setPendingDrop(null);
+													if (pending) dropRecovery(pending);
+												}}
+											>
+												{t("remoteGit.recoveryDropAction")}
+											</Button>
+											<Button type="button" variant="ghost" size="sm" data-testid="remote-git-recovery-drop-cancel" onClick={() => setPendingDrop(null)}>
+												{t("remoteGit.recoveryDropCancel")}
+											</Button>
+										</div>
+									</div>
+								) : null}
+								{state.recoveryNotice ? (
+									<p data-testid="remote-git-recovery-outcome" className="px-3 py-1 text-xs text-text-secondary">
+										{t(state.recoveryNotice.kind === "restored" ? "remoteGit.recoveryRestored" : "remoteGit.recoveryDropped", { path: state.recoveryNotice.path })}
+									</p>
+								) : null}
+							</>
+						) : null}
+					</section>
 					{/* G3a: history and refs are read-only sections; there is no checkout, branch, tag or push control anywhere below. */}
 					<section data-testid="remote-git-history" className="pb-2">
 						<button type="button" className="flex w-full items-center gap-1 px-3 py-1 text-xs font-medium text-text-secondary" aria-expanded={historyOpen} onClick={() => (historyOpen ? (state.historyErrorCode ? loadHistory() : setHistoryOpen(false)) : setHistoryOpen(true))}>

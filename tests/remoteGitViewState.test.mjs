@@ -452,3 +452,139 @@ test("a discard without a grant, with the wrong group or for another project nev
 	await busy.reads.discard("workingTree", target);
 	assert.equal(calls.length, 1);
 });
+
+const recoveryEntry = { ref: "refs/pideck/recovery/20261016120000-ab12cd34", oid: "e".repeat(40), path: "file.txt", bytes: 2048, at: 1792138005 };
+const recoverySnapshot = { ...snapshot, restoreToken: "e".repeat(32), dropToken: "f".repeat(32) };
+
+test("the recovery listing loads on demand and its truncation flag travels with it", async () => {
+	const calls = [];
+	const f = fixture({
+		recoveryList: async (...args) => {
+			calls.push(args);
+			return { ok: true, entries: [recoveryEntry], truncated: true };
+		},
+	});
+	await f.reads.loadRecovery();
+	assert.deepEqual(plain(calls), [["project"]]);
+	assert.deepEqual(plain(f.current().recovery), { entries: [recoveryEntry], truncated: true });
+	assert.equal(f.current().recoveryLoading, false);
+	const failed = fixture({ recoveryList: async () => ({ ok: false, code: "GIT_COMMAND_FAILED" }) });
+	await failed.reads.loadRecovery();
+	assert.equal(failed.current().recoveryErrorCode, "GIT_COMMAND_FAILED");
+	assert.equal(failed.current().recovery, undefined);
+	const thrown = fixture({
+		recoveryList: async () => {
+			throw new Error("invoke failed with SSH_HOST_DISCONNECTED");
+		},
+	});
+	await thrown.reads.loadRecovery();
+	assert.equal(thrown.current().recoveryErrorCode, "SSH_HOST_DISCONNECTED");
+});
+
+test("restoring a snapshot keeps the recovery store and answers with its own grant", async () => {
+	const calls = [];
+	const f = fixture({
+		remoteSnapshot: async () => ({ ok: true, snapshot: recoverySnapshot }),
+		recoveryList: async () => ({ ok: true, entries: [], truncated: false }),
+		recoveryRestore: async (...args) => {
+			calls.push(args);
+			return { ok: true, path: "file.txt", bytes: 2048 };
+		},
+	});
+	await f.reads.refresh();
+	await f.reads.restoreRecovery(recoveryEntry);
+	assert.deepEqual(plain(calls), [["project", recoveryEntry.ref, recoveryEntry.oid, recoveryEntry.path, recoverySnapshot.restoreToken]]);
+	assert.deepEqual(plain(f.current().recoveryNotice), { kind: "restored", path: "file.txt" });
+	assert.equal(f.current().mutating, undefined);
+	// The listing is reloaded after a restore, and the notice survives the refresh that follows it.
+	assert.ok(f.current().recovery, "the store is listed again");
+	await f.reads.refresh();
+	assert.deepEqual(plain(f.current().recoveryNotice), { kind: "restored", path: "file.txt" }, "an outcome the user still needs is not erased by a read");
+});
+
+test("deleting a snapshot is its own action with its own grant", async () => {
+	const calls = [];
+	const f = fixture({
+		remoteSnapshot: async () => ({ ok: true, snapshot: recoverySnapshot }),
+		recoveryList: async () => ({ ok: true, entries: [], truncated: false }),
+		recoveryDrop: async (...args) => {
+			calls.push(args);
+			return { ok: true };
+		},
+	});
+	await f.reads.refresh();
+	await f.reads.dropRecovery(recoveryEntry);
+	assert.deepEqual(plain(calls), [["project", recoveryEntry.ref, recoveryEntry.oid, recoverySnapshot.dropToken]]);
+	assert.deepEqual(plain(f.current().recoveryNotice), { kind: "dropped", path: "file.txt" });
+	// The repository facts come back with the outcome: a drop must not leave the panel looking empty.
+	assert.ok(f.current().snapshot, "the panel re-reads the repository after a drop");
+	// A refused drop reports its code and drops the facts; an unknown one says so and is never replayed.
+	const refused = fixture({ remoteSnapshot: async () => ({ ok: true, snapshot: recoverySnapshot }), recoveryDrop: async () => ({ ok: false, code: "GIT_RECOVERY_ENTRY_NOT_FOUND" }) });
+	await refused.reads.refresh();
+	await refused.reads.dropRecovery(recoveryEntry);
+	assert.equal(refused.current().errorCode, "GIT_RECOVERY_ENTRY_NOT_FOUND");
+	assert.equal(refused.current().snapshot, undefined);
+	const unknown = fixture({
+		remoteSnapshot: async () => ({ ok: true, snapshot: recoverySnapshot }),
+		recoveryDrop: async () => {
+			throw new Error("socket closed");
+		},
+	});
+	await unknown.reads.refresh();
+	await unknown.reads.dropRecovery(recoveryEntry);
+	assert.equal(unknown.current().errorCode, "GIT_WRITE_RESULT_UNCONFIRMED");
+});
+
+test("recovery actions without a grant, with a foreign ref or for another project never reach the API", async () => {
+	const calls = [];
+	const f = fixture({
+		remoteSnapshot: async () => ({ ok: true, snapshot: recoverySnapshot }),
+		recoveryList: async () => ({ ok: true, entries: [], truncated: false }),
+		recoveryRestore: async (...args) => {
+			calls.push(args);
+			return { ok: true, path: "file.txt", bytes: 1 };
+		},
+		recoveryDrop: async (...args) => {
+			calls.push(args);
+			return { ok: true };
+		},
+	});
+	await f.reads.refresh();
+	for (const bad of [{ ...recoveryEntry, ref: "refs/heads/main" }, { ...recoveryEntry, ref: "HEAD" }, { ...recoveryEntry, oid: "nope" }, null]) {
+		await f.reads.restoreRecovery(bad);
+		await f.reads.dropRecovery(bad);
+	}
+	assert.deepEqual(calls, [], "a foreign ref is refused locally, exactly as main would refuse it");
+	const ungranted = fixture({ remoteSnapshot: async () => ({ ok: true, snapshot }) });
+	await ungranted.reads.refresh();
+	await ungranted.reads.restoreRecovery(recoveryEntry);
+	await ungranted.reads.dropRecovery(recoveryEntry);
+	assert.equal(ungranted.current().errorCode, undefined);
+});
+
+test("a listing that finishes after a drop cannot erase the drop's outcome", async () => {
+	let release;
+	let listings = 0;
+	const f = fixture({
+		remoteSnapshot: async () => ({ ok: true, snapshot: recoverySnapshot }),
+		// The first listing hangs (the panel is still loading it); the reload the drop triggers answers at once.
+		recoveryList: () => {
+			listings += 1;
+			return listings === 1
+				? new Promise((accept) => {
+						release = accept;
+					})
+				: Promise.resolve({ ok: true, entries: [], truncated: false });
+		},
+		recoveryDrop: async () => ({ ok: true }),
+	});
+	await f.reads.refresh();
+	// The user expands the section (a listing starts), then drops a snapshot from the listing already on screen.
+	const slowListing = f.reads.loadRecovery();
+	const drop = f.reads.dropRecovery(recoveryEntry);
+	await drop;
+	release({ ok: true, entries: [], truncated: false });
+	await slowListing;
+	assert.deepEqual(plain(f.current().recoveryNotice), { kind: "dropped", path: "file.txt" }, "a read must never decide what an action reported");
+	assert.deepEqual(plain(f.current().recovery), { entries: [], truncated: false });
+});

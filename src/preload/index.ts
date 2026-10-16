@@ -797,6 +797,10 @@ const api = {
 		switchRemoteBranch: (projectId: string, name: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteSwitchBranch, projectId, name, token) as Promise<import("../shared/types").RemoteGitBranchMutationResult>,
 		// 可恢复丢弃（G4a）：先写恢复快照再动文件；返回可恢复 ref，main 注入指纹
 		discardRemote: (projectId: string, group: "workingTree" | "untracked", target: ProjectFileTarget, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteDiscard, projectId, group, target, token) as Promise<import("../shared/types").RemoteGitDiscardResult>,
+		// 恢复存储（G4b）：列表只读；还原/删除各需自己的 grant，ref 只允许 refs/pideck/recovery/*
+		recoveryList: (projectId: string) => ipcRenderer.invoke(ipcChannels.gitRemoteRecoveryList, projectId) as Promise<import("../shared/types").RemoteGitRecoveryListResult>,
+		recoveryRestore: (projectId: string, ref: string, oid: string, path: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteRecoveryRestore, projectId, ref, oid, path, token) as Promise<import("../shared/types").RemoteGitRecoveryRestoreResult>,
+		recoveryDrop: (projectId: string, ref: string, oid: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteRecoveryDrop, projectId, ref, oid, token) as Promise<import("../shared/types").RemoteGitRecoveryDropResult>,
 		// 只读历史（G3a）：分页日志／提交详情／本地引用／两版本间单文件；与 status 同一信任边界，无 token
 		remoteLog: (projectId: string, options?: { maxCount?: number; skip?: number }) => ipcRenderer.invoke(ipcChannels.gitRemoteLog, projectId, options) as Promise<import("../shared/types").RemoteGitLogResult>,
 		remoteCommitDetail: (projectId: string, oid: string) => ipcRenderer.invoke(ipcChannels.gitRemoteCommitDetail, projectId, oid) as Promise<import("../shared/types").RemoteGitCommitDetailResult>,

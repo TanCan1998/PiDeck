@@ -89,6 +89,8 @@ export const REMOTE_HELPER_ERROR_CODES = [
 	"GIT_REF_EXISTS",
 	"GIT_REF_NOT_FOUND",
 	"GIT_SWITCH_CONFLICT",
+	"GIT_RESTORE_CONFLICT",
+	"GIT_RECOVERY_ENTRY_NOT_FOUND",
 ] as const;
 export type RemoteHelperErrorCode = (typeof REMOTE_HELPER_ERROR_CODES)[number];
 
@@ -149,6 +151,18 @@ export const REMOTE_GIT_BRANCH_NAME_MAX_BYTES = 1024;
  * one with `git update-ref -d <ref>` when they no longer need it.
  */
 export const REMOTE_GIT_DISCARD_MAX_BYTES = 8 * 1024 * 1024;
+/** Listing bound for the recovery namespace: past it the list is labelled truncated instead of refused. */
+export const REMOTE_GIT_RECOVERY_MAX_ENTRIES = 64;
+export const REMOTE_HELPER_METHOD_GIT_RECOVERY_LIST = "git.recoveryList";
+export const REMOTE_HELPER_METHOD_GIT_RECOVERY_RESTORE = "git.recoveryRestore";
+export const REMOTE_HELPER_METHOD_GIT_RECOVERY_DROP = "git.recoveryDrop";
+/** One snapshot as the panel sees it: where it came from, how big it is and when it was taken. */
+export type RemoteGitRecoveryEntry = { ref: string; oid: string; path: string; bytes: number; at: number };
+export type RemoteGitRecoveryListResult = { entries: readonly RemoteGitRecoveryEntry[]; truncated: boolean };
+export type RemoteGitRecoveryRestoreParams = { ref: string; oid: string; path: string };
+export type RemoteGitRecoveryRestoreResult = { applied: true; path: string; bytes: number };
+export type RemoteGitRecoveryDropParams = { ref: string; oid: string };
+export type RemoteGitRecoveryDropResult = { applied: true };
 export const REMOTE_GIT_RECOVERY_REF_PREFIX = "refs/pideck/recovery/";
 /** Fixed author identity of a recovery commit: PiDeck's own journal entry, never the user's Git configuration. */
 export const REMOTE_GIT_RECOVERY_IDENTITY = { name: "PiDeck recovery", email: "pideck-recovery@localhost" } as const;
@@ -212,7 +226,7 @@ export const REMOTE_GIT_COMMIT_MESSAGE_MAX_BYTES = 4096;
 export type RemoteGitWorkspaceDiffParams = { group: "merge" | "index" | "workingTree" | "untracked"; path: string };
 export type RemoteGitWorkspaceDiffResult = { originalContent: string; modifiedContent: string };
 
-export const REMOTE_HELPER_CAPABILITIES = ["echo", "fs.stat", "fs.list", "fs.read", "fs.searchNames", "git.status", "git.workspaceDiff", "git.stage", "git.unstage", "git.commit", "git.log", "git.commitDetail", "git.refs", "git.refFileDiff", "git.createBranch", "git.switchBranch", "git.discard"] as const;
+export const REMOTE_HELPER_CAPABILITIES = ["echo", "fs.stat", "fs.list", "fs.read", "fs.searchNames", "git.status", "git.workspaceDiff", "git.stage", "git.unstage", "git.commit", "git.log", "git.commitDetail", "git.refs", "git.refFileDiff", "git.createBranch", "git.switchBranch", "git.discard", "git.recoveryList", "git.recoveryRestore", "git.recoveryDrop"] as const;
 export type RemoteHelperCapability = (typeof REMOTE_HELPER_CAPABILITIES)[number];
 /**
  * Ceiling for one requested relative path. It is applied to the raw string before any filesystem access,

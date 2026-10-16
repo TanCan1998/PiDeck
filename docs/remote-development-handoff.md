@@ -690,3 +690,10 @@ P4.5b 的单会话归档/恢复已完成真实 Electron＋SSH 验证，不能据
 - **不变量**：entry 测试改为逐 artifact——每文件 SHA-256 钉住、单行可打印 ASCII、无控制字节/`console.`/`eval`/`Function`/`require(`、<96 KiB、**只允许 import 审阅清单内的兄弟文件**、每能力在 CAPABILITIES 与分发各出现一次。`node -e <source>` 自测形态主动放弃（entry 依赖兄弟 import）：测试改为从文件启动整套 bundle，并断言相对 import 存在。
 - **验证**：entry 37/37、bootstrap 部署 12/12、session 集成 78/78、workspace 端到端 49/49、Git 面全绿（除既有基线红）；有界回归 1764 项 1750 通过／6 失败＝同一批既有红；typecheck／Biome／build 0；真机五合一 5 passed（3.4m），真实 SSH 上传并激活四文件 bundle。
 - **遗留**：真机 `~/.pideck/remote-host/bundles/` 已累积 11 个 bundle（bundle GC 不在本片范围，记录在案）；一次并行回归中 `remoteGitDiscard` 无身份用例返回过 `GIT_WRITE_RESULT_UNCONFIRMED`，未复现，按一次性抖动记录。细则见 [Git 计划 §5.14](remote-git-plan.md)。
+
+## 远端 Git G4b（2026-10-16，恢复清单／一键还原／清理，已真机验收）
+
+- **交付**：helper **1.14.0** 新增 `git.recoveryList`（一次 for-each-ref ＋ 每条一次 `ls-tree -l`；只服务「恰好一个路径的提交树」，外来 ref／多路径树跳过；上限 64，超出标 `truncated`）、`git.recoveryRestore`（快照字节写回同路径，只在目标不存在或与 index 一致时写入，写后逐字节回读；缺父目录拒绝）、`git.recoveryDrop`（`update-ref -d <ref> <oid>` 原生 CAS 删除）。三份 bundle 文件各自钉住；main 增 kind `restore`／`drop` 与三个通道＋逐字段重验；面板第三个可折叠区「恢复」（展开即加载、删除二次确认、结果提示 `remote-git-recovery-outcome`）；i18n 中英同步。
+- **重大发现并修复**：G4a 那两次「并行回归偶发 UNCONFIRMED、无法复现」的真根因是**影子 index 连 stat 缓存一起拷贝**——缓存看起来是当前状态时 `git restore` 跳过写入，`git status`/`git diff` 又因同一缓存报干净（racy-git 假干净）。修法：影子 index 从 index 自己的 tree 重建（丢光 stat、`GIT_OBJECT_DIRECTORY` 指向真实对象库），判定改为「Git 自己的 worktree-vs-index 比较跑在无 stat 缓存的影子 index 上」（保留 `text`/`eol` 转换语义）；还原的覆盖保护同法。另修：`dropRecovery` 成功未 refresh 导致整块区（含提示）随快照清空而卸载；恢复列表与写共用 epoch 导致读作废写的回执（改独立 `recoveryEpoch`）。
+- **验证**：`remoteGitRecovery` 9/9 ＋丢弃 15/15（含两条 racy 确定性回归）＋ helper 全套 144/144；并行批次连续 3 轮 135/135（此前会闪）；IPC 6/6；view 26/26；有界回归 1787 项 1773 通过／6 失败＝同一批既有基线红；typecheck／Biome／build 0；真机六合一 6 passed（4.0m），G4b 单项 1 passed（26.5s）。
+- **遗留**：无自动清理/TTL（列表上限 64＋显式删除，对象由 Git 回收）；不做批量、不跨项目、不自动建父目录；`git log --all` 仍列出恢复提交；独立复核车道未执行。证据：`/tmp/g4b-e2e-gate.log`、`/tmp/g4b-full-regression.log`、`/tmp/g4b-helper-all-final.log`、`/tmp/g4b-rec-x2.log`（假干净现场）。细则见 [Git 计划 §5.15／§5.15.1](remote-git-plan.md)。

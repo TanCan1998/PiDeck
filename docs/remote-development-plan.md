@@ -421,7 +421,7 @@ export interface PiRuntimeLauncher {
 
 ### 6.3 文件、Git 与 Session 存储后端
 
-Git 调研、选型和分批实施细节见 [远端 Git 计划](remote-git-plan.md)：保留原生 Git CLI，不新增 Git 库；G1 status/diff、G2a 单文件 stage/unstage、G2b 单次普通提交（helper 1.9.0，`write-tree`＋`commit-tree`＋`update-ref` 原生 ref CAS，见 Git 计划 §5.9.1）G3a 只读历史／引用（helper 1.10.0，log／commitDetail／refs／refFileDiff 四只读方法，见 Git 计划 §5.10／§5.11）G3b 分支写面（helper 1.11.0，createBranch／switchBranch，见 §5.12）G4a 可恢复丢弃／删除（helper 1.12.0，discard 先写 `refs/pideck/recovery/*` 快照再动文件，见 §5.13）以及 helper 多文件部署包拆分（1.13.0，entry＋git-read＋git-write＋runner 各带独立哈希，见 §5.14）已完成 Linux 开发态真实 Electron＋SSH 验收。amend／merge／签名、完整历史/分支/同步、跨平台与发布门禁不能因最小切片完成而省略。
+Git 调研、选型和分批实施细节见 [远端 Git 计划](remote-git-plan.md)：保留原生 Git CLI，不新增 Git 库；G1 status/diff、G2a 单文件 stage/unstage、G2b 单次普通提交（helper 1.9.0，`write-tree`＋`commit-tree`＋`update-ref` 原生 ref CAS，见 Git 计划 §5.9.1）G3a 只读历史／引用（helper 1.10.0，log／commitDetail／refs／refFileDiff 四只读方法，见 Git 计划 §5.10／§5.11）G3b 分支写面（helper 1.11.0，createBranch／switchBranch，见 §5.12）G4a 可恢复丢弃／删除（helper 1.12.0，discard 先写 `refs/pideck/recovery/*` 快照再动文件，见 §5.13）helper 多文件部署包拆分（1.13.0，entry＋git-read＋git-write＋runner 各带独立哈希，见 §5.14）与 G4b 恢复清单／一键还原／清理（helper 1.14.0，recoveryList／recoveryRestore／recoveryDrop，见 §5.15）已完成 Linux 开发态真实 Electron＋SSH 验收。amend／merge／签名、完整历史/分支/同步、跨平台与发布门禁不能因最小切片完成而省略。
 
 - `filesIpc.ts` 的新输入统一为 `ProjectFileTarget = { projectId: string; relativePath: string }`；main 根据 projectId 解析 location 和可信 root，再选择 local/remote backend。
 - 输出契约也要迁移：`FileTreeNode` / search result 必须携带 `projectId + relativePath`，`displayPath` 只用于展示。远端节点不得伪造本地绝对 `path` 或 `file://` URI。

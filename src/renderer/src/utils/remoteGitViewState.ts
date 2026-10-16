@@ -11,6 +11,7 @@ import type {
 	RemoteGitCommitDetailResult,
 	RemoteGitLogPage,
 	RemoteGitLogResult,
+	RemoteGitRecoveryEntryView,
 	RemoteGitRefFileDiff,
 	RemoteGitRefFileDiffResult,
 	RemoteGitRefs,
@@ -25,9 +26,14 @@ export type RemoteGitViewState = {
 	errorCode?: string;
 	mutating?: boolean;
 	/** Which action is in flight; the panel says “writing the index”, “committing”, or which branch action runs. */
-	mutatingKind?: "index" | "commit" | "branch" | "switch" | "discard";
+	mutatingKind?: "index" | "commit" | "branch" | "switch" | "discard" | "restore" | "drop";
 	/** Where the last discarded content went; null means the discarded change was a deletion (nothing to keep). */
 	discardRecovery?: { ref: string | null; path: string };
+	/* Recovery store (G4b): a manually loaded listing plus the outcome of the last restore or drop. */
+	recovery?: { entries: RemoteGitRecoveryEntryView[]; truncated: boolean };
+	recoveryLoading?: boolean;
+	recoveryErrorCode?: string;
+	recoveryNotice?: { kind: "restored" | "dropped"; path: string };
 	/** Counts confirmed commits, so the panel can clear its message box exactly once per success. */
 	confirmedCommits?: number;
 	diffLoading: boolean;
@@ -62,6 +68,9 @@ export type RemoteGitViewApi = {
 	createRemoteBranch(projectId: string, name: string, token: string): Promise<RemoteGitBranchMutationResult>;
 	switchRemoteBranch(projectId: string, name: string, token: string): Promise<RemoteGitBranchMutationResult>;
 	discardRemote(projectId: string, group: "workingTree" | "untracked", target: ProjectFileTarget, token: string): Promise<RemoteGitDiscardResult>;
+	recoveryList(projectId: string): Promise<{ ok: true; entries: RemoteGitRecoveryEntryView[]; truncated: boolean } | { ok: false; code: string }>;
+	recoveryRestore(projectId: string, ref: string, oid: string, path: string, token: string): Promise<{ ok: true; path: string; bytes: number } | { ok: false; code: string }>;
+	recoveryDrop(projectId: string, ref: string, oid: string, token: string): Promise<{ ok: true } | { ok: false; code: string }>;
 };
 /**
  * The same name rules main enforces, kept in step with `validateRemoteGitBranchName` on purpose: the panel refuses
@@ -88,6 +97,9 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 	let historyEpoch = 0;
 	let detailEpoch = 0;
 	let refsEpoch = 0;
+	// The recovery listing has its own epoch: a reload triggered by a finished action must never invalidate the
+	// outcome of the action the user performs next.
+	let recoveryEpoch = 0;
 	let state: RemoteGitViewState = { projectKey, loading: false, diffLoading: false };
 	function update(next: RemoteGitViewState) {
 		// The confirmed-commit counter is sticky: a later read (or a connection loss) must not resurrect the
@@ -95,7 +107,8 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 		const sticky = state.confirmedCommits;
 		// Both stickiness rules exist for the same reason: a later read must not erase something the user still needs.
 		const carried = sticky === undefined || next.confirmedCommits !== undefined ? next : { ...next, confirmedCommits: sticky };
-		state = next.discardRecovery === undefined && state.discardRecovery !== undefined ? { ...carried, discardRecovery: state.discardRecovery } : carried;
+		const withDiscard = next.discardRecovery === undefined && state.discardRecovery !== undefined ? { ...carried, discardRecovery: state.discardRecovery } : carried;
+		state = next.recoveryNotice === undefined && state.recoveryNotice !== undefined ? { ...withDiscard, recoveryNotice: state.recoveryNotice } : withDiscard;
 		if (active) publish(state);
 	}
 	const controller = {
@@ -107,6 +120,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			historyEpoch += 1;
 			detailEpoch += 1;
 			refsEpoch += 1;
+			recoveryEpoch += 1;
 			// Clear previous facts during refresh; a failed read must not display a stale clean repository.
 			const uncertainWrite = state.errorCode === "GIT_WRITE_RESULT_UNCONFIRMED";
 			const failureCode = (code: string) => (uncertainWrite ? "GIT_WRITE_RESULT_UNCONFIRMED" : code);
@@ -130,6 +144,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			historyEpoch += 1;
 			detailEpoch += 1;
 			refsEpoch += 1;
+			recoveryEpoch += 1;
 			update({ ...state, mutating: true, mutatingKind: "index", errorCode: undefined, diff: undefined, diffErrorCode: undefined });
 			try {
 				const result = await api.mutateRemoteIndex(projectId, operation, group, target, token);
@@ -154,6 +169,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			historyEpoch += 1;
 			detailEpoch += 1;
 			refsEpoch += 1;
+			recoveryEpoch += 1;
 			update({ ...state, mutating: true, mutatingKind: "commit", errorCode: undefined, diff: undefined, diffErrorCode: undefined });
 			try {
 				const result = await api.commitRemote(projectId, message, token);
@@ -278,6 +294,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			historyEpoch += 1;
 			detailEpoch += 1;
 			refsEpoch += 1;
+			recoveryEpoch += 1;
 			update({ ...state, mutating: true, mutatingKind: "discard", discardRecovery: undefined, errorCode: undefined, diff: undefined, diffErrorCode: undefined });
 			try {
 				const result = await api.discardRemote(projectId, group, target, token);
@@ -292,6 +309,69 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 				if (active && generation === epoch) update({ projectKey, loading: false, diffLoading: false, errorCode: "GIT_WRITE_RESULT_UNCONFIRMED" });
 			}
 		},
+		/* G4b recovery store: the listing is a manual read, restore and drop are one-shot writes with their own grants. */
+		async loadRecovery(): Promise<void> {
+			if (!active || state.loading || state.mutating || state.recoveryLoading) return;
+			const generation = ++recoveryEpoch;
+			update({ ...state, recovery: undefined, recoveryErrorCode: undefined, recoveryLoading: true });
+			try {
+				const result = await api.recoveryList(projectId);
+				if (!active || generation !== recoveryEpoch) return;
+				if (result.ok) update({ ...state, recoveryLoading: false, recovery: { entries: result.entries, truncated: result.truncated } });
+				else update({ ...state, recoveryLoading: false, recoveryErrorCode: result.code });
+			} catch (error) {
+				if (active && generation === recoveryEpoch) update({ ...state, recoveryLoading: false, recoveryErrorCode: errorCode(error) });
+			}
+		},
+		/** Puts the snapshot's bytes back; main and the helper decide whether the target may be written at all. */
+		async restoreRecovery(entry: RemoteGitRecoveryEntryView): Promise<void> {
+			if (!active || state.loading || state.diffLoading || state.mutating || !state.snapshot?.restoreToken) return;
+			if (!entry || typeof entry.ref !== "string" || !/^refs\/pideck\/recovery\/[A-Za-z0-9._-]+$/.test(entry.ref) || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(entry.oid)) return;
+			const token = state.snapshot.restoreToken;
+			const generation = ++epoch;
+			diffEpoch += 1;
+			historyEpoch += 1;
+			detailEpoch += 1;
+			refsEpoch += 1;
+			recoveryEpoch += 1;
+			update({ ...state, mutating: true, mutatingKind: "restore", recoveryNotice: undefined, errorCode: undefined, diff: undefined, diffErrorCode: undefined });
+			try {
+				const result = await api.recoveryRestore(projectId, entry.ref, entry.oid, entry.path, token);
+				if (!active || generation !== epoch) return;
+				if (!result.ok) {
+					update({ projectKey, loading: false, diffLoading: false, errorCode: result.code });
+					return;
+				}
+				update({ projectKey, loading: false, diffLoading: false, recoveryNotice: { kind: "restored", path: entry.path } });
+				await controller.refresh();
+				await controller.loadRecovery();
+			} catch {
+				if (active && generation === epoch) update({ projectKey, loading: false, diffLoading: false, errorCode: "GIT_WRITE_RESULT_UNCONFIRMED" });
+			}
+		},
+		/** The only action that makes a snapshot disappear; the helper deletes it with a compare-and-swap. */
+		async dropRecovery(entry: RemoteGitRecoveryEntryView): Promise<void> {
+			if (!active || state.loading || state.mutating || !state.snapshot?.dropToken) return;
+			if (!entry || typeof entry.ref !== "string" || !/^refs\/pideck\/recovery\/[A-Za-z0-9._-]+$/.test(entry.ref) || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(entry.oid)) return;
+			const token = state.snapshot.dropToken;
+			const generation = ++epoch;
+			update({ ...state, mutating: true, mutatingKind: "drop", recoveryNotice: undefined, errorCode: undefined });
+			try {
+				const result = await api.recoveryDrop(projectId, entry.ref, entry.oid, token);
+				if (!active || generation !== epoch) return;
+				if (!result.ok) {
+					update({ projectKey, loading: false, diffLoading: false, errorCode: result.code });
+					return;
+				}
+				update({ projectKey, loading: false, diffLoading: false, recoveryNotice: { kind: "dropped", path: entry.path } });
+				// A dropped snapshot does not change the worktree, but the panel still re-reads the repository: the
+				// success update above carries no facts, and the outcome the user needs lives inside that subtree.
+				await controller.refresh();
+				await controller.loadRecovery();
+			} catch {
+				if (active && generation === epoch) update({ projectKey, loading: false, diffLoading: false, errorCode: "GIT_WRITE_RESULT_UNCONFIRMED" });
+			}
+		},
 		/* G3b branch write face: one explicit action per click, an unknown outcome is never replayed, and only a
 		confirmed answer re-reads the repository. The name is refused here as well as in main, never adapted. */
 		async createBranch(name: string): Promise<void> {
@@ -302,6 +382,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			historyEpoch += 1;
 			detailEpoch += 1;
 			refsEpoch += 1;
+			recoveryEpoch += 1;
 			update({ ...state, mutating: true, mutatingKind: "branch", errorCode: undefined, diff: undefined, diffErrorCode: undefined });
 			try {
 				const result = await api.createRemoteBranch(projectId, name, token);
@@ -326,6 +407,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			historyEpoch += 1;
 			detailEpoch += 1;
 			refsEpoch += 1;
+			recoveryEpoch += 1;
 			update({ ...state, mutating: true, mutatingKind: "switch", errorCode: undefined, diff: undefined, diffErrorCode: undefined });
 			try {
 				const result = await api.switchRemoteBranch(projectId, name, token);
@@ -349,6 +431,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			historyEpoch += 1;
 			detailEpoch += 1;
 			refsEpoch += 1;
+			recoveryEpoch += 1;
 			void api.cancelRemoteReads(projectId).catch(() => undefined);
 			// Reconnect may emit several failure states; retain uncertainty until a successful explicit refresh.
 			const uncertainWrite = state.mutating || state.errorCode === "GIT_WRITE_RESULT_UNCONFIRMED";
@@ -363,6 +446,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			historyEpoch += 1;
 			detailEpoch += 1;
 			refsEpoch += 1;
+			recoveryEpoch += 1;
 		},
 	};
 	return controller;

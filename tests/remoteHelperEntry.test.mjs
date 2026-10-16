@@ -60,7 +60,7 @@ const HOST_ID = "01234567-89ab-4def-8123-456789abcdef";
 /** The helper never resolves HOME into a path, so a POSIX literal is the honest fixture on any platform. */
 const HELPER_HOME = "/home/pideck-helper";
 /** Frozen digest, pinned here as well as in the module: editing the source means editing both. */
-const FROZEN_SHA256 = "42cfa324978c046419b2496cccc179239074ef257fe4423be65823fe70e1bc10";
+const FROZEN_SHA256 = "63710a1f8e750115d6b4c56abe57d2fe01c78b621719b47bcf0554169ff631a3";
 const MAX_TEXT = 4096;
 const TEST_TIMEOUT_MS = 30_000;
 const GUARD_TIMEOUT_MS = 10_000;

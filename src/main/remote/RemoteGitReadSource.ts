@@ -20,13 +20,13 @@
  *   ceiling, so the directory sitting at the ceiling is never entered;
  * - a read is published only while the identity it was answered from is still on disk (`unchangedRead`).
  */
-export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,createGitCommitProgram,createGitBranchProgram,createGitDiscardProgram}from"./git-write.mjs";export function createGitReadProgram(root, fs, path) {
+export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,createGitCommitProgram,createGitBranchProgram,createGitDiscardProgram,createGitRecoveryProgram}from"./git-write.mjs";export function createGitReadProgram(root, fs, path) {
 	const cp = process.getBuiltinModule("node:child_process");
 	const crypto = process.getBuiltinModule("node:crypto");
 	const MAX_STATUS = 1048576, MAX_RESOURCES = 4096, MAX_TEXT = 262144, MAX_STDERR = 65536;
 	const MAX_INDEX = 16777216, MAX_METADATA = 20000, MAX_DEPTH = 32, MAX_PATH = 4096;
 	const scopes = new Set();
-	const stable = new Set(["PATH_OUTSIDE_ROOT", "PATH_NOT_FOUND", "NOT_A_FILE", "PERMISSION_DENIED", "IO_ERROR", "RESULT_TOO_LARGE", "REQUEST_TIMEOUT", "REQUEST_CANCELLED", "REMOTE_CONNECTION_LOST", "GIT_NOT_FOUND", "GIT_VERSION_UNSUPPORTED", "GIT_NOT_REPOSITORY", "GIT_UNSUPPORTED_REPOSITORY", "GIT_PLATFORM_UNSUPPORTED", "GIT_CONFIG_UNSUPPORTED", "GIT_COMMAND_FAILED", "GIT_RESULT_INVALID", "GIT_RESOURCE_CHANGED", "GIT_NOT_TEXT", "GIT_INDEX_LOCKED", "GIT_WRITE_UNSUPPORTED", "GIT_WRITE_RESULT_UNCONFIRMED", "GIT_COMMIT_NOTHING_STAGED", "GIT_COMMIT_MESSAGE_EMPTY", "GIT_COMMIT_IDENTITY_REQUIRED", "GIT_COMMIT_HEAD_CHANGED", "GIT_OBJECT_NOT_FOUND", "GIT_REF_EXISTS", "GIT_REF_NOT_FOUND", "GIT_SWITCH_CONFLICT"]);
+	const stable = new Set(["PATH_OUTSIDE_ROOT", "PATH_NOT_FOUND", "NOT_A_FILE", "PERMISSION_DENIED", "IO_ERROR", "RESULT_TOO_LARGE", "REQUEST_TIMEOUT", "REQUEST_CANCELLED", "REMOTE_CONNECTION_LOST", "GIT_NOT_FOUND", "GIT_VERSION_UNSUPPORTED", "GIT_NOT_REPOSITORY", "GIT_UNSUPPORTED_REPOSITORY", "GIT_PLATFORM_UNSUPPORTED", "GIT_CONFIG_UNSUPPORTED", "GIT_COMMAND_FAILED", "GIT_RESULT_INVALID", "GIT_RESOURCE_CHANGED", "GIT_NOT_TEXT", "GIT_INDEX_LOCKED", "GIT_WRITE_UNSUPPORTED", "GIT_WRITE_RESULT_UNCONFIRMED", "GIT_COMMIT_NOTHING_STAGED", "GIT_COMMIT_MESSAGE_EMPTY", "GIT_COMMIT_IDENTITY_REQUIRED", "GIT_COMMIT_HEAD_CHANGED", "GIT_OBJECT_NOT_FOUND", "GIT_REF_EXISTS", "GIT_REF_NOT_FOUND", "GIT_SWITCH_CONFLICT", "GIT_RESTORE_CONFLICT", "GIT_RECOVERY_ENTRY_NOT_FOUND"]);
 	const control = /[\x00-\x1f\x7f]/;
 	function failure(code) { return new Error(code); }
 	function code(error) {
@@ -357,6 +357,7 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,cr
 	const branches = createGitBranchProgram(fs, { failure: failure, execute: execute, rawStatus: rawStatus, snapshot: snapshot, head: head, text: text }, writer.gates);
 	/* Fixed journal identity for recovery commits: must stay equal to REMOTE_GIT_RECOVERY_IDENTITY in RemoteHelperContract.ts. */
 	const discarder = createGitDiscardProgram(fs, { failure: failure, crypto: crypto, execute: execute, rawStatus: rawStatus, snapshot: snapshot, head: head, entries: writer.entries, readFile: readFile, belongs: belongs, fingerprint: writer.fingerprint, reaped: writer.reaped }, writer.gates, { name: "PiDeck recovery", email: "pideck-recovery@localhost" });
+	const recovery = createGitRecoveryProgram(fs, { failure: failure, crypto: crypto, execute: execute, rawStatus: rawStatus, head: head, readFile: readFile, relative: relative, fingerprint: writer.fingerprint, reaped: writer.reaped }, writer.gates);
 	async function run(ctx, params) {
 		ctx.check();
 		if (process.platform !== "linux") throw failure("GIT_PLATFORM_UNSUPPORTED");
@@ -379,6 +380,8 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,cr
 		if (params.method === "git.commit") return committer.run(ctx, params, first, firstHead);
 		if (params.method === "git.createBranch" || params.method === "git.switchBranch") return branches.run(ctx, params, first, firstHead);
 		if (params.method === "git.discard") return discarder.run(ctx, params, first, firstHead);
+		if (params.method === "git.recoveryRestore" || params.method === "git.recoveryDrop") { params.expectedRevision = params.expectedRevision; return params.method === "git.recoveryRestore" ? recovery.restore(ctx, params, first, firstHead) : recovery.drop(ctx, params, first, firstHead); }
+		if (params.method === "git.recoveryList") return unchangedRead(ctx, first, firstHead, recovery.list(ctx));
 		if (params.method === "git.stage" || params.method === "git.unstage") return writer.run(ctx, params, first, firstHead);
 		if (params.method === "git.log") return unchangedRead(ctx, first, firstHead, log(ctx, params));
 		if (params.method === "git.commitDetail") return unchangedRead(ctx, first, firstHead, commitDetail(ctx, params));
@@ -411,6 +414,15 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,cr
 		if (method === "git.refFileDiff") {
 			if (keys.length !== 3 || !keys.includes("base") || !keys.includes("head") || !keys.includes("path")) throw failure("GIT_RESULT_INVALID");
 			return { method: method, base: params.base === null ? null : readHash(params.base), head: readHash(params.head), path: relative(params.path) };
+		}
+		if (method === "git.recoveryList") { if (keys.length) throw failure("GIT_RESULT_INVALID"); return { method: method }; }
+		if (method === "git.recoveryRestore") {
+			if (keys.length !== 4 || !keys.includes("ref") || !keys.includes("oid") || !keys.includes("path") || !keys.includes("expectedRevision") || typeof params.ref !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(params.oid) || typeof params.expectedRevision !== "string" || !/^[0-9a-f]{64}$/.test(params.expectedRevision)) throw failure("GIT_RESULT_INVALID");
+			return { method: method, ref: params.ref, oid: params.oid, path: relative(params.path), expectedRevision: params.expectedRevision };
+		}
+		if (method === "git.recoveryDrop") {
+			if (keys.length !== 3 || !keys.includes("ref") || !keys.includes("oid") || !keys.includes("expectedRevision") || typeof params.ref !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(params.oid) || typeof params.expectedRevision !== "string" || !/^[0-9a-f]{64}$/.test(params.expectedRevision)) throw failure("GIT_RESULT_INVALID");
+			return { method: method, ref: params.ref, oid: params.oid, expectedRevision: params.expectedRevision };
 		}
 		if (method === "git.discard") {
 			if (keys.length !== 3 || !keys.includes("path") || !keys.includes("group") || !keys.includes("expectedRevision") || !["workingTree", "untracked"].includes(params.group) || typeof params.expectedRevision !== "string" || !/^[0-9a-f]{64}$/.test(params.expectedRevision)) throw failure("GIT_RESULT_INVALID");
