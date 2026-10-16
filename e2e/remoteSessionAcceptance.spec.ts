@@ -803,7 +803,7 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 			await addVerifiedRemoteHostAndConnect(remoteWindow, creds, timeouts);
 			await enrollRemoteProjectInSidebar(remoteWindow, paths.projectPath, timeouts);
 			await createRemoteSessionAndReadId(remoteWindow, paths.projectName, timeouts);
-			await verifyRemoteGitSync({ window: remoteWindow, credentials: creds, root: paths.projectPath, origin: sync.origin, timeoutMs: 40_000, testInfo });
+			await verifyRemoteGitSync({ window: remoteWindow, credentials: creds, root: paths.projectPath, origin: sync.origin, other: sync.other, timeoutMs: 60_000, testInfo });
 			await localControl.verify();
 		} finally {
 			preserveAppLogs(remoteUserDataRoot, paths.runId);

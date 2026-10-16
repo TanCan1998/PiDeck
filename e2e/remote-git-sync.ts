@@ -44,8 +44,8 @@ export async function initializeRemoteGitSyncFixture(credentials: RemoteAcceptan
 }
 
 /** The real panel's sync bar against a run-owned remote: fetch, pull, a refusal, and a push behind a confirmation. */
-export async function verifyRemoteGitSync(input: { window: Page; credentials: RemoteAcceptanceCredentials; root: string; origin: string; timeoutMs: number; testInfo: TestInfo }) {
-	const { window, credentials, root, origin, timeoutMs, testInfo } = input;
+export async function verifyRemoteGitSync(input: { window: Page; credentials: RemoteAcceptanceCredentials; root: string; origin: string; other: string; timeoutMs: number; testInfo: TestInfo }) {
+	const { window, credentials, root, origin, other, timeoutMs, testInfo } = input;
 	const panel = window.getByTestId("remote-git-panel");
 	const command = async (script: string) => (await runRemoteCommand(credentials, "set -eu; cd " + quote(root) + "; " + script, 20_000)).stdout;
 	const git = (script: string) => command("git --no-optional-locks " + script);
@@ -62,8 +62,18 @@ export async function verifyRemoteGitSync(input: { window: Page; credentials: Re
 	 */
 	const refresh = async () => {
 		await panel.getByRole("button", { name: "刷新远端 Git", exact: true }).click();
-		await expect(panel.getByTestId("remote-git-workingTree").or(panel.getByText("工作区干净"))).toBeVisible({ timeout: timeoutMs });
-		await expect(fetchButton).toBeEnabled({ timeout: timeoutMs });
+		await expect(panel.getByTestId("remote-git-workingTree").or(panel.getByText("工作区干净")))
+			.toBeVisible({ timeout: timeoutMs })
+			.catch(async (error: unknown) => {
+				const text = await panel.innerText();
+				throw new Error(`the refresh did not settle; panel text: ${JSON.stringify(text.slice(0, 300))} (${String(error).split("\n")[0]})`);
+			});
+		await expect(fetchButton)
+			.toBeEnabled({ timeout: timeoutMs })
+			.catch(async (error: unknown) => {
+				const text = await panel.innerText();
+				throw new Error(`no fetch grant after the refresh; panel text: ${JSON.stringify(text.slice(0, 300))} (${String(error).split("\n")[0]})`);
+			});
 	};
 
 	await test.step("同步条显示分支与上游全名，且从不显示远端路径", async () => {
@@ -133,6 +143,35 @@ export async function verifyRemoteGitSync(input: { window: Page; credentials: Re
 		// The push moved the remote and the remote-tracking ref; local history and the worktree are untouched.
 		expect(await command("cat local.txt")).toBe("LOCAL COMMIT\n");
 		expect(await command("find .git -maxdepth 1 -name 'index.lock' -o -maxdepth 1 -name 'pideck-index-*' | wc -l")).toBe("0\n");
+	});
+
+	await test.step("分叉且仓库自己配置了合并策略：拉取留下冲突并如实报码", async () => {
+		// The strategy is the repository's own setting, written natively here: the helper never picks one.
+		await command("git config pull.rebase false");
+		await command("printf 'LOCAL SIDE\\n' > tracked.txt && git add -- tracked.txt && git -c user.name=PiDeck-E2E -c user.email=pideck-e2e@example.invalid commit -qm 'local side'");
+		await runRemoteCommand(
+			credentials,
+			[
+				"set -eu",
+				"cd " + quote(other),
+				"git fetch -q origin",
+				"git reset -q --hard origin/" + "$(git symbolic-ref --short HEAD)",
+				"printf 'REMOTE SIDE\\n' > tracked.txt",
+				"git add -- tracked.txt",
+				"git -c user.name=Teammate -c user.email=teammate@example.invalid commit -qm 'remote side'",
+				"git push -q origin HEAD",
+			].join("; "),
+			30_000,
+		);
+		await refresh();
+		await expect(pullButton).toBeEnabled({ timeout: timeoutMs });
+		await pullButton.click();
+		// A conflicted pull is reported, and the repository is deliberately left in that state for the user.
+		await expect(panel.getByRole("alert")).toContainText("冲突", { timeout: timeoutMs });
+		expect(await command("test -e .git/MERGE_HEAD && echo merging || echo clean")).toBe("merging\n");
+		expect(await command("git status --porcelain=v1 --untracked-files=no")).toContain("UU tracked.txt");
+		// Only the test's own fixture is cleaned up; the product never aborts a merge on its own.
+		await command("git merge --abort");
 	});
 
 	await testInfo.attach("remote-git-sync-oracles", { body: Buffer.from(JSON.stringify({ head: await git("rev-parse HEAD"), remote: await remoteHead() }, null, 2)), contentType: "application/json" });
