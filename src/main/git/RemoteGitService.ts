@@ -1,7 +1,7 @@
 import { GitStatus, type GitReadSnapshot, type GitResource, type GitResourceGroups, type GitResourceGroupType, type GitWorkspaceFileDiff } from "../../shared/types/git";
 import type { ProjectFileTarget } from "../../shared/types/project";
 import { parsePorcelainStatus } from "./gitStatusParser";
-import { REMOTE_GIT_MAX_RESOURCES, REMOTE_GIT_READ_TIMEOUT_MS, REMOTE_GIT_STATUS_MAX_BYTES, REMOTE_GIT_TEXT_MAX_BYTES, REMOTE_HELPER_PROTOCOL_VERSION } from "../remote/RemoteHelperContract";
+import { REMOTE_GIT_COMMIT_MESSAGE_MAX_BYTES, REMOTE_GIT_MAX_RESOURCES, REMOTE_GIT_READ_TIMEOUT_MS, REMOTE_GIT_STATUS_MAX_BYTES, REMOTE_GIT_TEXT_MAX_BYTES, REMOTE_HELPER_PROTOCOL_VERSION } from "../remote/RemoteHelperContract";
 
 export type RemoteGitLocator = { hostId: string; remotePath: string };
 export type RemoteGitSession = {
@@ -9,8 +9,9 @@ export type RemoteGitSession = {
 	request(method: string, params?: unknown, options?: { timeoutMs?: number; onRequestId?: (id: string) => void }): Promise<unknown>;
 	cancel(id: string, options?: { timeoutMs?: number }): Promise<unknown>;
 };
-export type RemoteGitWriteExpectation = { revision: string; hostRevision: number; target: RemoteGitLocator };
-export type RemoteGitReadSnapshot = GitReadSnapshot & { writeExpectation?: RemoteGitWriteExpectation };
+/** A main-owned capability: it says which confirmed revision, on which host identity, and which action kind it authorizes. */
+export type RemoteGitWriteExpectation = { kind: "index" | "commit"; revision: string; hostRevision: number; target: RemoteGitLocator };
+export type RemoteGitReadSnapshot = GitReadSnapshot & { writeExpectation?: RemoteGitWriteExpectation; commitExpectation?: RemoteGitWriteExpectation };
 
 const ERRORS = new Set([
 	"PATH_OUTSIDE_ROOT",
@@ -36,6 +37,10 @@ const ERRORS = new Set([
 	"GIT_WRITE_UNSUPPORTED",
 	"GIT_WRITE_RESULT_UNCONFIRMED",
 	"GIT_WRITE_SNAPSHOT_EXPIRED",
+	"GIT_COMMIT_NOTHING_STAGED",
+	"GIT_COMMIT_MESSAGE_EMPTY",
+	"GIT_COMMIT_IDENTITY_REQUIRED",
+	"GIT_COMMIT_HEAD_CHANGED",
 	"REMOTE_FEATURE_DISABLED",
 	"TOO_MANY_REQUESTS",
 	"GIT_TRUST_REQUIRED",
@@ -123,7 +128,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 		const current = ports.locator(projectId);
 		if (!current || current.hostId !== expected.hostId || current.remotePath !== expected.remotePath) throw new Error("GIT_TARGET_CHANGED");
 	}
-	async function run<T>(projectId: string, method: "git.status" | "git.workspaceDiff" | "git.stage" | "git.unstage", params: unknown, signal: AbortSignal | undefined, parse: (value: unknown, session: RemoteGitSession, capabilities: unknown[]) => T, expected?: RemoteGitWriteExpectation): Promise<T> {
+	async function run<T>(projectId: string, method: "git.status" | "git.workspaceDiff" | "git.stage" | "git.unstage" | "git.commit", params: unknown, signal: AbortSignal | undefined, parse: (value: unknown, session: RemoteGitSession, capabilities: unknown[]) => T, expected?: RemoteGitWriteExpectation): Promise<T> {
 		const locator = target(projectId);
 		let dispatchedWrite = false;
 		try {
@@ -144,7 +149,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 						if (signal?.aborted) throw new Error("REQUEST_CANCELLED");
 						assertCurrent(projectId, locator);
 						try {
-							if (name === "git.stage" || name === "git.unstage") dispatchedWrite = true;
+							if (name === "git.stage" || name === "git.unstage" || name === "git.commit") dispatchedWrite = true;
 							const result = await session.request(name, input, {
 								timeoutMs: REMOTE_GIT_READ_TIMEOUT_MS,
 								onRequestId: (id) => {
@@ -184,8 +189,11 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 				const snapshot = readRemoteGitStatus(value, projectId);
 				if (record(value) && value.revision !== undefined) {
 					if (typeof value.revision !== "string" || !/^[0-9a-f]{64}$/.test(value.revision)) throw new Error("GIT_RESULT_INVALID");
-					if (capabilities.includes("git.stage") && capabilities.includes("git.unstage") && typeof session.hostRevision === "number" && Number.isSafeInteger(session.hostRevision) && session.hostRevision >= 0)
-						snapshot.writeExpectation = { revision: value.revision, hostRevision: session.hostRevision, target: target(projectId) };
+					const hostRevision = session.hostRevision;
+					if (typeof hostRevision === "number" && Number.isSafeInteger(hostRevision) && hostRevision >= 0) {
+						if (capabilities.includes("git.stage") && capabilities.includes("git.unstage")) snapshot.writeExpectation = { kind: "index", revision: value.revision, hostRevision, target: target(projectId) };
+						if (capabilities.includes("git.commit")) snapshot.commitExpectation = { kind: "commit", revision: value.revision, hostRevision, target: target(projectId) };
+					}
 				}
 				return snapshot;
 			});
@@ -200,6 +208,23 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 				signal,
 				(value) => {
 					if (!record(value) || value.applied !== true || Object.keys(value).length !== 1) throw new Error("GIT_RESULT_INVALID");
+				},
+				expected,
+			);
+		},
+		/** One commit of the exact index the user confirmed; the message is passed verbatim, bounded and NUL-free. */
+		commit(projectId: string, message: string, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<{ head: string; tree: string }> {
+			if (expected.kind !== "commit") throw new Error("GIT_RESULT_INVALID");
+			if (typeof message !== "string" || message.length === 0 || message.trim().length === 0 || message.includes("\0") || Buffer.byteLength(message, "utf8") > REMOTE_GIT_COMMIT_MESSAGE_MAX_BYTES) throw new Error("GIT_COMMIT_MESSAGE_EMPTY");
+			return run(
+				projectId,
+				"git.commit",
+				{ message, expectedRevision: expected.revision },
+				signal,
+				(value) => {
+					const hash = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+					if (!record(value) || value.applied !== true || Object.keys(value).length !== 3 || typeof value.head !== "string" || !hash.test(value.head) || typeof value.tree !== "string" || !hash.test(value.tree)) throw new Error("GIT_RESULT_INVALID");
+					return { head: value.head, tree: value.tree };
 				},
 				expected,
 			);

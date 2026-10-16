@@ -24,19 +24,31 @@ function fixture(api = {}) {
 	return { reads, states, current: () => states.at(-1) };
 }
 
-test("remote Git refresh exposes complete facts and has no implicit polling or mutation API", async () => {
+test("remote Git refresh exposes complete facts and performs no implicit write", async () => {
 	let count = 0;
+	const writes = [];
 	const f = fixture({
 		remoteSnapshot: async () => {
 			count++;
 			return { ok: true, snapshot };
 		},
+		mutateRemoteIndex: async (...args) => {
+			writes.push(args);
+			return { ok: true };
+		},
+		commitRemote: async (...args) => {
+			writes.push(args);
+			return { ok: true };
+		},
 	});
 	await f.reads.refresh();
 	assert.equal(f.current().snapshot.branch, "main");
 	assert.equal(count, 1);
-	assert.equal(f.reads.stage, undefined);
-	assert.equal(f.reads.commit, undefined);
+	assert.equal(f.reads.stage, undefined, "no convenience alias may act without an explicit call");
+	assert.deepEqual(writes, [], "a refresh never writes; both write actions stay explicit and separate");
+	// The commit action exists, but without a granted token and a message it never reaches the API.
+	await f.reads.commit("message\n");
+	assert.deepEqual(writes, [], "commit without a grant must not call the API");
 });
 
 test("concurrent refresh cannot start a second read", async () => {

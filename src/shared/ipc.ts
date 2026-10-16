@@ -460,6 +460,7 @@ export const ipcChannels = {
 	/** SSH root repository facts plus SCM groups; writes/history/sync remain capability-blocked. */
 	gitRemoteSnapshot: "git:remote-snapshot",
 	gitRemoteMutateIndex: "git:remote-mutate-index",
+	gitRemoteCommit: "git:remote-commit",
 	gitRemoteCancelReads: "git:remote-cancel-reads",
 	gitWorkspaceFileDiff: "git:workspace-file-diff",
 	gitStage: "git:stage",

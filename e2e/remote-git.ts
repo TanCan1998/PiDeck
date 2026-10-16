@@ -92,7 +92,10 @@ export async function verifyRemoteGitRead(input: { window: Page; credentials: Re
 	await expect(panel.getByTestId("remote-git-index")).toContainText("deleted.txt");
 	await expect(panel.getByTestId("remote-git-workingTree")).toContainText("tracked.txt");
 	await expect(panel.getByTestId("remote-git-untracked")).toContainText("untracked.txt");
-	await expect(panel.getByRole("button", { name: /^(丢弃|提交|推送|拉取|初始化|全部暂存)/ })).toHaveCount(0);
+	// Commit is implemented as of G2b, but it must never be a one-click action: the button stays disabled until a
+	// message is typed, and the still-unimplemented or dangerous actions remain absent.
+	await expect(panel.getByRole("button", { name: /^(丢弃|推送|拉取|初始化|全部暂存)/ })).toHaveCount(0);
+	await expect(panel.getByRole("button", { name: "提交已暂存的改动", exact: true })).toBeDisabled();
 	const diff = async (group: string, name: string, old: string, next: string) => {
 		await panel
 			.getByTestId("remote-git-" + group)

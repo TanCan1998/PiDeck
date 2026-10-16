@@ -105,9 +105,11 @@ export type GitResourceGroups = {
 };
 
 /** Complete read-only repository snapshot; unsupported or failed reads never masquerade as empty status. */
-export type GitReadSnapshot = { groups: GitResourceGroups; head: string | null; branch: string | null; mutationToken?: string };
+export type GitReadSnapshot = { groups: GitResourceGroups; head: string | null; branch: string | null; mutationToken?: string; commitToken?: string };
 /** An uncertain mutation must be checked by a fresh read, never automatically replayed. */
 export type GitIndexMutationResult = { ok: true } | { ok: false; code: string };
+/** A commit has no renderer-visible result beyond success: the new HEAD is read back through a fresh snapshot. */
+export type GitCommitResult = { ok: true } | { ok: false; code: string };
 export type GitReadSnapshotResult = { ok: true; snapshot: GitReadSnapshot } | { ok: false; code: string };
 
 /** 批量回滚时保留资源组，避免同一目录中的 tracked/untracked 文件混淆。 */

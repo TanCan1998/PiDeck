@@ -1,4 +1,4 @@
-import type { GitIndexMutationResult, GitReadSnapshot, GitReadSnapshotResult, GitResourceGroupType, GitWorkspaceFileDiff } from "../../../shared/types/git";
+import type { GitCommitResult, GitIndexMutationResult, GitReadSnapshot, GitReadSnapshotResult, GitResourceGroupType, GitWorkspaceFileDiff } from "../../../shared/types/git";
 import type { ProjectFileTarget } from "../../../shared/types/project";
 
 export type RemoteGitViewState = {
@@ -7,6 +7,10 @@ export type RemoteGitViewState = {
 	snapshot?: GitReadSnapshot;
 	errorCode?: string;
 	mutating?: boolean;
+	/** Which action is in flight; the panel says “writing the index” or “committing” accordingly. */
+	mutatingKind?: "index" | "commit";
+	/** Counts confirmed commits, so the panel can clear its message box exactly once per success. */
+	confirmedCommits?: number;
 	diffLoading: boolean;
 	diff?: GitWorkspaceFileDiff;
 	diffGroup?: GitResourceGroupType;
@@ -14,6 +18,7 @@ export type RemoteGitViewState = {
 };
 export type RemoteGitViewApi = {
 	cancelRemoteReads(projectId: string): Promise<void>;
+	commitRemote(projectId: string, message: string, token: string): Promise<GitCommitResult>;
 	mutateRemoteIndex(projectId: string, operation: "stage" | "unstage", group: GitResourceGroupType, target: ProjectFileTarget, token: string): Promise<GitIndexMutationResult>;
 	remoteSnapshot(projectId: string): Promise<GitReadSnapshotResult>;
 	workspaceFileDiff(projectId: string, group: GitResourceGroupType, target: ProjectFileTarget): Promise<GitWorkspaceFileDiff | null>;
@@ -24,14 +29,17 @@ function errorCode(error: unknown): string {
 	// Electron invoke prefixes errors with the channel; only the bounded code becomes visible text.
 	return /\b(?:GIT_[A-Z_]+|SSH_[A-Z_]+|REMOTE_FEATURE_DISABLED|UNSUPPORTED_CAPABILITY|RESULT_TOO_LARGE|REQUEST_TIMEOUT|REQUEST_CANCELLED|REMOTE_CONNECTION_LOST|PERMISSION_DENIED|PATH_[A-Z_]+|NOT_A_FILE|TOO_MANY_REQUESTS)\b/.exec(raw)?.[0] ?? "GIT_COMMAND_FAILED";
 }
-/** Single-owner controller: explicit, one-shot index actions; no commit, polling or automatic write replay. */
+/** Single-owner controller: explicit, one-shot index actions and one commit per confirmed snapshot; no polling or replay. */
 export function createRemoteGitViewController(projectId: string, projectKey: string, api: RemoteGitViewApi, publish: (state: RemoteGitViewState) => void) {
 	let active = true;
 	let epoch = 0;
 	let diffEpoch = 0;
 	let state: RemoteGitViewState = { projectKey, loading: false, diffLoading: false };
 	function update(next: RemoteGitViewState) {
-		state = next;
+		// The confirmed-commit counter is sticky: a later read (or a connection loss) must not resurrect the
+		// message box the user already cleared.
+		const sticky = state.confirmedCommits;
+		state = sticky === undefined || next.confirmedCommits !== undefined ? next : { ...next, confirmedCommits: sticky };
 		if (active) publish(state);
 	}
 	const controller = {
@@ -59,7 +67,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			const token = state.snapshot.mutationToken;
 			const generation = ++epoch;
 			diffEpoch += 1;
-			update({ ...state, mutating: true, errorCode: undefined, diff: undefined, diffErrorCode: undefined });
+			update({ ...state, mutating: true, mutatingKind: "index", errorCode: undefined, diff: undefined, diffErrorCode: undefined });
 			try {
 				const result = await api.mutateRemoteIndex(projectId, operation, group, target, token);
 				if (!active || generation !== epoch) return;
@@ -70,6 +78,29 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 				update({ projectKey, loading: false, diffLoading: false });
 				await controller.refresh();
 			} catch {
+				if (active && generation === epoch) update({ projectKey, loading: false, diffLoading: false, errorCode: "GIT_WRITE_RESULT_UNCONFIRMED" });
+			}
+		},
+		async commit(message: string): Promise<void> {
+			if (!active || state.loading || state.diffLoading || state.mutating || !state.snapshot?.commitToken) return;
+			// The panel keeps the text; main re-validates it, so an empty/oversized message never reaches the helper.
+			if (typeof message !== "string" || message.trim().length === 0 || message.includes("\0")) return;
+			const token = state.snapshot.commitToken;
+			const generation = ++epoch;
+			diffEpoch += 1;
+			update({ ...state, mutating: true, mutatingKind: "commit", errorCode: undefined, diff: undefined, diffErrorCode: undefined });
+			try {
+				const result = await api.commitRemote(projectId, message, token);
+				if (!active || generation !== epoch) return;
+				if (!result.ok) {
+					// A refusal and an unknown result both drop the facts: only a fresh read may show a clean repository.
+					update({ projectKey, loading: false, diffLoading: false, errorCode: result.code });
+					return;
+				}
+				update({ projectKey, loading: false, diffLoading: false, confirmedCommits: (state.confirmedCommits ?? 0) + 1 });
+				await controller.refresh();
+			} catch {
+				// The commit may have happened; never retry it, and say so until the user refreshes.
 				if (active && generation === epoch) update({ projectKey, loading: false, diffLoading: false, errorCode: "GIT_WRITE_RESULT_UNCONFIRMED" });
 			}
 		},

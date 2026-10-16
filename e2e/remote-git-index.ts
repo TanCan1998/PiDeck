@@ -44,9 +44,23 @@ export async function verifyRemoteGitIndex(input: { window: Page; credentials: R
 		await expect(panel.getByRole("alert")).toContainText("尚未明确授权", { timeout: timeoutMs });
 		await panel.getByRole("button", { name: "信任此项目及其 .pi 资源", exact: true }).click();
 	};
+	/** Switch to a project that is already authorized: the per-project drawer may be open or closed. */
+	const switchAuthorized = async (path: string) => {
+		const project = remoteProjectRow(window, path.split("/").pop() ?? "");
+		await project.locator(".project-draggable").click();
+		const open = window.getByRole("button", { name: "打开右侧边栏", exact: true });
+		if (await open.count()) {
+			await open.click();
+			await window.getByTestId("drawer-rail-git").click();
+		}
+		await expect(panel).toHaveAttribute("data-project-id", (await project.getAttribute("data-sidebar-removal-id")) ?? "", { timeout: timeoutMs });
+		await expect(panel.getByTestId("remote-git-branch")).toBeVisible({ timeout: timeoutMs });
+	};
+	const box = panel.getByTestId("remote-git-commit-message");
+	const commitButton = panel.getByRole("button", { name: "提交已暂存的改动", exact: true });
 	await selectAndAuthorize(root);
 	await expect(row("workingTree", "tracked.txt")).toBeVisible({ timeout: timeoutMs });
-	await expect(panel.getByRole("button", { name: /^(丢弃|提交|推送|拉取|全部暂存|初始化)/ })).toHaveCount(0);
+	await expect(panel.getByRole("button", { name: /^(丢弃|推送|拉取|全部暂存|初始化)/ })).toHaveCount(0);
 	await action("workingTree", "tracked.txt", "暂存");
 	await expect(panel.getByTestId("remote-git-workingTree")).toHaveCount(0, { timeout: timeoutMs });
 	witnesses.staged = await command(root, "git --no-optional-locks show :tracked.txt");
@@ -131,5 +145,69 @@ export async function verifyRemoteGitIndex(input: { window: Page; credentials: R
 	witnesses.unbornAfter = await worktree(unborn);
 	expect(witnesses.unbornAfter).toBe(unbornBefore);
 	expect(await command(unborn, "test ! -e .git/index.lock; find .git -maxdepth 1 -name 'pideck-index-*' -print")).toBe("");
+
+	// G2b: commit the confirmed index through the real UI, then check the repository with native Git only.
+	// The drawer is already open here (another project is selected), so switch instead of opening it again.
+	await switchAuthorized(root);
+	await expect(row("index", "tracked.txt")).toBeVisible({ timeout: timeoutMs });
+	const headBeforeCommit = await command(root, "git --no-optional-locks rev-parse HEAD");
+	const trackedIdentity = await command(root, "stat -c '%a %s %i' tracked.txt");
+	const message = "远端提交 subject\n\n# 不剥离的注释行\nbody line with двойной space\n";
+	await expect(commitButton).toBeDisabled();
+	await box.fill(message);
+	await expect(commitButton).toBeEnabled();
+	await commitButton.click();
+	await expect(row("index", "tracked.txt")).toHaveCount(0, { timeout: timeoutMs });
+	await expect(row("workingTree", "tracked.txt")).toHaveCount(0, { timeout: timeoutMs });
+	await expect(box).toHaveValue("", { timeout: timeoutMs });
+	witnesses.headAfterCommit = await command(root, "git --no-optional-locks rev-parse HEAD");
+	expect(witnesses.headAfterCommit).not.toBe(headBeforeCommit);
+	expect(await command(root, "git --no-optional-locks rev-parse HEAD^")).toBe(headBeforeCommit);
+	expect(await command(root, "git --no-optional-locks log -1 --format=%s")).toBe("远端提交 subject\n");
+	expect(await command(root, "git --no-optional-locks log -1 --format=%B")).toBe(message + "\n");
+	expect(await command(root, "git --no-optional-locks reflog -1 --format=%gs")).toBe("commit: 远端提交 subject\n");
+	expect(await command(root, "git --no-optional-locks diff-index --cached --quiet HEAD -- tracked.txt && printf INDEX_MATCHES_HEAD")).toBe("INDEX_MATCHES_HEAD");
+	expect(await command(root, "test ! -e .git/index.lock; find .git -maxdepth 1 -name 'pideck-index-*' -print")).toBe("");
+
+	// Nothing staged is refused, and both effective gates refuse without executing the hook or moving HEAD.
+	await box.fill("第二次提交\n");
+	await commitButton.click();
+	await expect(panel.getByRole("alert")).toContainText("没有已暂存的改动", { timeout: timeoutMs });
+	expect(await command(root, "git --no-optional-locks rev-parse HEAD")).toBe(witnesses.headAfterCommit);
+	for (const gate of ["hook", "signing"] as const) {
+		const beforeGate = await command(root, "git --no-optional-locks rev-parse HEAD");
+		// Stage first: the same gates also guard staging, so the hook must appear only after the file is staged.
+		await command(root, "printf 'ONE_WORK_AGAIN\\n' > tracked.txt");
+		await refresh("tracked.txt");
+		await action("workingTree", "tracked.txt", "暂存");
+		await expect(row("index", "tracked.txt")).toBeVisible({ timeout: timeoutMs });
+		if (gate === "hook") await command(root, "mkdir -p .git/hooks; printf '#!/bin/sh\\nprintf executed > .git/pideck-commit-hook-ran\\n' > .git/hooks/pre-commit; chmod 700 .git/hooks/pre-commit");
+		if (gate === "signing") await command(root, "git config commit.gpgSign true");
+		await box.fill("被门禁拒绝的提交\\n");
+		await commitButton.click();
+		await expect(panel.getByRole("alert")).toContainText("暂不支持受控暂存", { timeout: timeoutMs });
+		expect(await command(root, "git --no-optional-locks rev-parse HEAD")).toBe(beforeGate);
+		if (gate === "hook") await command(root, "test ! -e .git/pideck-commit-hook-ran; rm -- .git/hooks/pre-commit");
+		if (gate === "signing") await command(root, "git config --unset commit.gpgSign");
+		await command(root, "git --no-optional-locks reset -q HEAD -- tracked.txt");
+		await command(root, "printf 'ONE_WORK\\n' > tracked.txt");
+		// The file now equals the committed HEAD again, so the panel shows a clean repository, not a row.
+		await panel.getByRole("button", { name: "刷新远端 Git", exact: true }).click();
+		await expect(panel.getByTestId("remote-git-branch")).toBeVisible({ timeout: timeoutMs });
+		await expect(panel.getByRole("alert")).toHaveCount(0);
+	}
+	witnesses.filesAfterCommit = await worktree(root);
+	// This section rewrote tracked.txt on purpose while staging two more changes, so its timestamps legitimately
+	// moved. Every other file keeps its full metadata witness, and tracked.txt must still match on content and
+	// identity (mode, size, inode).
+	const withoutTrackedTimestamps = (text: string) =>
+		text
+			.split("\n")
+			.filter((line) => !/^[0-7]{3,4} [0-9]+ [0-9]+ .*\.\/tracked\.txt$/.test(line))
+			.join("\n");
+	expect(withoutTrackedTimestamps(witnesses.filesAfterCommit)).toBe(withoutTrackedTimestamps(filesBefore));
+	expect(await command(root, 'printf %s "$(cat tracked.txt)"')).toBe("ONE_WORK");
+	expect(await command(root, "stat -c '%a %s %i' tracked.txt")).toBe(trackedIdentity);
+	expect(await command(root, "test ! -e .git/index.lock; find .git -maxdepth 1 -name 'pideck-index-*' -print; test ! -e .git/pideck-commit-hook-ran")).toBe("");
 	await testInfo.attach("remote-git-index-independent-oracles", { body: Buffer.from(JSON.stringify(witnesses, null, 2)), contentType: "application/json" });
 }

@@ -1,6 +1,6 @@
 # 远端 Git：调研结论与分阶段实施计划
 
-> 状态：G0 调研、G1 status/diff 与 G2a 单文件 stage/unstage 已完成 Linux 开发态实现、针对性回归及真实 Electron＋SSH 验收；G6a 补故障／并发／短周期资源回归并修复未知结果提示，G6b 新增真实 SSH 长稳验收且有一次完整 1 小时通过，G6c 更正暖机阶跃归因并加 steady-state 门禁（§5.6–§5.8）。**G2b commit 已有 Implementation Plan（§5.9），待确认后实施**；G3–G5 与完整 G6 未完成。仍受开发态实验门禁约束，不代表 Git parity 或 Remote v1 已收口。
+> 状态：G0 调研、G1 status/diff、G2a 单文件 stage/unstage 与 **G2b 单次普通提交** 已完成 Linux 开发态实现、针对性回归及真实 Electron＋SSH 验收（G2b 见 §5.9.1）；G6a 补故障／并发／短周期资源回归并修复未知结果提示，G6b 新增真实 SSH 长稳验收且有一次完整 1 小时通过，G6c 更正暖机阶跃归因并加 steady-state 门禁（§5.6–§5.8）。G3–G5 与完整 G6 未完成。仍受开发态实验门禁约束，不代表 Git parity 或 Remote v1 已收口。
 > 核对基线：`feat/remote-development`，G0 调研基线 `101b9b82c`；G1 从 `bc25ebe20` 实施，G2a 从 `f83f9d550` 实施。
 > 范围：落实总计划 §6.3 的 Git 能力；近期顺序仍为 **status/diff → stage/unstage/commit → 跨平台与稳定性**，不一次性搬运所有本机操作。
 
@@ -41,7 +41,7 @@ Git 算法、对象库、index、refs 和提交仍由原生 Git 实现。PiDeck 
 | --- | --- | --- |
 | **G0** | 现状审查、库调研、整体计划 | 本文；不改 Git 业务代码。 |
 | **G1** | root 仓库识别、status、按需 workspace/index/untracked diff、能力矩阵 | 真实 UI 可查看已有普通根仓库；明确区分 non-repository、空状态、unsupported 与失败；所有写面保持禁用。 |
-| **G2** | stage/unstage/commit | 精确路径操作、unborn 行为、index/HEAD 并发、提交预览与回执不确定性、仓库工程门禁通过后开放。可独立收口 stage/unstage；不能为凑齐三项而降低 commit 门禁。 |
+| **G2** | stage/unstage/commit | 精确路径操作、unborn 行为、index/HEAD 并发、提交预览与回执不确定性、仓库工程门禁通过后开放。可独立收口 stage/unstage；不能为凑齐三项而降低 commit 门禁。**现状：stage/unstage（§5.5）与单次普通提交（§5.9.1）均已交付；amend／merge／签名仍禁用。** |
 | **G3** | 历史/log/count/refs/detail/commit diff、compare、基础分支、嵌套仓库发现、refs polling | 有界历史与 diff，明确 repo scope；checkout 单独处理 dirty/conflict 和工作区改写；polling 随连接代数、窗口及订阅清理。 |
 | **G4** | init、discard 单个/批量、删除 workspace 文件 | 创建及破坏性写面单独验收。tracked discard 保留 index；untracked 删除必须可恢复或明确确认，不把远端永久删除称为本机回收站等价。 |
 | **G5** | ahead/behind、fetch/push/pull | 只在远端使用远端凭据；用户明确发起网络/历史变更；非交互、无隐式 fetch/pull/rebase/force、无断线自动重放。 |
@@ -173,6 +173,8 @@ G2 真机只操作本次创建的 repo：stage→diff→unstage 字节不变→�
 
 本批先交付可独立验证的暂存／取消暂存，**commit保持禁用**。原因不是缺少CLI，而是完整确认的index和expected HEAD无法靠「检查后普通git commit」形成原子门禁；不以commit-tree/update-ref或自定义Git事务临时拼接绕过该问题。后续commit另行完成工程门禁与并发方案。
 
+> 该保留意见在 G2b（§5.9）落地：提交不使用 `git commit`，而是 `write-tree` + `commit-tree` + `update-ref <new> <old>` 的**原生 ref CAS**，因此“完整确认的 index + expected HEAD”由 Git 自己的比较交换保证；工程门禁照旧拒绝而不是绕过（§5.9.1）。
+
 1. **公共契约**：helper新增可协商`git.stage`／`git.unstage`，升级冻结build/hash；snapshot额外带main签发的短期、一次性opaque mutation token。renderer只发送projectId、封闭operation/group、单个ProjectFileTarget和token，不能指定host/root/executable/config、旧路径或helper requestId。旧helper仍可读，写能力缺失明确禁用。现有本机stage/unstage行为不改，不借原生批量按钮扩大范围。
 2. **快照与身份**：token绑定sender、当前project locator、host store revision及helper核对的root/gitdir identity、HEAD/branch、index完整SHA与metadata、完整porcelain状态摘要；同项目刷新取代旧token，消费发生在首个await前，最多128条／15分钟。主机锁队列后再核对身份、trust和helper capability；原始期望摘要只在main/helper间传递。stale、过期、冲突、merge/rebase等进行中状态均明确拒绝，不能静默跳过后报成功。
 3. **官方index锁与受控副本**：Linux普通根仓库；root与`.git`分别FD锚定/no-follow。排他创建官方`.git/index.lock`（0600），已存在的锁拒绝且永不删除／解锁他人文件。持锁后复核期望index/HEAD/status，再将原index复制到同一锚定gitdir内本次随机排他shadow index。原生Git以受控`GIT_INDEX_FILE`操作shadow，真实index在最终提交前不变；没有第二Git引擎或旧版兼容fallback。
@@ -186,11 +188,11 @@ G2 真机只操作本次创建的 repo：stage→diff→unstage 字节不变→�
 
 ### 5.5 G2a 实施证据（2026-10-15，Linux 开发态）
 
-- **helper与本机边界**：`RemoteGitWriteSource.ts`与G1读取程序同源嵌入helper **1.8.0**，冻结SHA-256 `86db736b3e6a20f4bd98d29c498d2b732ff8bb9a9f985da2cb0291dc1d4d94ff`。仍只用四个builtin；为维持原有64 KiB审阅上限，删除大行内与文件头重复的10段解释注释，不放宽测试阈值；正文64,257个ASCII字节。新能力只声明`git.stage`／`git.unstage`，没有commit、网络或自由argv入口；既有本机Git写IPC对SSH仍拒绝。
+- **helper与本机边界**：`RemoteGitWriteSource.ts`与G1读取程序同源嵌入helper **1.8.0**（G2b 起为 1.9.0，见 §5.9.1），冻结SHA-256 `86db736b3e6a20f4bd98d29c498d2b732ff8bb9a9f985da2cb0291dc1d4d94ff`。仍只用四个builtin；为维持原有64 KiB审阅上限，删除大行内与文件头重复的10段解释注释，不放宽测试阈值；正文64,257个ASCII字节。新能力只声明`git.stage`／`git.unstage`，没有commit、网络或自由argv入口；既有本机Git写IPC对SSH仍拒绝。
 - **受控原生Git**：官方`index.lock`排他0600，root/gitdir FD锚定；同目录随机0700 scratch中复制index、HEAD与白名单有效配置，通过私有`GIT_DIR`／`GIT_INDEX_FILE`运行原生Git，以现有objects目录存放原生生成的blob。真实有效hooks、任意hooksPath、filter定义或签名要求在副本执行前后拒绝；私有context冻结的配置不具有项目代码执行能力，不把late新增的hook/config竞态带进原生add。不是把现有工程门禁清空后照样发布；晚到门禁阻塞真实index替换。保留原生autocrlf/attributes语义，比较非选中stage0 entries（mode/OID）不变、工作区正文/metadata与属性不变，再写本人lock、保mode/uid/gid、不chown、fsync、rename并核对结果。拒绝skip-worktree、assume-unchanged、split/sparse与非stage0 index。
 - **令牌与生命周期**：`RemoteGitMutationTokens.ts`最多128条／15分钟，sender＋project绑定、刷新替换，host revision与locator绑定在main-held expectation中；消费发生在首个await前。helper revision摘要绑定root/gitdir identity、index SHA/metadata、HEAD/branch和完整status；不把内部摘要或host/root交给renderer作为写权限。视图卸载、断线、明确取消、sender销毁和quit均撤销令牌／取消在途操作；旧helper仍能只读，未协商写能力无按钮。IPC新通道只接封闭operation/group、单target和opaque token。
 - **失败语义**：子进程组在deadline/cancel/EOF被终止；先等待回收再清理，清理只认本次拥有的inode，未知／被替换artifact保留，不递归删未知目录或删别人的锁。明确错误不替换真实index；发送写请求后timeout/cancel/断线、未知错误／身份变化，以及发布后的异常，main统一提示结果未确认，清旧事实，要求用户手动刷新，不重放。中断可能留下未引用objects或可核查scratch，不自动GC或reset；SIGKILL／宿主崩溃的残留锁没有自动解锁。写前后核对不等于所有非协作writer下的内核CAS，也不保证HEAD＋index跨文件原子性。
-- **UI**：`FileTree.indexActionsOnly`只开单行stage/unstage；即使误传其他callbacks，也不出现discard/delete/目录动作，保留local默认行为。刷新与写操作互斥，成功只读刷新；失败/未知不自动刷新或重试写。正文说明stage选取动作开始时最新整文件内容，不是「提交旧diff」；commit、bulk stage、合并解决、discard、历史、refs与同步均未开放。所有新增说明与稳定错误中英同步。
+- **UI**：`FileTree.indexActionsOnly`只开单行stage/unstage；即使误传其他callbacks，也不出现discard/delete/目录动作，保留local默认行为。刷新与写操作互斥，成功只读刷新；失败/未知不自动刷新或重试写。正文说明stage选取动作开始时最新整文件内容，不是「提交旧diff」；commit 随后在 G2b 开放（§5.9），bulk stage、合并解决、discard、历史、refs与同步仍未开放。所有新增说明与稳定错误中英同步。
 - **针对性验证**：最终29文件 **246/246、5 suites、0 fail/cancel/skip**；typecheck、触达Biome/diff、e2e `--list`、main/preload与production renderer构建通过。新增真实helper测试覆盖精确范围/unborn/rename/deletion/intent、UTF-8/CRLF与原生autocrlf、FIFO/符号链接、现有锁保留、全局hooksPath/有效hooks/签名/merge/split/skip拒绝，以及write期间外部index／HEAD／hook／worktree／attributes变更。真实子进程timeout/cancel/EOF回收且真实index不被发布；token owner/TTL/128上限、跨host revision、一次性消费及UI未知结果／迟到结果不重放均有回归。G1生产fixture原样抽到共享测试helper，未删行为断言。
 - **真实产品验收**：G2a首轮 **1 passed（1.7m）**；加入stage后真实diff正文断言，再与G1双仓只读专项最终复验 **2 passed（3.5m）**。普通仓stage→HEAD/index diff→unstage、untracked往返、rename双路径取消、外部index变化拒绝且外部index SHA不变、hooks/signing/已有锁拒绝并保留锁内容、unborn stage/unstage保留另一条暂存blob；独立原生Git/index/blob事实匹配UI，不依赖模型或直接IPC。HEAD不动，工作区SHA与mode/size/inode/mtime/ctime前后一致，本机对照index/文件不变；只操作本次唯一夹具，两项均`CLEANUP_OK`。
 - **证据**：`/tmp/remote-git-g2a-regression-final.log`、`/tmp/remote-git-g2a-typecheck-final.log`、`/tmp/remote-git-g2a-build-main.log`、`/tmp/remote-git-g2a-build-renderer.log`、`/tmp/remote-git-g2a-ui-final.log`、`/tmp/remote-git-g2a-ui-final-artifacts/`（独立oracle附件）。红例`write-red`／`ipc-red`／`view-red`保留；中期测试曾发现外部损坏index先被Git读到导致错误归类、以及helper重复builtin／source size不符，修代码与去重复注释，不降低门禁。UI两轮均通过；DSH既存报错不被本轮修复。`/tmp`非长期保留。
@@ -259,6 +261,17 @@ smoke5 用完整清单（116→124 个 kind、列合计从 263→271 与真实 F
 **体积上限**：当前 inline source 64,257 字符，距 64 KiB 审阅阈值仅剩 **1,279 字符**，commit 路径塞不进去。建议把**审阅阈值**提到 80 KiB，同时继续强制真正约束审阅面的不变量（单行、可打印 ASCII、只用四个 builtin、SHA-256 钉在代码与测试、每个 method 的契约测试）。若坚持 64 KiB，替代路径是把 read／write 程序拆成两个嵌入文件——更大的重构，会动 G1／G2a 的 helper 形状。
 
 **需确认的 5 点**：① 机制用 `write-tree`＋`commit-tree`＋`update-ref` CAS（而不是 `git commit`，后者给不出 expected-HEAD CAS）；② 消息逐字发送、不剥 `#` 注释；③ 身份仓库本地优先、缺失时只读探测全局，绝不写配置；④ ref 移动成功后再发布 index，发布失败报未确认、不回滚；⑤ 审阅阈值 64 KiB → 80 KiB。
+
+### 5.9.1 G2b 实施结果（2026-10-16，Linux 开发态）
+
+- **交付**：helper **1.9.0**，冻结 SHA-256 `9ed9ccc5837bf92c476a74967205f310b1ce92bb30a95e0a43fb034ca2159145`，正文 75,262 字符、单行可打印 ASCII、仍只用四个 builtin。新增可协商 `git.commit`：`params {message, expectedRevision}`、`result {applied, head, tree}`。审阅阈值按计划从 64 KiB 提到 **80 KiB**（唯一改动是阈值数字；单行／ASCII／四 builtin／双处 hash 钉住／每 method 契约测试这些真正约束审阅面的不变量全部保留，理由写在该测试的注释里）。
+- **机制**：官方 `.git/index.lock` 排他 → 私有 scratch 复制已验证 index → `git write-tree` → `git commit-tree <tree> [-p <expectedHead>]`（消息经 `-F <scratch>/message` **逐字**送入；实测不执行 hook、不签名）→ 自检父链（必须是确认 HEAD 的唯一子提交）→ `git update-ref -m "commit: <首行>" <ref> <new> <old>` **原生 CAS**（unborn 用零 OID，detached 直接更新 `HEAD`）→ 回读 HEAD 后才返回。**不发布任何 index 字节**：用户确认的 index 本来就描述即将成为 HEAD 的 tree，真机与 helper 测试都断言真实 `.git/index` 的 SHA+inode+mtimeNs 未变。
+- **门禁与稳定码**：有效 hooks／`hooksPath`／clean/process filter／签名要求／进行中操作（merge、cherry-pick、revert、rebase、sequencer、bisect）／非 stage-0 index ⇒ `GIT_WRITE_UNSUPPORTED`（实现里 `commit-tree` 不跑 hook，所以有 hook 时必须拒绝，绝不静默跳过）；另有 `GIT_COMMIT_NOTHING_STAGED`、`GIT_COMMIT_MESSAGE_EMPTY`、`GIT_COMMIT_IDENTITY_REQUIRED`、`GIT_COMMIT_HEAD_CHANGED`、`GIT_INDEX_LOCKED`、`GIT_RESOURCE_CHANGED`。身份只读仓库配置链（本地优先、全局兜底），永不写 Git 配置。
+- **结果语义**：ref 已移动但回读失败或回复丢失 ⇒ `GIT_WRITE_RESULT_UNCONFIRMED`，不回滚、不重试、不 reset；CAS 拒绝时不产生提交（`commit-tree` 可能已写入的对象会变成未引用对象，不自动 GC）。`update-ref` 因锁失败而 HEAD 未变时按 `GIT_WRITE_UNSUPPORTED` 如实回报，不冒充“HEAD 变了”。
+- **授权模型**：`RemoteGitWriteExpectation` 增 `kind: "index" | "commit"`，token 按 kind 绑定——同一 sender+project 的两种 grant 可同时存在，刷新只替换同类，跨类使用报 `GIT_RESULT_INVALID` 且不烧 token；`status` 新增 `commitToken`（renderer 仍只见 opaque token）。
+- **验证**：helper 级真实子进程 + 原生 Git **13/13**（正常提交的父链/tree/消息逐字含 `#` 行/reflog/真实 index 未变/无残留；unborn 根提交；nothing-staged；消息与参数边界；身份三态；hooks＋`hooksPath`＋签名拒绝且零执行；in-progress；外部 index lock 保留且可重试；stale revision；外部移 HEAD；ref 锁；timeout 零副作用）。Git 面回归 **269/269**、typecheck、Biome、e2e strict 自诊断 0。真实 Electron＋SSH：G1＋G2a/G2b **2 passed（2.7m）**、两项 `CLEANUP_OK`，真机核对 HEAD 移动／父提交／`%B` 逐字（含 `#` 行与西里尔文）／reflog／`diff-index` 与 HEAD 一致／无锁与 scratch，并在 nothing-staged、hook（零执行）、签名三类拒绝后断言 HEAD 不变、其余文件 metadata 与 tracked.txt 内容/身份 witness 一致。
+- **偏离计划之处**：计划里的 `commit.ready` 发现字段**没有实现**——状态读取不再多跑一遍门禁扫描（与 stage/unstage 相同的既有模型：能力＋grant 决定控件可用，门禁拒绝在尝试后如实报码）；界面因此可能出现“按钮可用但点击被拒绝”，文案与 stage 一致。未支持 amend／merge／rebase／cherry-pick／`--allow-empty`／`-a`／签名／模型生成提交信息／push/fetch。Windows/macOS、多窗口与长稳、打包/dev 集成、独立安全审查仍未验收——本批**不是** Remote v1 收口。
+- **证据**：`/tmp/remote-git-g2b-ui-final-artifacts/`（真机 G1＋G2a/G2b 的 trace/oracle 附件）、`/tmp/g2b-ui-final4.log`（2 passed）、`/tmp/g2b-regression-final.log`（269 项）、`/tmp/g2b-typecheck-final.log`；实现期红例与中间失败：`/tmp/g2b-commit-red.log`（METHOD_NOT_FOUND→能力未接线）、`/tmp/g2b-commit-4.log`（稳定码被折叠成 IO_ERROR）、`/tmp/g2b-commit-5.log`（scratch 未清理）、`/tmp/g2b-ui-final{,1,2,3}.log`（抽屉已开、工作区 witness 与自身改写冲突）。`/tmp` 不承诺长期保留。
 
 ## 6. 完整路线的剩余门禁
 

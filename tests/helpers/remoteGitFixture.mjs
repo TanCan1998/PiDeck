@@ -49,8 +49,11 @@ function fixture(t, initialize = true, helperEnv = {}, rootName = "project") {
 	});
 	child.on("error", failPending);
 	child.on("exit", () => failPending(new Error("helper exited before response")));
-	// Drain diagnostics without exposing paths or content in a failure message.
-	child.stderr.on("data", () => undefined);
+	// Drain diagnostics without exposing paths or content in a failure message; an explicit opt-in forwards
+	// them, because a stable code alone is often not enough to tell a helper bug from a fixture mistake.
+	child.stderr.on("data", (chunk) => {
+		if (process.env.PIDECK_TEST_HELPER_STDERR === "1") process.stderr.write("[helper] " + String(chunk));
+	});
 	t.after(() => {
 		failPending(new Error("fixture closed"));
 		lines.close();

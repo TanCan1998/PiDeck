@@ -653,7 +653,7 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 		}
 	});
 
-	test("远端 Git G2a：精确暂存取消 → 外部index拒绝 → hooks签名锁守卫 → unborn与工作区不变", async ({ remoteWindow, remoteUserDataRoot }, testInfo) => {
+	test("远端 Git G2a/G2b：精确暂存取消 → 提交已确认暂存区 → 拒绝面 → unborn与工作区不变", async ({ remoteWindow, remoteUserDataRoot }, testInfo) => {
 		test.setTimeout(660_000);
 		const creds = credentials;
 		if (!creds) {

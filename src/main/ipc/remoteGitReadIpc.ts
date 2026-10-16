@@ -1,9 +1,10 @@
 import { ipcMain, type IpcMainInvokeEvent } from "electron";
 import { ipcChannels } from "../../shared/ipc";
-import type { GitIndexMutationResult, GitReadSnapshotResult, GitResourceGroups, GitWorkspaceFileDiff } from "../../shared/types/git";
+import type { GitCommitResult, GitIndexMutationResult, GitReadSnapshotResult, GitResourceGroups, GitWorkspaceFileDiff } from "../../shared/types/git";
 import type { ProjectFileTarget } from "../../shared/types/project";
 import { createRemoteGitService, remoteGitFailureCode, validateRemoteGitPath, type RemoteGitLocator } from "../git/RemoteGitService";
 import { createRemoteGitMutationTokens } from "../git/RemoteGitMutationTokens";
+import { REMOTE_GIT_COMMIT_MESSAGE_MAX_BYTES } from "../remote/RemoteHelperContract";
 import type { RemoteHostConnectionService } from "../remote/RemoteHostConnectionService";
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -74,10 +75,11 @@ export function registerRemoteGitReadIpc(input: { enabled: boolean; locator(proj
 	ipcMain.handle(ipcChannels.gitRemoteSnapshot, async (event, projectId: unknown): Promise<GitReadSnapshotResult> => {
 		try {
 			tokens.revoke(event.sender.id, typeof projectId === "string" ? projectId : "");
-			const { writeExpectation, ...snapshot } = await read(event, projectId, undefined, (id, signal) => git.status(id, signal));
-			if (writeExpectation && typeof projectId === "string") {
-				watchSender(event.sender);
-				snapshot.mutationToken = tokens.issue(event.sender.id, projectId, writeExpectation);
+			const { writeExpectation, commitExpectation, ...snapshot } = await read(event, projectId, undefined, (id, signal) => git.status(id, signal));
+			if (typeof projectId === "string") {
+				if (writeExpectation) snapshot.mutationToken = tokens.issue(event.sender.id, projectId, writeExpectation);
+				if (commitExpectation) snapshot.commitToken = tokens.issue(event.sender.id, projectId, commitExpectation);
+				if (snapshot.mutationToken !== undefined || snapshot.commitToken !== undefined) watchSender(event.sender);
 			}
 			return { ok: true, snapshot };
 		} catch (error) {
@@ -95,11 +97,21 @@ export function registerRemoteGitReadIpc(input: { enabled: boolean; locator(proj
 				undefined,
 				(id, signal) => {
 					const file = fileTarget(id, value);
-					const expected = tokens.take(event.sender.id, id, token);
+					const expected = tokens.take(event.sender.id, id, "index", token);
 					return git.mutate(id, operation, group, file, expected, signal);
 				},
 				true,
 			);
+			return { ok: true };
+		} catch (error) {
+			return { ok: false, code: remoteGitFailureCode(error) };
+		}
+	});
+	ipcMain.handle(ipcChannels.gitRemoteCommit, async (event, projectId: unknown, message: unknown, token: unknown): Promise<GitCommitResult> => {
+		try {
+			// The message is user input, so it is bounded here before any SSH session is queued for it.
+			if (typeof message !== "string" || message.length === 0 || message.trim().length === 0 || message.includes("\0") || Buffer.byteLength(message, "utf8") > REMOTE_GIT_COMMIT_MESSAGE_MAX_BYTES) throw new Error("GIT_COMMIT_MESSAGE_EMPTY");
+			await read(event, projectId, undefined, (id, signal) => git.commit(id, message, tokens.take(event.sender.id, id, "commit", token), signal), true);
 			return { ok: true };
 		} catch (error) {
 			return { ok: false, code: remoteGitFailureCode(error) };

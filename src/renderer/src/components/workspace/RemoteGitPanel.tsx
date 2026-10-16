@@ -1,10 +1,11 @@
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
 import type { RemoteProject } from "../../../../shared/types/project";
 import type { GitResourceGroupType } from "../../../../shared/types/git";
 import { useRemoteGitView } from "../../hooks/useRemoteGitView";
 import { t } from "../../i18n";
 import { Button } from "../ui-shadcn/button";
+import { Textarea } from "../ui-shadcn/textarea";
 import { FileTree } from "../app/git/GitResourceTree";
 import { RemoteGitTrustGate } from "./RemoteGitTrustGate";
 
@@ -18,6 +19,10 @@ const refuseFallbackRead = async (): Promise<string> => {
 /** Only stable categories are rendered; invoke wrappers, remote paths and raw stderr are never user-facing. */
 export function remoteGitErrorMessage(code: string): string {
 	if (code === "GIT_INDEX_LOCKED") return t("remoteGit.indexLocked");
+	if (code === "GIT_COMMIT_NOTHING_STAGED") return t("remoteGit.nothingStaged");
+	if (code === "GIT_COMMIT_MESSAGE_EMPTY") return t("remoteGit.messageEmpty");
+	if (code === "GIT_COMMIT_IDENTITY_REQUIRED") return t("remoteGit.identityRequired");
+	if (code === "GIT_COMMIT_HEAD_CHANGED") return t("remoteGit.headChanged");
 	if (code === "GIT_WRITE_UNSUPPORTED") return t("remoteGit.writeUnsupported");
 	if (code === "GIT_WRITE_RESULT_UNCONFIRMED") return t("remoteGit.writeUnknown");
 	if (code === "GIT_WRITE_SNAPSHOT_EXPIRED") return t("remoteGit.writeExpired");
@@ -36,10 +41,19 @@ export function remoteGitErrorMessage(code: string): string {
 
 /** Reuses SCM rows and the existing diff renderer without native graph/watch/write/background-sync APIs. */
 export function RemoteGitPanel({ project }: { project: RemoteProject }) {
-	const { state, refresh, openDiff, closeDiff, mutate } = useRemoteGitView(project);
+	const { state, refresh, openDiff, closeDiff, mutate, commit } = useRemoteGitView(project);
 	const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
+	const [message, setMessage] = useState("");
+	const confirmedCommits = state.confirmedCommits ?? 0;
+	// A confirmed commit clears the box; a refusal or an unknown result keeps the text so nothing is retyped.
+	useEffect(() => {
+		if (confirmedCommits > 0) setMessage("");
+	}, [confirmedCommits]);
 	const snapshot = state.snapshot;
 	const viewingDiff = state.diffLoading || state.diff !== undefined || state.diffErrorCode !== undefined;
+	const busy = state.loading || state.diffLoading || state.mutating;
+	const messageBytes = new TextEncoder().encode(message).length;
+	const canCommit = snapshot?.commitToken !== undefined && !busy && message.trim().length > 0 && messageBytes <= 4096;
 	return (
 		<div data-testid="remote-git-panel" data-project-id={project.id} className="flex min-h-0 flex-1 flex-col overflow-hidden text-sm text-text-primary">
 			<div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2">
@@ -54,10 +68,22 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 				</Button>
 			</div>
 			<p className="shrink-0 border-b border-border px-3 py-2 text-xs text-text-secondary">{t(snapshot?.mutationToken ? "remoteGit.managedIndex" : "remoteGit.readOnly")}</p>
+			{snapshot && !viewingDiff ? (
+				<div className="shrink-0 space-y-2 border-b border-border px-3 py-2">
+					<Textarea data-testid="remote-git-commit-message" aria-label={t("remoteGit.commitMessage")} placeholder={t("remoteGit.commitPlaceholder")} value={message} rows={2} disabled={busy || snapshot.commitToken === undefined} onChange={(event) => setMessage(event.target.value)} />
+					<div className="flex items-center gap-2">
+						<Button type="button" size="sm" disabled={!canCommit} onClick={() => commit(message)}>
+							{t("remoteGit.commitAction")}
+						</Button>
+						{messageBytes > 0 ? <span className="text-xs text-text-secondary">{messageBytes}/4096</span> : null}
+					</div>
+					<p className="text-xs text-text-secondary">{t("remoteGit.commitHint")}</p>
+				</div>
+			) : null}
 			{state.loading || state.diffLoading || state.mutating ? (
 				<div role="status" className="flex items-center gap-2 p-3 text-text-secondary">
 					<LoaderCircle size={14} className="animate-spin" />
-					{t(state.mutating ? "remoteGit.writing" : "remoteGit.loading")}
+					{t(state.mutating ? (state.mutatingKind === "commit" ? "remoteGit.committing" : "remoteGit.writing") : "remoteGit.loading")}
 				</div>
 			) : null}
 			{state.errorCode ? (

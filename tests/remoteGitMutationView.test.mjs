@@ -4,8 +4,8 @@ import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 const { createRemoteGitViewController } = loadTsCommonJs("src/renderer/src/utils/remoteGitViewState.ts");
 const target = { projectId: "project", relativePath: "one.txt" };
 const resource = { target, path: "one.txt", displayPath: "one.txt", status: 5, letter: "M" };
-const snapshot = { head: "a".repeat(40), branch: "main", mutationToken: "b".repeat(32), groups: { merge: [], index: [], workingTree: [resource], untracked: [] } };
-function fixture(mutation, read = () => ({ ok: true, snapshot })) {
+const snapshot = { head: "a".repeat(40), branch: "main", mutationToken: "b".repeat(32), commitToken: "c".repeat(32), groups: { merge: [], index: [], workingTree: [resource], untracked: [] } };
+function fixture(mutation, read = () => ({ ok: true, snapshot }), commitResult = () => ({ ok: true })) {
 	const states = [],
 		calls = [];
 	const controller = createRemoteGitViewController(
@@ -21,6 +21,10 @@ function fixture(mutation, read = () => ({ ok: true, snapshot })) {
 			mutateRemoteIndex: async (...args) => {
 				calls.push(args);
 				return mutation();
+			},
+			commitRemote: async (...args) => {
+				calls.push(["commit", ...args]);
+				return commitResult();
 			},
 		},
 		(state) => states.push(state),
@@ -128,4 +132,76 @@ test("disposing an idle remote index view revokes its issued grant", async () =>
 	await f.controller.refresh();
 	f.controller.dispose();
 	assert.deepEqual(f.calls, ["read", "cancel"]);
+});
+
+test("an explicit commit sends the message verbatim, counts one confirmation and only then re-reads", async () => {
+	const f = fixture();
+	await f.controller.refresh();
+	await f.controller.commit("subject\n\nbody\n");
+	assert.deepEqual(
+		f.calls.filter((call) => Array.isArray(call)),
+		[["commit", "project", "subject\n\nbody\n", "c".repeat(32)]],
+	);
+	assert.equal(f.current().confirmedCommits, 1);
+	assert.ok(f.current().mutating !== true, "the in-flight flag must be released once the commit is confirmed");
+	assert.equal(f.current().errorCode, undefined);
+	assert.equal(f.calls.filter((call) => call === "read").length, 2, "facts come from one fresh read after the confirmation");
+});
+
+test("a refused commit drops the facts, reports its own code and is not retried", async () => {
+	const codes = ["GIT_COMMIT_IDENTITY_REQUIRED", "GIT_COMMIT_NOTHING_STAGED", "GIT_COMMIT_HEAD_CHANGED"];
+	for (const code of codes) {
+		const f = fixture(undefined, undefined, () => ({ ok: false, code }));
+		await f.controller.refresh();
+		await f.controller.commit("subject\n");
+		assert.equal(f.current().errorCode, code);
+		assert.equal(f.current().snapshot, undefined, "a refusal must not leave stale repository facts");
+		assert.equal(f.calls.filter((call) => Array.isArray(call)).length, 1, code + ": never replayed");
+	}
+});
+
+test("an uncertain commit keeps the warning across reconnects and is cleared only by a fresh read", async () => {
+	const f = fixture(undefined, undefined, () => ({ ok: false, code: "GIT_WRITE_RESULT_UNCONFIRMED" }));
+	await f.controller.refresh();
+	await f.controller.commit("subject\n");
+	assert.equal(f.current().errorCode, "GIT_WRITE_RESULT_UNCONFIRMED");
+	for (let transition = 0; transition < 3; transition++) {
+		f.controller.invalidateConnection();
+		assert.equal(f.current().errorCode, "GIT_WRITE_RESULT_UNCONFIRMED");
+		assert.equal(f.current().snapshot, undefined);
+	}
+	await f.controller.commit("subject\n");
+	assert.equal(f.calls.filter((call) => Array.isArray(call)).length, 1, "an uncertain commit is never replayed automatically");
+	await f.controller.refresh();
+	assert.equal(f.current().errorCode, undefined);
+	assert.equal(f.current().snapshot.commitToken, snapshot.commitToken);
+});
+
+test("a commit whose reply is lost becomes unknown instead of a failure", async () => {
+	const f = fixture(undefined, undefined, () => {
+		throw new Error("Error invoking remote method 'git:remote-commit'");
+	});
+	await f.controller.refresh();
+	await f.controller.commit("subject\n");
+	assert.equal(f.current().errorCode, "GIT_WRITE_RESULT_UNCONFIRMED");
+	assert.equal(f.current().snapshot, undefined);
+});
+
+test("an empty message or a missing grant never reaches the commit API", async () => {
+	const f = fixture();
+	await f.controller.refresh();
+	await f.controller.commit("   \n");
+	await f.controller.commit("");
+	assert.deepEqual(
+		f.calls.filter((call) => Array.isArray(call)),
+		[],
+	);
+	const without = fixture(undefined, () => ({ ok: true, snapshot: { ...snapshot, commitToken: undefined } }));
+	await without.controller.refresh();
+	await without.controller.commit("subject\n");
+	assert.deepEqual(
+		without.calls.filter((call) => Array.isArray(call)),
+		[],
+		"a helper without the capability has no commit grant",
+	);
 });

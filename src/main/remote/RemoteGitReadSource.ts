@@ -5,7 +5,7 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`function createGitReadProgram(r
 	const MAX_STATUS = 1048576, MAX_RESOURCES = 4096, MAX_TEXT = 262144, MAX_STDERR = 65536;
 	const MAX_INDEX = 16777216, MAX_METADATA = 20000, MAX_DEPTH = 32, MAX_PATH = 4096;
 	const scopes = new Set();
-	const stable = new Set(["PATH_OUTSIDE_ROOT", "PATH_NOT_FOUND", "NOT_A_FILE", "PERMISSION_DENIED", "IO_ERROR", "RESULT_TOO_LARGE", "REQUEST_TIMEOUT", "REQUEST_CANCELLED", "REMOTE_CONNECTION_LOST", "GIT_NOT_FOUND", "GIT_VERSION_UNSUPPORTED", "GIT_NOT_REPOSITORY", "GIT_UNSUPPORTED_REPOSITORY", "GIT_PLATFORM_UNSUPPORTED", "GIT_CONFIG_UNSUPPORTED", "GIT_COMMAND_FAILED", "GIT_RESULT_INVALID", "GIT_RESOURCE_CHANGED", "GIT_NOT_TEXT", "GIT_INDEX_LOCKED", "GIT_WRITE_UNSUPPORTED", "GIT_WRITE_RESULT_UNCONFIRMED"]);
+	const stable = new Set(["PATH_OUTSIDE_ROOT", "PATH_NOT_FOUND", "NOT_A_FILE", "PERMISSION_DENIED", "IO_ERROR", "RESULT_TOO_LARGE", "REQUEST_TIMEOUT", "REQUEST_CANCELLED", "REMOTE_CONNECTION_LOST", "GIT_NOT_FOUND", "GIT_VERSION_UNSUPPORTED", "GIT_NOT_REPOSITORY", "GIT_UNSUPPORTED_REPOSITORY", "GIT_PLATFORM_UNSUPPORTED", "GIT_CONFIG_UNSUPPORTED", "GIT_COMMAND_FAILED", "GIT_RESULT_INVALID", "GIT_RESOURCE_CHANGED", "GIT_NOT_TEXT", "GIT_INDEX_LOCKED", "GIT_WRITE_UNSUPPORTED", "GIT_WRITE_RESULT_UNCONFIRMED", "GIT_COMMIT_NOTHING_STAGED", "GIT_COMMIT_MESSAGE_EMPTY", "GIT_COMMIT_IDENTITY_REQUIRED", "GIT_COMMIT_HEAD_CHANGED"]);
 	const control = /[\x00-\x1f\x7f]/;
 	function failure(code) { return new Error(code); }
 	function code(error) {
@@ -212,6 +212,19 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`function createGitReadProgram(r
 		return { originalContent: originalContent, modifiedContent: modifiedContent };
 	}
 	const writer = createGitWriteProgram(fs, { crypto: crypto, failure: failure, relative: relative, metadata: metadata, readFile: readFile, text: text, execute: execute, rawStatus: rawStatus, snapshot: snapshot, head: head, belongs: belongs, validateConfiguration: validateConfiguration });
+	/* Commit identity is read from the repository's own config chain (local wins over global) and never written. */
+	async function configValue(ctx, key) {
+		const result = await execute(ctx, ["config", "--get", key], 1024, [1]);
+		if (result.exitCode !== 0) return null;
+		const raw = text(result.bytes);
+		return raw.endsWith("\n") ? raw.slice(0, -1) : raw;
+	}
+	async function commitIdentity(ctx) {
+		const name = await configValue(ctx, "user.name"), email = await configValue(ctx, "user.email");
+		for (const value of [name, email]) if (value === null || value.length === 0 || value.length > 320 || control.test(value) || value.indexOf("<") >= 0 || value.indexOf(">") >= 0) throw failure("GIT_COMMIT_IDENTITY_REQUIRED");
+		return { name: name, email: email };
+	}
+	const committer = createGitCommitProgram(fs, { crypto: crypto, failure: failure, text: text, readFile: readFile, execute: execute, rawStatus: rawStatus, snapshot: snapshot, head: head }, { gates: writer.gates, entries: writer.entries, reaped: writer.reaped, fingerprint: writer.fingerprint }, commitIdentity);
 	async function run(ctx, params) {
 		ctx.check();
 		if (process.platform !== "linux") throw failure("GIT_PLATFORM_UNSUPPORTED");
@@ -231,6 +244,7 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`function createGitReadProgram(r
 		ctx.executable = executable(); ctx.env = environment();
 		await validateConfiguration(ctx);
 		const first = snapshot(ctx), firstHead = await head(ctx);
+		if (params.method === "git.commit") return committer.run(ctx, params, first, firstHead);
 		if (params.method === "git.stage" || params.method === "git.unstage") return writer.run(ctx, params, first, firstHead);
 		const status = await rawStatus(ctx);
 		const result = params.method === "git.status" ? { status: status.bytes.toString("base64"), head: firstHead.head, branch: firstHead.branch, revision: writer.fingerprint(ctx, first, firstHead, status) } : await readDiff(ctx, params, status, firstHead);
@@ -245,6 +259,10 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`function createGitReadProgram(r
 		if (params === null || typeof params !== "object" || Array.isArray(params)) throw failure("GIT_RESULT_INVALID");
 		const keys = Object.keys(params);
 		if (method === "git.status") { if (keys.length) throw failure("GIT_RESULT_INVALID"); return { method: method }; }
+		if (method === "git.commit") {
+			if (keys.length !== 2 || !keys.includes("message") || !keys.includes("expectedRevision") || typeof params.message !== "string" || params.message.indexOf("\u0000") >= 0 || Buffer.byteLength(params.message, "utf8") > 4096 || typeof params.expectedRevision !== "string" || !/^[0-9a-f]{64}$/.test(params.expectedRevision)) throw failure("GIT_RESULT_INVALID");
+			return { method: method, message: params.message, expectedRevision: params.expectedRevision };
+		}
 		if (method === "git.stage" || method === "git.unstage") {
 			if (keys.length !== 3 || !keys.includes("path") || !keys.includes("group") || !keys.includes("expectedRevision") || typeof params.expectedRevision !== "string" || !/^[0-9a-f]{64}$/.test(params.expectedRevision) || !(method === "git.unstage" ? params.group === "index" : ["workingTree", "untracked"].includes(params.group))) throw failure("GIT_RESULT_INVALID");
 			return { method: method, path: relative(params.path), group: params.group, expectedRevision: params.expectedRevision };

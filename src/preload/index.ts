@@ -789,6 +789,8 @@ const api = {
 		cancelRemoteReads: (projectId: string) => ipcRenderer.invoke(ipcChannels.gitRemoteCancelReads, projectId) as Promise<void>,
 		mutateRemoteIndex: (projectId: string, operation: "stage" | "unstage", group: import("../shared/types").GitResourceGroupType, target: ProjectFileTarget, token: string) =>
 			ipcRenderer.invoke(ipcChannels.gitRemoteMutateIndex, projectId, operation, group, target, token) as Promise<import("../shared/types").GitIndexMutationResult>,
+		// 只提交已确认的暂存区；消息逐字发送，不在渲染层做任何 Git 语义加工
+		commitRemote: (projectId: string, message: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteCommit, projectId, message, token) as Promise<import("../shared/types").GitCommitResult>,
 		remoteSnapshot: (projectId: string) => ipcRenderer.invoke(ipcChannels.gitRemoteSnapshot, projectId) as Promise<import("../shared/types").GitReadSnapshotResult>,
 		status: (projectId: string, repoPath?: ProjectFileTarget) => ipcRenderer.invoke(ipcChannels.gitStatus, projectId, repoPath) as Promise<import("../shared/types").GitResourceGroups>,
 		// Git Changes 中单个文件的两侧快照（按点击惰性读取）

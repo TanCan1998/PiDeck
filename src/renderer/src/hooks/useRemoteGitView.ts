@@ -32,6 +32,9 @@ export function useRemoteGitView(project: RemoteProject) {
 		mutate: (operation: "stage" | "unstage", group: Parameters<NonNullable<typeof controller.current>["mutate"]>[1], target: Parameters<NonNullable<typeof controller.current>["mutate"]>[2]) => {
 			void controller.current?.mutate(operation, group, target);
 		},
+		commit: (message: string) => {
+			void controller.current?.commit(message);
+		},
 		closeDiff: () => controller.current?.closeDiff(),
 	};
 }

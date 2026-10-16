@@ -12,7 +12,9 @@ export function createRemoteGitMutationTokens(now = Date.now) {
 	return {
 		revoke,
 		issue(senderId: number, projectId: string, expected: RemoteGitWriteExpectation) {
-			revoke(senderId, projectId);
+			// A refresh replaces the grant of the same action kind only: one snapshot hands out both an index
+			// grant and a commit grant, and issuing the second must not revoke the first.
+			for (const [token, entry] of entries) if (entry.senderId === senderId && entry.projectId === projectId && entry.expected.kind === expected.kind) entries.delete(token);
 			for (const [token, entry] of entries) if (entry.expires <= now()) entries.delete(token);
 			while (entries.size >= 128) {
 				const oldest = entries.keys().next().value;
@@ -23,9 +25,11 @@ export function createRemoteGitMutationTokens(now = Date.now) {
 			return token;
 		},
 		/** Consume synchronously before the caller's first await; another window cannot burn the owner's token. */
-		take(senderId: number, projectId: string, token: unknown): RemoteGitWriteExpectation {
+		take(senderId: number, projectId: string, kind: "index" | "commit", token: unknown): RemoteGitWriteExpectation {
 			const entry = typeof token === "string" && /^[0-9a-f]{32}$/.test(token) ? entries.get(token) : undefined;
 			if (!entry || entry.senderId !== senderId || entry.projectId !== projectId) throw new Error("GIT_WRITE_SNAPSHOT_EXPIRED");
+			// A token for the other action kind is a caller bug: refuse without burning the token the user still owns.
+			if (entry.expected.kind !== kind) throw new Error("GIT_RESULT_INVALID");
 			entries.delete(String(token));
 			if (entry.expires <= now()) throw new Error("GIT_WRITE_SNAPSHOT_EXPIRED");
 			return entry.expected;

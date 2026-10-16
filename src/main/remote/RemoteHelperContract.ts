@@ -81,6 +81,10 @@ export const REMOTE_HELPER_ERROR_CODES = [
 	"GIT_INDEX_LOCKED",
 	"GIT_WRITE_UNSUPPORTED",
 	"GIT_WRITE_RESULT_UNCONFIRMED",
+	"GIT_COMMIT_NOTHING_STAGED",
+	"GIT_COMMIT_MESSAGE_EMPTY",
+	"GIT_COMMIT_IDENTITY_REQUIRED",
+	"GIT_COMMIT_HEAD_CHANGED",
 ] as const;
 export type RemoteHelperErrorCode = (typeof REMOTE_HELPER_ERROR_CODES)[number];
 
@@ -114,10 +118,20 @@ export type RemoteGitStatusResult = { status: string; head: string | null; branc
 /** Managed single-resource index mutations. The expectation is main-owned, never renderer authority. */
 export type RemoteGitMutationParams = { path: string; group: "index" | "workingTree" | "untracked"; expectedRevision: string };
 export type RemoteGitMutationResult = { applied: true };
+/**
+ * Managed commit: the tree comes from the verified index, the ref move is a native compare-and-swap.
+ * `message` is sent verbatim (no Git comment stripping) and bounded by REMOTE_GIT_COMMIT_MESSAGE_MAX_BYTES.
+ * `expectedRevision` is the same main-owned fingerprint the index mutations use, so the commit can only
+ * ever contain what the user confirmed.
+ */
+export type RemoteGitCommitParams = { message: string; expectedRevision: string };
+/** `head`/`tree` are the committed objects; both are read back from the repository after the CAS. */
+export type RemoteGitCommitResult = { applied: true; head: string; tree: string };
+export const REMOTE_GIT_COMMIT_MESSAGE_MAX_BYTES = 4096;
 export type RemoteGitWorkspaceDiffParams = { group: "merge" | "index" | "workingTree" | "untracked"; path: string };
 export type RemoteGitWorkspaceDiffResult = { originalContent: string; modifiedContent: string };
 
-export const REMOTE_HELPER_CAPABILITIES = ["echo", "fs.stat", "fs.list", "fs.read", "fs.searchNames", "git.status", "git.workspaceDiff", "git.stage", "git.unstage"] as const;
+export const REMOTE_HELPER_CAPABILITIES = ["echo", "fs.stat", "fs.list", "fs.read", "fs.searchNames", "git.status", "git.workspaceDiff", "git.stage", "git.unstage", "git.commit"] as const;
 export type RemoteHelperCapability = (typeof REMOTE_HELPER_CAPABILITIES)[number];
 /**
  * Ceiling for one requested relative path. It is applied to the raw string before any filesystem access,
