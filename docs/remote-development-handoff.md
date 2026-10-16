@@ -649,3 +649,10 @@ P4.5b 的单会话归档/恢复已完成真实 Electron＋SSH 验证，不能据
 - **自己的旧夹具**：主机上残留 `~/.pideck-e2e-e2emv7goca4`（10-14 旧 run，无 `.git`／锁／scratch）。按精确 runId 形状＋仅本套件四个 fixture 文件＋无特殊条目做归属校验后删除，输出 `OLD_FIXTURE_CLEANED`。
 - **不能外推**：Chromium 共享内存的确切触发点仍未归因；Windows/macOS、真实双窗口／双实例、网络黑洞／高延迟、打包/dev 集成、独立安全审查与 commit 门禁均未完成。单次 hour 绿灯不是长稳全景，也不是 Remote v1 收口。
 - **证据**：`/tmp/remote-git-g6c-smoke1.log`（harness 超时失败）、`/tmp/remote-git-g6c-smoke2…smoke5.log`（含 fdKinds 归因）、`/tmp/remote-git-g6c-hour1.log` 与 `/tmp/remote-git-g6c-hour-final-artifacts/`（最终 hour 报告＋163 样本）、`/tmp/remote-git-g6c-smoke5-artifacts/`（完整 FD 清单）、`/tmp/g6c-transport-probe.sh` 及运行输出、`/tmp/remote-git-g6c-unit*.log`、`/tmp/remote-git-g6c-steady-red.log`。细则见 [Git 计划 §5.8](remote-git-plan.md)。
+
+## 下一批：G2b commit（仅计划，待确认）
+
+- 实施计划已写在 [Git 计划 §5.9](remote-git-plan.md)：单次普通提交，机制为 `write-tree`（私有已核验 index）→ `commit-tree`（消息走 stdin、不执行 hook、不签名）→ `update-ref <ref> <new> <expectedHead>` 真 CAS → ref 移动成功后才发布 index。
+- 拒绝面：有效 hooks／`hooksPath`／filter／签名／进行中操作／非 stage-0 index ⇒ `GIT_WRITE_UNSUPPORTED`（因为 `commit-tree` 不跑 hook，所以有 hook 必须拒绝，不静默跳过）；`GIT_COMMIT_NOTHING_STAGED`／`GIT_COMMIT_MESSAGE_EMPTY`／`GIT_COMMIT_IDENTITY_REQUIRED`／`GIT_COMMIT_HEAD_CHANGED`／`GIT_INDEX_LOCKED`／`GIT_RESOURCE_CHANGED`。
+- 结果语义：ref 已移动但 index 发布失败或回复丢失 ⇒ `GIT_WRITE_RESULT_UNCONFIRMED`，不回滚、不重试；**CAS 与 index 发布不是同一事务**，非协作 writer 在窗口内移 HEAD 时 CAS 拒绝且我们不产生提交。
+- 机制事实来自本机一次性原生 Git 实验（`/tmp/g6b-commit-probe.sh` → `/tmp/remote-git-g2b-write-shape-probe.log`），不是产品验收。**尚未写任何实现代码**；需要确认的 5 点（机制、消息逐字、身份来源、发布顺序、审阅阈值 64 KiB→80 KiB）见 §5.9 末段。
