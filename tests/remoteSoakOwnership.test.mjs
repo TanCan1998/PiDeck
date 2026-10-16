@@ -67,3 +67,15 @@ test("resource permission errors are not converted to a fake zero/absent process
 	assert.throws(f.signal, /denied/);
 	assert.deepEqual(f.kills, []);
 });
+
+test("the fd-kind inventory reads a real /proc and buckets Chromium shared memory instead of listing it per segment", () => {
+	const { readSoakFdKinds } = loadTsCommonJs("e2e/remote-soak-evidence.ts");
+	const kinds = readSoakFdKinds(process.pid, 200);
+	const total = Object.values(kinds).reduce((sum, count) => sum + count, 0);
+	assert.ok(total > 5, "the test process has open descriptors, saw " + total);
+	for (const [key, count] of Object.entries(kinds)) assert.ok(key.length > 0 && Number.isInteger(count) && count > 0, key);
+	assert.ok(
+		Object.keys(kinds).every((key) => !/\/dev\/shm\/\.org\.chromium\.chromium\./i.test(key)),
+		"chromium shm segments must collapse into one bucket: " + Object.keys(kinds).join(","),
+	);
+});
