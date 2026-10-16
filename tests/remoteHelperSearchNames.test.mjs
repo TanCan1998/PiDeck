@@ -7,6 +7,7 @@ import { join } from "node:path";
 import test, { after } from "node:test";
 import { pathToFileURL } from "node:url";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
+import { materializeRemoteHelperArtifacts } from "./helpers/remoteHelperArtifacts.mjs";
 
 /*
  * Protocol proof for the bounded filename search (fs.searchNames, helper build 1.6.0). Every case below
@@ -98,7 +99,7 @@ function contractTypeFields(typeName) {
 /** The entry the deploy bundle uploads, written once per run so every child starts the reviewed bytes. */
 const ENTRY_DIRECTORY = mkdtempSync(join(tmpdir(), "pideck-search-entry-"));
 const ENTRY_PATH = join(ENTRY_DIRECTORY, REMOTE_HELPER_ENTRY_FILE_NAME);
-writeFileSync(ENTRY_PATH, REMOTE_HELPER_INLINE_SOURCE, "utf8");
+materializeRemoteHelperArtifacts(ENTRY_DIRECTORY);
 after(() => rmSync(ENTRY_DIRECTORY, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
 
 /** A fresh temporary directory that the hook removes; a Windows removal may need the retries. */

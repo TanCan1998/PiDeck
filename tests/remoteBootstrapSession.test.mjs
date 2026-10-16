@@ -7,7 +7,7 @@ import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
 const { runPreparedBootstrap } = loadTsCommonJs("src/main/remote/RemoteBootstrapSession.ts");
 const { frozenHelperBundleManifest } = loadTsCommonJs("src/main/remote/RemoteBootstrapDeployment.ts");
-const { REMOTE_HELPER_ENTRY_FILE_NAME } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
+const { REMOTE_HELPER_ARTIFACTS } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
 const { REMOTE_RUNNER_ENTRY_FILE_NAME } = loadTsCommonJs("src/main/remote/RemoteRunnerEntry.ts");
 const HOST_ID = "b145de8c-6330-45be-8752-f20e8e270150";
 const NONCE = "abc12345678901234567";
@@ -239,7 +239,7 @@ test("a wrong ready nonce refuses upload and stops the bootstrap entry", async (
 	await assert.rejects(runPreparedBootstrap(input), /BOOTSTRAP_READY_INVALID/);
 	assert.equal(starts.length, 1);
 	assert.deepEqual(session.stopped, ["abort"]);
-	assert.deepEqual(JSON.parse(JSON.stringify(manifest.files.map((file) => file.name))), [REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_RUNNER_ENTRY_FILE_NAME], "the fixture uploads the frozen bundle, so the refusal above happened before any of its bytes moved");
+	assert.deepEqual(JSON.parse(JSON.stringify(manifest.files.map((file) => file.name))), [...REMOTE_HELPER_ARTIFACTS.map((artifact) => artifact.name), REMOTE_RUNNER_ENTRY_FILE_NAME].sort(), "the fixture uploads the frozen bundle, so the refusal above happened before any of its bytes moved");
 });
 
 test("a known entry error before ready keeps its stable code without uploading", async (t) => {

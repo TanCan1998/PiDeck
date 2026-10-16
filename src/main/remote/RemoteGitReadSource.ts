@@ -1,5 +1,7 @@
 /**
- * Frozen, self-contained Git read program embedded in helper.mjs; no Git engine or runtime dependency is shipped.
+ * Frozen Git worker, deployed as its own bundle file (git-read.mjs) and imported by helper.mjs; no Git engine or
+ * runtime dependency is shipped. It owns the read batch and drives the write programs, which live in the sibling
+ * module git-write.mjs and are imported here.
  *
  * The comments inside the frozen body are deliberately one-line invariants: the frozen source is the audited
  * artifact and its ceiling is 96 KiB (see tests/remoteHelperEntry.test.mjs). The long-form rationale lives here:
@@ -18,7 +20,7 @@
  *   ceiling, so the directory sitting at the ceiling is never entered;
  * - a read is published only while the identity it was answered from is still on disk (`unchangedRead`).
  */
-export const REMOTE_GIT_READ_SOURCE = String.raw`function createGitReadProgram(root, fs, path) {
+export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,createGitCommitProgram,createGitBranchProgram,createGitDiscardProgram}from"./git-write.mjs";export function createGitReadProgram(root, fs, path) {
 	const cp = process.getBuiltinModule("node:child_process");
 	const crypto = process.getBuiltinModule("node:crypto");
 	const MAX_STATUS = 1048576, MAX_RESOURCES = 4096, MAX_TEXT = 262144, MAX_STDERR = 65536;

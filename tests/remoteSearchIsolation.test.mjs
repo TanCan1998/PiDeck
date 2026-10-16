@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test, { after } from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
+import { materializeRemoteHelperArtifacts } from "./helpers/remoteHelperArtifacts.mjs";
 
 /*
  * F4 independent verification of remote name search (task-10): the frozen helper op (F1) and the
@@ -73,7 +74,7 @@ const COUNTS_DIR = join(BASE, "counts");
 const ENTRY_PATH = join(BASE, "helper.mjs");
 const RUNNER_PATH = join(BASE, "counting-runner.mjs");
 mkdirSync(COUNTS_DIR, { recursive: true });
-writeFileSync(ENTRY_PATH, REMOTE_HELPER_INLINE_SOURCE, "utf8");
+materializeRemoteHelperArtifacts(BASE);
 
 /**
  * The counting seam: wrap the one documented builtin access point, import the frozen body afterwards and

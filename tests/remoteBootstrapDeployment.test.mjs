@@ -7,7 +7,7 @@ import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
 const { buildBundleManifest, observeBundleFiles } = loadTsCommonJs("src/main/remote/RemoteBootstrapUpload.ts");
 const { deployPreparedBundle, deployFrozenHelperBundle, frozenHelperBundleManifest } = loadTsCommonJs("src/main/remote/RemoteBootstrapDeployment.ts");
-const { REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_HELPER_ENTRY_SHA256, REMOTE_HELPER_INLINE_SOURCE } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
+const { REMOTE_HELPER_ARTIFACTS, REMOTE_HELPER_ENTRY_FILE_NAME } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
 const { REMOTE_RUNNER_ENTRY_FILE_NAME, REMOTE_RUNNER_ENTRY_SHA256, REMOTE_RUNNER_INLINE_SOURCE } = loadTsCommonJs("src/main/remote/RemoteRunnerEntry.ts");
 const CONNECTION = { executable: "/usr/bin/scp", destination: "pideck-verified-host", args: ["-o", "BatchMode=yes"], env: { PATH: "/usr/bin" }, openSshVersion: "OpenSSH_9.5p1" };
 const NONCE = "abc12345678901234567";
@@ -73,13 +73,19 @@ test("frozen helper bundle identity is available before the bootstrap ready fram
 	// The bundle carries both frozen entries: the helper the control connection speaks to, and the runner that
 	// supervises one remote pi. It is one content-addressed directory, so the two can never be mixed.
 	const manifest = frozenHelperBundleManifest();
-	assert.equal(manifest.files.length, 2);
-	assert.equal(manifest.files[0].name, REMOTE_HELPER_ENTRY_FILE_NAME);
-	assert.equal(manifest.files[0].sha256, REMOTE_HELPER_ENTRY_SHA256);
-	assert.equal(manifest.files[0].bytes, Buffer.byteLength(REMOTE_HELPER_INLINE_SOURCE, "utf8"));
-	assert.equal(manifest.files[1].name, REMOTE_RUNNER_ENTRY_FILE_NAME);
-	assert.equal(manifest.files[1].sha256, REMOTE_RUNNER_ENTRY_SHA256);
-	assert.equal(manifest.files[1].bytes, Buffer.byteLength(REMOTE_RUNNER_INLINE_SOURCE, "utf8"));
+	// The manifest sorts by name, so the comparison is by identity rather than by position.
+	const byName = new Map(manifest.files.map((file) => [file.name, file]));
+	assert.equal(byName.size, REMOTE_HELPER_ARTIFACTS.length + 1);
+	for (const artifact of REMOTE_HELPER_ARTIFACTS) {
+		const file = byName.get(artifact.name);
+		assert.ok(file, `${artifact.name} must be part of the bundle identity`);
+		assert.equal(file.sha256, artifact.sha256);
+		assert.equal(file.bytes, Buffer.byteLength(artifact.source, "utf8"));
+	}
+	const runner = byName.get(REMOTE_RUNNER_ENTRY_FILE_NAME);
+	assert.ok(runner, "the runner is part of the same bundle identity");
+	assert.equal(runner.sha256, REMOTE_RUNNER_ENTRY_SHA256);
+	assert.equal(runner.bytes, Buffer.byteLength(REMOTE_RUNNER_INLINE_SOURCE, "utf8"));
 });
 
 test("frozen helper deployment transfers the audited entry bytes and clears its temporary files", async () => {
@@ -89,7 +95,7 @@ test("frozen helper deployment transfers the audited entry bytes and clears its 
 	const launcher = {
 		async start(request) {
 			snapshotDirectory = request.invocation.cwd;
-			assert.equal(await readFile(join(snapshotDirectory, REMOTE_HELPER_ENTRY_FILE_NAME), "utf8"), REMOTE_HELPER_INLINE_SOURCE);
+			for (const artifact of REMOTE_HELPER_ARTIFACTS) assert.equal(await readFile(join(snapshotDirectory, artifact.name), "utf8"), artifact.source, `${artifact.name} must be the reviewed bytes`);
 			assert.equal(await readFile(join(snapshotDirectory, REMOTE_RUNNER_ENTRY_FILE_NAME), "utf8"), REMOTE_RUNNER_INLINE_SOURCE);
 			return exitingUpload(0);
 		},

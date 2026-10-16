@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { loadTsCommonJs } from "./loadTsCommonJs.mjs";
-const { REMOTE_HELPER_INLINE_SOURCE } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
+import { materializeRemoteHelperArtifacts } from "./remoteHelperArtifacts.mjs";
 const HOST_ID = "01234567-89ab-4def-8123-456789abcdef";
 /** Drive the deployed helper bytes, with an isolated HOME and an owned repository only. */
 function fixture(t, initialize = true, helperEnv = {}, rootName = "project") {
@@ -19,8 +19,8 @@ function fixture(t, initialize = true, helperEnv = {}, rootName = "project") {
 	for (const key of Object.keys(env)) if (key.startsWith("GIT_") && key !== "GIT_CONFIG_NOSYSTEM" && key !== "GIT_TEMPLATE_DIR") delete env[key];
 	const git = (...args) => execFileSync("git", args, { cwd: root, env, timeout: 5_000, encoding: "utf8", maxBuffer: 1024 * 1024 });
 	if (initialize) git("init", "-q");
-	const entry = join(directory, "helper.mjs");
-	writeFileSync(entry, REMOTE_HELPER_INLINE_SOURCE);
+	// The bundle is several files; the entry imports its siblings, so all of them are written.
+	const entry = materializeRemoteHelperArtifacts(directory).entryPath;
 	const overrides = typeof helperEnv === "function" ? helperEnv({ directory, root }) : helperEnv;
 	const child = spawn(process.execPath, [entry, "--root", root], { env: { ...env, ...overrides }, stdio: ["pipe", "pipe", "pipe"] });
 	const lines = createInterface({ input: child.stdout });

@@ -4,7 +4,7 @@ import { isAbsolute, join } from "node:path";
 import { REMOTE_BOOTSTRAP_BUNDLE_DIR_NAME, type RemoteBundleManifest } from "./RemoteHelperContract";
 import { runBootstrapFinalize, type BootstrapSession } from "./RemoteBootstrapTransfer";
 import { buildBundleManifest, withPrivateBundleUploadPlan, type BundleUploadInput } from "./RemoteBootstrapUpload";
-import { REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_HELPER_ENTRY_SHA256, REMOTE_HELPER_INLINE_SOURCE } from "./RemoteHelperEntry";
+import { REMOTE_HELPER_ARTIFACTS, REMOTE_HELPER_ENTRY_FILE_NAME } from "./RemoteHelperEntry";
 import { isRemoteRunnerAbsolutePath, REMOTE_RUNNER_CODE_INPUT_INVALID } from "./RemoteRunnerContract";
 import { REMOTE_RUNNER_ENTRY_FILE_NAME, REMOTE_RUNNER_ENTRY_SHA256, REMOTE_RUNNER_INLINE_SOURCE } from "./RemoteRunnerEntry";
 import type { SshProcessExit, SshProcessLauncher } from "./RemoteHostConnectionTypes";
@@ -34,19 +34,18 @@ export type PreparedBundleResult = { bundleSha256: string; deployRoot: string; a
  * never end up with the helper of one build and the runner of another.
  */
 export function frozenHelperBundleManifest(): RemoteBundleManifest {
-	return buildBundleManifest([
-		{ name: REMOTE_HELPER_ENTRY_FILE_NAME, sha256: REMOTE_HELPER_ENTRY_SHA256, bytes: Buffer.byteLength(REMOTE_HELPER_INLINE_SOURCE, "utf8") },
-		{ name: REMOTE_RUNNER_ENTRY_FILE_NAME, sha256: REMOTE_RUNNER_ENTRY_SHA256, bytes: Buffer.byteLength(REMOTE_RUNNER_INLINE_SOURCE, "utf8") },
-	]);
+	return buildBundleManifest([...REMOTE_HELPER_ARTIFACTS.map((artifact) => ({ name: artifact.name, sha256: artifact.sha256, bytes: Buffer.byteLength(artifact.source, "utf8") })), { name: REMOTE_RUNNER_ENTRY_FILE_NAME, sha256: REMOTE_RUNNER_ENTRY_SHA256, bytes: Buffer.byteLength(REMOTE_RUNNER_INLINE_SOURCE, "utf8") }]);
 }
 
 /** Prepare only frozen helper code; the deployment retains and clears both the source and upload snapshot. */
 export async function deployFrozenHelperBundle(input: Omit<PreparedBundleDeployment, "directory" | "names" | "executableNames">): Promise<PreparedBundleResult> {
 	const directory = await mkdtemp(join(tmpdir(), "pideck-frozen-helper-"));
 	try {
-		await writeFile(join(directory, REMOTE_HELPER_ENTRY_FILE_NAME), REMOTE_HELPER_INLINE_SOURCE, { flag: "wx", mode: 0o400 });
+		// Every reviewed artifact is written and hashed on its own: the entry, the Git worker it imports and the write
+		// programs that worker imports. The remote entry verifies each file's pinned digest before it activates.
+		for (const artifact of REMOTE_HELPER_ARTIFACTS) await writeFile(join(directory, artifact.name), artifact.source, { flag: "wx", mode: 0o400 });
 		await writeFile(join(directory, REMOTE_RUNNER_ENTRY_FILE_NAME), REMOTE_RUNNER_INLINE_SOURCE, { flag: "wx", mode: 0o400 });
-		return await deployPreparedBundle({ ...input, directory, names: [REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_RUNNER_ENTRY_FILE_NAME] });
+		return await deployPreparedBundle({ ...input, directory, names: [...REMOTE_HELPER_ARTIFACTS.map((artifact) => artifact.name), REMOTE_RUNNER_ENTRY_FILE_NAME] });
 	} finally {
 		await rm(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
 	}

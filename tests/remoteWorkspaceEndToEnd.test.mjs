@@ -51,7 +51,7 @@ const {
 	REMOTE_HELPER_METHOD_HELLO,
 	REMOTE_HELPER_PROTOCOL_VERSION,
 } = loadTsCommonJs("src/main/remote/RemoteHelperContract.ts");
-const { REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_HELPER_ENTRY_SHA256, REMOTE_HELPER_ENTRY_VERSION, REMOTE_HELPER_INLINE_SOURCE } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
+const { REMOTE_HELPER_ARTIFACTS, REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_HELPER_ENTRY_VERSION, REMOTE_HELPER_INLINE_SOURCE } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
 const { createRemoteControlClient } = loadTsCommonJs("src/main/remote/RemoteControlClient.ts");
 const { createRemoteWorkspaceReader, REMOTE_WORKSPACE_DIAGNOSTIC_CODES } = loadTsCommonJs("src/main/remote/RemoteWorkspaceReader.ts");
 const { REMOTE_BUNDLE_HASH_PREFIX, REMOTE_BUNDLE_HASH_SEPARATOR, buildBundleManifest, observeBundleFiles, withPrivateBundleUploadPlan } = loadTsCommonJs("src/main/remote/RemoteBootstrapUpload.ts");
@@ -239,9 +239,11 @@ function createWorkspaceFixture(t) {
  * has to fit, on purpose. The file-scope hook removes the directory after the last child has read it; a test
  * hook could delete it while a child is still starting.
  */
+import { materializeRemoteHelperArtifacts } from "./helpers/remoteHelperArtifacts.mjs";
+
 const ENTRY_DIRECTORY = mkdtempSync(join(tmpdir(), "pideck-e2e-entry-"));
 const ENTRY_PATH = join(ENTRY_DIRECTORY, REMOTE_HELPER_ENTRY_FILE_NAME);
-writeFileSync(ENTRY_PATH, REMOTE_HELPER_INLINE_SOURCE, "utf8");
+materializeRemoteHelperArtifacts(ENTRY_DIRECTORY);
 after(() => rmSync(ENTRY_DIRECTORY, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
 
 /**
@@ -447,14 +449,16 @@ seamTest("the upload plan's finalize frames match the manifest, the contract and
 	t.after(() => rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
 	// Names are deliberately declared out of order and include a dash, so name sorting and the segment rule
 	// are both exercised; the first file is the reviewed helper artifact itself.
-	const names = ["helper.mjs", "run-helper.sh", "aaa.txt"];
+	const names = [...REMOTE_HELPER_ARTIFACTS.map((artifact) => artifact.name), "run-helper.sh", "aaa.txt"];
 	const executableNames = ["helper.mjs"];
-	writeFileSync(join(directory, "helper.mjs"), REMOTE_HELPER_INLINE_SOURCE);
+	for (const artifact of REMOTE_HELPER_ARTIFACTS) writeFileSync(join(directory, artifact.name), artifact.source);
 	writeFileSync(join(directory, "run-helper.sh"), "#!/bin/sh\nexec node ./helper.mjs\n");
 	writeFileSync(join(directory, "aaa.txt"), "first file by name\n");
 	const truth = bundleTruth(directory, names, executableNames);
-	assert.equal(truth.get("helper.mjs").sha256, REMOTE_HELPER_ENTRY_SHA256, "the bundle ships the reviewed helper bytes, not a copy of them");
-	assert.equal(truth.get("helper.mjs").bytes, Buffer.byteLength(REMOTE_HELPER_INLINE_SOURCE, "utf8"));
+	for (const artifact of REMOTE_HELPER_ARTIFACTS) {
+		assert.equal(truth.get(artifact.name).sha256, artifact.sha256, `the bundle ships the reviewed ${artifact.name} bytes, not a copy of them`);
+		assert.equal(truth.get(artifact.name).bytes, Buffer.byteLength(artifact.source, "utf8"));
+	}
 
 	// The manifest's own hash is the input the entry announced, so it has to be built once; its *value* is
 	// asserted below against the address this test computes from the disk. Only the hashing of the files is
@@ -476,7 +480,7 @@ seamTest("the upload plan's finalize frames match the manifest, the contract and
 			// `--` terminator keeps a name that begins with a dash from being read as an option.
 			assert.equal(plan.invocation.executable, CONNECTION.executable);
 			assert.notEqual(plan.invocation.cwd, directory, "scp must read the private snapshot, not the mutable source");
-			assert.equal(readFileSync(join(plan.invocation.cwd, "helper.mjs"), "utf8"), REMOTE_HELPER_INLINE_SOURCE);
+			for (const artifact of REMOTE_HELPER_ARTIFACTS) assert.equal(readFileSync(join(plan.invocation.cwd, artifact.name), "utf8"), artifact.source);
 			const argv = plain(plan.invocation.args);
 			assert.deepEqual(argv.slice(-(names.length + 1), -1), names);
 			assert.equal(argv.at(-1), `${CONNECTION.destination}:${DEPLOY_ROOT}/${REMOTE_BOOTSTRAP_STAGING_PREFIX}${NONCE}`);

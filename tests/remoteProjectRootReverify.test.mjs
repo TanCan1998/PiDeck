@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test, { after } from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
+import { materializeRemoteHelperArtifacts } from "./helpers/remoteHelperArtifacts.mjs";
 
 /*
  * F4 independent verification of the root re-check (task-9, R2) and of the drift window.
@@ -442,7 +443,8 @@ const BASE = mkdtempSync(join(tmpdir(), "pideck-root-drift-"));
 const ENTRY_DIR = join(BASE, "entry");
 mkdirSync(ENTRY_DIR, { recursive: true });
 const ENTRY_PATH = join(ENTRY_DIR, "helper.mjs");
-writeFileSync(ENTRY_PATH, REMOTE_HELPER_INLINE_SOURCE, "utf8");
+// The entry must sit in the same directory as the siblings it imports.
+materializeRemoteHelperArtifacts(ENTRY_DIR);
 after(() => rmSync(BASE, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
 
 const OUTSIDE = join(BASE, "outside");

@@ -53,7 +53,7 @@ const {
 	isRemoteRunnerAbsolutePath,
 } = loadTsCommonJs("src/main/remote/RemoteRunnerContract.ts");
 const { deployedRunnerPath, frozenHelperBundleManifest } = loadTsCommonJs("src/main/remote/RemoteBootstrapDeployment.ts");
-const { REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_HELPER_ENTRY_SHA256, REMOTE_HELPER_INLINE_SOURCE } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
+const { REMOTE_HELPER_ARTIFACTS, REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_HELPER_INLINE_SOURCE } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
 
 /** Frozen digest, pinned here as well as in the module: editing the source means editing both. */
 const FROZEN_SHA256 = "b63858473bfbf20df7a6fe18ffbc7a6ee45fbbeed45c045b0ec5c8edc616376a";
@@ -288,13 +288,18 @@ runnerTest("the frozen body repeats the contract's literals and its command shap
 	assert.ok(REMOTE_RUNNER_INLINE_SOURCE.includes("process.kill(-pgid"), "signals go to the process group");
 });
 
-runnerTest("the deploy bundle carries both frozen entries and the runner path resolves inside it", () => {
+runnerTest("the deploy bundle carries every reviewed file and the runner path resolves inside it", () => {
 	const manifest = frozenHelperBundleManifest();
-	assert.deepEqual(plain(manifest.files.map((file) => file.name)), [REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_RUNNER_ENTRY_FILE_NAME], "one immutable bundle carries the helper and the runner");
-	const helper = manifest.files.find((file) => file.name === REMOTE_HELPER_ENTRY_FILE_NAME);
+	// The helper is a multi-file bundle (entry, Git worker, write programs) plus the runner: one immutable
+	// content-addressed directory, so a client cannot end up with one build's helper and another build's runner.
+	const expectedNames = [...REMOTE_HELPER_ARTIFACTS.map((artifact) => artifact.name), REMOTE_RUNNER_ENTRY_FILE_NAME].sort();
+	assert.deepEqual(plain(manifest.files.map((file) => file.name)), expectedNames, "one immutable bundle carries every reviewed file");
+	for (const artifact of REMOTE_HELPER_ARTIFACTS) {
+		const file = manifest.files.find((entry) => entry.name === artifact.name);
+		assert.equal(file.sha256, artifact.sha256, `${artifact.name} must be pinned in the manifest`);
+		assert.equal(file.bytes, Buffer.byteLength(artifact.source, "utf8"));
+	}
 	const runner = manifest.files.find((file) => file.name === REMOTE_RUNNER_ENTRY_FILE_NAME);
-	assert.equal(helper.sha256, REMOTE_HELPER_ENTRY_SHA256);
-	assert.equal(helper.bytes, Buffer.byteLength(REMOTE_HELPER_INLINE_SOURCE, "utf8"));
 	assert.equal(runner.sha256, REMOTE_RUNNER_ENTRY_SHA256);
 	assert.equal(runner.bytes, Buffer.byteLength(REMOTE_RUNNER_INLINE_SOURCE, "utf8"));
 

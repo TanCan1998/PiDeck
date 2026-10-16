@@ -1,5 +1,6 @@
 /**
- * Managed Git writes: native Git runs in an owned private metadata context, never with live hooks/filters.
+ * Managed Git writes, deployed as their own bundle file (git-write.mjs) and imported by git-read.mjs: native Git
+ * runs in an owned private metadata context, never with live hooks/filters.
  *
  * The frozen body keeps one-line invariants only (its ceiling is 96 KiB). The long-form rules behind them:
  *
@@ -23,7 +24,7 @@
  *   and unknown or externally replaced artifacts are retained instead of recursively removed;
  * - an unreaped native writer keeps its lock, which is why cleanup waits for killed children first.
  */
-export const REMOTE_GIT_WRITE_SOURCE = String.raw`function createGitWriteProgram(fs, port) {
+export const REMOTE_GIT_WRITE_SOURCE = String.raw`export function createGitWriteProgram(fs, port) {
 	const crypto = port.crypto;
 	const fail = port.failure, MAX_INDEX = 16777216, MAX_TEXT = 262144;
 	const CONFIG = "^(core\\.(hookspath|attributesfile|excludesfile|repositoryformatversion|filemode|ignorecase|autocrlf|eol|safecrlf|symlinks|ignorestat|trustctime|checkstat|protecthfs|protectntfs|quotepath)|commit\\.gpgsign|index\\.version|extensions\\.objectformat|status\\.renames|diff\\.(renames|renamelimit))$";
@@ -170,7 +171,7 @@ export const REMOTE_GIT_WRITE_SOURCE = String.raw`function createGitWriteProgram
 	return { run: run, fingerprint: fingerprint, gates: gates, entries: entries, reaped: reaped };
 }
 /* Managed commit: verified index tree plus a native ref CAS; failures after it are unconfirmed and identity is read-only. */
-function createGitCommitProgram(fs, port, shared, identityOf) {
+export function createGitCommitProgram(fs, port, shared, identityOf) {
 	const fail = port.failure, MAX_INDEX = 16777216, MAX_TEXT = 262144, ZERO = "0".repeat(40), HASH = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 	function utf8(bytes) { try { return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); } catch { throw fail("GIT_RESULT_INVALID"); } }
 	function optional(base, name, limit) { try { return port.readFile(base, name, limit); } catch (error) { if (error.message === "PATH_NOT_FOUND") return null; throw error; } }
@@ -268,7 +269,7 @@ function createGitCommitProgram(fs, port, shared, identityOf) {
 	return { run: run };
 }
 /* Branch write face: create is a create-only CAS that cannot move HEAD, with the name checked by Git and then by our own rules; switch runs native git switch, refuses a conflicting worktree and treats a post-checkout hook as a refusal. */
-function createGitBranchProgram(fs, port, gates) {
+export function createGitBranchProgram(fs, port, gates) {
 	const fail = port.failure, HASH = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 	function utf8(bytes) { try { return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); } catch { throw fail("GIT_RESULT_INVALID"); } }
 	function validName(value) {
@@ -350,7 +351,7 @@ function createGitBranchProgram(fs, port, gates) {
 	return { run: run };
 }
 /* Discard: raw bytes (hash-object --no-filters) go into a create-only refs/pideck/recovery ref and are read back BEFORE the file is touched. */
-function createGitDiscardProgram(fs, port, gates, identity) {
+export function createGitDiscardProgram(fs, port, gates, identity) {
 	const fail = port.failure, crypto = port.crypto, MAX_DISCARD = 8388608, ZERO = "0".repeat(40), HASH = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 	function fingerprint(stats) { return [stats.dev, stats.ino, stats.uid, stats.gid].map(String).join(":"); }
 	function owned(path, expected) { try { const stats = fs.lstatSync(path, { bigint: true }); return stats.isFile() && !stats.isSymbolicLink() && fingerprint(stats) === expected; } catch { return false; } }

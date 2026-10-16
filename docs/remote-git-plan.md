@@ -1,8 +1,8 @@
 # 远端 Git：调研结论与分阶段实施计划
 
-> 状态：G0 调研、G1 status/diff、G2a 单文件 stage/unstage、**G2b 单次普通提交**、**G3a 只读历史／引用**（helper 1.10.0，§5.10／§5.11）、**G3b 分支写面（新建分支／切换）**（helper 1.11.0，§5.12）与 **G4a 可恢复丢弃／删除**（helper 1.12.0，§5.13）已完成 Linux 开发态实现、针对性回归及真实 Electron＋SSH 验收（G2b 见 §5.9.1）；G6a 补故障／并发／短周期资源回归并修复未知结果提示，G6b 新增真实 SSH 长稳验收且有一次完整 1 小时通过，G6c 更正暖机阶跃归因并加 steady-state 门禁（§5.6–§5.8）。G3 写面（checkout／建分支）与 G4–G5、完整 G6 未完成。仍受开发态实验门禁约束，不代表 Git parity 或 Remote v1 已收口。
+> 状态：G0 调研、G1 status/diff、G2a 单文件 stage/unstage、**G2b 单次普通提交**、**G3a 只读历史／引用**（helper 1.10.0，§5.10／§5.11）、**G3b 分支写面（新建分支／切换）**（helper 1.11.0，§5.12）、**G4a 可恢复丢弃／删除**（helper 1.12.0，§5.13）与 **helper 多文件部署包拆分**（1.13.0，§5.14）已完成 Linux 开发态实现、针对性回归及真实 Electron＋SSH 验收（G2b 见 §5.9.1）；G6a 补故障／并发／短周期资源回归并修复未知结果提示，G6b 新增真实 SSH 长稳验收且有一次完整 1 小时通过，G6c 更正暖机阶跃归因并加 steady-state 门禁（§5.6–§5.8）。G3 写面（checkout／建分支）与 G4–G5、完整 G6 未完成。仍受开发态实验门禁约束，不代表 Git parity 或 Remote v1 已收口。
 > 核对基线：`feat/remote-development`，G0 调研基线 `101b9b82c`；G1 从 `bc25ebe20` 实施，G2a 从 `f83f9d550` 实施。
-> **冻结 helper 源码编辑纪律**（2026-10-16，同一次会话内第二次踩到）：`RemoteGitReadSource.ts`／`RemoteGitWriteSource.ts` 的正文是 `String.raw` 模板，**新写的注释里出现反引号或 `${` 会提前终止模板**，结果是文件仍「像」有内容但编译产物丢掉后半段（本次现象：写入源少了整个分支程序、压平产物报 `Illegal return statement`）。改这两处之后固定三步自检：① 文件内反引号总数 == 2；② `node --check` 压平后的 helper 产物；③ `loadTsCommonJs` 读出的 `REMOTE_GIT_*_SOURCE` 里能搜到新函数名。
+> **冻结 helper 源码编辑纪律**（2026-10-16，同一次会话内第二次踩到；§5.14 拆分后该纪律按**每个 bundle 文件**逐一适用，各文件的审阅上限仍是 96 KiB）：`RemoteGitReadSource.ts`／`RemoteGitWriteSource.ts` 的正文是 `String.raw` 模板，**新写的注释里出现反引号或 `${` 会提前终止模板**，结果是文件仍「像」有内容但编译产物丢掉后半段（本次现象：写入源少了整个分支程序、压平产物报 `Illegal return statement`）。改这两处之后固定三步自检：① 文件内反引号总数 == 2；② `node --check` 压平后的 helper 产物；③ `loadTsCommonJs` 读出的 `REMOTE_GIT_*_SOURCE` 里能搜到新函数名。
 > 范围：落实总计划 §6.3 的 Git 能力；近期顺序仍为 **status/diff → stage/unstage/commit → 跨平台与稳定性**，不一次性搬运所有本机操作。
 
 ## 1. 技术结论：继续使用 Git CLI，不更换引擎或新增 Git 依赖
@@ -359,6 +359,20 @@ smoke5 用完整清单（116→124 个 kind、列合计从 263→271 与真实 F
 - **真机验收**：`G1|G2a/G2b|G3a|G3b|G4a` **5 passed（3.4m）**，其中 G4a 单项 **1 passed（32.4s）**：面板里「回滚更改」先弹内联确认，**取消**后仓库逐字节不变；**确认**后工作区回到已提交版本、`remote-git-recovery-note` 显示 `refs/pideck/recovery/<stamp>` 且 `git show <ref>:tracked.txt` 等于被丢弃的原文；删除未跟踪文件（含 CRLF）后 `test -e` 为 absent、`git show <ref>:scratch.txt` 逐字节等于删除前内容；HEAD／分支／tag 全未动、`status --porcelain` 为空、恰好两个恢复引用、工作区其余文件与 `keep.txt` 不变、无 `index.lock`／`pideck-index-*` 残留、远端 `/tmp` 与 `~/.pideck-e2e-*` 零残留。同时补上 G3b 声称过但实际未落盘的「按 kind 的进行中文案」（新建分支／切换／丢弃各有自己的进度行）。
 - **偏离与未完成**：①**没有自动清理**：恢复 ref 会一直留在对象库（每次丢弃 ≈ 1 commit＋1 tree＋1 blob≈文件大小），清理方式是用户显式 `git update-ref -d <ref>`；②**面板内没有恢复入口**（列出与一键还原属 G4b），恢复目前是文档化命令里的一条 `git show`；③不支持多文件批量丢弃、目录递归删除、index 组的「丢弃」；④`git log --all` 会列出恢复提交（根提交、消息 `discard: <path>`）——这是刻意的可发现性，已文档化；⑤父代理自审代替独立复核车道；⑥Windows/macOS、多窗口、长稳、打包集成、独立安全审查未验收——本批**不是** Remote v1 收口。
 - **证据**：`/tmp/g4a-e2e-gate.log`（5 passed 3.4m）、`/tmp/g4a-e2e-run4.log`（G4a 单项 1 passed 32.4s）、`/tmp/g4a-full-regression.log`（1764 项）、`/tmp/g4a-helper-all2.log`（110/110）、`/tmp/g4a-ipc2.log`（5/5）、`/tmp/g4a-view1.log`（44/44）、`/tmp/g4a-build.log`；机制探针 `/tmp/g4a-probe.sh`、`/tmp/g4a-probe2.sh`、`/tmp/g4a-shadow-probe2.sh`；实现期红例 `/tmp/g4a-discard{1..7}.log`（`name` TDZ／restore 撞 index.lock／scratch 布局缺失／测试漏暂存／残留 scratch）、`/tmp/g4a-e2e-run{1,2,3}.log`（提示竞态、尾随换行、见证范围含恢复 ref）。`/tmp` 不承诺长期保留。
+
+### 5.14 helper 多文件部署包拆分（2026-10-16，结构性改动，已真机验收）
+
+- **为什么**：G4a 把单文件正文推到 97,822 字符（96 KiB 上限、余量 <500）。§5.13 与 `tests/remoteHelperEntry.test.mjs` 已把规则写成「下一个放不下的特性必须拆分内嵌程序或放弃单文件结构」。G4b（恢复列表／一键还原）必然要加代码，因此先做拆分，而不是再抬阈值、也不是删掉使正文可审计的不变量。
+- **拆成什么**：部署包现在是**四个文件**，各自单独审阅、单独哈希、单独钉住——
+  - `helper.mjs`（30,342 字符）：协议帧、并发/等待室、`hello`/`echo`/`cancel`、只读 fs 批（`fs.stat`/`fs.list`/`fs.read`/`fs.searchNames`）、argv/root 两态规则、Git 方法分发骨架；`import{createGitReadProgram}from"./git-read.mjs"`。
+  - `git-read.mjs`（31,565 字符）：只读 Git 批与共享执行器（root FD 锚定、元数据门禁、无跟随读取、预算拒绝、`unchangedRead`）；`import{...}from"./git-write.mjs"`。
+  - `git-write.mjs`（36,130 字符）：四个写程序的工厂（stage/unstage、commit、branch、discard），构成本 run 的私有元数据上下文与官方 index.lock 纪律。
+  - `remote-runner.mjs`（13,620 字符，本来就在同一 bundle 里）：远端 pi 监督进程。
+  - 四个文件同属**一个内容寻址 bundle**（`frozenHelperBundleManifest()` 列出全部文件与各自 sha256），因此不可能出现「helper 是 A 版、runner 是 B 版」的组合。
+- **不变量的搬家与保留**：`tests/remoteHelperEntry.test.mjs` 的不变量检查改为**逐 artifact**：每个文件一个 SHA-256 钉住、单行可打印 ASCII、无控制字节、无 `console.`、无 `eval`/`Function`、无 `require(`、<96 KiB、**只允许 import 自己在审阅清单内的兄弟文件**（entry→git-read、git-read→git-write、git-write→无），且每个声明能力必须在 entry 的 CAPABILITIES 与分发里各出现一次。`node -e <source>` 自测形态**按计划主动放弃**：entry 现在 import 兄弟文件，命令行只带 entry 根本跑不起来——测试改为从**文件**启动整套 bundle（这正是部署形态），并断言 entry 带着相对 import，防止单文件形态悄悄复活。
+- **部署链路**：`REMOTE_HELPER_ARTIFACTS` 是唯一文件清单（名称＋源码＋sha256），`deployFrozenHelperBundle` 逐个写入（0400）并让 manifest 覆盖全部文件；bundle sha 随内容自动变化。测试侧新增 `tests/helpers/remoteHelperArtifacts.mjs` 物化整套文件，`remoteGitFixture`/`remoteHelperEntry`/`remoteWorkspaceEndToEnd`/`remoteBootstrapDeployment`/`remoteBootstrapSession`/`remoteBootstrapSessionIntegration`/`remoteSearchIsolation`/`remoteHelperSearchNames`/`remoteProjectRootReverify` 已全部改为物化整套 bundle。
+- **验证**：helper entry 37/37（含逐 artifact 不变量）、bootstrap 部署 12/12、bootstrap session 集成 78/78（含 runner 路径与 bundle 清单）、workspace 端到端 49/49、依赖 helper 的 Git 套件 194→全绿（除既有基线红）；有界回归 **1764 项 1750 通过／8 skip／6 失败＝同一批既有基线红**（1.6.0 期钉住×4、scanned-entry cap、本地 fetch 集成），零新增；typecheck／Biome／`build:fast` 0；真机 `G1|G2a/G2b|G3a|G3b|G4a` **5 passed（3.4m）**——真实 SSH 上传并激活四文件 bundle、每个 Git e2e 仍绿、远端零残留。
+- **已知观察与遗留**：①真机测试机的 `~/.pideck/remote-host/bundles/` 已累积 11 个内容寻址 bundle 目录（每次 helper 版本变化一个）；**bundle 的 GC/容量上限不在本片范围**，作为远端磁盘占用问题记录在案；②`REMOTE_HELPER_ENTRY_VERSION` 升到 1.13.0（文件集变化本身是协议形状变化）；③一次四路并行回归中 `remoteGitDiscard` 的「无身份仓库」用例曾返回 `GIT_WRITE_RESULT_UNCONFIRMED`，此后单独与并行各跑两轮均未复现（无身份路径与判定条件未变），按**未复现的一次性抖动**记录，不作为已修问题。
 
 ## 6. 完整路线的剩余门禁
 

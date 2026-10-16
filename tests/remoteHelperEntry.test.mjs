@@ -51,7 +51,8 @@ const {
 	REMOTE_HELPER_MAX_METHOD_LENGTH,
 	REMOTE_HELPER_PROTOCOL_VERSION,
 } = loadTsCommonJs("src/main/remote/RemoteHelperContract.ts");
-const { REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_HELPER_ENTRY_SHA256, REMOTE_HELPER_ENTRY_VERSION, REMOTE_HELPER_INLINE_SOURCE } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
+const { REMOTE_HELPER_ARTIFACTS, REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_HELPER_ENTRY_SHA256, REMOTE_HELPER_ENTRY_VERSION, REMOTE_HELPER_GIT_READ_SHA256, REMOTE_HELPER_GIT_WRITE_SHA256, REMOTE_HELPER_INLINE_SOURCE } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
+const { materializeRemoteHelperArtifacts } = await import("./helpers/remoteHelperArtifacts.mjs");
 const { REMOTE_FRAME_DIAGNOSTIC_CODES, createRemoteControlClient } = loadTsCommonJs("src/main/remote/RemoteControlClient.ts");
 
 /** Same host id shape the host store mints; the client only bounds it by length and control bytes. */
@@ -59,7 +60,7 @@ const HOST_ID = "01234567-89ab-4def-8123-456789abcdef";
 /** The helper never resolves HOME into a path, so a POSIX literal is the honest fixture on any platform. */
 const HELPER_HOME = "/home/pideck-helper";
 /** Frozen digest, pinned here as well as in the module: editing the source means editing both. */
-const FROZEN_SHA256 = "be042d1e33fe9ec24f7c96a7397431b596fd058e879cb5f01b208f918ecf36d2";
+const FROZEN_SHA256 = "42cfa324978c046419b2496cccc179239074ef257fe4423be65823fe70e1bc10";
 const MAX_TEXT = 4096;
 const TEST_TIMEOUT_MS = 30_000;
 const GUARD_TIMEOUT_MS = 10_000;
@@ -87,8 +88,9 @@ const helperTest = (name, fn, timeoutMs = TEST_TIMEOUT_MS) => test(name, { timeo
  * absorb a Windows directory removal racing a closing handle.
  */
 const ENTRY_DIRECTORY = mkdtempSync(join(tmpdir(), "pideck-helper-entry-"));
-const ENTRY_PATH = join(ENTRY_DIRECTORY, REMOTE_HELPER_ENTRY_FILE_NAME);
-writeFileSync(ENTRY_PATH, REMOTE_HELPER_INLINE_SOURCE, "utf8");
+// The bundle is several files, so the whole reviewed set is written: the entry imports its siblings, and an
+// entry-only directory would fail to start at all.
+const ENTRY_PATH = materializeRemoteHelperArtifacts(ENTRY_DIRECTORY).entryPath;
 after(() => rmSync(ENTRY_DIRECTORY, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
 
 /** Production objects live in another VM realm, so deep comparisons are normalised through JSON. */
@@ -369,101 +371,57 @@ function startHelper(t, options = {}) {
 	};
 }
 
-/** Windows caps one CreateProcess command line - program path, every argument and its quoting - at 32767 characters. */
-const WINDOWS_COMMAND_LINE_LIMIT = 32_767;
-
-/**
- * What one argv token costs once Windows sees it: libuv wraps a token that carries a space or a double quote
- * in quotes and escapes every double quote as \" (uv/src/win/process.c, quote_cmd_arg). Reproduced rather
- * than assumed, because that escaping is most of the difference between the size of the body and the size of
- * the command line that has to carry it.
- */
-function quoteWindowsArgument(argument) {
-	if (!/[\s"]/.test(argument)) return argument;
-	let quoted = '"';
-	let backslashes = 0;
-	for (const character of argument) {
-		if (character === "\\") {
-			backslashes += 1;
-			quoted += character;
-			continue;
-		}
-		if (character === '"') {
-			quoted += `${"\\".repeat(backslashes + 1)}"`;
-			backslashes = 0;
-			continue;
-		}
-		backslashes = 0;
-		quoted += character;
-	}
-	return `${quoted}${"\\".repeat(backslashes)}"`;
-}
-
-/**
- * The command line `node -e <source> -- --root <root>` costs, charged at the roots the two `inlineEval`
- * tests really pass: `createFsFixture`'s root is the longest of them, and `XXXXXX` stands for the six
- * characters `mkdtemp` appends. An `-e` test with a deeper root has to charge that path here as well,
- * otherwise this arithmetic stops describing the run it predicts.
- */
-function inlineEvalCommandLineLength() {
-	return [process.execPath, "-e", REMOTE_HELPER_INLINE_SOURCE, "--", "--root", join(tmpdir(), "pideck-helper-fs-XXXXXX", "root")].map(quoteWindowsArgument).join(" ").length;
-}
-
-helperTest("the frozen helper source is one byte-frozen ASCII line", () => {
-	// The helper is uploaded as a content-addressed artifact, so its bytes are the deployment identity:
-	// an edit is only legitimate together with a deliberate update of both digests below.
-	const digest = createHash("sha256").update(REMOTE_HELPER_INLINE_SOURCE, "utf8").digest("hex");
-	assert.equal(digest, FROZEN_SHA256, "the frozen helper source changed: update REMOTE_HELPER_ENTRY_SHA256 and this digest in the same commit");
-	assert.equal(digest, REMOTE_HELPER_ENTRY_SHA256, "the exported digest must describe the exported source");
-	assert.equal(Buffer.byteLength(REMOTE_HELPER_INLINE_SOURCE, "utf8"), REMOTE_HELPER_INLINE_SOURCE.length, "the source stays printable ASCII");
-	assert.ok(!/[\r\n]/.test(REMOTE_HELPER_INLINE_SOURCE), "the source is one line");
-	assert.ok(!/[\u0000-\u001f\u007f]/.test(REMOTE_HELPER_INLINE_SOURCE), "no control byte may reach stdin or an argv token");
-	assert.ok(!REMOTE_HELPER_INLINE_SOURCE.includes("console."), "stdout carries protocol frames only");
-	// The deployed artifact uses four audited builtins; Git's process/crypto imports are optional reads.
-	// No package or SDK is loaded.
-	assert.ok(!REMOTE_HELPER_INLINE_SOURCE.includes("require("), "the helper needs nothing but process and its stdio");
+helperTest("every frozen bundle artifact is one byte-frozen ASCII line with its own pin", () => {
+	// The deploy bundle ships several reviewed files - the protocol entry, the Git worker it imports and the write
+	// programs that worker imports - and each one is content-addressed and pinned on its own. A change is only
+	// legitimate together with a deliberate update of that file's digest.
+	const expected = new Map([
+		["helper.mjs", { sha256: FROZEN_SHA256, builtins: ["node:fs", "node:path"], imports: ["git-read.mjs"] }],
+		["git-read.mjs", { sha256: REMOTE_HELPER_GIT_READ_SHA256, builtins: ["node:child_process", "node:crypto"], imports: ["git-write.mjs"] }],
+		["git-write.mjs", { sha256: REMOTE_HELPER_GIT_WRITE_SHA256, builtins: [], imports: [] }],
+	]);
 	assert.deepEqual(
-		Array.from(REMOTE_HELPER_INLINE_SOURCE.matchAll(/getBuiltinModule\("([^"]+)"\)/g)).map((match) => match[1]),
-		["node:fs", "node:path", "node:child_process", "node:crypto"],
-		"the helper may load exactly the four builtins its fs/Git read batches need",
+		Array.from(REMOTE_HELPER_ARTIFACTS, (artifact) => artifact.name),
+		[...expected.keys()],
+		"the bundle's file list is part of the reviewed surface",
 	);
-	// Two size facts, deliberately different in kind. This one is a review bound on a frozen single-line
-	// artifact, not a startup constraint: everything below starts the body from a file, where no command line
-	// length applies, and the body has to stay small enough to be audited as one line. It is also two orders
-	// of magnitude below the 8 MiB frame cap the same body enforces.
-	// The bound moved 64 KiB -> 80 KiB with build 1.9.0 (managed commit) and 80 KiB -> 96 KiB with build 1.10.0
-	// (read-only history), each time because the measured batch did not fit. Build 1.12.0 (recoverable discard) fit
-	// WITHOUT raising it again: the frozen prose comments inside the body were compressed to one-line invariants,
-	// with their long form moved to the TS-side headers of RemoteGitReadSource.ts / RemoteGitWriteSource.ts, leaving
-	// under 500 characters of headroom. That is the signal, not an accident: the next feature that does not fit must split
-	// the embedded program into separate deploy-bundle files (or drop the `node -e` self-test shape that forces one
-	// file), not move this number again and not delete the invariants that make the body auditable.
-	//
-	// What actually bounds the audit surface stays enforced here and around it: one printable-ASCII line,
-	// exactly the four builtins above, a SHA-256 frozen both in RemoteHelperEntry.ts and in this file, no dynamic
-	// evaluation, one dispatch arm per advertised capability, and a contract test per method.
-	assert.ok(REMOTE_HELPER_INLINE_SOURCE.length > 1024 && REMOTE_HELPER_INLINE_SOURCE.length < 96 * 1024, `unexpected source size ${REMOTE_HELPER_INLINE_SOURCE.length}`);
-	assert.ok(!/\b(?:eval|Function)\s*\(/.test(REMOTE_HELPER_INLINE_SOURCE), "the frozen body must not evaluate assembled code");
-	assert.ok(!/\bimport\b|\brequire\s*\(/.test(REMOTE_HELPER_INLINE_SOURCE), "the frozen body stays one self-contained artifact");
+	for (const artifact of REMOTE_HELPER_ARTIFACTS) {
+		const pins = expected.get(artifact.name);
+		assert.ok(pins, `${artifact.name} must be pinned in this test`);
+		const digest = createHash("sha256").update(artifact.source, "utf8").digest("hex");
+		assert.equal(digest, pins.sha256, `${artifact.name} changed: update its pin in RemoteHelperEntry.ts and this digest in the same commit`);
+		assert.equal(digest, artifact.sha256, `the exported digest of ${artifact.name} must describe the exported source`);
+		assert.equal(Buffer.byteLength(artifact.source, "utf8"), artifact.source.length, `${artifact.name} stays printable ASCII`);
+		assert.ok(!/[\r\n]/.test(artifact.source), `${artifact.name} is one line`);
+		assert.ok(!/[\u0000-\u001f\u007f]/.test(artifact.source), `${artifact.name}: no control byte may reach stdin or an argv token`);
+		assert.ok(!artifact.source.includes("console."), `${artifact.name}: stdout carries protocol frames only`);
+		assert.ok(!/\b(?:eval|Function)\s*\(/.test(artifact.source), `${artifact.name} must not evaluate assembled code`);
+		assert.ok(!artifact.source.includes("require("), `${artifact.name} needs nothing but process and its stdio`);
+		// A review bound on one readable artifact, not a startup constraint: the entry is started from the deploy
+		// bundle, where no command line carries it at all. Keeping every file this small is what makes each one
+		// auditable as a single line, and the review surface of a change the file that changed.
+		assert.ok(artifact.source.length > 1024 && artifact.source.length < 96 * 1024, `${artifact.name}: unexpected size ${artifact.source.length}`);
+		assert.deepEqual(
+			Array.from(artifact.source.matchAll(/getBuiltinModule\("([^"]+)"\)/g), (match) => match[1]),
+			pins.builtins,
+			`${artifact.name} may load exactly the builtins its batch needs`,
+		);
+		// The only modules a bundle file may import are its reviewed siblings: never a package, never an absolute path.
+		const imports = Array.from(artifact.source.matchAll(/\bfrom"\.\/([A-Za-z0-9._-]+)"/g), (match) => match[1]);
+		assert.deepEqual(imports, pins.imports, `${artifact.name} may import exactly ${pins.imports.join(", ") || "nothing"}`);
+		for (const target of imports) assert.ok(expected.has(target), `${artifact.name} imports ${target}, which is not part of the reviewed bundle`);
+	}
 	// Every advertised capability must have exactly one dispatch arm, so a capability can never be advertised
 	// without an implementation, or implemented twice.
 	for (const capability of REMOTE_HELPER_CAPABILITIES) {
 		const mentions = REMOTE_HELPER_INLINE_SOURCE.split(`"${capability}"`).length - 1;
 		assert.ok(mentions >= 2, `${capability} must appear in CAPABILITIES and in the dispatch`);
 	}
-	// This one used to be a startup constraint of the `node -e <source>` shape: Windows accepts at most 32766
-	// characters in a CreateProcess command line (the documented cap is 32767 including the terminating null;
-	// measured: 32766 starts, 32767 fails with ENAMETOOLONG), and the body, the escaping of every double quote
-	// in it and the launcher's own argv all came out of that one budget. helper build 1.6.0 outgrew it, so that
-	// coverage went deliberately, exactly as the previous version of this comment required: the test that
-	// started the body that way now starts the same file with a `--` separator, which shifts argv the same way
-	// and still proves the flag is scanned rather than indexed. The arithmetic stays as the record of why, and
-	// it is asserted in the other direction on purpose: a body that fits the Windows command line again fails
-	// this line and asks for the `-e` coverage back instead of leaving the shape silently uncovered.
-	// The `-e` shape would fit a POSIX argv limit (about 128 KiB), but the CI gate for this suite is Windows
-	// only, so a POSIX-only test would be a test that never runs and is not worth the false assurance.
-	const inlineCommandLine = inlineEvalCommandLineLength();
-	assert.ok(inlineCommandLine > WINDOWS_COMMAND_LINE_LIMIT, `the body fits a Windows command line again (${inlineCommandLine} <= ${WINDOWS_COMMAND_LINE_LIMIT - 1}): restore the \`node -e <source>\` coverage that was removed for helper build 1.6.0`);
+	// The multi-file bundle replaced the single-artifact `node -e <source>` shape: the entry imports a sibling it
+	// needs to run, so a command line carrying only the entry cannot work at all. That is deliberate - the single
+	// artifact had already outgrown the Windows command line budget and had no room left for the next batch - and
+	// it is asserted here so the shape cannot come back by accident.
+	assert.match(REMOTE_HELPER_INLINE_SOURCE, /from"\.\/git-read\.mjs"/, "the entry is the protocol half of a bundle, not a standalone script");
 });
 
 helperTest("the exported entry identity matches the frozen source", () => {
@@ -698,9 +656,9 @@ helperTest("a root that is itself a link is canonicalized once at startup", asyn
 
 helperTest("fs.stat classifies entries with lstat semantics", async (t) => {
 	const fixture = createFsFixture(t);
-	// The second `-e` test, and the one that carries a root through the shifted argv: a scan that missed the
-	// flag there would leave the whole read-only batch answering PATH_OUTSIDE_ROOT instead of serving the tree.
-	const session = startHelper(t, { inlineEval: true, root: fixture.root });
+	// The root is passed through argv, so a scan that missed the flag would leave the whole read-only batch
+	// answering PATH_OUTSIDE_ROOT instead of serving the tree.
+	const session = startHelper(t, { root: fixture.root });
 	const file = await call(session, REMOTE_HELPER_METHOD_FS_STAT, { path: "alpha.txt" });
 	assert.deepEqual(Object.keys(file), contractFields("RemoteHelperStatResult"));
 	assert.equal(file.kind, "file");
@@ -1411,8 +1369,8 @@ helperTest("stdin EOF ends the helper with code 0 and drops its pending work", a
 
 helperTest("the uploaded helper.mjs runs the same frozen source", async (t) => {
 	const directory = await mkdtemp(join(tmpdir(), "pideck-helper-entry-"));
-	const entryPath = join(directory, REMOTE_HELPER_ENTRY_FILE_NAME);
-	await writeFile(entryPath, REMOTE_HELPER_INLINE_SOURCE, "utf8");
+	// The whole bundle, not just the entry: the uploaded artifact imports its siblings by relative path.
+	const entryPath = materializeRemoteHelperArtifacts(directory).entryPath;
 	// The uploaded artifact is started exactly the way the remote command does it: a real file and the
 	// root as a plain argv pair, with no `--` separator in front of the flag.
 	const root = createRootFixture(t);

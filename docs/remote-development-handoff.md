@@ -682,3 +682,11 @@ P4.5b 的单会话归档/恢复已完成真实 Electron＋SSH 验证，不能据
 - **96 KiB 取舍**：本批正文一度 102 KB，未抬阈值，而是把冻结正文的解释性长注释压成一行式不变量、长文迁到两个 frozen source 的 TS 侧文件头；压缩后 97,822 字符、余量 <500，行为代码零改动。测试注释写明：下一个放不下的特性必须拆分内嵌程序。
 - **验证**：`remoteGitDiscard` 13/13（真实子进程＋原生 Git：CRLF／Unicode／空格路径字节逐字可取回、`text` 属性路径上原始快照 ≠ Git 转换后 blob 的对照、丢弃后工作区＝index 且 index 内容不变、删除后可取回、`" D"` 无 ref、超 8 MiB／符号链接／gitlink／stale／hooks／外部锁全部快照前拒绝零副作用、身份缺失仍可用、同名两次两个 ref、嵌套路径形态保留、零残留）；IPC 5/5；view 21 项；有界回归 **1764 项 1750 通过／8 skip／6 失败＝同一批既有红**，零回归；typecheck／Biome／`build:fast` 0。真机 `G1|G2a/G2b|G3a|G3b|G4a` **5 passed（3.4m）**，G4a 单项 1 passed（32.4s）：取消不动仓库、确认后备份可取回、删除未跟踪文件后可取回（CRLF 逐字节）、HEAD/分支/tag 未动、status 干净、恰好两个恢复 ref、零残留。
 - **证据**：`/tmp/g4a-e2e-gate.log`、`/tmp/g4a-e2e-run4.log`、`/tmp/g4a-full-regression.log`、`/tmp/g4a-helper-all2.log`、`/tmp/g4a-ipc2.log`、`/tmp/g4a-view1.log`；探针 `/tmp/g4a-probe*.sh`。细则见 [Git 计划 §5.13／§5.13.1](remote-git-plan.md)。
+
+## helper 多文件部署包拆分（2026-10-16，结构性改动，已真机验收）
+
+- **为什么**：G4a 把单文件正文推到 97,822 字符（96 KiB 上限、余量 <500），而 G4b 必然要加代码；按已记录规则（§5.13、entry 测试注释）不再抬阈值，改为拆分。
+- **拆成什么**：一个内容寻址 bundle 四个文件，各自审阅/哈希/钉住——`helper.mjs` 30,342（协议帧＋并发/取消＋只读 fs 批＋argv/root 两态＋Git 分发骨架，import `./git-read.mjs`）、`git-read.mjs` 31,565（只读 Git 批与共享执行器，import `./git-write.mjs`）、`git-write.mjs` 36,130（stage/unstage、commit、branch、discard 四个写程序工厂）、`remote-runner.mjs` 13,620（远端 pi 监督，本来就在同 bundle）。`frozenHelperBundleManifest()` 列出全部文件与各自 sha256，bundle sha 随内容变化。
+- **不变量**：entry 测试改为逐 artifact——每文件 SHA-256 钉住、单行可打印 ASCII、无控制字节/`console.`/`eval`/`Function`/`require(`、<96 KiB、**只允许 import 审阅清单内的兄弟文件**、每能力在 CAPABILITIES 与分发各出现一次。`node -e <source>` 自测形态主动放弃（entry 依赖兄弟 import）：测试改为从文件启动整套 bundle，并断言相对 import 存在。
+- **验证**：entry 37/37、bootstrap 部署 12/12、session 集成 78/78、workspace 端到端 49/49、Git 面全绿（除既有基线红）；有界回归 1764 项 1750 通过／6 失败＝同一批既有红；typecheck／Biome／build 0；真机五合一 5 passed（3.4m），真实 SSH 上传并激活四文件 bundle。
+- **遗留**：真机 `~/.pideck/remote-host/bundles/` 已累积 11 个 bundle（bundle GC 不在本片范围，记录在案）；一次并行回归中 `remoteGitDiscard` 无身份用例返回过 `GIT_WRITE_RESULT_UNCONFIRMED`，未复现，按一次性抖动记录。细则见 [Git 计划 §5.14](remote-git-plan.md)。
