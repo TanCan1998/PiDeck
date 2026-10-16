@@ -2,6 +2,7 @@ import { GitStatus, type GitReadSnapshot, type GitResource, type GitResourceGrou
 import type { ProjectFileTarget } from "../../shared/types/project";
 import { parsePorcelainStatus } from "./gitStatusParser";
 import {
+	REMOTE_GIT_BRANCH_NAME_MAX_BYTES,
 	REMOTE_GIT_COMMIT_MAX_FILES,
 	REMOTE_GIT_COMMIT_MESSAGE_MAX_BYTES,
 	REMOTE_GIT_DETAIL_MESSAGE_MAX_BYTES,
@@ -26,9 +27,13 @@ export type RemoteGitSession = {
 	request(method: string, params?: unknown, options?: { timeoutMs?: number; onRequestId?: (id: string) => void }): Promise<unknown>;
 	cancel(id: string, options?: { timeoutMs?: number }): Promise<unknown>;
 };
-/** A main-owned capability: it says which confirmed revision, on which host identity, and which action kind it authorizes. */
-export type RemoteGitWriteExpectation = { kind: "index" | "commit"; revision: string; hostRevision: number; target: RemoteGitLocator };
-export type RemoteGitReadSnapshot = GitReadSnapshot & { writeExpectation?: RemoteGitWriteExpectation; commitExpectation?: RemoteGitWriteExpectation };
+/**
+ * A main-owned capability: it says which confirmed revision, on which host identity, and which action kind it
+ * authorizes. `head` is the HEAD the read confirmed, so a branch action can only ever be applied to the state
+ * the user was looking at - the renderer names a branch, never the commit the branch may move to.
+ */
+export type RemoteGitWriteExpectation = { kind: "index" | "commit" | "branch" | "switch"; revision: string; hostRevision: number; target: RemoteGitLocator; head?: string | null };
+export type RemoteGitReadSnapshot = GitReadSnapshot & { writeExpectation?: RemoteGitWriteExpectation; commitExpectation?: RemoteGitWriteExpectation; branchExpectation?: RemoteGitWriteExpectation; switchExpectation?: RemoteGitWriteExpectation };
 
 const ERRORS = new Set([
 	"PATH_OUTSIDE_ROOT",
@@ -59,6 +64,9 @@ const ERRORS = new Set([
 	"GIT_COMMIT_IDENTITY_REQUIRED",
 	"GIT_COMMIT_HEAD_CHANGED",
 	"GIT_OBJECT_NOT_FOUND",
+	"GIT_REF_EXISTS",
+	"GIT_REF_NOT_FOUND",
+	"GIT_SWITCH_CONFLICT",
 	"REMOTE_FEATURE_DISABLED",
 	"TOO_MANY_REQUESTS",
 	"GIT_TRUST_REQUIRED",
@@ -71,6 +79,28 @@ const ERRORS = new Set([
 function record(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+/**
+ * A branch is named, never addressed as a ref or a revision: the remote `check-ref-format --branch` decides what
+ * Git accepts, and this list refuses the shapes a caller must not be able to smuggle in (full refs, object ids,
+ * `@`, `@{...}`, a leading dash, backslashes and control characters).
+ */
+export function validateRemoteGitBranchName(value: unknown): string {
+	if (
+		typeof value !== "string" ||
+		value.length === 0 ||
+		Buffer.byteLength(value, "utf8") > REMOTE_GIT_BRANCH_NAME_MAX_BYTES ||
+		/[\x00-\x1f\x7f\\]/.test(value) ||
+		value === "@" ||
+		value.startsWith("-") ||
+		value.includes("@{") ||
+		value.startsWith("refs/") ||
+		/^(?:HEAD|FETCH_HEAD|ORIG_HEAD|MERGE_HEAD|CHERRY_PICK_HEAD|REVERT_HEAD|BISECT_HEAD)$/.test(value) ||
+		/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value)
+	)
+		throw new Error("GIT_RESULT_INVALID");
+	return value;
+}
+
 /** Restrict protocol diagnostics to the closed vocabulary; arbitrary remote stderr never crosses IPC. */
 export function remoteGitFailureCode(error: unknown): string {
 	const message = record(error) && typeof error.message === "string" ? error.message : "";
@@ -242,7 +272,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 	}
 	async function run<T>(
 		projectId: string,
-		method: "git.status" | "git.workspaceDiff" | "git.stage" | "git.unstage" | "git.commit" | "git.log" | "git.commitDetail" | "git.refs" | "git.refFileDiff",
+		method: "git.status" | "git.workspaceDiff" | "git.stage" | "git.unstage" | "git.commit" | "git.log" | "git.commitDetail" | "git.refs" | "git.refFileDiff" | "git.createBranch" | "git.switchBranch",
 		params: unknown,
 		signal: AbortSignal | undefined,
 		parse: (value: unknown, session: RemoteGitSession, capabilities: unknown[]) => T,
@@ -268,7 +298,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 						if (signal?.aborted) throw new Error("REQUEST_CANCELLED");
 						assertCurrent(projectId, locator);
 						try {
-							if (name === "git.stage" || name === "git.unstage" || name === "git.commit") dispatchedWrite = true;
+							if (name === "git.stage" || name === "git.unstage" || name === "git.commit" || name === "git.createBranch" || name === "git.switchBranch") dispatchedWrite = true;
 							const result = await session.request(name, input, {
 								timeoutMs: REMOTE_GIT_READ_TIMEOUT_MS,
 								onRequestId: (id) => {
@@ -312,6 +342,8 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 					if (typeof hostRevision === "number" && Number.isSafeInteger(hostRevision) && hostRevision >= 0) {
 						if (capabilities.includes("git.stage") && capabilities.includes("git.unstage")) snapshot.writeExpectation = { kind: "index", revision: value.revision, hostRevision, target: target(projectId) };
 						if (capabilities.includes("git.commit")) snapshot.commitExpectation = { kind: "commit", revision: value.revision, hostRevision, target: target(projectId) };
+						if (capabilities.includes("git.createBranch")) snapshot.branchExpectation = { kind: "branch", revision: value.revision, hostRevision, target: target(projectId), head: snapshot.head };
+						if (capabilities.includes("git.switchBranch")) snapshot.switchExpectation = { kind: "switch", revision: value.revision, hostRevision, target: target(projectId), head: snapshot.head };
 					}
 				}
 				return snapshot;
@@ -384,6 +416,39 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 		},
 		refs(projectId: string, signal?: AbortSignal): Promise<RemoteGitRefs> {
 			return run(projectId, "git.refs", {}, signal, (value) => readRemoteGitRefs(value));
+		},
+		/** Creating a branch is a create-only native CAS at the HEAD the read confirmed; HEAD itself never moves. */
+		createBranch(projectId: string, name: unknown, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<{ branch: string }> {
+			if (expected.kind !== "branch") throw new Error("GIT_RESULT_INVALID");
+			const branch = validateRemoteGitBranchName(name);
+			return run(
+				projectId,
+				"git.createBranch",
+				{ name: branch, expectedHead: expected.head ?? null },
+				signal,
+				(value) => {
+					if (!record(value) || value.applied !== true || Object.keys(value).length !== 2 || value.branch !== branch) throw new Error("GIT_RESULT_INVALID");
+					return { branch };
+				},
+				expected,
+			);
+		},
+		/** Switching runs native `git switch` for an existing local branch; a conflicting worktree is refused. */
+		switchBranch(projectId: string, name: unknown, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<{ branch: string; head: string | null }> {
+			if (expected.kind !== "switch") throw new Error("GIT_RESULT_INVALID");
+			const branch = validateRemoteGitBranchName(name);
+			return run(
+				projectId,
+				"git.switchBranch",
+				{ name: branch, expectedHead: expected.head ?? null },
+				signal,
+				(value) => {
+					if (!record(value) || value.applied !== true || Object.keys(value).length !== 3 || value.branch !== branch) throw new Error("GIT_RESULT_INVALID");
+					if (value.head !== null && (typeof value.head !== "string" || !REMOTE_GIT_OID_PATTERN.test(value.head))) throw new Error("GIT_RESULT_INVALID");
+					return { branch, head: value.head };
+				},
+				expected,
+			);
 		},
 		/** `base: null` names the side that does not exist; both sides missing is a refusal, not an empty diff. */
 		refFileDiff(projectId: string, base: unknown, head: unknown, file: ProjectFileTarget, signal?: AbortSignal): Promise<RemoteGitRefFileDiff> {

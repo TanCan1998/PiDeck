@@ -249,4 +249,94 @@ function createGitCommitProgram(fs, port, shared, identityOf) {
 		}
 	}
 	return { run: run };
+}
+/* G3b branch write face. Creating a branch is one native compare-and-swap on refs/heads/<name> with a zero
+old value, so it can only ever create a branch that does not exist yet and can never move HEAD; a name is
+first asked of Git itself (check-ref-format --branch) and then held to this protocol's own rules, because
+that command accepts "@" on its own. Switching runs native git switch and nothing else: it refuses a
+conflicting worktree instead of forcing it, and a post-checkout hook is a refusal, not something to skip. */
+function createGitBranchProgram(fs, port, gates) {
+	const fail = port.failure, HASH = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+	function utf8(bytes) { try { return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); } catch { throw fail("GIT_RESULT_INVALID"); } }
+	function validName(value) {
+		if (typeof value !== "string" || value.length === 0 || Buffer.byteLength(value, "utf8") > 1024 || /[\u0000-\u001f\u007f\\]/.test(value) || value === "@" || value.indexOf("@{") >= 0) throw fail("GIT_RESULT_INVALID");
+		return value;
+	}
+	/* A branch name must be accepted by Git and must not read as a full ref, an object id or a revision. */
+	async function checked(ctx, value) {
+		/* Measured: git answers 1 or 128 for a name it refuses (for example 128 for a leading dash), and any of
+		those means the same thing to us - an invalid name, refused before any ref exists. */
+		const result = await port.execute(ctx, ["check-ref-format", "--branch", value], 1024, [1, 128]);
+		if (result.exitCode !== 0) throw fail("GIT_RESULT_INVALID");
+		if (/^(?:HEAD|FETCH_HEAD|ORIG_HEAD)$/.test(value) || value.indexOf("refs/") === 0 || HASH.test(value)) throw fail("GIT_RESULT_INVALID");
+		return value;
+	}
+	async function branchHead(ctx, target) {
+		const probe = await port.execute(ctx, ["rev-parse", "--verify", "--quiet", target], 256, [1, 128]);
+		if (probe.exitCode !== 0) return null;
+		const oid = utf8(probe.bytes).trim();
+		if (!HASH.test(oid)) throw fail("GIT_RESULT_INVALID");
+		return oid;
+	}
+	async function run(ctx, params, first, firstHead) {
+		const name = await checked(ctx, validName(params.name));
+		if (params.expectedHead !== null && !HASH.test(String(params.expectedHead))) throw fail("GIT_RESULT_INVALID");
+		const expected = params.expectedHead;
+		/* A caller that confirmed nothing has confirmed an unborn repository: that is only true when there is
+		really no HEAD, and it is never a state a switch can start from. */
+		if (expected === null && params.method === "git.createBranch") throw fail("GIT_COMMIT_HEAD_CHANGED");
+		if (params.method === "git.createBranch") {
+			if (expected !== null && firstHead.head !== expected) throw fail("GIT_COMMIT_HEAD_CHANGED");
+			const target = "refs/heads/" + name;
+			if (await branchHead(ctx, target)) throw fail("GIT_REF_EXISTS");
+			const configured = await gates(ctx);
+			if (port.snapshot(ctx) !== first) throw fail("GIT_RESOURCE_CHANGED");
+			/* Zero old value: create-only, so a branch that appeared meanwhile is refused by Git itself. */
+			try { await port.execute(ctx, ["update-ref", "-m", "branch: created " + name, target, expected, "0".repeat(40)], 65536); }
+			catch (error) {
+				const now = await branchHead(ctx, target);
+				if (now === expected) throw fail("GIT_WRITE_RESULT_UNCONFIRMED");
+				if (now !== null) throw fail("GIT_REF_EXISTS");
+				const after = await port.head(ctx);
+				if (after.head !== firstHead.head || after.branch !== firstHead.branch) throw fail("GIT_COMMIT_HEAD_CHANGED");
+				throw error.message === "GIT_COMMAND_FAILED" ? fail("GIT_WRITE_UNSUPPORTED") : error;
+			}
+			if ((await branchHead(ctx, target)) !== expected) throw fail("GIT_WRITE_RESULT_UNCONFIRMED");
+			const finalHead = await port.head(ctx);
+			if (finalHead.head !== firstHead.head || finalHead.branch !== firstHead.branch) throw fail("GIT_WRITE_RESULT_UNCONFIRMED");
+			if (JSON.stringify(await gates(ctx)) !== JSON.stringify(configured)) throw fail("GIT_RESOURCE_CHANGED");
+			ctx.check();
+			return { applied: true, branch: name };
+		}
+		const target = "refs/heads/" + name;
+		const existing = await branchHead(ctx, target);
+		if (existing === null) throw fail("GIT_REF_NOT_FOUND");
+		/* Existence is answered first: in an unborn repository no branch can exist, and that is the honest reason.
+		A caller that confirmed "unborn" (null) while a real HEAD exists is exactly as stale as a wrong oid. */
+		if (firstHead.head !== expected) throw fail("GIT_COMMIT_HEAD_CHANGED");
+		const current = await port.head(ctx);
+		if (current.branch === name) return { applied: true, branch: name, head: existing };
+		if (port.snapshot(ctx) !== first) throw fail("GIT_RESOURCE_CHANGED");
+		/* Effective hooks/config first: a post-checkout hook runs during a real switch, so a repository that
+		has one is refused before switch is ever called, never run with hooks silently skipped. */
+		await gates(ctx);
+		/* Native switch: a conflicting worktree is refused by Git (rc != 0) and nothing is forced. */
+		try { await port.execute(ctx, ["switch", "--", name], 65536); }
+		catch (error) {
+			const after = await port.head(ctx);
+			if (after.branch === name && after.head === existing) throw fail("GIT_WRITE_RESULT_UNCONFIRMED");
+			if (after.branch !== firstHead.branch || after.head !== firstHead.head) throw fail("GIT_WRITE_RESULT_UNCONFIRMED");
+			if (error.message !== "GIT_COMMAND_FAILED") throw error;
+			throw fail("GIT_SWITCH_CONFLICT");
+		}
+		const after = await port.head(ctx);
+		if (after.branch !== name || after.head !== existing) throw fail("GIT_WRITE_RESULT_UNCONFIRMED");
+		/* The working tree is re-read through Git itself: whatever the checkout produced must be the branch's tree. */
+		const status = await port.rawStatus(ctx);
+		if (status.resources.some(function (entry) { return ["DD", "AU", "UD", "UA", "DU", "AA", "UU"].includes(entry.xy); })) throw fail("GIT_WRITE_RESULT_UNCONFIRMED");
+		if ((await port.execute(ctx, ["diff", "--quiet", "--no-ext-diff", "--no-textconv", "HEAD", "--"], 1024, [1])).exitCode !== 0) throw fail("GIT_WRITE_RESULT_UNCONFIRMED");
+		ctx.check();
+		return { applied: true, branch: name, head: existing };
+	}
+	return { run: run };
 }`.replace(/\r?\n[\t ]*/g, "");

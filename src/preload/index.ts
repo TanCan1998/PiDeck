@@ -792,6 +792,9 @@ const api = {
 		// 只提交已确认的暂存区；消息逐字发送，不在渲染层做任何 Git 语义加工
 		commitRemote: (projectId: string, message: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteCommit, projectId, message, token) as Promise<import("../shared/types").GitCommitResult>,
 		remoteSnapshot: (projectId: string) => ipcRenderer.invoke(ipcChannels.gitRemoteSnapshot, projectId) as Promise<import("../shared/types").GitReadSnapshotResult>,
+		// 分支写面（G3b）：新建分支不移动 HEAD，切换走原生 switch 且冲突即拒（绝不 force）
+		createRemoteBranch: (projectId: string, name: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteCreateBranch, projectId, name, token) as Promise<import("../shared/types").RemoteGitBranchMutationResult>,
+		switchRemoteBranch: (projectId: string, name: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteSwitchBranch, projectId, name, token) as Promise<import("../shared/types").RemoteGitBranchMutationResult>,
 		// 只读历史（G3a）：分页日志／提交详情／本地引用／两版本间单文件；与 status 同一信任边界，无 token
 		remoteLog: (projectId: string, options?: { maxCount?: number; skip?: number }) => ipcRenderer.invoke(ipcChannels.gitRemoteLog, projectId, options) as Promise<import("../shared/types").RemoteGitLogResult>,
 		remoteCommitDetail: (projectId: string, oid: string) => ipcRenderer.invoke(ipcChannels.gitRemoteCommitDetail, projectId, oid) as Promise<import("../shared/types").RemoteGitCommitDetailResult>,

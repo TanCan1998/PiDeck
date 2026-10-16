@@ -33,6 +33,12 @@ export function useRemoteGitView(project: RemoteProject) {
 	const loadRefs = useCallback(() => {
 		void controller.current?.loadRefs();
 	}, []);
+	const createBranch = useCallback((name: string) => {
+		void controller.current?.createBranch(name);
+	}, []);
+	const switchBranch = useCallback((name: string) => {
+		void controller.current?.switchBranch(name);
+	}, []);
 	const openHistoryFileDiff = useCallback((base: string | null, head: string, target: Parameters<NonNullable<typeof controller.current>["openHistoryFileDiff"]>[2]) => {
 		void controller.current?.openHistoryFileDiff(base, head, target);
 	}, []);
@@ -56,5 +62,7 @@ export function useRemoteGitView(project: RemoteProject) {
 		openCommitDetail,
 		loadRefs,
 		openHistoryFileDiff,
+		createBranch,
+		switchBranch,
 	};
 }

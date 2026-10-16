@@ -5,6 +5,7 @@ import type {
 	GitReadSnapshotResult,
 	GitResourceGroupType,
 	GitWorkspaceFileDiff,
+	RemoteGitBranchMutationResult,
 	RemoteGitCommitDetail,
 	RemoteGitCommitDetailResult,
 	RemoteGitLogPage,
@@ -22,8 +23,8 @@ export type RemoteGitViewState = {
 	snapshot?: GitReadSnapshot;
 	errorCode?: string;
 	mutating?: boolean;
-	/** Which action is in flight; the panel says “writing the index” or “committing” accordingly. */
-	mutatingKind?: "index" | "commit";
+	/** Which action is in flight; the panel says “writing the index”, “committing”, or which branch action runs. */
+	mutatingKind?: "index" | "commit" | "branch" | "switch";
 	/** Counts confirmed commits, so the panel can clear its message box exactly once per success. */
 	confirmedCommits?: number;
 	diffLoading: boolean;
@@ -55,7 +56,20 @@ export type RemoteGitViewApi = {
 	remoteCommitDetail(projectId: string, oid: string): Promise<RemoteGitCommitDetailResult>;
 	remoteRefs(projectId: string): Promise<RemoteGitRefsResult>;
 	remoteRefFileDiff(projectId: string, base: string | null, head: string, target: ProjectFileTarget): Promise<RemoteGitRefFileDiffResult>;
+	createRemoteBranch(projectId: string, name: string, token: string): Promise<RemoteGitBranchMutationResult>;
+	switchRemoteBranch(projectId: string, name: string, token: string): Promise<RemoteGitBranchMutationResult>;
 };
+/**
+ * The same name rules main enforces, kept in step with `validateRemoteGitBranchName` on purpose: the panel refuses
+ * locally so an unusable name never leaves the window, while the main process stays the authority. A pseudo-ref such
+ * as HEAD is a name Git would refuse - the panel must not offer it and pretend the click could work.
+ */
+export function validRemoteGitBranchName(name: unknown): name is string {
+	if (typeof name !== "string" || name.length === 0 || new TextEncoder().encode(name).length > 1024 || /[\x00-\x1f\x7f\\]/.test(name)) return false;
+	if (name === "@" || name.startsWith("-") || name.includes("@{") || name.startsWith("refs/")) return false;
+	if (/^(?:HEAD|FETCH_HEAD|ORIG_HEAD|MERGE_HEAD|CHERRY_PICK_HEAD|REVERT_HEAD|BISECT_HEAD)$/.test(name)) return false;
+	return !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(name);
+}
 
 function errorCode(error: unknown): string {
 	const raw = error instanceof Error ? error.message : String(error);
@@ -241,6 +255,55 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 				else update({ ...state, diffLoading: false, diff });
 			} catch (error) {
 				if (active && generation === epoch && request === diffEpoch) update({ ...state, diffLoading: false, diffErrorCode: errorCode(error) });
+			}
+		},
+		/* G3b branch write face: one explicit action per click, an unknown outcome is never replayed, and only a
+		confirmed answer re-reads the repository. The name is refused here as well as in main, never adapted. */
+		async createBranch(name: string): Promise<void> {
+			if (!active || state.loading || state.diffLoading || state.mutating || !validRemoteGitBranchName(name) || !state.snapshot?.branchToken) return;
+			const token = state.snapshot.branchToken;
+			const generation = ++epoch;
+			diffEpoch += 1;
+			historyEpoch += 1;
+			detailEpoch += 1;
+			refsEpoch += 1;
+			update({ ...state, mutating: true, mutatingKind: "branch", errorCode: undefined, diff: undefined, diffErrorCode: undefined });
+			try {
+				const result = await api.createRemoteBranch(projectId, name, token);
+				if (!active || generation !== epoch) return;
+				if (!result.ok) {
+					update({ projectKey, loading: false, diffLoading: false, errorCode: result.code });
+					return;
+				}
+				update({ projectKey, loading: false, diffLoading: false });
+				await controller.refresh();
+			} catch {
+				// A ref write with a lost reply may well have happened: say unknown instead of retrying it.
+				if (active && generation === epoch) update({ projectKey, loading: false, diffLoading: false, errorCode: "GIT_WRITE_RESULT_UNCONFIRMED" });
+			}
+		},
+		async switchBranch(name: string): Promise<void> {
+			if (!active || state.loading || state.diffLoading || state.mutating || !validRemoteGitBranchName(name) || !state.snapshot?.switchToken) return;
+			if (state.snapshot.branch === name) return;
+			const token = state.snapshot.switchToken;
+			const generation = ++epoch;
+			diffEpoch += 1;
+			historyEpoch += 1;
+			detailEpoch += 1;
+			refsEpoch += 1;
+			update({ ...state, mutating: true, mutatingKind: "switch", errorCode: undefined, diff: undefined, diffErrorCode: undefined });
+			try {
+				const result = await api.switchRemoteBranch(projectId, name, token);
+				if (!active || generation !== epoch) return;
+				if (!result.ok) {
+					update({ projectKey, loading: false, diffLoading: false, errorCode: result.code });
+					return;
+				}
+				update({ projectKey, loading: false, diffLoading: false });
+				await controller.refresh();
+			} catch {
+				// The checkout may have happened; never replay it, and keep saying the result is unknown.
+				if (active && generation === epoch) update({ projectKey, loading: false, diffLoading: false, errorCode: "GIT_WRITE_RESULT_UNCONFIRMED" });
 			}
 		},
 		/** Connection transitions invalidate facts without automatically reconnecting or refreshing. */

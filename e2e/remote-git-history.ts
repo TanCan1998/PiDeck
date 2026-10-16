@@ -149,8 +149,10 @@ export async function verifyRemoteGitHistory(input: { window: Page; credentials:
 		await expect(rows.filter({ hasText: "feature/x" })).toContainText("分支");
 		await expect(rows.filter({ hasText: "v1.0" })).toContainText(lightweight.slice(0, 8));
 		await expect(rows.filter({ hasText: "v2.0" })).toContainText(peeled.slice(0, 8));
-		// 没有任何写入口：检出/新建分支/tag/推送控件不存在。
-		await expect(panel.getByRole("button", { name: /^(丢弃|推送|拉取|全部暂存|初始化|检出|切换分支|新建分支|创建分支|打标签)/ })).toHaveCount(0);
+		// 历史本身仍无写入口；G3b 只开放「新建分支」与逐行「切换」，其余危险控件仍然不存在。
+		await expect(panel.getByTestId("remote-git-create-branch")).toBeVisible();
+		await expect(panel.getByTestId("remote-git-switch-branch").first()).toBeVisible();
+		await expect(panel.getByRole("button", { name: /^(丢弃|推送|拉取|全部暂存|初始化|检出|删除分支|重命名|打标签|强制)/ })).toHaveCount(0);
 	});
 
 	await test.step("手动刷新重建事实，仓库字节不变", async () => {

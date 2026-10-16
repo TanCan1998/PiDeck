@@ -86,6 +86,9 @@ export const REMOTE_HELPER_ERROR_CODES = [
 	"GIT_COMMIT_IDENTITY_REQUIRED",
 	"GIT_COMMIT_HEAD_CHANGED",
 	"GIT_OBJECT_NOT_FOUND",
+	"GIT_REF_EXISTS",
+	"GIT_REF_NOT_FOUND",
+	"GIT_SWITCH_CONFLICT",
 ] as const;
 export type RemoteHelperErrorCode = (typeof REMOTE_HELPER_ERROR_CODES)[number];
 
@@ -134,6 +137,19 @@ export const REMOTE_GIT_DETAIL_MESSAGE_MAX_BYTES = 64 * 1024;
 export const REMOTE_GIT_IDENTITY_MAX_BYTES = 320;
 export const REMOTE_GIT_SUBJECT_MAX_BYTES = 1024;
 export const REMOTE_GIT_LOG_MAX_PARENTS = 8;
+/**
+ * G3b branch write face: a name that `git check-ref-format --branch` accepts, minus `@` (which that command
+ * happens to allow) and any control character. Branch names travel as names, never as full refs or object ids.
+ */
+export const REMOTE_GIT_BRANCH_NAME_MAX_BYTES = 1024;
+export const REMOTE_HELPER_METHOD_GIT_CREATE_BRANCH = "git.createBranch";
+export const REMOTE_HELPER_METHOD_GIT_SWITCH_BRANCH = "git.switchBranch";
+/** `expectedHead: null` means the repository is unborn; the branch is created at the confirmed HEAD otherwise. */
+export type RemoteGitCreateBranchParams = { name: string; expectedHead: string | null };
+export type RemoteGitCreateBranchResult = { applied: true; branch: string };
+/** Switching only ever names an existing local branch; a conflicting worktree is refused, never forced. */
+export type RemoteGitSwitchBranchParams = { name: string; expectedHead: string | null };
+export type RemoteGitSwitchBranchResult = { applied: true; branch: string; head: string | null };
 
 /** One history row; `parents` is bounded and `subject` is the first line only. */
 export type RemoteGitLogEntry = { oid: string; parents: readonly string[]; authorName: string; authorEmail: string; authorTimeSec: number; subject: string };
@@ -178,7 +194,7 @@ export const REMOTE_GIT_COMMIT_MESSAGE_MAX_BYTES = 4096;
 export type RemoteGitWorkspaceDiffParams = { group: "merge" | "index" | "workingTree" | "untracked"; path: string };
 export type RemoteGitWorkspaceDiffResult = { originalContent: string; modifiedContent: string };
 
-export const REMOTE_HELPER_CAPABILITIES = ["echo", "fs.stat", "fs.list", "fs.read", "fs.searchNames", "git.status", "git.workspaceDiff", "git.stage", "git.unstage", "git.commit", "git.log", "git.commitDetail", "git.refs", "git.refFileDiff"] as const;
+export const REMOTE_HELPER_CAPABILITIES = ["echo", "fs.stat", "fs.list", "fs.read", "fs.searchNames", "git.status", "git.workspaceDiff", "git.stage", "git.unstage", "git.commit", "git.log", "git.commitDetail", "git.refs", "git.refFileDiff", "git.createBranch", "git.switchBranch"] as const;
 export type RemoteHelperCapability = (typeof REMOTE_HELPER_CAPABILITIES)[number];
 /**
  * Ceiling for one requested relative path. It is applied to the raw string before any filesystem access,

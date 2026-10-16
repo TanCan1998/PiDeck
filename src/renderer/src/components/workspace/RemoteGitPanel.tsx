@@ -5,7 +5,9 @@ import type { GitResourceGroupType } from "../../../../shared/types/git";
 import { useRemoteGitView } from "../../hooks/useRemoteGitView";
 import { t } from "../../i18n";
 import { relativeTimeParts } from "../../utils/providerUsageDisplay";
+import { validRemoteGitBranchName } from "../../utils/remoteGitViewState";
 import { Button } from "../ui-shadcn/button";
+import { Input } from "../ui-shadcn/input";
 import { Textarea } from "../ui-shadcn/textarea";
 import { FileTree } from "../app/git/GitResourceTree";
 import { RemoteGitTrustGate } from "./RemoteGitTrustGate";
@@ -29,6 +31,9 @@ export function remoteGitErrorMessage(code: string): string {
 	if (code === "GIT_COMMIT_MESSAGE_EMPTY") return t("remoteGit.messageEmpty");
 	if (code === "GIT_COMMIT_IDENTITY_REQUIRED") return t("remoteGit.identityRequired");
 	if (code === "GIT_COMMIT_HEAD_CHANGED") return t("remoteGit.headChanged");
+	if (code === "GIT_REF_EXISTS") return t("remoteGit.refExists");
+	if (code === "GIT_REF_NOT_FOUND") return t("remoteGit.refNotFound");
+	if (code === "GIT_SWITCH_CONFLICT") return t("remoteGit.switchConflict");
 	if (code === "GIT_WRITE_UNSUPPORTED") return t("remoteGit.writeUnsupported");
 	if (code === "GIT_WRITE_RESULT_UNCONFIRMED") return t("remoteGit.writeUnknown");
 	if (code === "GIT_WRITE_SNAPSHOT_EXPIRED") return t("remoteGit.writeExpired");
@@ -47,11 +52,12 @@ export function remoteGitErrorMessage(code: string): string {
 
 /** Reuses SCM rows and the existing diff renderer without native graph/watch/write/background-sync APIs. */
 export function RemoteGitPanel({ project }: { project: RemoteProject }) {
-	const { state, refresh, openDiff, closeDiff, mutate, commit, loadHistory, loadMoreHistory, openCommitDetail, loadRefs, openHistoryFileDiff } = useRemoteGitView(project);
+	const { state, refresh, openDiff, closeDiff, mutate, commit, loadHistory, loadMoreHistory, openCommitDetail, loadRefs, openHistoryFileDiff, createBranch, switchBranch } = useRemoteGitView(project);
 	const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
 	const [message, setMessage] = useState("");
 	const [historyOpen, setHistoryOpen] = useState(false);
 	const [refsOpen, setRefsOpen] = useState(false);
+	const [newBranch, setNewBranch] = useState("");
 	const confirmedCommits = state.confirmedCommits ?? 0;
 	// A confirmed commit clears the box; a refusal or an unknown result keeps the text so nothing is retyped.
 	useEffect(() => {
@@ -64,6 +70,8 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 	const busy = state.loading || state.diffLoading || state.mutating;
 	const messageBytes = new TextEncoder().encode(message).length;
 	const canCommit = snapshot?.commitToken !== undefined && !busy && message.trim().length > 0 && messageBytes <= 4096;
+	const canCreateBranch = snapshot?.branchToken !== undefined && !busy && validRemoteGitBranchName(newBranch);
+	const canSwitchBranch = snapshot?.switchToken !== undefined && !busy;
 	// Expanding a section is the user action that loads it; an error stays until the header is clicked again.
 	useEffect(() => {
 		if (historyOpen && snapshot !== undefined && state.history === undefined && !state.historyLoading && state.historyErrorCode === undefined && !state.loading && !state.mutating) loadHistory();
@@ -248,6 +256,12 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 						</button>
 						{refsOpen ? (
 							<>
+								<div className="flex items-center gap-2 px-3 pb-1">
+									<Input data-testid="remote-git-branch-name" aria-label={t("remoteGit.branchName")} placeholder={t("remoteGit.branchNamePlaceholder")} value={newBranch} disabled={busy || snapshot?.branchToken === undefined} onChange={(event) => setNewBranch(event.target.value)} />
+									<Button type="button" size="sm" data-testid="remote-git-create-branch" disabled={!canCreateBranch} onClick={() => createBranch(newBranch)}>
+										{t("remoteGit.createBranch")}
+									</Button>
+								</div>
 								{state.refsLoading ? <p className="px-3 text-xs text-text-secondary">{t("remoteGit.loading")}</p> : null}
 								{state.refsErrorCode ? (
 									<p role="alert" className="px-3 text-xs text-danger">
@@ -260,6 +274,12 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 												<span className="text-text-secondary">{t(ref.kind === "branch" ? "remoteGit.refBranch" : "remoteGit.refTag")}</span>
 												<span className="min-w-0 flex-1 truncate font-mono">{ref.name}</span>
 												<span className="font-mono text-text-secondary">{ref.oid.slice(0, 8)}</span>
+												{/* Switching only ever names an existing branch; the current one has nothing to do. */}
+												{ref.kind === "branch" && ref.name !== snapshot?.branch ? (
+													<Button type="button" variant="ghost" size="sm" data-testid="remote-git-switch-branch" aria-label={`${t("remoteGit.switchBranch")} ${ref.name}`} disabled={!canSwitchBranch} onClick={() => switchBranch(ref.name)}>
+														{t("remoteGit.switchBranch")}
+													</Button>
+												) : null}
 											</div>
 										))
 									: null}

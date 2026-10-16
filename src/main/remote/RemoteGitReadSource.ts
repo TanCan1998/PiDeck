@@ -5,7 +5,7 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`function createGitReadProgram(r
 	const MAX_STATUS = 1048576, MAX_RESOURCES = 4096, MAX_TEXT = 262144, MAX_STDERR = 65536;
 	const MAX_INDEX = 16777216, MAX_METADATA = 20000, MAX_DEPTH = 32, MAX_PATH = 4096;
 	const scopes = new Set();
-	const stable = new Set(["PATH_OUTSIDE_ROOT", "PATH_NOT_FOUND", "NOT_A_FILE", "PERMISSION_DENIED", "IO_ERROR", "RESULT_TOO_LARGE", "REQUEST_TIMEOUT", "REQUEST_CANCELLED", "REMOTE_CONNECTION_LOST", "GIT_NOT_FOUND", "GIT_VERSION_UNSUPPORTED", "GIT_NOT_REPOSITORY", "GIT_UNSUPPORTED_REPOSITORY", "GIT_PLATFORM_UNSUPPORTED", "GIT_CONFIG_UNSUPPORTED", "GIT_COMMAND_FAILED", "GIT_RESULT_INVALID", "GIT_RESOURCE_CHANGED", "GIT_NOT_TEXT", "GIT_INDEX_LOCKED", "GIT_WRITE_UNSUPPORTED", "GIT_WRITE_RESULT_UNCONFIRMED", "GIT_COMMIT_NOTHING_STAGED", "GIT_COMMIT_MESSAGE_EMPTY", "GIT_COMMIT_IDENTITY_REQUIRED", "GIT_COMMIT_HEAD_CHANGED", "GIT_OBJECT_NOT_FOUND"]);
+	const stable = new Set(["PATH_OUTSIDE_ROOT", "PATH_NOT_FOUND", "NOT_A_FILE", "PERMISSION_DENIED", "IO_ERROR", "RESULT_TOO_LARGE", "REQUEST_TIMEOUT", "REQUEST_CANCELLED", "REMOTE_CONNECTION_LOST", "GIT_NOT_FOUND", "GIT_VERSION_UNSUPPORTED", "GIT_NOT_REPOSITORY", "GIT_UNSUPPORTED_REPOSITORY", "GIT_PLATFORM_UNSUPPORTED", "GIT_CONFIG_UNSUPPORTED", "GIT_COMMAND_FAILED", "GIT_RESULT_INVALID", "GIT_RESOURCE_CHANGED", "GIT_NOT_TEXT", "GIT_INDEX_LOCKED", "GIT_WRITE_UNSUPPORTED", "GIT_WRITE_RESULT_UNCONFIRMED", "GIT_COMMIT_NOTHING_STAGED", "GIT_COMMIT_MESSAGE_EMPTY", "GIT_COMMIT_IDENTITY_REQUIRED", "GIT_COMMIT_HEAD_CHANGED", "GIT_OBJECT_NOT_FOUND", "GIT_REF_EXISTS", "GIT_REF_NOT_FOUND", "GIT_SWITCH_CONFLICT"]);
 	const control = /[\x00-\x1f\x7f]/;
 	function failure(code) { return new Error(code); }
 	function code(error) {
@@ -333,6 +333,7 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`function createGitReadProgram(r
 		return { name: name, email: email };
 	}
 	const committer = createGitCommitProgram(fs, { crypto: crypto, failure: failure, text: text, readFile: readFile, execute: execute, rawStatus: rawStatus, snapshot: snapshot, head: head }, { gates: writer.gates, entries: writer.entries, reaped: writer.reaped, fingerprint: writer.fingerprint }, commitIdentity);
+	const branches = createGitBranchProgram(fs, { failure: failure, execute: execute, rawStatus: rawStatus, snapshot: snapshot, head: head, text: text }, writer.gates);
 	async function run(ctx, params) {
 		ctx.check();
 		if (process.platform !== "linux") throw failure("GIT_PLATFORM_UNSUPPORTED");
@@ -353,6 +354,7 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`function createGitReadProgram(r
 		await validateConfiguration(ctx);
 		const first = snapshot(ctx), firstHead = await head(ctx);
 		if (params.method === "git.commit") return committer.run(ctx, params, first, firstHead);
+		if (params.method === "git.createBranch" || params.method === "git.switchBranch") return branches.run(ctx, params, first, firstHead);
 		if (params.method === "git.stage" || params.method === "git.unstage") return writer.run(ctx, params, first, firstHead);
 		if (params.method === "git.log") return unchangedRead(ctx, first, firstHead, log(ctx, params));
 		if (params.method === "git.commitDetail") return unchangedRead(ctx, first, firstHead, commitDetail(ctx, params));
@@ -385,6 +387,10 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`function createGitReadProgram(r
 		if (method === "git.refFileDiff") {
 			if (keys.length !== 3 || !keys.includes("base") || !keys.includes("head") || !keys.includes("path")) throw failure("GIT_RESULT_INVALID");
 			return { method: method, base: params.base === null ? null : readHash(params.base), head: readHash(params.head), path: relative(params.path) };
+		}
+		if (method === "git.createBranch" || method === "git.switchBranch") {
+			if (keys.length !== 2 || !keys.includes("name") || !keys.includes("expectedHead") || (params.expectedHead !== null && (typeof params.expectedHead !== "string" || !HASH_PATTERN.test(params.expectedHead)))) throw failure("GIT_RESULT_INVALID");
+			return { method: method, name: params.name, expectedHead: params.expectedHead };
 		}
 		if (method === "git.commit") {
 			if (keys.length !== 2 || !keys.includes("message") || !keys.includes("expectedRevision") || typeof params.message !== "string" || params.message.indexOf("\u0000") >= 0 || Buffer.byteLength(params.message, "utf8") > 4096 || typeof params.expectedRevision !== "string" || !/^[0-9a-f]{64}$/.test(params.expectedRevision)) throw failure("GIT_RESULT_INVALID");

@@ -1,6 +1,8 @@
 import { randomBytes } from "node:crypto";
 import type { RemoteGitWriteExpectation } from "./RemoteGitService";
 
+/** The closed set of actions a snapshot can authorize; one token authorizes exactly one kind. */
+export type RemoteGitMutationKind = RemoteGitWriteExpectation["kind"];
 type Entry = { senderId: number; projectId: string; expires: number; expected: RemoteGitWriteExpectation };
 
 /** Bounded, memory-only capabilities: a snapshot grants one index action to one window/project. */
@@ -25,7 +27,7 @@ export function createRemoteGitMutationTokens(now = Date.now) {
 			return token;
 		},
 		/** Consume synchronously before the caller's first await; another window cannot burn the owner's token. */
-		take(senderId: number, projectId: string, kind: "index" | "commit", token: unknown): RemoteGitWriteExpectation {
+		take(senderId: number, projectId: string, kind: RemoteGitMutationKind, token: unknown): RemoteGitWriteExpectation {
 			const entry = typeof token === "string" && /^[0-9a-f]{32}$/.test(token) ? entries.get(token) : undefined;
 			if (!entry || entry.senderId !== senderId || entry.projectId !== projectId) throw new Error("GIT_WRITE_SNAPSHOT_EXPIRED");
 			// A token for the other action kind is a caller bug: refuse without burning the token the user still owns.

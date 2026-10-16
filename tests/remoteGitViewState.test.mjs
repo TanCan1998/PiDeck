@@ -277,3 +277,91 @@ test("a revision file diff uses the shared diff surface and its identity is chec
 	assert.equal(swapped.current().diff, undefined);
 	assert.equal(swapped.current().diffErrorCode, "GIT_RESOURCE_CHANGED");
 });
+
+const branchSnapshot = { ...snapshot, branchToken: "b".repeat(32), switchToken: "c".repeat(32) };
+
+test("creating a branch sends the main-owned grant, refreshes only after confirmation and never replays an unknown result", async () => {
+	const calls = [];
+	let resolve;
+	const f = fixture({
+		remoteSnapshot: async () => ({ ok: true, snapshot: branchSnapshot }),
+		createRemoteBranch: async (...args) => {
+			calls.push(args);
+			return new Promise((accept) => {
+				resolve = accept;
+			});
+		},
+	});
+	await f.reads.refresh();
+	const pending = f.reads.createBranch("feature/one");
+	assert.equal(f.current().mutating, true);
+	assert.equal(f.current().mutatingKind, "branch");
+	// One action at a time: a second click while the first is in flight never reaches the API.
+	await f.reads.createBranch("feature/two");
+	assert.equal(calls.length, 1);
+	assert.deepEqual(plain(calls[0]), ["project", "feature/one", branchSnapshot.branchToken]);
+	resolve({ ok: true });
+	await pending;
+	assert.equal(f.current().mutating, undefined);
+	assert.equal(f.calls?.length ?? 0, 0);
+	// A refusal reports its own code and drops the facts.
+	const refused = fixture({ remoteSnapshot: async () => ({ ok: true, snapshot: branchSnapshot }), createRemoteBranch: async () => ({ ok: false, code: "GIT_REF_EXISTS" }) });
+	await refused.reads.refresh();
+	await refused.reads.createBranch("taken");
+	assert.equal(refused.current().errorCode, "GIT_REF_EXISTS");
+	assert.equal(refused.current().snapshot, undefined);
+	// An unknown outcome is a warning, not a success, and is never replayed.
+	const unknown = fixture({ remoteSnapshot: async () => ({ ok: true, snapshot: branchSnapshot }), createRemoteBranch: async () => ({ ok: false, code: "GIT_WRITE_RESULT_UNCONFIRMED" }) });
+	await unknown.reads.refresh();
+	await unknown.reads.createBranch("maybe");
+	assert.equal(unknown.current().errorCode, "GIT_WRITE_RESULT_UNCONFIRMED");
+});
+
+test("an invalid or unauthorized branch name never reaches the API", async () => {
+	const calls = [];
+	const f = fixture({
+		remoteSnapshot: async () => ({ ok: true, snapshot: branchSnapshot }),
+		createRemoteBranch: async (...args) => {
+			calls.push(args);
+			return { ok: true };
+		},
+		switchRemoteBranch: async (...args) => {
+			calls.push(args);
+			return { ok: true };
+		},
+	});
+	await f.reads.refresh();
+	for (const name of ["", "@", "-feature", "HEAD", "FETCH_HEAD", "refs/heads/x", "a@{b}", "a\\b", "x".repeat(1025), "d".repeat(40)]) await f.reads.createBranch(name);
+	await f.reads.switchBranch("main");
+	assert.deepEqual(calls, [], "names main would refuse and the branch already current are refused locally");
+	// Without a grant from the snapshot nothing is attempted, however valid the name is.
+	const ungranted = fixture({ remoteSnapshot: async () => ({ ok: true, snapshot }) });
+	await ungranted.reads.refresh();
+	await ungranted.reads.createBranch("feature/one");
+	await ungranted.reads.switchBranch("feature/one");
+	assert.equal(ungranted.current().errorCode, undefined);
+});
+
+test("switching uses its own grant, refreshes on confirmation and reports a conflict without touching facts twice", async () => {
+	const calls = [];
+	const f = fixture({
+		remoteSnapshot: async () => ({ ok: true, snapshot: branchSnapshot }),
+		switchRemoteBranch: async (...args) => {
+			calls.push(args);
+			return { ok: true };
+		},
+	});
+	await f.reads.refresh();
+	await f.reads.switchBranch("feature");
+	assert.deepEqual(plain(calls), [["project", "feature", branchSnapshot.switchToken]]);
+	// A grant is single use, so the second click can only work because the confirmed switch re-read the repository.
+	const readsBefore = f.states.filter((entry) => entry.snapshot !== undefined).length;
+	await f.reads.switchBranch("feature");
+	assert.equal(calls.length, 2);
+	assert.ok(f.states.filter((entry) => entry.snapshot !== undefined).length > readsBefore, "a confirmed switch re-reads the repository and hands out the next grant");
+	const conflict = fixture({ remoteSnapshot: async () => ({ ok: true, snapshot: branchSnapshot }), switchRemoteBranch: async () => ({ ok: false, code: "GIT_SWITCH_CONFLICT" }) });
+	await conflict.reads.refresh();
+	await conflict.reads.switchBranch("feature");
+	assert.equal(conflict.current().errorCode, "GIT_SWITCH_CONFLICT");
+	assert.equal(conflict.current().mutating, undefined);
+});

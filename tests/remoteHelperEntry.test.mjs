@@ -59,7 +59,7 @@ const HOST_ID = "01234567-89ab-4def-8123-456789abcdef";
 /** The helper never resolves HOME into a path, so a POSIX literal is the honest fixture on any platform. */
 const HELPER_HOME = "/home/pideck-helper";
 /** Frozen digest, pinned here as well as in the module: editing the source means editing both. */
-const FROZEN_SHA256 = "f04c1c8773883d33b9c516cf175dafe39e80e242c768c1cdc309be521ae603de";
+const FROZEN_SHA256 = "a9196036c37108b6013907c80e11893fe5b085f40a5d6bff669f94551cff5621";
 const MAX_TEXT = 4096;
 const TEST_TIMEOUT_MS = 30_000;
 const GUARD_TIMEOUT_MS = 10_000;
@@ -432,7 +432,7 @@ helperTest("the frozen helper source is one byte-frozen ASCII line", () => {
 	// length applies, and the body has to stay small enough to be audited as one line. It is also two orders
 	// of magnitude below the 8 MiB frame cap the same body enforces.
 	// The bound moved 64 KiB -> 80 KiB with helper build 1.9.0 (managed commit) and 80 KiB -> 96 KiB with
-	// build 1.10.0 (read-only history), each time because the measured headroom could not fit the next batch
+	// build 1.11.0 (branch write face; last raise was 1.10.0), each time because the measured headroom could not fit the next batch
 	// (1,279 characters before commit; 3,391 after trimming before history) and because the batch is protocol
 	// code — bounds, validation and refusal paths — rather than prose.
 	//
