@@ -792,6 +792,11 @@ const api = {
 		// 只提交已确认的暂存区；消息逐字发送，不在渲染层做任何 Git 语义加工
 		commitRemote: (projectId: string, message: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteCommit, projectId, message, token) as Promise<import("../shared/types").GitCommitResult>,
 		remoteSnapshot: (projectId: string) => ipcRenderer.invoke(ipcChannels.gitRemoteSnapshot, projectId) as Promise<import("../shared/types").GitReadSnapshotResult>,
+		// 只读历史（G3a）：分页日志／提交详情／本地引用／两版本间单文件；与 status 同一信任边界，无 token
+		remoteLog: (projectId: string, options?: { maxCount?: number; skip?: number }) => ipcRenderer.invoke(ipcChannels.gitRemoteLog, projectId, options) as Promise<import("../shared/types").RemoteGitLogResult>,
+		remoteCommitDetail: (projectId: string, oid: string) => ipcRenderer.invoke(ipcChannels.gitRemoteCommitDetail, projectId, oid) as Promise<import("../shared/types").RemoteGitCommitDetailResult>,
+		remoteRefs: (projectId: string) => ipcRenderer.invoke(ipcChannels.gitRemoteRefs, projectId) as Promise<import("../shared/types").RemoteGitRefsResult>,
+		remoteRefFileDiff: (projectId: string, base: string | null, head: string, target: ProjectFileTarget) => ipcRenderer.invoke(ipcChannels.gitRemoteRefFileDiff, projectId, base, head, target) as Promise<import("../shared/types").RemoteGitRefFileDiffResult>,
 		status: (projectId: string, repoPath?: ProjectFileTarget) => ipcRenderer.invoke(ipcChannels.gitStatus, projectId, repoPath) as Promise<import("../shared/types").GitResourceGroups>,
 		// Git Changes 中单个文件的两侧快照（按点击惰性读取）
 		workspaceFileDiff: (projectId: string, group: GitWorkspaceDiffGroup, fileTarget: ProjectFileTarget, repoPath?: ProjectFileTarget) => ipcRenderer.invoke(ipcChannels.gitWorkspaceFileDiff, projectId, group, fileTarget, repoPath) as Promise<GitWorkspaceFileDiff | null>,

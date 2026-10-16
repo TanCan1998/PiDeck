@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { RemoteProject } from "../../../shared/types/project";
 import { desktopApi } from "../desktopApi";
 import { createRemoteGitViewController, type RemoteGitViewState } from "../utils/remoteGitViewState";
@@ -21,6 +21,21 @@ export function useRemoteGitView(project: RemoteProject) {
 			if (controller.current === reads) controller.current = null;
 		};
 	}, [project.id, project.locator.hostId, projectKey]);
+	const loadHistory = useCallback(() => {
+		void controller.current?.loadHistory();
+	}, []);
+	const loadMoreHistory = useCallback(() => {
+		void controller.current?.loadMoreHistory();
+	}, []);
+	const openCommitDetail = useCallback((oid: string) => {
+		void controller.current?.openCommitDetail(oid);
+	}, []);
+	const loadRefs = useCallback(() => {
+		void controller.current?.loadRefs();
+	}, []);
+	const openHistoryFileDiff = useCallback((base: string | null, head: string, target: Parameters<NonNullable<typeof controller.current>["openHistoryFileDiff"]>[2]) => {
+		void controller.current?.openHistoryFileDiff(base, head, target);
+	}, []);
 	return {
 		state: state.projectKey === projectKey ? state : { projectKey, loading: true, diffLoading: false },
 		refresh: () => {
@@ -36,5 +51,10 @@ export function useRemoteGitView(project: RemoteProject) {
 			void controller.current?.commit(message);
 		},
 		closeDiff: () => controller.current?.closeDiff(),
+		loadHistory,
+		loadMoreHistory,
+		openCommitDetail,
+		loadRefs,
+		openHistoryFileDiff,
 	};
 }

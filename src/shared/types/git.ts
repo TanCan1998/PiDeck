@@ -106,6 +106,36 @@ export type GitResourceGroups = {
 
 /** Complete read-only repository snapshot; unsupported or failed reads never masquerade as empty status. */
 export type GitReadSnapshot = { groups: GitResourceGroups; head: string | null; branch: string | null; mutationToken?: string; commitToken?: string };
+
+// ── G3a：远端历史／引用／提交详情／两个版本之间的单文件差异（只读、有界、超限即拒）──
+
+/** 一页历史：`commits` 有界，`hasMore` 表示还有下一页（由 main 多取一条判断，不向渲染层报告总数）。 */
+export type RemoteGitCommit = { oid: string; parents: string[]; authorName: string; authorEmail: string; authorTimeSec: number; subject: string };
+export type RemoteGitLogPage = { commits: RemoteGitCommit[]; hasMore: boolean };
+export type RemoteGitLogResult = { ok: true; page: RemoteGitLogPage } | { ok: false; code: string };
+/** 提交详情：完整消息（有界 UTF-8）＋相对第一父提交的变更文件列表；根提交无 base。 */
+export type RemoteGitCommitFile = { status: string; path: string; oldPath?: string };
+export type RemoteGitCommitDetail = {
+	oid: string;
+	parents: string[];
+	authorName: string;
+	authorEmail: string;
+	authorTimeSec: number;
+	committerName: string;
+	committerEmail: string;
+	committerTimeSec: number;
+	subject: string;
+	message: string;
+	files: RemoteGitCommitFile[];
+};
+export type RemoteGitCommitDetailResult = { ok: true; detail: RemoteGitCommitDetail } | { ok: false; code: string };
+/** 本地分支与 tag；不含 remote-tracking ref，避免暗示尚未交付的同步状态。 */
+export type RemoteGitRef = { fullName: string; name: string; oid: string; kind: "branch" | "tag" };
+export type RemoteGitRefs = { head: string | null; branch: string | null; refs: RemoteGitRef[] };
+export type RemoteGitRefsResult = { ok: true; refs: RemoteGitRefs } | { ok: false; code: string };
+/** `base: null` 表示该侧不存在（根提交，或该侧新增文件）；两侧都不存在时拒绝。 */
+export type RemoteGitRefFileDiff = { path: string; target: ProjectFileTarget; displayPath: string; base: string | null; head: string; originalContent: string; modifiedContent: string };
+export type RemoteGitRefFileDiffResult = { ok: true; diff: RemoteGitRefFileDiff } | { ok: false; code: string };
 /** An uncertain mutation must be checked by a fresh read, never automatically replayed. */
 export type GitIndexMutationResult = { ok: true } | { ok: false; code: string };
 /** A commit has no renderer-visible result beyond success: the new HEAD is read back through a fresh snapshot. */

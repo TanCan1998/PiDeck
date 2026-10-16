@@ -1,4 +1,19 @@
-import type { GitCommitResult, GitIndexMutationResult, GitReadSnapshot, GitReadSnapshotResult, GitResourceGroupType, GitWorkspaceFileDiff } from "../../../shared/types/git";
+import type {
+	GitCommitResult,
+	GitIndexMutationResult,
+	GitReadSnapshot,
+	GitReadSnapshotResult,
+	GitResourceGroupType,
+	GitWorkspaceFileDiff,
+	RemoteGitCommitDetail,
+	RemoteGitCommitDetailResult,
+	RemoteGitLogPage,
+	RemoteGitLogResult,
+	RemoteGitRefFileDiff,
+	RemoteGitRefFileDiffResult,
+	RemoteGitRefs,
+	RemoteGitRefsResult,
+} from "../../../shared/types/git";
 import type { ProjectFileTarget } from "../../../shared/types/project";
 
 export type RemoteGitViewState = {
@@ -12,9 +27,23 @@ export type RemoteGitViewState = {
 	/** Counts confirmed commits, so the panel can clear its message box exactly once per success. */
 	confirmedCommits?: number;
 	diffLoading: boolean;
-	diff?: GitWorkspaceFileDiff;
+	/** A workspace diff or one file's two sides between two revisions; one surface, one flight at a time. */
+	diff?: GitWorkspaceFileDiff | RemoteGitRefFileDiff;
+	diffKind?: "workspace" | "revision";
 	diffGroup?: GitResourceGroupType;
 	diffErrorCode?: string;
+	/* Read-only history (G3a): manual loads only; facts die with the snapshot facts so the panel never mixes generations. */
+	history?: RemoteGitLogPage;
+	historyLoading?: boolean;
+	historyMoreLoading?: boolean;
+	historyErrorCode?: string;
+	detailOid?: string;
+	detail?: RemoteGitCommitDetail;
+	detailLoading?: boolean;
+	detailErrorCode?: string;
+	refs?: RemoteGitRefs;
+	refsLoading?: boolean;
+	refsErrorCode?: string;
 };
 export type RemoteGitViewApi = {
 	cancelRemoteReads(projectId: string): Promise<void>;
@@ -22,6 +51,10 @@ export type RemoteGitViewApi = {
 	mutateRemoteIndex(projectId: string, operation: "stage" | "unstage", group: GitResourceGroupType, target: ProjectFileTarget, token: string): Promise<GitIndexMutationResult>;
 	remoteSnapshot(projectId: string): Promise<GitReadSnapshotResult>;
 	workspaceFileDiff(projectId: string, group: GitResourceGroupType, target: ProjectFileTarget): Promise<GitWorkspaceFileDiff | null>;
+	remoteLog(projectId: string, options?: { maxCount?: number; skip?: number }): Promise<RemoteGitLogResult>;
+	remoteCommitDetail(projectId: string, oid: string): Promise<RemoteGitCommitDetailResult>;
+	remoteRefs(projectId: string): Promise<RemoteGitRefsResult>;
+	remoteRefFileDiff(projectId: string, base: string | null, head: string, target: ProjectFileTarget): Promise<RemoteGitRefFileDiffResult>;
 };
 
 function errorCode(error: unknown): string {
@@ -34,6 +67,9 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 	let active = true;
 	let epoch = 0;
 	let diffEpoch = 0;
+	let historyEpoch = 0;
+	let detailEpoch = 0;
+	let refsEpoch = 0;
 	let state: RemoteGitViewState = { projectKey, loading: false, diffLoading: false };
 	function update(next: RemoteGitViewState) {
 		// The confirmed-commit counter is sticky: a later read (or a connection loss) must not resurrect the
@@ -47,6 +83,10 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			if (!active || state.loading || state.diffLoading || state.mutating) return;
 			const generation = ++epoch;
 			diffEpoch += 1;
+			// History, detail and refs facts die with the snapshot facts; in-flight section loads are stale too.
+			historyEpoch += 1;
+			detailEpoch += 1;
+			refsEpoch += 1;
 			// Clear previous facts during refresh; a failed read must not display a stale clean repository.
 			const uncertainWrite = state.errorCode === "GIT_WRITE_RESULT_UNCONFIRMED";
 			const failureCode = (code: string) => (uncertainWrite ? "GIT_WRITE_RESULT_UNCONFIRMED" : code);
@@ -67,6 +107,9 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			const token = state.snapshot.mutationToken;
 			const generation = ++epoch;
 			diffEpoch += 1;
+			historyEpoch += 1;
+			detailEpoch += 1;
+			refsEpoch += 1;
 			update({ ...state, mutating: true, mutatingKind: "index", errorCode: undefined, diff: undefined, diffErrorCode: undefined });
 			try {
 				const result = await api.mutateRemoteIndex(projectId, operation, group, target, token);
@@ -88,6 +131,9 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			const token = state.snapshot.commitToken;
 			const generation = ++epoch;
 			diffEpoch += 1;
+			historyEpoch += 1;
+			detailEpoch += 1;
+			refsEpoch += 1;
 			update({ ...state, mutating: true, mutatingKind: "commit", errorCode: undefined, diff: undefined, diffErrorCode: undefined });
 			try {
 				const result = await api.commitRemote(projectId, message, token);
@@ -108,7 +154,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			if (!active || state.loading || state.diffLoading || state.mutating || !state.snapshot || target.projectId !== projectId) return;
 			const generation = epoch;
 			const request = ++diffEpoch;
-			update({ ...state, diff: undefined, diffGroup: group, diffErrorCode: undefined, diffLoading: true });
+			update({ ...state, diff: undefined, diffKind: "workspace", diffGroup: group, diffErrorCode: undefined, diffLoading: true });
 			try {
 				const diff = await api.workspaceFileDiff(projectId, group, target);
 				if (!active || generation !== epoch || request !== diffEpoch) return;
@@ -121,13 +167,90 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 		closeDiff() {
 			if (!active || state.diffLoading || state.mutating) return;
 			diffEpoch += 1;
-			update({ ...state, diff: undefined, diffGroup: undefined, diffLoading: false, diffErrorCode: undefined });
+			update({ ...state, diff: undefined, diffKind: undefined, diffGroup: undefined, diffLoading: false, diffErrorCode: undefined });
+		},
+		/* Read-only history (G3a): every load is a user action; nothing here polls, connects or writes. */
+		async loadHistory(): Promise<void> {
+			if (!active || state.loading || state.mutating || state.historyLoading || state.historyMoreLoading) return;
+			const generation = ++historyEpoch;
+			update({ ...state, history: undefined, historyErrorCode: undefined, historyLoading: true, detail: undefined, detailOid: undefined, detailErrorCode: undefined });
+			try {
+				const result = await api.remoteLog(projectId, { maxCount: 50 });
+				if (!active || generation !== historyEpoch) return;
+				if (result.ok) update({ ...state, historyLoading: false, history: result.page });
+				else update({ ...state, historyLoading: false, historyErrorCode: result.code });
+			} catch (error) {
+				if (active && generation === historyEpoch) update({ ...state, historyLoading: false, historyErrorCode: errorCode(error) });
+			}
+		},
+		async loadMoreHistory(): Promise<void> {
+			if (!active || state.loading || state.mutating || state.historyLoading || state.historyMoreLoading || !state.history?.hasMore) return;
+			const generation = ++historyEpoch;
+			const skip = state.history.commits.length;
+			update({ ...state, historyMoreLoading: true, historyErrorCode: undefined });
+			try {
+				const result = await api.remoteLog(projectId, { maxCount: 50, skip });
+				if (!active || generation !== historyEpoch) return;
+				if (result.ok) update({ ...state, historyMoreLoading: false, history: { commits: [...state.history.commits, ...result.page.commits], hasMore: result.page.hasMore } });
+				// A failed page keeps the rows already on screen; only a fresh full load replaces them.
+				else update({ ...state, historyMoreLoading: false, historyErrorCode: result.code });
+			} catch (error) {
+				if (active && generation === historyEpoch) update({ ...state, historyMoreLoading: false, historyErrorCode: errorCode(error) });
+			}
+		},
+		async openCommitDetail(oid: string): Promise<void> {
+			// A new click always supersedes the flight in progress; the detail epoch decides which answer may publish.
+			if (!active || state.loading || state.mutating) return;
+			if (typeof oid !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid)) return;
+			const generation = ++detailEpoch;
+			update({ ...state, detailOid: oid, detail: undefined, detailErrorCode: undefined, detailLoading: true });
+			try {
+				const result = await api.remoteCommitDetail(projectId, oid);
+				if (!active || generation !== detailEpoch) return;
+				if (result.ok && result.detail.oid === oid) update({ ...state, detailLoading: false, detail: result.detail });
+				else update({ ...state, detailLoading: false, detailErrorCode: result.ok ? "GIT_RESOURCE_CHANGED" : result.code });
+			} catch (error) {
+				if (active && generation === detailEpoch) update({ ...state, detailLoading: false, detailErrorCode: errorCode(error) });
+			}
+		},
+		async loadRefs(): Promise<void> {
+			if (!active || state.loading || state.mutating || state.refsLoading) return;
+			const generation = ++refsEpoch;
+			update({ ...state, refs: undefined, refsErrorCode: undefined, refsLoading: true });
+			try {
+				const result = await api.remoteRefs(projectId);
+				if (!active || generation !== refsEpoch) return;
+				if (result.ok) update({ ...state, refsLoading: false, refs: result.refs });
+				else update({ ...state, refsLoading: false, refsErrorCode: result.code });
+			} catch (error) {
+				if (active && generation === refsEpoch) update({ ...state, refsLoading: false, refsErrorCode: errorCode(error) });
+			}
+		},
+		/** One file's two sides between two revisions, on the same surface as a workspace diff. */
+		async openHistoryFileDiff(base: string | null, head: string, target: ProjectFileTarget) {
+			if (!active || state.loading || state.diffLoading || state.mutating || target.projectId !== projectId) return;
+			if (typeof head !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(head) || (base !== null && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(base))) return;
+			const generation = epoch;
+			const request = ++diffEpoch;
+			update({ ...state, diff: undefined, diffKind: "revision", diffGroup: undefined, diffErrorCode: undefined, diffLoading: true });
+			try {
+				const result = await api.remoteRefFileDiff(projectId, base, head, target);
+				if (!active || generation !== epoch || request !== diffEpoch) return;
+				const diff = result.ok ? result.diff : undefined;
+				if (!diff || diff.target.projectId !== projectId || diff.target.relativePath !== target.relativePath || diff.head !== head || diff.base !== base) update({ ...state, diffLoading: false, diffErrorCode: result.ok ? "GIT_RESOURCE_CHANGED" : result.code });
+				else update({ ...state, diffLoading: false, diff });
+			} catch (error) {
+				if (active && generation === epoch && request === diffEpoch) update({ ...state, diffLoading: false, diffErrorCode: errorCode(error) });
+			}
 		},
 		/** Connection transitions invalidate facts without automatically reconnecting or refreshing. */
 		invalidateConnection() {
 			if (!active) return;
 			epoch += 1;
 			diffEpoch += 1;
+			historyEpoch += 1;
+			detailEpoch += 1;
+			refsEpoch += 1;
 			void api.cancelRemoteReads(projectId).catch(() => undefined);
 			// Reconnect may emit several failure states; retain uncertainty until a successful explicit refresh.
 			const uncertainWrite = state.mutating || state.errorCode === "GIT_WRITE_RESULT_UNCONFIRMED";
@@ -139,6 +262,9 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			void api.cancelRemoteReads(projectId).catch(() => undefined);
 			epoch += 1;
 			diffEpoch += 1;
+			historyEpoch += 1;
+			detailEpoch += 1;
+			refsEpoch += 1;
 		},
 	};
 	return controller;

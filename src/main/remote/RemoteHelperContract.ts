@@ -85,6 +85,7 @@ export const REMOTE_HELPER_ERROR_CODES = [
 	"GIT_COMMIT_MESSAGE_EMPTY",
 	"GIT_COMMIT_IDENTITY_REQUIRED",
 	"GIT_COMMIT_HEAD_CHANGED",
+	"GIT_OBJECT_NOT_FOUND",
 ] as const;
 export type RemoteHelperErrorCode = (typeof REMOTE_HELPER_ERROR_CODES)[number];
 
@@ -115,6 +116,52 @@ export const REMOTE_GIT_METADATA_MAX_DEPTH = 32;
 export const REMOTE_GIT_READ_TIMEOUT_MS = 30_000;
 
 export type RemoteGitStatusResult = { status: string; head: string | null; branch: string | null; revision?: string };
+
+/**
+ * Read-only history batch (G3a): log, one commit's detail, local refs and one file's two sides between
+ * two revisions. Every list is bounded and refused rather than truncated, and no method touches the network,
+ * the index or the working tree. Refs are returned as opaque OIDs: nothing here interprets a branch name.
+ */
+export const REMOTE_GIT_LOG_MAX_COUNT = 100;
+/** One page's default when the caller omits `maxCount`; still a literal on both sides. */
+export const REMOTE_GIT_LOG_DEFAULT_COUNT = 50;
+export const REMOTE_GIT_LOG_MAX_SKIP = 100_000;
+export const REMOTE_GIT_REF_MAX_COUNT = 512;
+export const REMOTE_GIT_REF_MAX_NAME_BYTES = 1024;
+export const REMOTE_GIT_COMMIT_MAX_FILES = 512;
+/** The detail message read back from history; distinct from the 4 KiB commit input bound on purpose. */
+export const REMOTE_GIT_DETAIL_MESSAGE_MAX_BYTES = 64 * 1024;
+export const REMOTE_GIT_IDENTITY_MAX_BYTES = 320;
+export const REMOTE_GIT_SUBJECT_MAX_BYTES = 1024;
+export const REMOTE_GIT_LOG_MAX_PARENTS = 8;
+
+/** One history row; `parents` is bounded and `subject` is the first line only. */
+export type RemoteGitLogEntry = { oid: string; parents: readonly string[]; authorName: string; authorEmail: string; authorTimeSec: number; subject: string };
+export type RemoteGitLogParams = { maxCount?: number; skip?: number };
+export type RemoteGitLogResult = { commits: readonly RemoteGitLogEntry[]; hasMore: boolean };
+/** The commit's full message and its changed files against its first parent (a root commit lists all files). */
+export type RemoteGitCommitDetailParams = { oid: string };
+export type RemoteGitCommitFile = { status: string; path: string; oldPath?: string };
+export type RemoteGitCommitDetailResult = {
+	oid: string;
+	parents: readonly string[];
+	authorName: string;
+	authorEmail: string;
+	authorTimeSec: number;
+	committerName: string;
+	committerEmail: string;
+	committerTimeSec: number;
+	subject: string;
+	message: string;
+	files: readonly RemoteGitCommitFile[];
+};
+export type RemoteGitRefsParams = Record<string, never>;
+/** Local branches and tags only: remote-tracking refs would imply sync state this batch does not deliver. */
+export type RemoteGitRefEntry = { fullName: string; name: string; oid: string; kind: "branch" | "tag" };
+export type RemoteGitRefsResult = { head: string | null; branch: string | null; refs: readonly RemoteGitRefEntry[] };
+/** `base: null` means the file has no other side (root commit, or a file added by this commit). */
+export type RemoteGitRefFileDiffParams = { base: string | null; head: string; path: string };
+export type RemoteGitRefFileDiffResult = { originalContent: string; modifiedContent: string };
 /** Managed single-resource index mutations. The expectation is main-owned, never renderer authority. */
 export type RemoteGitMutationParams = { path: string; group: "index" | "workingTree" | "untracked"; expectedRevision: string };
 export type RemoteGitMutationResult = { applied: true };
@@ -131,7 +178,7 @@ export const REMOTE_GIT_COMMIT_MESSAGE_MAX_BYTES = 4096;
 export type RemoteGitWorkspaceDiffParams = { group: "merge" | "index" | "workingTree" | "untracked"; path: string };
 export type RemoteGitWorkspaceDiffResult = { originalContent: string; modifiedContent: string };
 
-export const REMOTE_HELPER_CAPABILITIES = ["echo", "fs.stat", "fs.list", "fs.read", "fs.searchNames", "git.status", "git.workspaceDiff", "git.stage", "git.unstage", "git.commit"] as const;
+export const REMOTE_HELPER_CAPABILITIES = ["echo", "fs.stat", "fs.list", "fs.read", "fs.searchNames", "git.status", "git.workspaceDiff", "git.stage", "git.unstage", "git.commit", "git.log", "git.commitDetail", "git.refs", "git.refFileDiff"] as const;
 export type RemoteHelperCapability = (typeof REMOTE_HELPER_CAPABILITIES)[number];
 /**
  * Ceiling for one requested relative path. It is applied to the raw string before any filesystem access,

@@ -59,7 +59,7 @@ const HOST_ID = "01234567-89ab-4def-8123-456789abcdef";
 /** The helper never resolves HOME into a path, so a POSIX literal is the honest fixture on any platform. */
 const HELPER_HOME = "/home/pideck-helper";
 /** Frozen digest, pinned here as well as in the module: editing the source means editing both. */
-const FROZEN_SHA256 = "9ed9ccc5837bf92c476a74967205f310b1ce92bb30a95e0a43fb034ca2159145";
+const FROZEN_SHA256 = "f04c1c8773883d33b9c516cf175dafe39e80e242c768c1cdc309be521ae603de";
 const MAX_TEXT = 4096;
 const TEST_TIMEOUT_MS = 30_000;
 const GUARD_TIMEOUT_MS = 10_000;
@@ -431,13 +431,25 @@ helperTest("the frozen helper source is one byte-frozen ASCII line", () => {
 	// artifact, not a startup constraint: everything below starts the body from a file, where no command line
 	// length applies, and the body has to stay small enough to be audited as one line. It is also two orders
 	// of magnitude below the 8 MiB frame cap the same body enforces.
-	// The bound moved from 64 KiB to 80 KiB with helper build 1.9.0 (managed commit). That is a deliberate
-	// review-budget change, not a quiet relaxation: the commit path needs its own verified index context,
-	// message handling and compare-and-swap, and the measured headroom before it was 1,279 characters, so
-	// trimming prose could not have made it fit. Everything that actually bounds the audit surface is still
-	// enforced here and in the surrounding tests: one printable-ASCII line, exactly the four builtins above,
-	// a SHA-256 frozen both in RemoteHelperEntry.ts and in this file, and a contract test per method.
-	assert.ok(REMOTE_HELPER_INLINE_SOURCE.length > 1024 && REMOTE_HELPER_INLINE_SOURCE.length < 80 * 1024, `unexpected source size ${REMOTE_HELPER_INLINE_SOURCE.length}`);
+	// The bound moved 64 KiB -> 80 KiB with helper build 1.9.0 (managed commit) and 80 KiB -> 96 KiB with
+	// build 1.10.0 (read-only history), each time because the measured headroom could not fit the next batch
+	// (1,279 characters before commit; 3,391 after trimming before history) and because the batch is protocol
+	// code — bounds, validation and refusal paths — rather than prose.
+	//
+	// This is the LAST raise: the next feature that does not fit must split the embedded program into separate
+	// deploy-bundle files (or drop the `node -e` self-test shape that forces one file), not move this number
+	// again. What actually bounds the audit surface stays enforced here and around it: one printable-ASCII line,
+	// exactly the four builtins above, a SHA-256 frozen both in RemoteHelperEntry.ts and in this file, no dynamic
+	// evaluation, one dispatch arm per advertised capability, and a contract test per method.
+	assert.ok(REMOTE_HELPER_INLINE_SOURCE.length > 1024 && REMOTE_HELPER_INLINE_SOURCE.length < 96 * 1024, `unexpected source size ${REMOTE_HELPER_INLINE_SOURCE.length}`);
+	assert.ok(!/\b(?:eval|Function)\s*\(/.test(REMOTE_HELPER_INLINE_SOURCE), "the frozen body must not evaluate assembled code");
+	assert.ok(!/\bimport\b|\brequire\s*\(/.test(REMOTE_HELPER_INLINE_SOURCE), "the frozen body stays one self-contained artifact");
+	// Every advertised capability must have exactly one dispatch arm, so a capability can never be advertised
+	// without an implementation, or implemented twice.
+	for (const capability of REMOTE_HELPER_CAPABILITIES) {
+		const mentions = REMOTE_HELPER_INLINE_SOURCE.split(`"${capability}"`).length - 1;
+		assert.ok(mentions >= 2, `${capability} must appear in CAPABILITIES and in the dispatch`);
+	}
 	// This one used to be a startup constraint of the `node -e <source>` shape: Windows accepts at most 32766
 	// characters in a CreateProcess command line (the documented cap is 32767 including the terminating null;
 	// measured: 32766 starts, 32767 fails with ENAMETOOLONG), and the body, the escaping of every double quote

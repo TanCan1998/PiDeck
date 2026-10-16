@@ -1,6 +1,6 @@
 import { ipcMain, type IpcMainInvokeEvent } from "electron";
 import { ipcChannels } from "../../shared/ipc";
-import type { GitCommitResult, GitIndexMutationResult, GitReadSnapshotResult, GitResourceGroups, GitWorkspaceFileDiff } from "../../shared/types/git";
+import type { GitCommitResult, GitIndexMutationResult, GitReadSnapshotResult, GitResourceGroups, GitWorkspaceFileDiff, RemoteGitCommitDetailResult, RemoteGitLogResult, RemoteGitRefFileDiffResult, RemoteGitRefsResult } from "../../shared/types/git";
 import type { ProjectFileTarget } from "../../shared/types/project";
 import { createRemoteGitService, remoteGitFailureCode, validateRemoteGitPath, type RemoteGitLocator } from "../git/RemoteGitService";
 import { createRemoteGitMutationTokens } from "../git/RemoteGitMutationTokens";
@@ -113,6 +113,39 @@ export function registerRemoteGitReadIpc(input: { enabled: boolean; locator(proj
 			if (typeof message !== "string" || message.length === 0 || message.trim().length === 0 || message.includes("\0") || Buffer.byteLength(message, "utf8") > REMOTE_GIT_COMMIT_MESSAGE_MAX_BYTES) throw new Error("GIT_COMMIT_MESSAGE_EMPTY");
 			await read(event, projectId, undefined, (id, signal) => git.commit(id, message, tokens.take(event.sender.id, id, "commit", token), signal), true);
 			return { ok: true };
+		} catch (error) {
+			return { ok: false, code: remoteGitFailureCode(error) };
+		}
+	});
+	/* Read-only history (G3a): same sender/project/pressure boundaries as status; never a token. */
+	ipcMain.handle(ipcChannels.gitRemoteLog, async (event, projectId: unknown, options: unknown): Promise<RemoteGitLogResult> => {
+		try {
+			const page = await read(event, projectId, undefined, (id, signal) => git.log(id, options, signal));
+			return { ok: true, page };
+		} catch (error) {
+			return { ok: false, code: remoteGitFailureCode(error) };
+		}
+	});
+	ipcMain.handle(ipcChannels.gitRemoteCommitDetail, async (event, projectId: unknown, oid: unknown): Promise<RemoteGitCommitDetailResult> => {
+		try {
+			const detail = await read(event, projectId, undefined, (id, signal) => git.commitDetail(id, oid, signal));
+			return { ok: true, detail };
+		} catch (error) {
+			return { ok: false, code: remoteGitFailureCode(error) };
+		}
+	});
+	ipcMain.handle(ipcChannels.gitRemoteRefs, async (event, projectId: unknown): Promise<RemoteGitRefsResult> => {
+		try {
+			const refs = await read(event, projectId, undefined, (id, signal) => git.refs(id, signal));
+			return { ok: true, refs };
+		} catch (error) {
+			return { ok: false, code: remoteGitFailureCode(error) };
+		}
+	});
+	ipcMain.handle(ipcChannels.gitRemoteRefFileDiff, async (event, projectId: unknown, base: unknown, head: unknown, value: unknown): Promise<RemoteGitRefFileDiffResult> => {
+		try {
+			const diff = await read(event, projectId, undefined, (id, signal) => git.refFileDiff(id, base, head, fileTarget(id, value), signal));
+			return { ok: true, diff };
 		} catch (error) {
 			return { ok: false, code: remoteGitFailureCode(error) };
 		}

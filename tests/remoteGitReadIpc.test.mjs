@@ -6,8 +6,30 @@ import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 const { ipcChannels } = loadTsCommonJs("src/shared/ipc.ts");
 const projectId = "remote-project";
 const locator = { kind: "ssh", hostId: "remote-host", remotePath: "/workspace/project" };
-const snapshot = { status: Buffer.from(" M tracked.txt\0").toString("base64"), head: "a".repeat(40), branch: "main" };
-const hello = { protocolVersion: 1, root: locator.remotePath, capabilities: ["git.status", "git.workspaceDiff"] };
+const oid = (char) => char.repeat(40);
+const snapshot = { status: Buffer.from(" M tracked.txt\0").toString("base64"), head: oid("a"), branch: "main" };
+const hello = { protocolVersion: 1, root: locator.remotePath, capabilities: ["git.status", "git.workspaceDiff", "git.log", "git.commitDetail", "git.refs", "git.refFileDiff"] };
+const logPage = { commits: [{ oid: oid("a"), parents: [oid("b")], authorName: "Fixture", authorEmail: "fixture@example.invalid", authorTimeSec: 1700000000, subject: "one" }], hasMore: true };
+const detailValue = {
+	parents: [oid("b")],
+	authorName: "Fixture",
+	authorEmail: "fixture@example.invalid",
+	authorTimeSec: 1700000000,
+	committerName: "Fixture",
+	committerEmail: "fixture@example.invalid",
+	committerTimeSec: 1700000000,
+	subject: "subject",
+	message: "subject\n\nbody\n",
+	files: [{ status: "R100", path: "renamed.txt", oldPath: "old.txt" }],
+};
+const refsValue = {
+	head: oid("a"),
+	branch: "main",
+	refs: [
+		{ fullName: "refs/heads/main", name: "main", oid: oid("a"), kind: "branch" },
+		{ fullName: "refs/tags/v1", name: "v1", oid: oid("c"), kind: "tag" },
+	],
+};
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
 /** Drive registered IPC handlers with the real remote service, no network and no local Git fallback. */
@@ -22,7 +44,12 @@ function fixture(overrides = {}) {
 		request: async (method, params, options) => {
 			calls.push({ method, params });
 			options?.onRequestId?.("request-id");
-			return method === "hello" ? hello : method === "git.status" ? snapshot : { originalContent: "base\n", modifiedContent: "working\n" };
+			if (method === "hello") return hello;
+			if (method === "git.status") return snapshot;
+			if (method === "git.log") return logPage;
+			if (method === "git.commitDetail") return { ...detailValue, oid: params.oid };
+			if (method === "git.refs") return refsValue;
+			return { originalContent: "base\n", modifiedContent: "working\n" };
 		},
 		cancel: async (id) => {
 			calls.push({ method: "cancel", id });
@@ -133,5 +160,81 @@ test("remote Git IPC disposal cancels reads and admits no further operations", a
 	const result = await f.handlers.get(ipcChannels.gitRemoteSnapshot)(f.event, projectId);
 	assert.equal(result.ok, false);
 	assert.equal(result.code, "REQUEST_CANCELLED");
+	assert.equal(f.calls.length, 0);
+});
+
+test("remote history IPC answers log, detail, refs and ref-file diff through the real service", async () => {
+	const f = fixture();
+	const page = await f.handlers.get(ipcChannels.gitRemoteLog)(f.event, projectId, { maxCount: 10, skip: 5 });
+	assert.equal(page.ok, true);
+	assert.equal(page.page.hasMore, true);
+	assert.deepEqual(plain(page.page.commits), logPage.commits);
+	assert.deepEqual(plain(f.calls.at(-1)), { method: "git.log", params: { maxCount: 10, skip: 5 } });
+	const defaults = await f.handlers.get(ipcChannels.gitRemoteLog)(f.event, projectId);
+	assert.equal(defaults.ok, true);
+	assert.deepEqual(plain(f.calls.at(-1)), { method: "git.log", params: { maxCount: 50, skip: 0 } });
+	const detail = await f.handlers.get(ipcChannels.gitRemoteCommitDetail)(f.event, projectId, oid("d"));
+	assert.equal(detail.ok, true);
+	assert.equal(detail.detail.oid, oid("d"));
+	assert.equal(detail.detail.message, "subject\n\nbody\n");
+	assert.deepEqual(plain(detail.detail.files), [{ status: "R100", path: "renamed.txt", oldPath: "old.txt" }]);
+	const refs = await f.handlers.get(ipcChannels.gitRemoteRefs)(f.event, projectId);
+	assert.equal(refs.ok, true);
+	assert.equal(refs.refs.branch, "main");
+	assert.deepEqual(
+		refs.refs.refs.map((entry) => entry.kind),
+		["branch", "tag"],
+	);
+	const diff = await f.handlers.get(ipcChannels.gitRemoteRefFileDiff)(f.event, projectId, null, oid("d"), { projectId, relativePath: "renamed.txt" });
+	assert.equal(diff.ok, true);
+	assert.equal(diff.diff.originalContent, "base\n");
+	assert.equal(diff.diff.modifiedContent, "working\n");
+	assert.deepEqual(plain(diff.diff.target), { projectId, relativePath: "renamed.txt" });
+	assert.deepEqual(plain(f.calls.at(-1)), { method: "git.refFileDiff", params: { base: null, head: oid("d"), path: "renamed.txt" } });
+});
+
+test("remote history IPC rejects invalid parameters before any helper session is opened", async () => {
+	const f = fixture();
+	for (const options of [0, 101, 1.5, "10", null, { maxCount: 10, extra: 1 }, { skip: -1 }, { skip: 100001 }]) {
+		const result = await f.handlers.get(ipcChannels.gitRemoteLog)(f.event, projectId, options);
+		assert.equal(result.ok, false, JSON.stringify(options));
+		assert.equal(result.code, "GIT_RESULT_INVALID");
+	}
+	for (const value of ["abc", oid("d").toUpperCase(), 42, null]) {
+		const result = await f.handlers.get(ipcChannels.gitRemoteCommitDetail)(f.event, projectId, value);
+		assert.equal(result.ok, false, String(value));
+		assert.equal(result.code, "GIT_RESULT_INVALID");
+	}
+	const cross = await f.handlers.get(ipcChannels.gitRemoteRefFileDiff)(f.event, projectId, null, oid("d"), { projectId: "other", relativePath: "renamed.txt" });
+	assert.equal(cross.code, "GIT_RESULT_INVALID");
+	const escape = await f.handlers.get(ipcChannels.gitRemoteRefFileDiff)(f.event, projectId, null, oid("d"), { projectId, relativePath: "../outside" });
+	assert.equal(escape.code, "PATH_OUTSIDE_ROOT");
+	const namedBase = await f.handlers.get(ipcChannels.gitRemoteRefFileDiff)(f.event, projectId, "main", oid("d"), { projectId, relativePath: "renamed.txt" });
+	assert.equal(namedBase.code, "GIT_RESULT_INVALID");
+	assert.equal(f.calls.length, 0, "refused parameters must not open a helper session");
+});
+
+test("remote history IPC re-validates helper answers and refuses anything outside the frozen shape", async () => {
+	const f = fixture();
+	f.session.request = async (method, params) => {
+		if (method === "hello") return hello;
+		if (method === "git.log") return { commits: Array.from({ length: 101 }, () => ({ oid: oid("a"), parents: [], authorName: "F", authorEmail: "f@e.invalid", authorTimeSec: 1, subject: "s" })), hasMore: false };
+		if (method === "git.commitDetail") return { ...detailValue, oid: oid("e") };
+		if (method === "git.refs") return { head: oid("a"), branch: "main", refs: [{ fullName: "refs/remotes/origin/main", name: "origin/main", oid: oid("b"), kind: "branch" }] };
+		return { originalContent: "a\0b", modifiedContent: "" };
+	};
+	// A page longer than the ceiling, an answer for a different commit, a remote-tracking ref and a NUL byte.
+	assert.equal((await f.handlers.get(ipcChannels.gitRemoteLog)(f.event, projectId)).code, "GIT_RESULT_INVALID");
+	assert.equal((await f.handlers.get(ipcChannels.gitRemoteCommitDetail)(f.event, projectId, oid("d"))).code, "GIT_RESULT_INVALID");
+	assert.equal((await f.handlers.get(ipcChannels.gitRemoteRefs)(f.event, projectId)).code, "GIT_RESULT_INVALID");
+	assert.equal((await f.handlers.get(ipcChannels.gitRemoteRefFileDiff)(f.event, projectId, null, oid("d"), { projectId, relativePath: "x.txt" })).code, "GIT_RESULT_INVALID");
+});
+
+test("disabled remote history IPC refuses with zero helper work", async () => {
+	const f = fixture({ enabled: false });
+	assert.equal((await f.handlers.get(ipcChannels.gitRemoteLog)(f.event, projectId)).code, "REMOTE_FEATURE_DISABLED");
+	assert.equal((await f.handlers.get(ipcChannels.gitRemoteCommitDetail)(f.event, projectId, oid("d"))).code, "REMOTE_FEATURE_DISABLED");
+	assert.equal((await f.handlers.get(ipcChannels.gitRemoteRefs)(f.event, projectId)).code, "REMOTE_FEATURE_DISABLED");
+	assert.equal((await f.handlers.get(ipcChannels.gitRemoteRefFileDiff)(f.event, projectId, null, oid("d"), { projectId, relativePath: "x.txt" })).code, "REMOTE_FEATURE_DISABLED");
 	assert.equal(f.calls.length, 0);
 });

@@ -4,6 +4,7 @@ import type { RemoteProject } from "../../../../shared/types/project";
 import type { GitResourceGroupType } from "../../../../shared/types/git";
 import { useRemoteGitView } from "../../hooks/useRemoteGitView";
 import { t } from "../../i18n";
+import { relativeTimeParts } from "../../utils/providerUsageDisplay";
 import { Button } from "../ui-shadcn/button";
 import { Textarea } from "../ui-shadcn/textarea";
 import { FileTree } from "../app/git/GitResourceTree";
@@ -15,6 +16,11 @@ const GROUP_LABELS = { merge: "remoteGit.merge", index: "remoteGit.index", worki
 const refuseFallbackRead = async (): Promise<string> => {
 	throw new Error("GIT_RESOURCE_CHANGED");
 };
+/** History rows carry the author and a relative time; the same vocabulary the usage panel already uses. */
+function historyTime(seconds: number): string {
+	const parts = relativeTimeParts(seconds * 1000);
+	return t(parts.key, parts.params);
+}
 
 /** Only stable categories are rendered; invoke wrappers, remote paths and raw stderr are never user-facing. */
 export function remoteGitErrorMessage(code: string): string {
@@ -41,19 +47,30 @@ export function remoteGitErrorMessage(code: string): string {
 
 /** Reuses SCM rows and the existing diff renderer without native graph/watch/write/background-sync APIs. */
 export function RemoteGitPanel({ project }: { project: RemoteProject }) {
-	const { state, refresh, openDiff, closeDiff, mutate, commit } = useRemoteGitView(project);
+	const { state, refresh, openDiff, closeDiff, mutate, commit, loadHistory, loadMoreHistory, openCommitDetail, loadRefs, openHistoryFileDiff } = useRemoteGitView(project);
 	const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
 	const [message, setMessage] = useState("");
+	const [historyOpen, setHistoryOpen] = useState(false);
+	const [refsOpen, setRefsOpen] = useState(false);
 	const confirmedCommits = state.confirmedCommits ?? 0;
 	// A confirmed commit clears the box; a refusal or an unknown result keeps the text so nothing is retyped.
 	useEffect(() => {
 		if (confirmedCommits > 0) setMessage("");
 	}, [confirmedCommits]);
 	const snapshot = state.snapshot;
+	// A const capture keeps the narrowed commit detail inside file-row closures.
+	const detail = state.detail;
 	const viewingDiff = state.diffLoading || state.diff !== undefined || state.diffErrorCode !== undefined;
 	const busy = state.loading || state.diffLoading || state.mutating;
 	const messageBytes = new TextEncoder().encode(message).length;
 	const canCommit = snapshot?.commitToken !== undefined && !busy && message.trim().length > 0 && messageBytes <= 4096;
+	// Expanding a section is the user action that loads it; an error stays until the header is clicked again.
+	useEffect(() => {
+		if (historyOpen && snapshot !== undefined && state.history === undefined && !state.historyLoading && state.historyErrorCode === undefined && !state.loading && !state.mutating) loadHistory();
+	}, [historyOpen, snapshot, state.history, state.historyLoading, state.historyErrorCode, state.loading, state.mutating, loadHistory]);
+	useEffect(() => {
+		if (refsOpen && snapshot !== undefined && state.refs === undefined && !state.refsLoading && state.refsErrorCode === undefined && !state.loading && !state.mutating) loadRefs();
+	}, [refsOpen, snapshot, state.refs, state.refsLoading, state.refsErrorCode, state.loading, state.mutating, loadRefs]);
 	return (
 		<div data-testid="remote-git-panel" data-project-id={project.id} className="flex min-h-0 flex-1 flex-col overflow-hidden text-sm text-text-primary">
 			<div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2">
@@ -151,6 +168,104 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 							</section>
 						) : null,
 					)}
+					{/* G3a: history and refs are read-only sections; there is no checkout, branch, tag or push control anywhere below. */}
+					<section data-testid="remote-git-history" className="pb-2">
+						<button type="button" className="flex w-full items-center gap-1 px-3 py-1 text-xs font-medium text-text-secondary" aria-expanded={historyOpen} onClick={() => (historyOpen ? (state.historyErrorCode ? loadHistory() : setHistoryOpen(false)) : setHistoryOpen(true))}>
+							{t("remoteGit.historyTitle")}
+						</button>
+						{historyOpen ? (
+							<>
+								<p className="px-3 pb-1 text-xs text-text-secondary">{t("remoteGit.historyReadOnly")}</p>
+								{state.historyLoading ? <p className="px-3 text-xs text-text-secondary">{t("remoteGit.loading")}</p> : null}
+								{state.historyErrorCode ? (
+									<p role="alert" className="px-3 text-xs text-danger">
+										{remoteGitErrorMessage(state.historyErrorCode)}
+									</p>
+								) : null}
+								{state.history
+									? state.history.commits.map((commit) => (
+											<button
+												key={commit.oid}
+												type="button"
+												data-testid="remote-git-history-row"
+												data-oid={commit.oid}
+												aria-current={state.detailOid === commit.oid || undefined}
+												className="flex w-full items-center gap-2 px-3 py-1 text-left text-xs hover:bg-surface-secondary"
+												onClick={() => openCommitDetail(commit.oid)}
+											>
+												<span className="font-mono text-text-secondary">{commit.oid.slice(0, 8)}</span>
+												<span className="min-w-0 flex-1 truncate">{commit.subject}</span>
+												<span className="shrink-0 text-text-secondary">
+													{commit.authorName} · {historyTime(commit.authorTimeSec)}
+												</span>
+											</button>
+										))
+									: null}
+								{state.history?.hasMore ? (
+									<Button type="button" variant="ghost" size="sm" data-testid="remote-git-history-more" disabled={!!state.historyMoreLoading} onClick={() => loadMoreHistory()}>
+										{t("remoteGit.historyMore")}
+									</Button>
+								) : null}
+								{state.detailOid ? (
+									<div data-testid="remote-git-commit-detail" className="mx-3 my-1 rounded border border-border p-2">
+										{state.detailLoading ? <p className="text-xs text-text-secondary">{t("remoteGit.loading")}</p> : null}
+										{state.detailErrorCode ? (
+											<p role="alert" className="text-xs text-danger">
+												{remoteGitErrorMessage(state.detailErrorCode)}
+											</p>
+										) : null}
+										{detail ? (
+											<>
+												<p className="font-mono text-xs text-text-secondary">{detail.oid}</p>
+												<p className="whitespace-pre-wrap break-words text-xs">{detail.message}</p>
+												<p className="text-xs text-text-secondary">
+													{detail.authorName} &lt;{detail.authorEmail}&gt; · {historyTime(detail.authorTimeSec)}
+												</p>
+												<h4 className="pt-1 text-xs font-medium text-text-secondary">{t("remoteGit.detailFiles")}</h4>
+												{detail.files.map((file) => (
+													<button
+														key={`${file.status}:${file.path}`}
+														type="button"
+														data-testid="remote-git-commit-file"
+														className="flex w-full items-center gap-2 px-1 py-0.5 text-left text-xs hover:bg-surface-secondary"
+														onClick={() => openHistoryFileDiff(detail.parents[0] ?? null, detail.oid, { projectId: project.id, relativePath: file.path })}
+													>
+														<span className="font-mono text-text-secondary">{file.status}</span>
+														<span className="min-w-0 flex-1 truncate">{file.path}</span>
+														{file.oldPath ? <span className="shrink-0 text-text-secondary">← {file.oldPath}</span> : null}
+													</button>
+												))}
+											</>
+										) : null}
+									</div>
+								) : null}
+							</>
+						) : null}
+					</section>
+					<section data-testid="remote-git-refs" className="pb-2">
+						<button type="button" className="flex w-full items-center gap-1 px-3 py-1 text-xs font-medium text-text-secondary" aria-expanded={refsOpen} onClick={() => (refsOpen ? (state.refsErrorCode ? loadRefs() : setRefsOpen(false)) : setRefsOpen(true))}>
+							{t("remoteGit.refsTitle")}
+						</button>
+						{refsOpen ? (
+							<>
+								{state.refsLoading ? <p className="px-3 text-xs text-text-secondary">{t("remoteGit.loading")}</p> : null}
+								{state.refsErrorCode ? (
+									<p role="alert" className="px-3 text-xs text-danger">
+										{remoteGitErrorMessage(state.refsErrorCode)}
+									</p>
+								) : null}
+								{state.refs
+									? state.refs.refs.map((ref) => (
+											<div key={ref.fullName} data-testid="remote-git-ref-row" className="flex items-center gap-2 px-3 py-0.5 text-xs">
+												<span className="text-text-secondary">{t(ref.kind === "branch" ? "remoteGit.refBranch" : "remoteGit.refTag")}</span>
+												<span className="min-w-0 flex-1 truncate font-mono">{ref.name}</span>
+												<span className="font-mono text-text-secondary">{ref.oid.slice(0, 8)}</span>
+											</div>
+										))
+									: null}
+							</>
+						) : null}
+					</section>
 				</div>
 			) : null}
 		</div>

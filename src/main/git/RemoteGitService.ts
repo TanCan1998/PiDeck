@@ -1,7 +1,24 @@
-import { GitStatus, type GitReadSnapshot, type GitResource, type GitResourceGroups, type GitResourceGroupType, type GitWorkspaceFileDiff } from "../../shared/types/git";
+import { GitStatus, type GitReadSnapshot, type GitResource, type GitResourceGroups, type GitResourceGroupType, type GitWorkspaceFileDiff, type RemoteGitCommitDetail, type RemoteGitLogPage, type RemoteGitRefFileDiff, type RemoteGitRefs } from "../../shared/types/git";
 import type { ProjectFileTarget } from "../../shared/types/project";
 import { parsePorcelainStatus } from "./gitStatusParser";
-import { REMOTE_GIT_COMMIT_MESSAGE_MAX_BYTES, REMOTE_GIT_MAX_RESOURCES, REMOTE_GIT_READ_TIMEOUT_MS, REMOTE_GIT_STATUS_MAX_BYTES, REMOTE_GIT_TEXT_MAX_BYTES, REMOTE_HELPER_PROTOCOL_VERSION } from "../remote/RemoteHelperContract";
+import {
+	REMOTE_GIT_COMMIT_MAX_FILES,
+	REMOTE_GIT_COMMIT_MESSAGE_MAX_BYTES,
+	REMOTE_GIT_DETAIL_MESSAGE_MAX_BYTES,
+	REMOTE_GIT_IDENTITY_MAX_BYTES,
+	REMOTE_GIT_LOG_DEFAULT_COUNT,
+	REMOTE_GIT_LOG_MAX_COUNT,
+	REMOTE_GIT_LOG_MAX_PARENTS,
+	REMOTE_GIT_LOG_MAX_SKIP,
+	REMOTE_GIT_MAX_RESOURCES,
+	REMOTE_GIT_READ_TIMEOUT_MS,
+	REMOTE_GIT_REF_MAX_COUNT,
+	REMOTE_GIT_REF_MAX_NAME_BYTES,
+	REMOTE_GIT_STATUS_MAX_BYTES,
+	REMOTE_GIT_SUBJECT_MAX_BYTES,
+	REMOTE_GIT_TEXT_MAX_BYTES,
+	REMOTE_HELPER_PROTOCOL_VERSION,
+} from "../remote/RemoteHelperContract";
 
 export type RemoteGitLocator = { hostId: string; remotePath: string };
 export type RemoteGitSession = {
@@ -41,6 +58,7 @@ const ERRORS = new Set([
 	"GIT_COMMIT_MESSAGE_EMPTY",
 	"GIT_COMMIT_IDENTITY_REQUIRED",
 	"GIT_COMMIT_HEAD_CHANGED",
+	"GIT_OBJECT_NOT_FOUND",
 	"REMOTE_FEATURE_DISABLED",
 	"TOO_MANY_REQUESTS",
 	"GIT_TRUST_REQUIRED",
@@ -116,6 +134,100 @@ export function readRemoteGitStatus(value: unknown, projectId: string): RemoteGi
 	return { groups, head: value.head, branch: value.branch };
 }
 
+const REMOTE_GIT_OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const REMOTE_GIT_NAME_CONTROL = /[\x00-\x08\x0a-\x1f\x7f]/;
+const REMOTE_GIT_BODY_CONTROL = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
+const REMOTE_GIT_FILE_STATUS_PATTERN = /^(?:[AMDTUXB]|[RC]\d{1,3})$/;
+/** Helper output is re-validated field by field before it crosses IPC; trust stays with the read, not the producer. */
+function remoteGitOid(value: unknown): string {
+	if (typeof value !== "string" || !REMOTE_GIT_OID_PATTERN.test(value)) throw new Error("GIT_RESULT_INVALID");
+	return value;
+}
+function remoteGitName(value: unknown, maxBytes: number): string {
+	if (typeof value !== "string" || !value || Buffer.byteLength(value, "utf8") > maxBytes || REMOTE_GIT_NAME_CONTROL.test(value)) throw new Error("GIT_RESULT_INVALID");
+	return value;
+}
+function remoteGitSubject(value: unknown): string {
+	if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > REMOTE_GIT_SUBJECT_MAX_BYTES || REMOTE_GIT_NAME_CONTROL.test(value)) throw new Error("GIT_RESULT_INVALID");
+	return value;
+}
+function remoteGitMessage(value: unknown): string {
+	if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > REMOTE_GIT_DETAIL_MESSAGE_MAX_BYTES || REMOTE_GIT_BODY_CONTROL.test(value)) throw new Error("GIT_RESULT_INVALID");
+	return value;
+}
+function remoteGitTime(value: unknown): number {
+	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error("GIT_RESULT_INVALID");
+	return value;
+}
+function remoteGitParents(value: unknown): string[] {
+	if (!Array.isArray(value) || value.length > REMOTE_GIT_LOG_MAX_PARENTS) throw new Error("GIT_RESULT_INVALID");
+	return value.map(remoteGitOid);
+}
+/** One bounded history page; hasMore comes from the extra record the helper fetched, never a total. */
+export function readRemoteGitLog(value: unknown): RemoteGitLogPage {
+	if (!record(value) || Object.keys(value).length !== 2 || typeof value.hasMore !== "boolean" || !Array.isArray(value.commits) || value.commits.length > REMOTE_GIT_LOG_MAX_COUNT) throw new Error("GIT_RESULT_INVALID");
+	return {
+		commits: value.commits.map((entry) => {
+			if (!record(entry) || Object.keys(entry).length !== 6) throw new Error("GIT_RESULT_INVALID");
+			return {
+				oid: remoteGitOid(entry.oid),
+				parents: remoteGitParents(entry.parents),
+				authorName: remoteGitName(entry.authorName, REMOTE_GIT_IDENTITY_MAX_BYTES),
+				authorEmail: remoteGitName(entry.authorEmail, REMOTE_GIT_IDENTITY_MAX_BYTES),
+				authorTimeSec: remoteGitTime(entry.authorTimeSec),
+				subject: remoteGitSubject(entry.subject),
+			};
+		}),
+		hasMore: value.hasMore,
+	};
+}
+/** One commit's byte-exact detail plus its changed files against the first parent. */
+export function readRemoteGitCommitDetail(value: unknown): RemoteGitCommitDetail {
+	if (!record(value) || Object.keys(value).length !== 11 || !Array.isArray(value.files) || value.files.length > REMOTE_GIT_COMMIT_MAX_FILES) throw new Error("GIT_RESULT_INVALID");
+	return {
+		oid: remoteGitOid(value.oid),
+		parents: remoteGitParents(value.parents),
+		authorName: remoteGitName(value.authorName, REMOTE_GIT_IDENTITY_MAX_BYTES),
+		authorEmail: remoteGitName(value.authorEmail, REMOTE_GIT_IDENTITY_MAX_BYTES),
+		authorTimeSec: remoteGitTime(value.authorTimeSec),
+		committerName: remoteGitName(value.committerName, REMOTE_GIT_IDENTITY_MAX_BYTES),
+		committerEmail: remoteGitName(value.committerEmail, REMOTE_GIT_IDENTITY_MAX_BYTES),
+		committerTimeSec: remoteGitTime(value.committerTimeSec),
+		subject: remoteGitSubject(value.subject),
+		message: remoteGitMessage(value.message),
+		files: value.files.map((file) => {
+			if (!record(file)) throw new Error("GIT_RESULT_INVALID");
+			const keys = Object.keys(file);
+			const renamed = keys.includes("oldPath");
+			if (!keys.includes("path") || !keys.includes("status") || (renamed ? keys.length !== 3 : keys.length !== 2)) throw new Error("GIT_RESULT_INVALID");
+			if (typeof file.status !== "string" || !REMOTE_GIT_FILE_STATUS_PATTERN.test(file.status)) throw new Error("GIT_RESULT_INVALID");
+			const path = validateRemoteGitPath(file.path);
+			return renamed ? { status: file.status, path, oldPath: validateRemoteGitPath(file.oldPath) } : { status: file.status, path };
+		}),
+	};
+}
+/** Local branches and tags only; the current HEAD and branch name are read alongside. */
+export function readRemoteGitRefs(value: unknown): RemoteGitRefs {
+	if (!record(value) || Object.keys(value).length !== 3 || !Array.isArray(value.refs) || value.refs.length > REMOTE_GIT_REF_MAX_COUNT) throw new Error("GIT_RESULT_INVALID");
+	const head = value.head === null ? null : remoteGitOid(value.head);
+	const branch = value.branch === null ? null : remoteGitName(value.branch, 4096);
+	return {
+		head,
+		branch,
+		refs: value.refs.map((entry) => {
+			if (!record(entry) || Object.keys(entry).length !== 4) throw new Error("GIT_RESULT_INVALID");
+			const kind = entry.kind;
+			if (kind !== "branch" && kind !== "tag") throw new Error("GIT_RESULT_INVALID");
+			const prefix = kind === "branch" ? "refs/heads/" : "refs/tags/";
+			const fullName = entry.fullName;
+			if (typeof fullName !== "string" || !fullName.startsWith(prefix)) throw new Error("GIT_RESULT_INVALID");
+			const name = fullName.slice(prefix.length);
+			if (entry.name !== name || !name || Buffer.byteLength(name, "utf8") > REMOTE_GIT_REF_MAX_NAME_BYTES || REMOTE_GIT_NAME_CONTROL.test(name)) throw new Error("GIT_RESULT_INVALID");
+			return { fullName, name, oid: remoteGitOid(entry.oid), kind };
+		}),
+	};
+}
+
 /** Main-owned operation boundary: live project values, live trust and bound helper requests; never a local cwd. */
 export function createRemoteGitService(ports: { locator(projectId: string): RemoteGitLocator | undefined; trusted(target: RemoteGitLocator): Promise<boolean>; withProject<T>(target: RemoteGitLocator, work: (session: RemoteGitSession) => Promise<T>, signal?: AbortSignal): Promise<T> }) {
 	function target(projectId: string): RemoteGitLocator {
@@ -128,7 +240,14 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 		const current = ports.locator(projectId);
 		if (!current || current.hostId !== expected.hostId || current.remotePath !== expected.remotePath) throw new Error("GIT_TARGET_CHANGED");
 	}
-	async function run<T>(projectId: string, method: "git.status" | "git.workspaceDiff" | "git.stage" | "git.unstage" | "git.commit", params: unknown, signal: AbortSignal | undefined, parse: (value: unknown, session: RemoteGitSession, capabilities: unknown[]) => T, expected?: RemoteGitWriteExpectation): Promise<T> {
+	async function run<T>(
+		projectId: string,
+		method: "git.status" | "git.workspaceDiff" | "git.stage" | "git.unstage" | "git.commit" | "git.log" | "git.commitDetail" | "git.refs" | "git.refFileDiff",
+		params: unknown,
+		signal: AbortSignal | undefined,
+		parse: (value: unknown, session: RemoteGitSession, capabilities: unknown[]) => T,
+		expected?: RemoteGitWriteExpectation,
+	): Promise<T> {
 		const locator = target(projectId);
 		let dispatchedWrite = false;
 		try {
@@ -236,6 +355,46 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 				if (!record(value) || typeof value.originalContent !== "string" || typeof value.modifiedContent !== "string") throw new Error("GIT_RESULT_INVALID");
 				for (const text of [value.originalContent, value.modifiedContent]) if (text.includes("\0") || Buffer.byteLength(text, "utf8") > REMOTE_GIT_TEXT_MAX_BYTES || Buffer.from(text, "utf8").toString("utf8") !== text) throw new Error("GIT_RESULT_INVALID");
 				return { path, target: { projectId, relativePath: path }, displayPath: path, originalContent: value.originalContent, modifiedContent: value.modifiedContent };
+			});
+		},
+		/* Read-only history (G3a): no token, no write expectation, nothing staged or moved. */
+		log(projectId: string, options: unknown, signal?: AbortSignal): Promise<RemoteGitLogPage> {
+			let maxCount = REMOTE_GIT_LOG_DEFAULT_COUNT;
+			let skip = 0;
+			if (options !== undefined) {
+				if (!record(options) || Object.keys(options).some((key) => key !== "maxCount" && key !== "skip")) throw new Error("GIT_RESULT_INVALID");
+				if (options.maxCount !== undefined) {
+					if (typeof options.maxCount !== "number" || !Number.isSafeInteger(options.maxCount) || options.maxCount < 1 || options.maxCount > REMOTE_GIT_LOG_MAX_COUNT) throw new Error("GIT_RESULT_INVALID");
+					maxCount = options.maxCount;
+				}
+				if (options.skip !== undefined) {
+					if (typeof options.skip !== "number" || !Number.isSafeInteger(options.skip) || options.skip < 0 || options.skip > REMOTE_GIT_LOG_MAX_SKIP) throw new Error("GIT_RESULT_INVALID");
+					skip = options.skip;
+				}
+			}
+			return run(projectId, "git.log", { maxCount, skip }, signal, (value) => readRemoteGitLog(value));
+		},
+		commitDetail(projectId: string, oid: unknown, signal?: AbortSignal): Promise<RemoteGitCommitDetail> {
+			const value = remoteGitOid(oid);
+			return run(projectId, "git.commitDetail", { oid: value }, signal, (raw) => {
+				const detail = readRemoteGitCommitDetail(raw);
+				if (detail.oid !== value) throw new Error("GIT_RESULT_INVALID");
+				return detail;
+			});
+		},
+		refs(projectId: string, signal?: AbortSignal): Promise<RemoteGitRefs> {
+			return run(projectId, "git.refs", {}, signal, (value) => readRemoteGitRefs(value));
+		},
+		/** `base: null` names the side that does not exist; both sides missing is a refusal, not an empty diff. */
+		refFileDiff(projectId: string, base: unknown, head: unknown, file: ProjectFileTarget, signal?: AbortSignal): Promise<RemoteGitRefFileDiff> {
+			if (file.projectId !== projectId) throw new Error("GIT_RESULT_INVALID");
+			const path = validateRemoteGitPath(file.relativePath);
+			const headOid = remoteGitOid(head);
+			const baseOid = base === null ? null : remoteGitOid(base);
+			return run(projectId, "git.refFileDiff", { base: baseOid, head: headOid, path }, signal, (raw) => {
+				if (!record(raw) || Object.keys(raw).length !== 2 || typeof raw.originalContent !== "string" || typeof raw.modifiedContent !== "string") throw new Error("GIT_RESULT_INVALID");
+				for (const text of [raw.originalContent, raw.modifiedContent]) if (text.includes("\0") || Buffer.byteLength(text, "utf8") > REMOTE_GIT_TEXT_MAX_BYTES) throw new Error("GIT_RESULT_INVALID");
+				return { path, target: { projectId, relativePath: path }, displayPath: path, base: baseOid, head: headOid, originalContent: raw.originalContent, modifiedContent: raw.modifiedContent };
 			});
 		},
 	};
