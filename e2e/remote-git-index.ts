@@ -60,7 +60,7 @@ export async function verifyRemoteGitIndex(input: { window: Page; credentials: R
 	const commitButton = panel.getByRole("button", { name: "提交已暂存的改动", exact: true });
 	await selectAndAuthorize(root);
 	await expect(row("workingTree", "tracked.txt")).toBeVisible({ timeout: timeoutMs });
-	await expect(panel.getByRole("button", { name: /^(丢弃|推送|拉取|全部暂存|初始化)/ })).toHaveCount(0);
+	await expect(panel.getByRole("button", { name: /^(丢弃|全部暂存|初始化|强制|amend)/ })).toHaveCount(0);
 	await action("workingTree", "tracked.txt", "暂存");
 	await expect(panel.getByTestId("remote-git-workingTree")).toHaveCount(0, { timeout: timeoutMs });
 	witnesses.staged = await command(root, "git --no-optional-locks show :tracked.txt");

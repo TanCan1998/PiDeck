@@ -701,5 +701,6 @@ P4.5b 的单会话归档/恢复已完成真实 Electron＋SSH 验证，不能据
 ## 远端 Git G5a（2026-10-16，同步能力：helper＋main／IPC＋控制器已交付，面板同步条回退待重做）
 
 - **已交付**：helper **1.15.0** 第四份 bundle 文件 `git-sync.mjs`（唯一网络代码）——`git.syncFacts`（上游全名＋ahead/behind＋**只有名字**的 remotes）、`git.fetch`（`--no-tags`、不 prune、只动 `refs/remotes/*`、前后指纹核对）、`git.push`（`--porcelain`、无 force／无 `--set-upstream`，三种拒绝措辞都归一到 `GIT_PUSH_REJECTED`）、`git.pull`（前置：脏工作区拒绝、分歧且未配置策略拒绝；`--no-edit`；冲突如实报码不 abort）。三动词都过 hooks/config 门禁、用 10 分钟预算。**身份链硬规则**：不注入 `GIT_SSH`／`ASKPASS`、不写 URL／配置、不碰 `~/.ssh`／known_hosts、不关 host-key 校验；远端 Git 用远端账号自己的身份链。main 三种 grant＋四通道＋逐字段重验；renderer 控制器与 i18n 齐全。
-- **回退**：面板同步条已实现，但真机验收显示它让抽屉在刷新循环中持续改高，文件行菜单点击被判定为不稳定（G2a/G2b、G4a 变红），因此提交前整体回退 UI，六合一门禁恢复 6 passed。下一片先解决布局抖动，再交付同步条与真机同步 e2e。
+- **面板同步条已交付**：固定两行高度（facts ＋ 预留消息行）、推送内联确认、没有 remote／上游时在消息行说明且不写配置；抖动根因是「facts 由 effect 监视快照自动重载」与 `refresh()` 互相触发，修法＝facts 只在项目身份变化后读一次 ＋ `loadSync` 不受 `state.loading`／`state.mutating` 阻塞（自带单飞）＋ 几何恒定常量高度；显式手势（刷新／trust 通过）与动词成功后才重读。真机六合一回到 6 passed（3.9m），G1 等无写控件断言按新能力更新。
+- **真机同步 e2e 待补**：写过一版（run 内 bare remote＋第二工作副本），facts／fetch／pull 三步已通过，但脏工作区拒绝与推送两步的时序未收敛，用例与 helper 已撤出（不留 flaky）；拒绝路径由 helper／IPC 测试覆盖。
 - **验证**：helper 级 `remoteGitSync` 9/9、`remoteGitSyncIpc` 4/4、view 29/29（含同步）、helper 全链路 104/104、typecheck／Biome／build 0、真机 6 passed（4.0m）。证据：`/tmp/g5-sync8.log`、`/tmp/g5-ipc5.log`、`/tmp/g5-focused-final.log`、`/tmp/g5-e2e-gate8.log`、`/tmp/g5-probe2.sh`（原生事实）。细则见 [Git 计划 §5.16／§5.16.1](remote-git-plan.md)。

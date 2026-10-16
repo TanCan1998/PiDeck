@@ -20,6 +20,14 @@ const refuseFallbackRead = async (): Promise<string> => {
 	throw new Error("GIT_RESOURCE_CHANGED");
 };
 /** History rows carry the author and a relative time; the same vocabulary the usage panel already uses. */
+/** The verbs answer with small closed vocabularies; the panel never prints a raw remote word. */
+function syncOutcomeLabel(outcome: string): string {
+	if (outcome === "pushed" || outcome === "new") return t("remoteGit.syncPushedDetail");
+	if (outcome === "fast-forward") return t("remoteGit.syncFastForward");
+	if (outcome === "merge") return t("remoteGit.syncMerge");
+	if (outcome.startsWith("updated:")) return t("remoteGit.syncUpdatedRefs", { n: Number(outcome.slice("updated:".length)) || 0 });
+	return t("remoteGit.syncUpToDate");
+}
 function historyTime(seconds: number): string {
 	const parts = relativeTimeParts(seconds * 1000);
 	return t(parts.key, parts.params);
@@ -35,6 +43,14 @@ export function remoteGitErrorMessage(code: string): string {
 	if (code === "GIT_REF_EXISTS") return t("remoteGit.refExists");
 	if (code === "GIT_REF_NOT_FOUND") return t("remoteGit.refNotFound");
 	if (code === "GIT_SWITCH_CONFLICT") return t("remoteGit.switchConflict");
+	if (code === "GIT_RECOVERY_ENTRY_NOT_FOUND") return t("remoteGit.recoveryEntryNotFound");
+	if (code === "GIT_SYNC_REMOTE_UNKNOWN") return t("remoteGit.syncRemoteUnknown");
+	if (code === "GIT_SYNC_DIRTY") return t("remoteGit.syncDirty");
+	if (code === "GIT_PULL_STRATEGY_REQUIRED") return t("remoteGit.syncStrategyRequired");
+	if (code === "GIT_PULL_CONFLICTS") return t("remoteGit.syncConflicts");
+	if (code === "GIT_PUSH_REJECTED") return t("remoteGit.syncPushRejected");
+	if (code === "GIT_PUSH_REMOTE_REFUSED") return t("remoteGit.syncPushRemoteRefused");
+	if (code === "GIT_SYNC_FAILED") return t("remoteGit.syncFailed");
 	if (code === "GIT_RECOVERY_ENTRY_NOT_FOUND") return t("remoteGit.recoveryEntryNotFound");
 	if (code === "GIT_SYNC_REMOTE_UNKNOWN") return t("remoteGit.syncRemoteUnknown");
 	if (code === "GIT_SYNC_DIRTY") return t("remoteGit.syncDirty");
@@ -61,7 +77,7 @@ export function remoteGitErrorMessage(code: string): string {
 
 /** Reuses SCM rows and the existing diff renderer without native graph/watch/write/background-sync APIs. */
 export function RemoteGitPanel({ project }: { project: RemoteProject }) {
-	const { state, refresh, openDiff, closeDiff, mutate, commit, loadHistory, loadMoreHistory, openCommitDetail, loadRefs, openHistoryFileDiff, createBranch, switchBranch, discard, loadRecovery, restoreRecovery, dropRecovery } = useRemoteGitView(project);
+	const { state, refresh, openDiff, closeDiff, mutate, commit, loadHistory, loadMoreHistory, openCommitDetail, loadRefs, openHistoryFileDiff, createBranch, switchBranch, discard, loadRecovery, restoreRecovery, dropRecovery, loadSync, fetchRemote, pushRemote, pullRemote } = useRemoteGitView(project);
 	const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
 	const [message, setMessage] = useState("");
 	const [historyOpen, setHistoryOpen] = useState(false);
@@ -70,6 +86,13 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 	const [pendingDiscard, setPendingDiscard] = useState<{ group: "workingTree" | "untracked"; path: string; target: ProjectFileTarget } | null>(null);
 	const [recoveryOpen, setRecoveryOpen] = useState(false);
 	const [pendingDrop, setPendingDrop] = useState<RemoteGitRecoveryEntryView | null>(null);
+	const [pushConfirm, setPushConfirm] = useState(false);
+	// An explicit refresh is the user gesture that re-reads both the repository facts and the remote chain: the sync
+	// facts never reload on their own, so nothing can move the rows below this bar without the user asking for it.
+	const refreshAll = () => {
+		refresh();
+		loadSync();
+	};
 	const confirmedCommits = state.confirmedCommits ?? 0;
 	// A confirmed commit clears the box; a refusal or an unknown result keeps the text so nothing is retyped.
 	useEffect(() => {
@@ -87,6 +110,14 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 	const canDiscard = snapshot?.discardToken !== undefined && !busy;
 	const canRestore = snapshot?.restoreToken !== undefined && !busy;
 	const canDrop = snapshot?.dropToken !== undefined && !busy;
+	const syncFacts = state.sync;
+	const syncRemote = syncFacts?.remotes[0];
+	const syncBranch = syncFacts?.branch ?? null;
+	const canFetch = snapshot?.fetchToken !== undefined && !busy && syncRemote !== undefined;
+	// Push and pull need a checked-out branch whose upstream is on a remote this repository actually has.
+	const syncTracked = syncFacts?.upstream != null && syncBranch !== null && syncRemote !== undefined;
+	const canPush = snapshot?.pushToken !== undefined && !busy && syncTracked;
+	const canPull = snapshot?.pullToken !== undefined && !busy && syncTracked;
 	// The tree offers index actions and the recoverable discard as separate capabilities: either grant is enough.
 	const writable = snapshot?.mutationToken !== undefined || snapshot?.discardToken !== undefined;
 	// Expanding a section is the user action that loads it; an error stays until the header is clicked again.
@@ -108,9 +139,60 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 					</Button>
 				) : null}
 				<span className="min-w-0 flex-1 truncate font-medium">{t("remoteGit.title")}</span>
-				<Button variant="ghost" size="icon-sm" onClick={refresh} disabled={state.loading || state.diffLoading || state.mutating} aria-label={t("remoteGit.refresh")}>
+				<Button variant="ghost" size="icon-sm" onClick={refreshAll} disabled={state.loading || state.diffLoading || state.mutating} aria-label={t("remoteGit.refresh")}>
 					<RefreshCw size={14} />
 				</Button>
+			</div>
+			{/* Fixed geometry on purpose: this bar never changes the height of the rows below it. */}
+			<div data-testid="remote-git-sync" className="shrink-0 space-y-1 border-b border-border px-3 py-1 text-xs">
+				<div className="flex h-6 items-center gap-1">
+					<span className="min-w-0 flex-1 truncate text-text-secondary" data-testid="remote-git-sync-facts">
+						{syncFacts === undefined
+							? t("remoteGit.syncLoading")
+							: `${syncFacts.branch ?? t("remoteGit.detached")}${syncFacts.upstream === null ? "" : " → " + syncFacts.upstream}${syncFacts.ahead > 0 ? " · " + t("remoteGit.syncAhead", { n: syncFacts.ahead }) : ""}${syncFacts.behind > 0 ? " · " + t("remoteGit.syncBehind", { n: syncFacts.behind }) : ""}`}
+					</span>
+					<Button type="button" variant="ghost" size="sm" data-testid="remote-git-sync-fetch" disabled={!canFetch} onClick={() => syncRemote && fetchRemote(syncRemote)}>
+						{t("remoteGit.syncFetch")}
+					</Button>
+					<Button type="button" variant="ghost" size="sm" data-testid="remote-git-sync-push" disabled={!canPush} onClick={() => setPushConfirm(true)}>
+						{t("remoteGit.syncPush")}
+					</Button>
+					<Button type="button" variant="ghost" size="sm" data-testid="remote-git-sync-pull" disabled={!canPull} onClick={() => syncRemote && syncBranch && pullRemote(syncRemote, syncBranch)}>
+						{t("remoteGit.syncPull")}
+					</Button>
+				</div>
+				{pushConfirm && syncRemote && syncBranch ? (
+					<div data-testid="remote-git-sync-push-confirm-bar" className="flex h-6 items-center gap-2">
+						<span className="min-w-0 flex-1 truncate">{t("remoteGit.syncPushConfirm", { remote: syncRemote, branch: syncBranch })}</span>
+						<Button
+							type="button"
+							size="sm"
+							data-testid="remote-git-sync-push-confirm"
+							onClick={() => {
+								setPushConfirm(false);
+								pushRemote(syncRemote, syncBranch);
+							}}
+						>
+							{t("remoteGit.syncPushConfirmAction")}
+						</Button>
+						<Button type="button" variant="ghost" size="sm" data-testid="remote-git-sync-push-cancel" onClick={() => setPushConfirm(false)}>
+							{t("remoteGit.syncCancel")}
+						</Button>
+					</div>
+				) : (
+					/* The message line is reserved whether or not it has something to say. */
+					<p data-testid="remote-git-sync-message" className="h-6 truncate leading-6 text-text-secondary" aria-live="polite">
+						{state.syncErrorCode
+							? remoteGitErrorMessage(state.syncErrorCode)
+							: state.syncNotice
+								? t(state.syncNotice.kind === "fetch" ? "remoteGit.syncFetched" : state.syncNotice.kind === "push" ? "remoteGit.syncPushed" : "remoteGit.syncPulled", { detail: syncOutcomeLabel(state.syncNotice.outcome) })
+								: syncFacts !== undefined && syncFacts.remotes.length === 0
+									? t("remoteGit.syncNoRemote")
+									: syncFacts !== undefined && syncRemote !== undefined && !syncTracked
+										? t("remoteGit.syncNoUpstream")
+										: ""}
+					</p>
+				)}
 			</div>
 			<p className="shrink-0 border-b border-border px-3 py-2 text-xs text-text-secondary">{t(snapshot && (snapshot.mutationToken || snapshot.commitToken || snapshot.branchToken || snapshot.switchToken || snapshot.discardToken) ? "remoteGit.managedIndex" : "remoteGit.readOnly")}</p>
 			{snapshot && !viewingDiff ? (
@@ -152,7 +234,7 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 					{remoteGitErrorMessage(state.errorCode)}
 				</p>
 			) : null}
-			{state.errorCode === "GIT_TRUST_REQUIRED" ? <RemoteGitTrustGate project={project} onApproved={refresh} /> : null}
+			{state.errorCode === "GIT_TRUST_REQUIRED" ? <RemoteGitTrustGate project={project} onApproved={refreshAll} /> : null}
 			{state.diffErrorCode ? (
 				<p role="alert" className="p-3 text-danger">
 					{remoteGitErrorMessage(state.diffErrorCode)}

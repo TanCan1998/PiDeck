@@ -61,7 +61,7 @@ export async function verifyRemoteGitDiscard(input: { window: Page; credentials:
 		await panel.getByRole("button", { name: "信任此项目及其 .pi 资源", exact: true }).click();
 		await expect(panel.getByTestId("remote-git-workingTree")).toContainText("tracked.txt", { timeout: timeoutMs });
 		await expect(panel.getByTestId("remote-git-untracked")).toContainText("scratch.txt", { timeout: timeoutMs });
-		await expect(panel.getByRole("button", { name: /^(丢弃|推送|拉取|全部暂存|初始化)/ })).toHaveCount(0);
+		await expect(panel.getByRole("button", { name: /^(全部暂存|初始化|强制|amend)/ })).toHaveCount(0);
 	});
 
 	await test.step("取消确认不会动任何东西", async () => {

@@ -327,7 +327,9 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 		},
 		/* G5a sync: facts are read on demand; every verb is a network side effect with its own grant and never replayed. */
 		async loadSync(): Promise<void> {
-			if (!active || state.loading || state.mutating || state.syncLoading) return;
+			// Reading the remote chain does not depend on a repository read being finished, and it has its own
+			// single-flight guard; blocking it on `loading` would drop the load that follows the first read.
+			if (!active || state.syncLoading) return;
 			const generation = ++syncEpoch;
 			update({ ...state, sync: undefined, syncErrorCode: undefined, syncLoading: true });
 			try {

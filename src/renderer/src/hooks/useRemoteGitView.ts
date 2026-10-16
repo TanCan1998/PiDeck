@@ -11,6 +11,10 @@ export function useRemoteGitView(project: RemoteProject) {
 	useEffect(() => {
 		const reads = createRemoteGitViewController(project.id, projectKey, desktopApi.git, setState);
 		controller.current = reads;
+		// The sync facts belong to the project identity, not to a snapshot generation: they are read once after the
+		// first repository read, and afterwards only when the user acts (refresh or a sync verb). No effect watches
+		// the snapshot, so a refresh can never trigger a second, self-feeding load that moves the rows under the user.
+		void reads.refresh().then(() => reads.loadSync());
 		const unsubscribe = desktopApi.remoteHosts.onStateChange((change) => {
 			if (change.hostId === project.locator.hostId && ["disconnected", "offline", "degraded", "needs-attention", "reconnecting"].includes(change.state)) reads.invalidateConnection();
 		});
