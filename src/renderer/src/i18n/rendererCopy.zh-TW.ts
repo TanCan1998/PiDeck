@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: 8c806fcc69816d567e26ad801cf026b51b8d0651fbe67e15da14a542813000cd（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: facb5af86459b33abea2e83cc504a4d41249ce106ad1317f36ccc9e81ea57ae9（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -3926,6 +3926,10 @@ export const zhTW: Record<TranslationKey, string> = {
 	"drawer.gitChangedFiles": "Git 工作區修改",
 	"drawer.gitChangedFilesDesc": "顯示當前專案未提交到 Git 的工作區變動，提交後會清空",
 	"drawer.gitChangesNone": "工作區乾淨，無未提交變更",
+	"drawer.gitStatus.modified": "已修改",
+	"drawer.gitStatus.added": "已暫存",
+	"drawer.gitStatus.untracked": "未納入 Git",
+	"drawer.gitStatus.conflict": "有衝突",
 	"drawer.moreFiles": "還有 {count} 個",
 	"drawer.projectSessions": "{name} · 歷史會話",
 	"drawer.sessionActionCopying": "正在複製…",

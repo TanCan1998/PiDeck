@@ -12,8 +12,12 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
 const source = readFileSync("src/renderer/src/styles/foundation.css", "utf8");
+/** 文件树行名的着色映射：被测 token 由它派生，改映射（例如 untracked→text-warning）即换被测 token。 */
+const { fileTreeGitStatusClass } = loadTsCommonJs("src/renderer/src/utils/fileTreeGitStatus.ts");
+const FILE_TREE_GIT_STATUSES = ["modified", "added", "untracked", "conflict"];
 
 /** 从 CSS 源码抽取指定块（selector 精确匹配到下一个 `}`）内的 --token 声明。 */
 function extractBlock(selector) {
@@ -138,10 +142,12 @@ const PAIRS = [
 	["warning", "bg-panel", 4.5, "警告态文字 × 面板"],
 	["info", "bg-app", 4.5, "信息态文字 × 页面底"],
 	["info", "bg-panel", 4.5, "信息态文字 × 面板"],
-	// 文件树行名 Git 着色（WorkspaceSurface FileNode：modified=info / added=success /
-	// untracked=danger / conflict=warning）。行底是抽屉 bg-panel（上方已覆盖），
-	// hover 切到 bg-muted——这是新引入的真实文字/底色组合，必须一起兜住。
-	...["info", "success", "danger", "warning"].map((token) => [token, "bg-muted", 4.5, `文件树 Git 着色（${token}） × 行 hover 底`]),
+	// 文件树行名 Git 着色（WorkspaceSurface FileNode）：token 由着色映射派生，改映射即换被测 token；
+	// 行底 bg-panel 由上面的状态色条目覆盖，这里只管 hover / 按下（行上 hover:bg-muted 与 active:bg-muted）。
+	...FILE_TREE_GIT_STATUSES.flatMap((status) => {
+		const token = fileTreeGitStatusClass(status).replace(/^text-/, "");
+		return [[token, "bg-muted", 4.5, `文件树 Git 着色（${status} → ${token}） × hover/按下底`]];
+	}),
 	// 状态徽章（WebRemoteAccessSection: bg-success/15 text-success 等真实组合）
 	["danger", "danger-soft", 4.5, "危险徽章文字 × danger-soft 底"],
 	["success", "success-soft", 4.5, "成功徽章文字 × success-soft 底"],

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { EMPTY_FILE_TREE_GIT_STATUS, buildFileTreeGitStatusMap, dropNestedRepoUntrackedPlaceholders, fileTreeGitKey, mergeGitResourceGroups, type FileTreeGitStatus } from "../../utils/fileTreeGitStatus";
+import { EMPTY_FILE_TREE_GIT_STATUS, buildFileTreeGitStatusLookup, dropNestedRepoUntrackedPlaceholders, mergeGitResourceGroups, type FileTreeGitStatusLookup } from "../../utils/fileTreeGitStatus";
 import type { GitResourceGroups } from "../../../../shared/types";
 
 /**
@@ -21,7 +21,10 @@ type GitStatusTarget = { repoPath?: string; repoRoot: string | null };
 type GitStatusFetch = { target: GitStatusTarget; groups: GitResourceGroups } | null;
 
 export function useFileTreeGitStatus(options: { projectId?: string; projectRoot?: string }) {
-	const [statusMap, setStatusMap] = useState<ReadonlyMap<string, FileTreeGitStatus>>(EMPTY_FILE_TREE_GIT_STATUS);
+	// 状态就是一张查表函数（含大小写兜底与精确优先），换表即触发重渲染；未命中 = 该行不上色。
+	// 注意：React 把函数型入参当 lazy initializer / updater，查表函数必须包一层 () => …，
+	// 否则会被当场调用一次，state 里落地的是它的返回值（undefined）。
+	const [statusOf, setStatusOf] = useState<FileTreeGitStatusLookup>(() => EMPTY_FILE_TREE_GIT_STATUS);
 	// 代次防竞态：切项目后迟到的旧请求不能覆盖新项目的着色（同 files:list 的防竞态思路）。
 	const requestSeqRef = useRef(0);
 	// projectId/projectRoot 走 ref：refresh 保持恒定引用，调用方 effect 不因它重跑。
@@ -31,7 +34,7 @@ export function useFileTreeGitStatus(options: { projectId?: string; projectRoot?
 	const refresh = useCallback(async () => {
 		const { projectId, projectRoot } = optionsRef.current;
 		if (!projectId) {
-			setStatusMap(EMPTY_FILE_TREE_GIT_STATUS);
+			setStatusOf(() => EMPTY_FILE_TREE_GIT_STATUS);
 			requestSeqRef.current += 1;
 			return;
 		}
@@ -59,10 +62,11 @@ export function useFileTreeGitStatus(options: { projectId?: string; projectRoot?
 			// 自己的状态处理（见 dropNestedRepoUntrackedPlaceholders）；只认同「真的取到状态」的
 			// 嵌套仓根——该仓失败时留着占位，至少还能显示「这里有未跟踪内容」，而不是整棵子树无色。
 			const succeededNestedRoots = fetched.flatMap((entry) => (entry.target.repoRoot ? [entry.target.repoRoot] : []));
-			setStatusMap(buildFileTreeGitStatusMap(mergeGitResourceGroups(fetched.map((entry) => dropNestedRepoUntrackedPlaceholders(entry.groups, succeededNestedRoots))), projectRoot));
+			const nextLookup = buildFileTreeGitStatusLookup(mergeGitResourceGroups(fetched.map((entry) => dropNestedRepoUntrackedPlaceholders(entry.groups, succeededNestedRoots))), projectRoot);
+			setStatusOf(() => nextLookup);
 		} catch {
 			// 非 git 项目 / 发现仓库失败：着色整体退场。保留旧表反而会误导（项目可能刚被拆分）。
-			if (seq === requestSeqRef.current) setStatusMap(EMPTY_FILE_TREE_GIT_STATUS);
+			if (seq === requestSeqRef.current) setStatusOf(() => EMPTY_FILE_TREE_GIT_STATUS);
 		}
 	}, []);
 
@@ -80,7 +84,5 @@ export function useFileTreeGitStatus(options: { projectId?: string; projectRoot?
 	);
 
 	/** 行级查询：树节点渲染时按路径 O(1) 查表（未命中 = 该行不上色）。 */
-	const statusOf = useCallback((path: string): FileTreeGitStatus | undefined => statusMap.get(fileTreeGitKey(path)), [statusMap]);
-
 	return { statusOf, refresh };
 }

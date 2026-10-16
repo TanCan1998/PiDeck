@@ -135,6 +135,7 @@ test("file tabs use preview/permanent strategy owned by useFileEditor", () => {
 	assert.match(viewer, /onClick=\{handleClose\}/);
 	assert.match(viewer, /aria-label=\{t\("common.close"\)\}/);
 
-	const surface = readFileSync("src/renderer/src/components/session/WorkspaceSurface.tsx", "utf8");
+	// 行渲染（含双击常驻预览）已迁到独立模块，契约跟着迁。
+	const surface = readFileSync("src/renderer/src/components/session/FileNode.tsx", "utf8");
 	assert.match(surface, /onViewFile\?\.\(node\.path, "permanent"\)/);
 });

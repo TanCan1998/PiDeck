@@ -1874,9 +1874,8 @@
   background: var(--color-bg-hover);
   color: var(--color-text-primary);
 }
-.file-node-row:active {
-  background: var(--color-bg-active);
-}
+/* 按下底色不再由 legacy 规则定义：行上的 active:bg-muted 在 utilities 层生效（层序见 AGENTS.md），
+   旧规则留着也永远被压住，删掉以免两处定义漂移。 */
 .file-node-row:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
