@@ -18,6 +18,8 @@ const source = readFileSync("src/renderer/src/styles/foundation.css", "utf8");
 /** 文件树行名的着色映射：被测 token 由它派生，改映射（例如 untracked→text-warning）即换被测 token。 */
 const { fileTreeGitStatusClass } = loadTsCommonJs("src/renderer/src/utils/fileTreeGitStatus.ts");
 const FILE_TREE_GIT_STATUSES = ["modified", "added", "untracked", "conflict"];
+/** `text-info` → `info`；洗淡档 `text-info/65` → `info/65`（带 alpha 的前景在 resolveText 里混到底色上再算）。 */
+const fileTreeToken = (status, muted) => fileTreeGitStatusClass({ status, muted }).replace(/^text-/, "");
 
 /** 从 CSS 源码抽取指定块（selector 精确匹配到下一个 `}`）内的 --token 声明。 */
 function extractBlock(selector) {
@@ -75,6 +77,16 @@ function contrast(a, b) {
 	const l2 = lum(parseColor(b));
 	const [hi, lo] = l1 > l2 ? [l1, l2] : [l2, l1];
 	return (hi + 0.05) / (lo + 0.05);
+}
+
+/**
+ * 前景 token 解析：`name/alpha`（Tailwind 的 `text-info/65` 洗淡档）按 alpha 混到底色上再算对比度，
+ * 与 bg-warning/15 同一 sRGB 近似口径（Tailwind 实际用 color-mix in oklab，近似误差小于一档透明度）。
+ */
+function resolveText(tokens, textToken, bg) {
+	const [name, alpha] = textToken.split("/");
+	const base = resolve(tokens, `color-${name}`);
+	return alpha ? blend(base, bg, Number(alpha) / 100) : base;
 }
 
 /** alpha 混合近似（Tailwind bg-warning/15 这类透明底：前景按 alpha 混到底色上）。 */
@@ -142,12 +154,10 @@ const PAIRS = [
 	["warning", "bg-panel", 4.5, "警告态文字 × 面板"],
 	["info", "bg-app", 4.5, "信息态文字 × 页面底"],
 	["info", "bg-panel", 4.5, "信息态文字 × 面板"],
-	// 文件树行名 Git 着色（WorkspaceSurface FileNode）：token 由着色映射派生，改映射即换被测 token；
-	// 行底 bg-panel 由上面的状态色条目覆盖，这里只管 hover / 按下（行上 hover:bg-muted 与 active:bg-muted）。
-	...FILE_TREE_GIT_STATUSES.flatMap((status) => {
-		const token = fileTreeGitStatusClass(status).replace(/^text-/, "");
-		return [[token, "bg-muted", 4.5, `文件树 Git 着色（${status} → ${token}） × hover/按下底`]];
-	}),
+	// 文件树行名 Git 着色（FileNode）：token 由着色映射派生，改映射即换被测 token。
+	// 实色档（文件 + 直接父目录）走正文 AA 4.5；洗淡档（更远祖先，`text-info/65`）是「更深处有变化」的
+	// 过程层提示，按 text-faint 同款地板 2.5——65% 是四色 × 21 套色板里定出来的最差值（2.65，55% 只有 2.24）。
+	...FILE_TREE_GIT_STATUSES.flatMap((status) => [[fileTreeToken(status, false), "bg-muted", 4.5, `文件树 Git 着色（${status} 实色） × hover/按下底`], ...["bg-app", "bg-panel", "bg-muted"].map((face) => [fileTreeToken(status, true), face, 2.5, `文件树 Git 着色（${status} 洗淡档） × ${face}`])]),
 	// 状态徽章（WebRemoteAccessSection: bg-success/15 text-success 等真实组合）
 	["danger", "danger-soft", 4.5, "危险徽章文字 × danger-soft 底"],
 	["success", "success-soft", 4.5, "成功徽章文字 × success-soft 底"],
@@ -181,11 +191,11 @@ for (const { label, tokens } of PALETTES) {
 	test(`主题 token 对比度矩阵：${label}`, () => {
 		const failures = [];
 		for (const [textToken, faceToken, min, usage] of PAIRS) {
-			const fg = resolve(tokens, `color-${textToken}`);
 			const bg = resolveFace(tokens, faceToken);
+			const fg = resolveText(tokens, textToken, bg);
 			const ratio = contrast(fg, bg);
 			if (ratio < min) {
-				failures.push(`  ✗ ${usage} [--color-${textToken}=${fg} on ${bg}]: ${ratio.toFixed(2)}:1 < ${min}:1`);
+				failures.push(`  ✗ ${usage} [${textToken}=${fg} on ${bg}]: ${ratio.toFixed(2)}:1 < ${min}:1`);
 			}
 		}
 		assert.deepEqual(failures, [], `${label}主题对比度违规 ${failures.length} 处:\n${failures.join("\n")}`);

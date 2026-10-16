@@ -39,6 +39,15 @@ const LETTER_OF = {
 };
 const resource = (path, status) => ({ path, status, letter: LETTER_OF[status] ?? "M" });
 
+/**
+ * 命中快照：`status` 或 `status:muted`，未命中为 undefined。
+ * 只取字段而不是 deepEqual 整个对象——沙箱里造的对象原型与测试 realm 不同，deepStrictEqual 会误判。
+ */
+const hitOf = (lookup, path) => {
+	const hit = lookup(path);
+	return hit ? `${hit.status}${hit.muted ? ":muted" : ":strong"}` : undefined;
+};
+
 test("fileTreeGitKey：反斜杠归一 + 去尾斜杠，保留大小写", () => {
 	assert.equal(fileTreeGitKey("C:\\Repo\\Src\\A.ts"), "C:/Repo/Src/A.ts", "反斜杠归一成 POSIX，不改大小写");
 	assert.equal(fileTreeGitKey("/home/x/proj/"), "/home/x/proj", "尾部斜杠不参与键");
@@ -47,16 +56,16 @@ test("fileTreeGitKey：反斜杠归一 + 去尾斜杠，保留大小写", () => 
 
 test("大小写敏感文件系统：仅大小写不同的兄弟文件不互相染色", () => {
 	const lookup = lookupOf(groups({ workingTree: [resource("/p/src/Foo.ts", GitStatus.MODIFIED)] }), "/p");
-	assert.equal(lookup("/p/src/Foo.ts"), "modified", "精确命中");
+	assert.equal(lookup("/p/src/Foo.ts")?.status, "modified", "精确命中");
 	assert.equal(lookup("/p/src/foo.ts"), undefined, "干净的同名（仅大小写不同）文件不得被染");
 });
 
 test("大小写不敏感文件系统：精确优先，落空才忽略大小写兜底", () => {
 	// git 索引里的拼写与磁盘大小写不一致（Windows/macOS 上的仅大小写改名）时靠兜底救回上色
 	const lookup = lookupOf(groups({ untracked: [resource("C:\\MyRepo\\src\\Draft.ts", GitStatus.UNTRACKED)] }), "C:/MyRepo", true);
-	assert.equal(lookup("C:/MyRepo/src/Draft.ts"), "untracked", "精确命中优先");
-	assert.equal(lookup("c:/myrepo/src/draft.ts"), "untracked", "大小写不同也命中兜底");
-	assert.equal(lookup("C:\\MyRepo\\SRC"), "untracked", "目录键同样兜底，反斜杠仍归一");
+	assert.equal(lookup("C:/MyRepo/src/Draft.ts")?.status, "untracked", "精确命中优先");
+	assert.equal(lookup("c:/myrepo/src/draft.ts")?.status, "untracked", "大小写不同也命中兜底");
+	assert.equal(lookup("C:\\MyRepo\\SRC")?.status, "untracked", "目录键同样兜底，反斜杠仍归一");
 });
 
 test("大小写不敏感兜底：折叠键有歧义时宁可不染色", () => {
@@ -68,8 +77,8 @@ test("大小写不敏感兜底：折叠键有歧义时宁可不染色", () => {
 		"/p",
 		true,
 	);
-	assert.equal(lookup("/p/src/Foo.ts"), "modified", "精确命中不受歧义影响");
-	assert.equal(lookup("/p/src/foo.ts"), "untracked", "精确命中不受歧义影响");
+	assert.equal(lookup("/p/src/Foo.ts")?.status, "modified", "精确命中不受歧义影响");
+	assert.equal(lookup("/p/src/foo.ts")?.status, "untracked", "精确命中不受歧义影响");
 	assert.equal(lookup("/p/src/FOO.ts"), undefined, "第三种拼写不猜：折叠键歧义时按未命中处理");
 });
 
@@ -131,8 +140,8 @@ test("查找表：IGNORED 资源不参与着色，也不沿祖先目录上染", 
 
 test("查找表：未跟踪文件标红，祖先目录同色（用户核心诉求：没进 git 管理一眼可辨）", () => {
 	const lookup = lookupOf(groups({ untracked: [resource("/proj/notes/draft.md", GitStatus.UNTRACKED)] }), "/proj");
-	assert.equal(lookup("/proj/notes/draft.md"), "untracked", "文件行取自身状态");
-	assert.equal(lookup("/proj/notes"), "untracked", "父目录聚合子树状态");
+	assert.equal(lookup("/proj/notes/draft.md")?.status, "untracked", "文件行取自身状态");
+	assert.equal(lookup("/proj/notes")?.status, "untracked", "父目录聚合子树状态");
 	assert.equal(lookup("/proj"), undefined, "项目根不是树节点，不标记");
 });
 
@@ -144,9 +153,9 @@ test("查找表：目录里未跟踪 + 已修改并存时，目录红优先于�
 		}),
 		"/proj",
 	);
-	assert.equal(lookup("/proj/src/old.ts"), "modified", "已跟踪改动文件行保持蓝");
-	assert.equal(lookup("/proj/src/new.ts"), "untracked", "未跟踪文件行保持琥珀棕");
-	assert.equal(lookup("/proj/src"), "untracked", "目录聚合：提示「有东西没进 git」");
+	assert.equal(lookup("/proj/src/old.ts")?.status, "modified", "已跟踪改动文件行保持蓝");
+	assert.equal(lookup("/proj/src/new.ts")?.status, "untracked", "未跟踪文件行保持琥珀棕");
+	assert.equal(lookup("/proj/src")?.status, "untracked", "目录聚合：提示「有东西没进 git」");
 });
 
 test("查找表：同一文件暂存新增后又改（index+workingTree 并存），文件行 added 胜出", () => {
@@ -157,7 +166,7 @@ test("查找表：同一文件暂存新增后又改（index+workingTree 并存�
 		}),
 		"/proj",
 	);
-	assert.equal(lookup("/proj/a.ts"), "added", "新文件信息量最大：绿（IDEA 同款）");
+	assert.equal(lookup("/proj/a.ts")?.status, "added", "新文件信息量最大：绿（IDEA 同款）");
 });
 
 test("查找表：冲突资源走琥珀，且优先级高于其他状态", () => {
@@ -168,14 +177,34 @@ test("查找表：冲突资源走琥珀，且优先级高于其他状态", () =>
 		}),
 		"/proj",
 	);
-	assert.equal(lookup("/proj/conflict.ts"), "conflict");
+	assert.equal(lookup("/proj/conflict.ts")?.status, "conflict");
 	assert.equal(lookup("/proj"), undefined, "根目录仍不标记");
 });
 
 test("查找表：删除文件按新路径标记——文件不在树上，着色落在父目录", () => {
 	const lookup = lookupOf(groups({ workingTree: [resource("/proj/src/gone.ts", GitStatus.DELETED)] }), "/proj");
-	assert.equal(lookup("/proj/src/gone.ts"), "modified", "文件键仍标记（树外节点查不到，无害）");
-	assert.equal(lookup("/proj/src"), "modified", "目录确有变更：蓝");
+	assert.equal(lookup("/proj/src/gone.ts")?.status, "modified", "文件键仍标记（树外节点查不到，无害）");
+	assert.equal(lookup("/proj/src")?.status, "modified", "目录确有变更：蓝");
+});
+
+test("查表档位：直接父目录实色，更远祖先洗淡（IDEA 的 immediate / descendants 两档）", () => {
+	const lookup = lookupOf(groups({ untracked: [resource("/proj/src/renderer/hooks/new.ts", GitStatus.UNTRACKED)] }), "/proj");
+	assert.equal(hitOf(lookup, "/proj/src/renderer/hooks/new.ts"), "untracked:strong", "文件本身实色");
+	assert.equal(hitOf(lookup, "/proj/src/renderer/hooks"), "untracked:strong", "直接父目录实色：这层就有变化");
+	assert.equal(hitOf(lookup, "/proj/src/renderer"), "untracked:muted", "祖父目录洗淡：只有更深处才有变化");
+	assert.equal(hitOf(lookup, "/proj/src"), "untracked:muted", "更远祖先同样洗淡（留提示但不喊）");
+});
+
+test("查表档位：目录有直接子资源即实色（哪怕取胜的状态来自更深层）", () => {
+	const lookup = lookupOf(
+		groups({
+			workingTree: [resource("/proj/a/own.ts", GitStatus.MODIFIED)],
+			untracked: [resource("/proj/a/deep/new.ts", GitStatus.UNTRACKED)],
+		}),
+		"/proj",
+	);
+	assert.equal(hitOf(lookup, "/proj/a"), "untracked:strong", "含直接改动即按 immediate 档展示（状态仍按 rank 取未跟踪）");
+	assert.equal(hitOf(lookup, "/proj/a/deep"), "untracked:strong", "直接父目录实色");
 });
 
 test("多仓：嵌套仓目录的「外层仓未跟踪」占位被丢弃，改按嵌套仓自己的状态上色", () => {
@@ -187,9 +216,10 @@ test("多仓：嵌套仓目录的「外层仓未跟踪」占位被丢弃，改�
 	assert.equal(merged.untracked.length, 0, "嵌套仓根目录的未跟踪占位被丢掉");
 	assert.equal(merged.index.length, 1);
 	const lookup = lookupOf(merged, "/proj");
-	assert.equal(lookup("/proj/packages/app/main.ts"), "added", "嵌套仓文件按自己仓库的状态上色");
-	assert.equal(lookup("/proj/packages/app"), "added", "嵌套仓目录取子树聚合，不再被外层仓标成未跟踪");
-	assert.equal(lookup("/proj/packages"), "added", "祖先目录同步聚合");
+	assert.equal(lookup("/proj/packages/app/main.ts")?.status, "added", "嵌套仓文件按自己仓库的状态上色");
+	assert.equal(lookup("/proj/packages/app")?.status, "added", "嵌套仓目录取子树聚合，不再被外层仓标成未跟踪");
+	assert.equal(hitOf(lookup, "/proj/packages/app"), "added:strong", "嵌套仓文件是它的直接子资源：实色档");
+	assert.equal(lookup("/proj/packages")?.status, "added", "祖先目录同步聚合");
 });
 
 test("多仓：未跟踪占位过滤只打嵌套仓根目录，仓内真未跟踪文件与子模块 gitlink 都保留", () => {
@@ -217,8 +247,8 @@ test("查找表：同一路径既是资源又是祖先目录时按目录聚合�
 		}),
 		"/proj",
 	);
-	assert.equal(lookup("/proj/packages/app"), "added", "目录语义覆盖文件语义");
-	assert.equal(lookup("/proj/packages"), "untracked", "祖先目录仍按未跟踪优先（子树里有未跟踪内容）");
+	assert.equal(lookup("/proj/packages/app")?.status, "added", "目录语义覆盖文件语义");
+	assert.equal(lookup("/proj/packages")?.status, "untracked", "祖先目录仍按未跟踪优先（子树里有未跟踪内容）");
 });
 
 test("多仓合并：空数组不产生任何条目，原分组不被修改", () => {
@@ -235,12 +265,19 @@ test("查找表：空分组返回空表", () => {
 	assert.equal(lookup("/proj/a.ts"), undefined);
 });
 
-test("着色类映射：四个状态各映射到语义 token utility，未命中不染色", () => {
+test("着色类映射：两档各自的 utility，未命中不染色", () => {
 	// 必须走 utility 而非写死色值：暗色与各皮肤经 token 自动适配（AGENTS.md CSS 双轨）
-	assert.equal(fileTreeGitStatusClass("modified"), "text-info");
-	assert.equal(fileTreeGitStatusClass("added"), "text-success");
-	assert.equal(fileTreeGitStatusClass("untracked"), "text-warning", "未跟踪用琥珀棕（IDEA unversioned 同族），不是报警红");
-	assert.equal(fileTreeGitStatusClass("conflict"), "text-danger", "红留给真正要处理的冲突");
+	const strong = (status) => fileTreeGitStatusClass({ status, muted: false });
+	const muted = (status) => fileTreeGitStatusClass({ status, muted: true });
+	assert.equal(strong("modified"), "text-info");
+	assert.equal(strong("added"), "text-success");
+	assert.equal(strong("untracked"), "text-warning", "未跟踪用琥珀棕（IDEA unversioned 同族），不是报警红");
+	assert.equal(strong("conflict"), "text-danger", "红留给真正要处理的冲突");
+	// 洗淡档必须写成整串字面量（Tailwind 按字面量生成 utility）：保留色相，只有透明度不同
+	assert.equal(muted("modified"), "text-info/65");
+	assert.equal(muted("added"), "text-success/65");
+	assert.equal(muted("untracked"), "text-warning/65");
+	assert.equal(muted("conflict"), "text-danger/65");
 	assert.equal(fileTreeGitStatusClass(undefined), undefined, "未命中（干净文件/非仓库）不加类");
 });
 
@@ -267,7 +304,7 @@ test("接线契约：文件行与目录行都叠着色类、查表函数接进�
 	assert.match(row, /active:bg-muted/, "行按下底必须与 hover 同档（legacy :active 规则已删）");
 	assert.match(row, /active:bg-accent/, "选中行按下时保持强调底，不被按下色抢走");
 	// 文字替代通道：颜色之外的第二种信号（色弱可辨）
-	assert.match(row, /fileTreeGitStatusLabelKey\(\s*gitStatus\s*\)/, "行必须取状态名文案键");
+	assert.match(row, /fileTreeGitStatusLabelKey\(\s*gitStatus\?\.status\s*\)/, "行必须取状态名文案键");
 	assert.match(row, /aria-label=\{\s*gitStatusLabel\s*\?/, "状态名要进 aria-label，屏幕阅读器也能读到");
 	// 颜色只走 utility：legacy 样式表不得再为行名写状态色（改成正向扫描，拦住真的手写色规则）
 	const css = readSource("src/renderer/src/styles/timeline.css");

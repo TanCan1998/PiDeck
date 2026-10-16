@@ -95,9 +95,9 @@ test("多仓：根仓与嵌套仓状态合并；嵌套仓根取数成功时外�
 	await h.statusCalls()[1].d.resolve(groups({ index: [resource("/p/packages/app/main.ts", GitStatus.INDEX_ADDED)] }));
 	await flush();
 	const view = h.render({ projectId: "p1", projectRoot: "/p" });
-	assert.equal(view.statusOf("/p/src/a.ts"), "modified", "根仓改动上色");
-	assert.equal(view.statusOf("/p/packages/app/main.ts"), "added", "嵌套仓改动上色");
-	assert.equal(view.statusOf("/p/packages/app"), "added", "占位被丢弃后，嵌套仓目录按自己的子树聚合");
+	assert.equal(view.statusOf("/p/src/a.ts")?.status, "modified", "根仓改动上色");
+	assert.equal(view.statusOf("/p/packages/app/main.ts")?.status, "added", "嵌套仓改动上色");
+	assert.equal(view.statusOf("/p/packages/app")?.status, "added", "占位被丢弃后，嵌套仓目录按自己的子树聚合");
 });
 
 test("项目根不在任何已发现仓库内（子目录当项目）：回退默认 scope，否则整盘无色", async () => {
@@ -113,7 +113,7 @@ test("项目根不在任何已发现仓库内（子目录当项目）：回退�
 	);
 	await h.statusCalls()[0].d.resolve(groups({ workingTree: [resource("/outer/sub/a.ts", GitStatus.MODIFIED)] }));
 	await flush();
-	assert.equal(h.render({ projectId: "p2", projectRoot: "/outer/sub" }).statusOf("/outer/sub/a.ts"), "modified");
+	assert.equal(h.render({ projectId: "p2", projectRoot: "/outer/sub" }).statusOf("/outer/sub/a.ts")?.status, "modified");
 });
 
 test("嵌套仓取数失败：外层仓的未跟踪占位保留，子树仍提示「有东西没进 git」", async () => {
@@ -126,8 +126,8 @@ test("嵌套仓取数失败：外层仓的未跟踪占位保留，子树仍提�
 	await h.statusCalls()[1].d.reject(new Error("repository missing"));
 	await flush();
 	const view = h.render({ projectId: "p3", projectRoot: "/p" });
-	assert.equal(view.statusOf("/p/vendor/sub"), "untracked", "失败的嵌套仓不能连占位一起丢掉");
-	assert.equal(view.statusOf("/p/vendor"), "untracked", "占位仍沿祖先目录上染（项目根本身不标记）");
+	assert.equal(view.statusOf("/p/vendor/sub")?.status, "untracked", "失败的嵌套仓不能连占位一起丢掉");
+	assert.equal(view.statusOf("/p/vendor")?.status, "untracked", "占位仍沿祖先目录上染（项目根本身不标记）");
 });
 
 test("单仓失败不拖垮其余：另一仓的状态照常上色，不抛错", async () => {
@@ -140,7 +140,7 @@ test("单仓失败不拖垮其余：另一仓的状态照常上色，不抛错",
 	await h.statusCalls()[1].d.resolve(groups({ workingTree: [resource("/p/sub/a.ts", GitStatus.MODIFIED)] }));
 	await flush();
 	const view = h.render({ projectId: "p4", projectRoot: "/p" });
-	assert.equal(view.statusOf("/p/sub/a.ts"), "modified", "失败仓被跳过，成功仓照常着色");
+	assert.equal(view.statusOf("/p/sub/a.ts")?.status, "modified", "失败仓被跳过，成功仓照常着色");
 });
 
 test("发现仓库失败（非 git 项目）：静默退化为无着色且不抛", async () => {
@@ -174,7 +174,7 @@ test("切项目：迟到响应被代次守卫丢弃，新项目着色不被冲�
 	await flush();
 	await h.statusCalls()[0].d.resolve(groups({ workingTree: [resource("/new/a.ts", GitStatus.MODIFIED)] }));
 	await flush();
-	assert.equal(h.render({ projectId: "new", projectRoot: "/new" }).statusOf("/new/a.ts"), "modified");
+	assert.equal(h.render({ projectId: "new", projectRoot: "/new" }).statusOf("/new/a.ts")?.status, "modified");
 	const writes = h.writes();
 	// 旧项目的两跳请求此刻才回来
 	await staleList.d.resolve([repo("/old", "")]);
@@ -183,7 +183,7 @@ test("切项目：迟到响应被代次守卫丢弃，新项目着色不被冲�
 	await flush();
 	const view = h.render({ projectId: "new", projectRoot: "/new" });
 	assert.equal(view.statusOf("/old/a.ts"), undefined, "旧项目着色不得落地");
-	assert.equal(view.statusOf("/new/a.ts"), "modified", "新项目着色保持");
+	assert.equal(view.statusOf("/new/a.ts")?.status, "modified", "新项目着色保持");
 	assert.equal(h.writes(), writes, "迟到响应不得再写状态");
 });
 

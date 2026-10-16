@@ -12,6 +12,12 @@ import { GitStatus, type GitResource, type GitResourceGroups } from "../../../sh
  */
 export type FileTreeGitStatus = "modified" | "added" | "untracked" | "conflict";
 
+/**
+ * 查表命中：`muted` 表示这是「只有更深处才有变化」的祖先目录（IDEA 的 Have changed descendants 那一档）。
+ * 直接父目录与文件本身是实色档，更远的祖先用同色洗淡——保留折叠目录的提示能力，又不把整条路径喊响。
+ */
+export type FileTreeGitStatusHit = { status: FileTreeGitStatus; muted: boolean };
+
 /** 文件行优先级：同一文件可同时进 index 与 workingTree（先暂存后又改），取信息量最大的状态。 */
 const FILE_STATUS_RANK: Record<FileTreeGitStatus, number> = { conflict: 4, added: 3, modified: 2, untracked: 1 };
 
@@ -44,23 +50,25 @@ export function fileTreeGitStatusOf(status: GitStatus): FileTreeGitStatus | unde
 }
 
 /**
- * 着色状态 → 行名文本色 utility（Tailwind + 语义 token，不写死色值）：
- * 暗色与各皮肤经 token 自动适配，对比度由主题色板守卫测试兜底。
- * 独立成纯函数的理由：状态与颜色的对应是产品规则，必须能离开 React 单测。
+ * 着色状态 → 行名文本色 utility（Tailwind + 语义 token，不写死色值）：每个状态两档。
+ * - strong：文件本身与**直接**父目录（这一层就有变化）；
+ * - muted：只有更深后代才有变化的祖先目录，用同色 65% 洗淡（IDEA 的两档做法）。
+ *   洗淡必须保留色相——洗成灰色就分不出「未跟踪 vs 已修改」了；65% 是按
+ *   tests/themeContrast 的 2.5:1 过程层地板在 21 套色板里定出来的（55% 最差只有 2.24）。
+ * 注意：两档类名都必须写成整串字面量——Tailwind 扫描器按字面量生成 utility，
+ * 用 strong + "/65" 拼出来的类不会被生成，颜色会整体失效。
  */
-export function fileTreeGitStatusClass(status: FileTreeGitStatus | undefined): string | undefined {
-	switch (status) {
-		case "modified":
-			return "text-info";
-		case "added":
-			return "text-success";
-		case "untracked":
-			return "text-warning";
-		case "conflict":
-			return "text-danger";
-		default:
-			return undefined;
-	}
+const CLASS_BY_STATUS: Record<FileTreeGitStatus, { strong: string; muted: string }> = {
+	modified: { strong: "text-info", muted: "text-info/65" },
+	added: { strong: "text-success", muted: "text-success/65" },
+	untracked: { strong: "text-warning", muted: "text-warning/65" },
+	conflict: { strong: "text-danger", muted: "text-danger/65" },
+};
+
+/** 查表命中 → 行名着色类（未命中 = 干净文件 / 不在 git 里 = 不上色）。 */
+export function fileTreeGitStatusClass(hit: FileTreeGitStatusHit | undefined): string | undefined {
+	if (!hit) return undefined;
+	return hit.muted ? CLASS_BY_STATUS[hit.status].muted : CLASS_BY_STATUS[hit.status].strong;
 }
 
 /**
@@ -103,8 +111,8 @@ export function isCaseInsensitiveFileSystem(): boolean {
 	return /Windows|Macintosh|Mac OS X/i.test(navigator.userAgent);
 }
 
-/** 行级查询：命中返回着色状态，未命中（干净文件 / 不在 git 里）返回 undefined。 */
-export type FileTreeGitStatusLookup = (path: string) => FileTreeGitStatus | undefined;
+/** 行级查询：命中返回「状态 + 档位」，未命中（干净文件 / 不在 git 里）返回 undefined。 */
+export type FileTreeGitStatusLookup = (path: string) => FileTreeGitStatusHit | undefined;
 
 /** 空查表：非 git 项目 / 加载失败时复用同一引用，避免渲染层无谓重建。 */
 export const EMPTY_FILE_TREE_GIT_STATUS: FileTreeGitStatusLookup = () => undefined;
@@ -112,8 +120,8 @@ export const EMPTY_FILE_TREE_GIT_STATUS: FileTreeGitStatusLookup = () => undefin
 /**
  * 丢掉「嵌套仓库目录被外层仓报成未跟踪」的占位资源。
  * git 不递归进另一个仓库，只把该目录整个报成 untracked；而目录里的真实状态由嵌套仓自己的
- * status 提供（多仓项目已合并）。保留占位会得到「目录标红、内部文件各有各的颜色」的
- * 自相矛盾观感，红色还会顺着祖先目录一路传上去。
+ * status 提供（多仓项目已合并）。保留占位会得到「目录整个被标成未跟踪、内部文件各有各的颜色」的
+ * 自相矛盾观感，颜色还会顺着祖先目录一路传上去。
  * 只丢未跟踪占位：已跟踪的子模块 gitlink（M）是有效信息，必须保留。
  */
 export function dropNestedRepoUntrackedPlaceholders(groups: GitResourceGroups, repoRoots: readonly string[]): GitResourceGroups {
@@ -141,10 +149,12 @@ export function mergeGitResourceGroups(groupsList: readonly GitResourceGroups[])
 }
 
 /**
- * 把 GitResourceGroups 折成「文件树路径 → 着色状态」查表：
+ * 把 GitResourceGroups 折成「文件树路径 → 着色命中」查表：
  * - 资源自身路径按文件语义取状态（同路径多组并存按 FILE_STATUS_RANK 决胜，如先暂存后又改）；
- * - 祖先目录逐级向上聚合子树状态（DIR_STATUS_RANK 决胜）：子树里有未跟踪文件即标红，
- *   因为「这个目录有东西没进 git」比「有已跟踪改动」更值得提醒。
+ * - 祖先目录逐级向上聚合子树状态（DIR_STATUS_RANK 决胜，档位见下）：子树里有未跟踪文件就
+ *   标成未跟踪色，因为「这个目录有东西没进 git」比「有已跟踪改动」更值得提醒；
+ * - 档位：直接父目录 = 实色（这一层就有变化），更远的祖先 = 洗淡（只有更深处才有变化）。
+ *   与 IDEA 的「Have immediate changed children / Have changed descendants」两档同构。
  * 前提是 git 资源路径与文件树节点路径同源（都从 ProjectStore 的项目路径出发）；
  * WSL 项目的 UNC 形态不一致时只会上色失败（静默退化），不会误染。
  * 删除/重命名资源按新路径标记：文件本身已不在树上，着色落在父目录（目录确有变更，语义成立）。
@@ -158,10 +168,14 @@ export function buildFileTreeGitStatusLookup(groups: GitResourceGroups, projectR
 	// 两张表的优先级表数值不可比，混在一张表里比较会得出随插入顺序变化的结果。
 	const fileStatus = new Map<string, FileTreeGitStatus>();
 	const dirStatus = new Map<string, FileTreeGitStatus>();
+	// 有直接子资源的目录 = 实色档。只按「有没有直接子资源」判定档位：某目录同时有直接改动
+	// 与更深改动时，两边都算「这层就有变化」，按实色展示（与 IDEA 的 immediate 档一致）。
+	const dirWithDirectChild = new Set<string>();
 	const put = (map: Map<string, FileTreeGitStatus>, key: string, status: FileTreeGitStatus, rank: Record<FileTreeGitStatus, number>) => {
 		const prev = map.get(key);
 		if (prev === undefined || rank[status] > rank[prev]) map.set(key, status);
 	};
+	const parentKeyOf = (key: string) => key.slice(0, key.lastIndexOf("/"));
 	const rootKey = projectRoot ? fileTreeGitKey(projectRoot) : "";
 	for (const group of [groups.merge, groups.index, groups.workingTree, groups.untracked]) {
 		for (const resource of group) {
@@ -169,29 +183,32 @@ export function buildFileTreeGitStatusLookup(groups: GitResourceGroups, projectR
 			if (status === undefined) continue; // IGNORED 等显式不染色的资源直接跳过
 			const fileKey = fileTreeGitKey(resource.path);
 			put(fileStatus, fileKey, status, FILE_STATUS_RANK);
-			// 祖先目录聚合：截到最后一个 "/" 逐级上走；到项目根（项目根不是树节点）或盘符根即停。
-			for (let dir = fileKey.slice(0, fileKey.lastIndexOf("/")); dir; dir = dir.slice(0, dir.lastIndexOf("/"))) {
-				if (dir === rootKey) break;
+			// 祖先目录聚合：逐级上走；到项目根（项目根不是树节点）或盘符根即停。
+			let dir = parentKeyOf(fileKey);
+			let level = 1;
+			while (dir && dir !== rootKey) {
 				put(dirStatus, dir, status, DIR_STATUS_RANK);
+				if (level === 1) dirWithDirectChild.add(dir);
+				dir = parentKeyOf(dir);
+				level += 1;
 			}
 		}
 	}
 	// 目录聚合后写入：路径能同时出现在两张表里说明它下面挂着资源（文件不可能有子路径），
-	// 按目录语义展示更贴近文件树里实际看到的内容——否则嵌套仓目录会整块标红，
+	// 按目录语义展示更贴近文件树里实际看到的内容——否则嵌套仓目录会整块被标成未跟踪，
 	// 与其内部每个文件的真实状态自相矛盾。
-	const exact = new Map<string, FileTreeGitStatus>(fileStatus);
-	for (const [key, status] of dirStatus) exact.set(key, status);
-	if (!(options?.caseInsensitiveFs ?? isCaseInsensitiveFileSystem())) return (path) => exact.get(fileTreeGitKey(path));
+	const hits = new Map<string, FileTreeGitStatusHit>();
+	for (const [key, status] of fileStatus) hits.set(key, { status, muted: false });
+	for (const [key, status] of dirStatus) hits.set(key, { status, muted: !dirWithDirectChild.has(key) });
+	if (!(options?.caseInsensitiveFs ?? isCaseInsensitiveFileSystem())) return (path) => hits.get(fileTreeGitKey(path));
 	// 折叠索引：null 表示该折叠键有歧义（两个仅大小写不同的路径同时存在），查询时按未命中处理。
-	const folded = new Map<string, FileTreeGitStatus | null>();
-	for (const [key, status] of exact) {
+	const folded = new Map<string, FileTreeGitStatusHit | null>();
+	for (const [key, hit] of hits) {
 		const lower = key.toLowerCase();
-		folded.set(lower, folded.has(lower) ? null : status);
+		folded.set(lower, folded.has(lower) ? null : hit);
 	}
 	return (path) => {
 		const key = fileTreeGitKey(path);
-		const hit = exact.get(key);
-		if (hit !== undefined) return hit;
-		return folded.get(key.toLowerCase()) ?? undefined;
+		return hits.get(key) ?? folded.get(key.toLowerCase()) ?? undefined;
 	};
 }

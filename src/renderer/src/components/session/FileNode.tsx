@@ -8,7 +8,7 @@ import { getFileIconSeti, getFileIconColor, getFileTypeLabel } from "../../fileI
 import { activeEditorFileAtom } from "../../atoms/app-ui-atoms";
 import { writeFileNodeDragPayload } from "../app/AppUtils";
 import { t } from "../../i18n";
-import { fileTreeGitStatusClass, fileTreeGitStatusLabelKey, type FileTreeGitStatus } from "../../utils/fileTreeGitStatus";
+import { fileTreeGitStatusClass, fileTreeGitStatusLabelKey, type FileTreeGitStatusHit } from "../../utils/fileTreeGitStatus";
 import type { FileTreeNode } from "../../../../shared/types";
 
 /**
@@ -53,8 +53,8 @@ export function FileNode(props: {
 	onMoveFiles?: (sourcePaths: string[], targetDir: string) => void;
 	dragOverDir?: string | null;
 	onDragOverDirChange?: (path: string | null) => void;
-	/** Git 状态查表（IDEA 风格行名着色）：untracked/modified/added/conflict；缺省（非 git 项目/未加载）不上色 */
-	gitStatusOf?: (path: string) => FileTreeGitStatus | undefined;
+	/** Git 状态查表（IDEA 风格行名着色）：命中带档位（祖先目录可能洗淡）；缺省（非 git 项目/未加载）不上色 */
+	gitStatusOf?: (path: string) => FileTreeGitStatusHit | undefined;
 }) {
 	const { node, expandedDirs, onToggleDirectory, depth = 0 } = props;
 	const expanded = expandedDirs.has(node.path);
@@ -62,12 +62,12 @@ export function FileNode(props: {
 	   树行跨六层 props 链，订阅 atom 而非透传。 */
 	const activeEditorFile = useAtomValue(activeEditorFileAtom);
 	const isActiveFile = node.type === "file" && node.path === activeEditorFile;
-	// Git 着色查表：文件行取自身状态，目录行取子树聚合状态（构建见 fileTreeGitStatus.ts）。
+	// Git 着色查表：文件行取自身状态，目录行取子树聚合状态（直接父目录实色、更远祖先洗淡）。
 	const gitStatus = props.gitStatusOf?.(node.path);
 	// 活跃编辑器行的选中高亮优先：不叠加着色类，避免 git 色压掉选中态。
 	const gitStatusClass = isActiveFile ? undefined : fileTreeGitStatusClass(gitStatus);
 	// 文字替代通道：颜色是唯一信号时色弱用户无从判断，title / aria-label 里带上状态名。
-	const gitStatusLabelKey = fileTreeGitStatusLabelKey(gitStatus);
+	const gitStatusLabelKey = fileTreeGitStatusLabelKey(gitStatus?.status);
 	const gitStatusLabel = gitStatusLabelKey ? t(gitStatusLabelKey) : "";
 	const typeLabel = node.type === "file" ? getFileTypeLabel(node.name) : "";
 	// 对应 VS Code defaultIndent + depth × indent；外层不缩进，全宽背景保持不变。
