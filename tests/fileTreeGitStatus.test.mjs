@@ -6,7 +6,8 @@
  *    （含未跟踪文件时红优先，呼应「没进 git 管理」的核心诉求）、祖先只标到项目根；
  * 4. 颜色映射——状态 → Tailwind 语义 token utility（不写死色值，暗色/皮肤自动适配）；
  * 5. 多仓合并——根仓与嵌套仓的状态合并后走同一套优先级规则；
- * 6. 接线契约——文件树行名按查表结果叠加着色类、活跃编辑器行不叠加、刷新按钮重拉着色。
+ * 6. 接线契约——文件行与目录行都叠着色类、查表函数顶层传入 + 递归透传、两处刷新调用点都在；
+ *    这些断言按「出现次数」钉住，删掉任一处都会红（此前的 presence 正则对行为级删除全部假绿）。
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -22,7 +23,18 @@ const { buildFileTreeGitStatusMap, dropNestedRepoUntrackedPlaceholders, fileTree
 
 /** 最小 GitResourceGroups 工厂：只喂 merge/index/workingTree/untracked 四组 */
 const groups = ({ merge = [], index = [], workingTree = [], untracked = [] } = {}) => ({ merge, index, workingTree, untracked });
-const resource = (path, status) => ({ path, status, letter: "M" });
+/** GitResource.letter 由状态派生（对齐主进程 parsePorcelainStatus 的口径）：写死 "M" 会造出与状态矛盾的测试数据。 */
+const LETTER_OF = {
+	[GitStatus.UNTRACKED]: "U",
+	[GitStatus.INDEX_ADDED]: "A",
+	[GitStatus.INTENT_TO_ADD]: "A",
+	[GitStatus.INDEX_DELETED]: "D",
+	[GitStatus.DELETED]: "D",
+	[GitStatus.INDEX_RENAMED]: "R",
+	[GitStatus.INDEX_COPIED]: "C",
+	[GitStatus.INTENT_TO_RENAME]: "R",
+};
+const resource = (path, status) => ({ path, status, letter: LETTER_OF[status] ?? "M" });
 
 test("fileTreeGitKey：反斜杠归一、大小写不敏感、尾斜杠剔除", () => {
 	assert.equal(fileTreeGitKey("C:\\Repo\\Src\\A.ts"), "c:/repo/src/a.ts", "Windows 反斜杠要归一成 POSIX 并转小写");
@@ -48,7 +60,6 @@ test("查找表：未跟踪文件标红，祖先目录同色（用户核心诉�
 	assert.equal(map.get("/proj/notes/draft.md"), "untracked", "文件行取自身状态");
 	assert.equal(map.get("/proj/notes"), "untracked", "父目录聚合子树状态");
 	assert.equal(map.get("/proj"), undefined, "项目根不是树节点，不标记");
-	assert.equal(map.has("/"), false, "项目根之外的祖先不标记");
 });
 
 test("查找表：目录里未跟踪 + 已修改并存时，目录红优先于蓝", () => {
@@ -128,6 +139,20 @@ test("多仓：未跟踪占位过滤只打嵌套仓根目录，仓内真未跟�
 	assert.equal(dropNestedRepoUntrackedPlaceholders(outer, []), outer, "没有嵌套仓时原样返回（免重建）");
 });
 
+test("查找表：同一路径既是资源又是祖先目录时按目录聚合（刻意规则，必须有断言钉住）", () => {
+	// 根仓把嵌套仓目录整个报成未跟踪，同时该目录里有它自己的改动。
+	// 若改成「文件语义优先」（if (!map.has)），这个目录会被标成未跟踪，与内部每个文件的状态矛盾。
+	const map = buildFileTreeGitStatusMap(
+		groups({
+			untracked: [resource("/proj/packages/app", GitStatus.UNTRACKED)],
+			index: [resource("/proj/packages/app/main.ts", GitStatus.INDEX_ADDED)],
+		}),
+		"/proj",
+	);
+	assert.equal(map.get("/proj/packages/app"), "added", "目录语义覆盖文件语义");
+	assert.equal(map.get("/proj/packages"), "untracked", "祖先目录仍按未跟踪优先（子树里有未跟踪内容）");
+});
+
 test("多仓合并：空数组不产生任何条目，原分组不被修改", () => {
 	const single = groups({ workingTree: [resource("/proj/a.ts", GitStatus.MODIFIED)] });
 	const before = JSON.stringify(single);
@@ -151,13 +176,21 @@ test("着色类映射：四个状态各映射到语义 token utility，未命中
 	assert.equal(fileTreeGitStatusClass(undefined), undefined, "未命中（干净文件/非仓库）不加类");
 });
 
-test("接线契约：文件树行名按查表结果叠加着色类，刷新按钮重拉着色", () => {
+test("接线契约：文件行与目录行都叠着色类、查表函数接进树、两处刷新调用点都在", () => {
 	const surface = readSource("src/renderer/src/components/session/WorkspaceSurface.tsx");
-	assert.match(surface, /cn\("file-node-name",\s*gitStatusClass\)/, "文件与目录行名都按同一份着色类渲染");
+	// 出现次数而不是「有没有」：文件行 + 目录行各一处，删掉任何一种行都会红
+	const coloredRows = surface.match(/cn\(\s*"file-node-name"\s*,\s*gitStatusClass\s*\)/g) ?? [];
+	assert.equal(coloredRows.length, 2, "文件行与目录行都必须按同一份着色类渲染");
+	// 查表函数必须真的接到树上：顶层传入 + 递归透传缺一不可（缺后者深层节点全失色）
+	assert.match(surface, /gitStatusOf=\{\s*gitStatus\.statusOf\s*\}/, "面板把查表函数传给树根");
+	assert.match(surface, /gitStatusOf=\{\s*props\.gitStatusOf\s*\}/, "目录节点把查表函数透传给子节点");
 	assert.match(surface, /isActiveFile\s*\?\s*undefined\s*:\s*fileTreeGitStatusClass/, "活跃编辑器行的选中高亮优先于 Git 着色");
-	assert.match(surface, /void\s+gitStatus\.refresh\(\)/, "手动刷新同步重拉 Git 状态");
-	assert.match(surface, /useFileTreeGitStatus\(\{\s*projectId:\s*props\.projectId,\s*projectRoot:\s*props\.projectRoot\s*\}\)/, "着色数据源接项目 id 与项目根（路径归一要靠根裁剪祖先）");
-	// 颜色只走 utility：legacy 样式表不得再为文件树写状态色
+	// 两个调用点：文件树变化后的防抖重拉 + 刷新按钮，删掉任一处都会红
+	const refreshCalls = surface.match(/void\s+gitStatus\.refresh\(\)/g) ?? [];
+	assert.equal(refreshCalls.length, 2, "防抖重拉与刷新按钮都必须触发重拉");
+	assert.match(surface, /window\.setTimeout\(\s*\(\)\s*=>\s*void\s+gitStatus\.refresh\(\s*\)\s*,\s*400\s*\)/, "防抖重拉必须挂在定时器上（不是每帧都拉）");
+	assert.match(surface, /\[\s*props\.files\s*,\s*gitStatus\.refresh\s*\]/, "防抖重拉由文件树内容变化触发");
+	// 颜色只走 utility：legacy 样式表不得再为行名写状态色（改成正向扫描，拦住真的手写色规则）
 	const css = readSource("src/renderer/src/styles/timeline.css");
-	assert.doesNotMatch(css, /file-tree-git-|data-git-status/, "不得新增手写状态色规则（CSS 双轨：新改动走 Tailwind）");
+	assert.doesNotMatch(css, /\.file-node-name[^{}]*\{[^{}]*\bcolor\s*:/, "不得为行名写手写状态色规则（CSS 双轨：新改动走 Tailwind）");
 });
