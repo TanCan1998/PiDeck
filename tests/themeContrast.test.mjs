@@ -138,6 +138,10 @@ const PAIRS = [
 	["warning", "bg-panel", 4.5, "警告态文字 × 面板"],
 	["info", "bg-app", 4.5, "信息态文字 × 页面底"],
 	["info", "bg-panel", 4.5, "信息态文字 × 面板"],
+	// 文件树行名 Git 着色（WorkspaceSurface FileNode：modified=info / added=success /
+	// untracked=danger / conflict=warning）。行底是抽屉 bg-panel（上方已覆盖），
+	// hover 切到 bg-muted——这是新引入的真实文字/底色组合，必须一起兜住。
+	...["info", "success", "danger", "warning"].map((token) => [token, "bg-muted", 4.5, `文件树 Git 着色（${token}） × 行 hover 底`]),
 	// 状态徽章（WebRemoteAccessSection: bg-success/15 text-success 等真实组合）
 	["danger", "danger-soft", 4.5, "危险徽章文字 × danger-soft 底"],
 	["success", "success-soft", 4.5, "成功徽章文字 × success-soft 底"],

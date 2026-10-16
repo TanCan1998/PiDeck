@@ -24,6 +24,8 @@ import { PathTooltip } from "../ui-shadcn/PathTooltip";
 import { FileSearch, Search } from "lucide-react";
 import { useFileSearch } from "../../hooks/useFileSearch";
 import { useFileTreeStickyAppearance } from "../../hooks/files/useFileTreeStickyAppearance";
+import { useFileTreeGitStatus } from "../../hooks/files/useFileTreeGitStatus";
+import { fileTreeGitStatusClass, type FileTreeGitStatus } from "../../utils/fileTreeGitStatus";
 import { FileSearchResults } from "./FileSearchResults";
 import { isEditableTarget, isFileSearchShortcut, isTypeToSearchKey } from "../../utils/fileSearchTrigger";
 
@@ -161,6 +163,15 @@ function FilesPanel(props: {
 	// 文件名搜索（issue #215）：状态域在 hook，面板只转发输入与关闭
 	const fileSearch = useFileSearch({ projectId: props.projectId });
 	const [searchOpen, setSearchOpen] = useState(false);
+	// Git 状态着色（IDEA 风格：untracked 红 / modified 蓝 / added 绿 / conflict 琥珀）：
+	// 面板挂载（抽屉打开）与切换项目由 hook 拉取；手动刷新按钮见下方 onClick。
+	const gitStatus = useFileTreeGitStatus({ projectId: props.projectId, projectRoot: props.projectRoot });
+	// 文件树内容变化（复制/粘贴/移动、工具触发的重载、切项目清树）后同步重拉着色：
+	// 展开目录也会产出新的 files 引用，用防抖把连续变化合并成一次 git status。
+	useEffect(() => {
+		const timer = window.setTimeout(() => void gitStatus.refresh(), 400);
+		return () => window.clearTimeout(timer);
+	}, [props.files, gitStatus.refresh]);
 	// 面板容器：退出搜索后把焦点收回来，否则焦点落到 body，之后的 Ctrl+F / 输入即搜索都收不到键
 	const panelRef = useRef<HTMLDivElement | null>(null);
 	// 关闭时同步清空查询词：退出搜索态必须回到完整文件树，且避免残留查询触发下一次挂载时的扫描
@@ -295,7 +306,19 @@ function FilesPanel(props: {
 						</Button>
 					)}
 					{/* 刷新与全部收起：纯图标，密度对齐 shadcn icon button */}
-					<Button type="button" variant="ghost" size="icon-sm" className="icon-only inline-grid size-6 place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground" onClick={props.onRefreshFiles} title={t("common.refresh")} aria-label={t("common.refresh")}>
+					{/* 刷新同时重拉 Git 着色：agent 改完文件后点一次刷新，颜色与树同步更新 */}
+					<Button
+						type="button"
+						variant="ghost"
+						size="icon-sm"
+						className="icon-only inline-grid size-6 place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+						onClick={() => {
+							props.onRefreshFiles();
+							void gitStatus.refresh();
+						}}
+						title={t("common.refresh")}
+						aria-label={t("common.refresh")}
+					>
 						<RefreshCw size={13} />
 					</Button>
 					{props.onCollapseAll && (
@@ -330,6 +353,7 @@ function FilesPanel(props: {
 						onMoveFiles={props.onMoveFiles}
 						dragOverDir={dragOverDir}
 						onDragOverDirChange={setDragOverDir}
+						gitStatusOf={gitStatus.statusOf}
 					/>
 				))
 			)}
@@ -470,6 +494,8 @@ function FileNode(props: {
 	onMoveFiles?: (sourcePaths: string[], targetDir: string) => void;
 	dragOverDir?: string | null;
 	onDragOverDirChange?: (path: string | null) => void;
+	/** Git 状态查表（IDEA 风格行名着色）：untracked/modified/added/conflict；缺省（非 git 项目/未加载）不上色 */
+	gitStatusOf?: (path: string) => FileTreeGitStatus | undefined;
 }) {
 	const { node, expandedDirs, onToggleDirectory, depth = 0 } = props;
 	const expanded = expandedDirs.has(node.path);
@@ -477,6 +503,9 @@ function FileNode(props: {
 	   树行跨六层 props 链，订阅 atom 而非透传。 */
 	const activeEditorFile = useAtomValue(activeEditorFileAtom);
 	const isActiveFile = node.type === "file" && node.path === activeEditorFile;
+	// Git 着色查表：文件行取自身状态，目录行取子树聚合状态（构建见 fileTreeGitStatus.ts）。
+	// 活跃编辑器行的选中高亮优先：不叠加着色类，避免 git 色压掉选中态。
+	const gitStatusClass = isActiveFile ? undefined : fileTreeGitStatusClass(props.gitStatusOf?.(node.path));
 	const typeLabel = node.type === "file" ? getFileTypeLabel(node.name) : "";
 	// 对应 VS Code defaultIndent + depth × indent；外层不缩进，全宽背景保持不变。
 	const rowStyle: CSSProperties = {
@@ -556,7 +585,7 @@ function FileNode(props: {
 					{/* 文件也保留 16px twistie 槽位，确保与同级目录的图标和名称对齐。 */}
 					<span data-file-tree-twistie="" aria-hidden="true" className="h-full w-4 shrink-0" />
 					<span className="file-node-icon">{fileIconElement(node.name, false, false)}</span>
-					<span className="file-node-name">{node.name}</span>
+					<span className={cn("file-node-name", gitStatusClass)}>{node.name}</span>
 					<span className="file-node-type-label">{typeLabel}</span>
 				</button>
 			</div>
@@ -597,7 +626,7 @@ function FileNode(props: {
 							/>
 						</span>
 						<span className="file-node-icon">{fileIconElement(node.name, true, expanded)}</span>
-						<span className="file-node-name">{node.name}</span>
+						<span className={cn("file-node-name", gitStatusClass)}>{node.name}</span>
 					</button>
 				</CollapsibleTrigger>
 				{/* overflow-clip 取代默认的 overflow-hidden：hidden 会让本层变成「不滚动的 scrollport」，
@@ -630,6 +659,7 @@ function FileNode(props: {
 									onMoveFiles={props.onMoveFiles}
 									dragOverDir={props.dragOverDir}
 									onDragOverDirChange={props.onDragOverDirChange}
+									gitStatusOf={props.gitStatusOf}
 									depth={depth + 1}
 								/>
 							))}
