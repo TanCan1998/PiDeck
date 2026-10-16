@@ -400,7 +400,7 @@ smoke5 用完整清单（116→124 个 kind、列合计从 263→271 与真实 F
 
 ### 5.16 G5a（远端同步：fetch／push／pull）冻结契约（2026-10-16）
 
-> 状态：**契约冻结；helper＋main／IPC＋renderer（含面板同步条）已实施并验证（§5.16.1）；真机同步 e2e 待补**。这是唯一一批有**网络副作用**的能力，因此先把「两条身份链」和「每种操作的副作用边界」写死，再动手。
+> 状态：**契约冻结；helper＋main／IPC＋renderer（含面板同步条）已实施并验证，真机同步 e2e 已通过（§5.16.1）**。这是唯一一批有**网络副作用**的能力，因此先把「两条身份链」和「每种操作的副作用边界」写死，再动手。
 
 - **G5a 原生 Git 事实（本机实测，`/tmp/g5-probe*.sh`，全部在 `GIT_TERMINAL_PROMPT=0` 下）**
   - `git push --porcelain <remote> <branch>` 是机器可读且**跨版本稳定**的：已是最新 ⇒ rc=0 且行 `=	<refspec>	[up to date]`；新提交 ⇒ rc=0 且行 ` 	<refspec>	<old>..<new>`（状态位是空格）；历史被改写 ⇒ **rc=1** 且行 `!	<refspec>	[rejected] (non-fast-forward)`。因此「非快进被拒」可以精确判定，不需要解析本地化 stderr。
@@ -418,16 +418,17 @@ smoke5 用完整清单（116→124 个 kind、列合计从 263→271 与真实 F
 - **UI 契约（冻结）**：面板顶部新增同步条（testid `remote-git-sync`／`remote-git-sync-fetch`／`remote-git-sync-push`／`remote-git-sync-pull`／`remote-git-sync-facts`）：显示当前分支、上游、`ahead/behind`；三个动作各自一个按钮，推送前**内联确认**（推送改远端，属不可逆外部副作用）；有未跟踪之外的本地改动时拉取按钮禁用并说明原因；没有上游时三个按钮禁用并提示去终端设置上游（**我们不写配置**）；**不提供** force push／`--set-upstream`／prune／tag 同步／rebase 选项。三种动作都需要 main-owned token（kind `fetch`／`push`／`pull`）。
 - **验证计划**：helper 真实子进程＋原生 Git（用 run 内自建 bare remote：fetch 只动 remote-tracking ref 且 index/HEAD/工作区不变、`--no-tags` 不写标签；push 的 up-to-date／新提交／非快进拒绝三态与 porcelain 解析、指纹不变、argv 里没有 force；pull 的前置拒绝（脏工作区、游标不属于该远端、无上游）、快进、分歧未配置策略 ⇒ 拒绝且工作区不变、冲突 ⇒ 明确报码且不自动 abort）；main／IPC（token kind 分离、URL 不外泄、参数边界、回复重验）；真机 e2e（run 内 bare remote：UI 里 fetch 看到 ahead/behind 变化→push 内联确认后远端 ref 前进→pull 把远端提交带回工作区）。
 
-#### 5.16.1 G5a 实施结果（helper＋main／IPC＋面板同步条已交付；真机同步 e2e 待补）
+#### 5.16.1 G5a 实施结果（helper＋main／IPC＋面板同步条＋真机同步 e2e 已交付）
 
 - **交付**：helper **1.15.0**，bundle 第四份文件 `git-sync.mjs`（9,181 字符，独立钉住）——唯一的网络代码。`git.syncFacts`（`rev-parse --symbolic-full-name <branch>@{upstream}` 给全名、`rev-list --left-right --count` 给 ahead/behind、`git remote` 只给**名字**）；`git.fetch`（`--no-tags`、不 prune、只动 `refs/remotes/<remote>/*`，前后**指纹核对**保证 index／工作区／HEAD 一字未动，并给出 ref 增量）；`git.push`（`--porcelain`，argv 无 `+`／`--force`／`--set-upstream`；实测非快进拒绝有三种措辞 `(non-fast-forward)`／`(fetch first)`／`(needs force)` ⇒ `GIT_PUSH_REJECTED`，其它 `!` ⇒ `GIT_PUSH_REMOTE_REFUSED`）；`git.pull`（先 fetch＋指纹核对，再前置判定：缺上游／工作区有已跟踪改动 ⇒ `GIT_SYNC_DIRTY`；**分歧且 `pull.rebase`／`pull.ff` 未配置 ⇒ `GIT_PULL_STRATEGY_REQUIRED`**，绝不替用户选策略；`--no-edit` 只是不打开编辑器；冲突 ⇒ `GIT_PULL_CONFLICTS` 且不自动 abort／重放）。三种动词都先过既有 hooks/config 门禁（本地 `pre-push`／`post-merge` 是执行，不是可跳过的步骤），并用 10 分钟预算而不是 30 秒读预算；连接失败映射为 `GIT_SYNC_FAILED`，请求发出后丢失 ⇒ `GIT_WRITE_RESULT_UNCONFIRMED`（沿用既有「写结果未确认」语义，不为同步另造一套词汇）。
 - **身份链分离**：同步动词跑在 helper 的净化环境里（`GIT_*` 全剥离、`GIT_TERMINAL_PROMPT=0`），**不注入 `GIT_SSH`／`GIT_SSH_COMMAND`／`GIT_ASKPASS`**、不写远端 URL／Git 配置、不碰 `~/.ssh`／`known_hosts`／`~/.git-credentials`、不关闭 host-key 校验；远端 Git 用远端账号自己的身份链，PiDeck↔主机的 SSH pin 是另一条链。测试里用「剥掉注释后的冻结正文不得出现这些 token」把关。
 - **main／IPC／renderer 控制器**：kind `fetch`／`push`／`pull` 三种 grant；`git:remote-sync-facts`（无 token、纯读）与三个动作通道；主进程逐字段重验（remote 名是封闭形状、upstream 必须是 `refs/remotes/<remote>/…`、推送的 refspec 必须正好是本次分支、pull 的 mode 只能是三值之一）；renderer 控制器 `loadSync`／`fetch`／`push`／`pull`（单飞、成功后才刷新、拒绝丢事实、未知报 `GIT_WRITE_RESULT_UNCONFIRMED` 且**永不重放**），i18n 中英同步（同步条与全部新稳定码文案）。
 - **面板同步条（本次已交付，含抖动根因修复）**：一个固定高度的条（facts 行 + 预留消息行，两行都是 `h-6`），显示分支 → 上游全名、`领先/落后 n`，右侧三个按钮（获取／推送／拉取）；推送先弹**内联确认**（改动远端，不可逆）；没有 remote／没有上游时在消息行说明（并提示去终端处理，**不写配置**）；同步错误/结果/提示都走 `aria-live` 的消息行而不是 `role=alert`，避免与 trust／连接告警的选择器冲突。
   之前的真机失败（抽屉在刷新循环中持续改高、文件行菜单点击被判为不稳定，G2a/G4a 变红）根因是**同步事实由 effect 监视快照自动重载**，与 `refresh()` 互相触发；修法是三条：①facts **只在项目身份变化后读一次**（hook 里 `refresh().then(loadSync)`），②`loadSync` 不再被 `state.loading`／`state.mutating` 阻塞（它有自己的单飞守卫，且是纯读），③条的几何恒定（两行固定高度、消息行常驻预留）。显式手势（刷新按钮、trust 通过后的 `refreshAll`）与每个动词成功后才会重读 facts。修好后真机六合一恢复 **6 passed（3.9m）**，随后 G1 等用例的「无写控件」断言按新能力更新（保留仍然不存在的：丢弃／全部暂存／初始化／强制／amend）。 回归守卫 `tests/remoteGitSyncBar.test.mjs`：断言固定高度类与「任何 effect 都不得调用 loadSync」（实测把 loadSync 塞回 effect 即变红），并断言 hook 只在首次读取后加载一次。
-- **真机同步 e2e 待补（如实记录）**：按 run 内 bare remote（`sync-origin.git` ＋ `sync-other` 第二个工作副本）写过一版端到端用例，facts／fetch（远端跟踪引用前进、工作区不动）／pull（快进后文件进工作区）三步已验证通过；但"脏工作区拒绝"与"推送"两步的断言仍在与面板状态刷新竞争（facts 的 `领先/落后` 只在 fetch 后才有变化、拒绝文案出现在面板级错误行而不是同步条、以及点击时快照令牌的时序），本轮未收敛，因此**用例连同 helper 一起撤出**（不留 flaky 用例）。拒绝路径（脏工作区、分歧无策略、冲突）已有 helper 级与 IPC 级覆盖（`remoteGitSync` 9/9）。下一片：把这三步的时序固定下来（等待 facts 快照就绪再点击／把拒绝文案断言到正确的行），再补真机同步 e2e。
+- **真机同步 e2e（已通过）**：`e2e/remote-git-sync.ts` 在 run 自己的目录里建 `sync-origin.git`（bare）＋`sync-other`（第二个工作副本，扮演队友推一个提交），项目 `origin` 指向它、`git push -u` 建立上游——全程无外部网络与凭据。用例走**真实面板**：①同步条显示 `分支 → refs/remotes/origin/…` 且**从不显示远端路径**，fetch/push/pull 三个按钮就位，且没有 force／`--set-upstream` 控件；②**获取** → 提示「已获取」＋`落后 1` 出现（计数只随 fetch 变化 ✓），原生核对 `refs/remotes/origin/<branch>` == 远端 HEAD、**HEAD 与工作区不动**、`incoming.txt` 仍不在（fetch 不改工作区）；③**拉取** → 提示「已拉取：快进」＋`incoming.txt` 进工作区＋HEAD == 远端 HEAD；④原生写脏 `tracked.txt` → 刷新（面板确认脏状态）→ **拉取被拒**，面板错误行显示「需要干净的工作区」且文件内容不变；⑤原生做一个本地提交 → 刷新 → **推送**先弹确认：**取消**后原生远端 ref 不动，**确认**后远端 ref == 本地 HEAD、本地历史与工作区不变、无锁无 scratch 残留。
+  这一版能稳定通过的关键是**用按钮可用性做时序**：面板的 token 只在一次仓库读取之后签发，所以「等按钮可点击」就等于「等快照就绪」，点击不再与读取竞争；另外两处修正是把计数断言放在 fetch 之后（facts 只读远端跟踪引用）、把拒绝文案断言到面板级错误行（同步条只报动词结果）。**此前那一版正是缺这三条才没收敛**。
 - **验证**：`remoteGitSync` 9/9（真实子进程＋原生 Git＋run 内 bare remote：facts 无 URL 泄漏、fetch 只动 remote-tracking ref 且 index/HEAD/工作区不变、`--no-tags`、push 的 up-to-date／新提交／非快进拒绝三态与远端 ref 不动、pull 的快进／脏工作区拒绝／分歧未配置策略拒绝（HEAD 不动）/仓库自己配置策略时合并、以及身份链 token 不在代码里）；`remoteGitSyncIpc` 4/4；view 29/29（含三条同步控制器用例）；受影响的 helper 全链路 **104/104**；typecheck／Biome／`build:fast` 0；真机 **`G1|G2a/G2b|G3a|G3b|G4a|G4b` 6 passed（4.0m）**（同步接线不影响既有链路）。
-- **未完成**：真机同步 e2e（上述）、`pull` 的冲突与认证失败只有单测覆盖（无真机用例），force／prune／tag 同步／`--set-upstream` 按设计不提供，跨平台与打包集成仍未验收。
+- **未完成**：`pull` 的冲突与认证失败只有单测覆盖（无真机用例；认证失败依赖环境，冲突路径的单测已覆盖），force／prune／tag 同步／`--set-upstream` 按设计不提供，跨平台与打包集成仍未验收。
 
 ## 6. 完整路线的剩余门禁
 
