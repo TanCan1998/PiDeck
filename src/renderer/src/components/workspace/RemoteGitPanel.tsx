@@ -35,6 +35,14 @@ export function remoteGitErrorMessage(code: string): string {
 	if (code === "GIT_REF_EXISTS") return t("remoteGit.refExists");
 	if (code === "GIT_REF_NOT_FOUND") return t("remoteGit.refNotFound");
 	if (code === "GIT_SWITCH_CONFLICT") return t("remoteGit.switchConflict");
+	if (code === "GIT_RECOVERY_ENTRY_NOT_FOUND") return t("remoteGit.recoveryEntryNotFound");
+	if (code === "GIT_SYNC_REMOTE_UNKNOWN") return t("remoteGit.syncRemoteUnknown");
+	if (code === "GIT_SYNC_DIRTY") return t("remoteGit.syncDirty");
+	if (code === "GIT_PULL_STRATEGY_REQUIRED") return t("remoteGit.syncStrategyRequired");
+	if (code === "GIT_PULL_CONFLICTS") return t("remoteGit.syncConflicts");
+	if (code === "GIT_PUSH_REJECTED") return t("remoteGit.syncPushRejected");
+	if (code === "GIT_PUSH_REMOTE_REFUSED") return t("remoteGit.syncPushRemoteRefused");
+	if (code === "GIT_SYNC_FAILED") return t("remoteGit.syncFailed");
 	if (code === "GIT_WRITE_UNSUPPORTED") return t("remoteGit.writeUnsupported");
 	if (code === "GIT_WRITE_RESULT_UNCONFIRMED") return t("remoteGit.writeUnknown");
 	if (code === "GIT_WRITE_SNAPSHOT_EXPIRED") return t("remoteGit.writeExpired");

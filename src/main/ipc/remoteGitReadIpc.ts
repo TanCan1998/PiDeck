@@ -15,6 +15,10 @@ import type {
 	RemoteGitRecoveryRestoreResult,
 	RemoteGitRefFileDiffResult,
 	RemoteGitRefsResult,
+	RemoteGitFetchOutcomeResult,
+	RemoteGitPullOutcomeResult,
+	RemoteGitPushOutcomeResult,
+	RemoteGitSyncFactsResult,
 } from "../../shared/types/git";
 import type { ProjectFileTarget } from "../../shared/types/project";
 import { createRemoteGitService, remoteGitFailureCode, validateRemoteGitPath, type RemoteGitLocator } from "../git/RemoteGitService";
@@ -90,7 +94,7 @@ export function registerRemoteGitReadIpc(input: { enabled: boolean; locator(proj
 	ipcMain.handle(ipcChannels.gitRemoteSnapshot, async (event, projectId: unknown): Promise<GitReadSnapshotResult> => {
 		try {
 			tokens.revoke(event.sender.id, typeof projectId === "string" ? projectId : "");
-			const { writeExpectation, commitExpectation, branchExpectation, switchExpectation, discardExpectation, restoreExpectation, dropExpectation, ...snapshot } = await read(event, projectId, undefined, (id, signal) => git.status(id, signal));
+			const { writeExpectation, commitExpectation, branchExpectation, switchExpectation, discardExpectation, restoreExpectation, dropExpectation, fetchExpectation, pushExpectation, pullExpectation, ...snapshot } = await read(event, projectId, undefined, (id, signal) => git.status(id, signal));
 			if (typeof projectId === "string") {
 				if (writeExpectation) snapshot.mutationToken = tokens.issue(event.sender.id, projectId, writeExpectation);
 				if (commitExpectation) snapshot.commitToken = tokens.issue(event.sender.id, projectId, commitExpectation);
@@ -99,7 +103,22 @@ export function registerRemoteGitReadIpc(input: { enabled: boolean; locator(proj
 				if (discardExpectation) snapshot.discardToken = tokens.issue(event.sender.id, projectId, discardExpectation);
 				if (restoreExpectation) snapshot.restoreToken = tokens.issue(event.sender.id, projectId, restoreExpectation);
 				if (dropExpectation) snapshot.dropToken = tokens.issue(event.sender.id, projectId, dropExpectation);
-				if (snapshot.mutationToken !== undefined || snapshot.commitToken !== undefined || snapshot.branchToken !== undefined || snapshot.switchToken !== undefined || snapshot.discardToken !== undefined || snapshot.restoreToken !== undefined || snapshot.dropToken !== undefined) watchSender(event.sender);
+				if (fetchExpectation) snapshot.fetchToken = tokens.issue(event.sender.id, projectId, fetchExpectation);
+				if (pushExpectation) snapshot.pushToken = tokens.issue(event.sender.id, projectId, pushExpectation);
+				if (pullExpectation) snapshot.pullToken = tokens.issue(event.sender.id, projectId, pullExpectation);
+				if (
+					snapshot.mutationToken !== undefined ||
+					snapshot.commitToken !== undefined ||
+					snapshot.branchToken !== undefined ||
+					snapshot.switchToken !== undefined ||
+					snapshot.discardToken !== undefined ||
+					snapshot.restoreToken !== undefined ||
+					snapshot.dropToken !== undefined ||
+					snapshot.fetchToken !== undefined ||
+					snapshot.pushToken !== undefined ||
+					snapshot.pullToken !== undefined
+				)
+					watchSender(event.sender);
 			}
 			return { ok: true, snapshot };
 		} catch (error) {
@@ -181,6 +200,35 @@ export function registerRemoteGitReadIpc(input: { enabled: boolean; locator(proj
 		try {
 			await read(event, projectId, undefined, (id, signal) => git.recoveryDrop(id, ref, oid, tokens.take(event.sender.id, id, "drop", token), signal), true);
 			return { ok: true };
+		} catch (error) {
+			return { ok: false, code: remoteGitFailureCode(error) };
+		}
+	});
+	/* G5a sync: facts are a read, the three verbs are network writes with their own grants. */
+	ipcMain.handle(ipcChannels.gitRemoteSyncFacts, async (event, projectId: unknown): Promise<RemoteGitSyncFactsResult> => {
+		try {
+			return { ok: true, facts: await read(event, projectId, undefined, (id, signal) => git.syncFacts(id, signal)) };
+		} catch (error) {
+			return { ok: false, code: remoteGitFailureCode(error) };
+		}
+	});
+	ipcMain.handle(ipcChannels.gitRemoteFetch, async (event, projectId: unknown, remote: unknown, token: unknown): Promise<RemoteGitFetchOutcomeResult> => {
+		try {
+			return { ok: true, outcome: await read(event, projectId, undefined, (id, signal) => git.fetch(id, remote, tokens.take(event.sender.id, id, "fetch", token), signal), true) };
+		} catch (error) {
+			return { ok: false, code: remoteGitFailureCode(error) };
+		}
+	});
+	ipcMain.handle(ipcChannels.gitRemotePush, async (event, projectId: unknown, remote: unknown, branch: unknown, token: unknown): Promise<RemoteGitPushOutcomeResult> => {
+		try {
+			return { ok: true, outcome: await read(event, projectId, undefined, (id, signal) => git.push(id, remote, branch, tokens.take(event.sender.id, id, "push", token), signal), true) };
+		} catch (error) {
+			return { ok: false, code: remoteGitFailureCode(error) };
+		}
+	});
+	ipcMain.handle(ipcChannels.gitRemotePull, async (event, projectId: unknown, remote: unknown, branch: unknown, token: unknown): Promise<RemoteGitPullOutcomeResult> => {
+		try {
+			return { ok: true, outcome: await read(event, projectId, undefined, (id, signal) => git.pull(id, remote, branch, tokens.take(event.sender.id, id, "pull", token), signal), true) };
 		} catch (error) {
 			return { ok: false, code: remoteGitFailureCode(error) };
 		}

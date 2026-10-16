@@ -588,3 +588,98 @@ test("a listing that finishes after a drop cannot erase the drop's outcome", asy
 	assert.deepEqual(plain(f.current().recoveryNotice), { kind: "dropped", path: "file.txt" }, "a read must never decide what an action reported");
 	assert.deepEqual(plain(f.current().recovery), { entries: [], truncated: false });
 });
+
+const syncFacts = { branch: "main", upstream: "refs/remotes/origin/main", ahead: 1, behind: 2, remotes: ["origin"] };
+const syncSnapshot = { ...snapshot, fetchToken: "1".repeat(32), pushToken: "2".repeat(32), pullToken: "3".repeat(32) };
+
+test("sync facts load on demand and the three verbs use their own grants and report their own outcome", async () => {
+	const calls = [];
+	const f = fixture({
+		remoteSnapshot: async () => ({ ok: true, snapshot: syncSnapshot }),
+		syncFacts: async (...args) => {
+			calls.push(["facts", ...args]);
+			return { ok: true, facts: syncFacts };
+		},
+		fetchRemote: async (...args) => {
+			calls.push(["fetch", ...args]);
+			return { ok: true, outcome: { upToDate: false, updated: [{ ref: "refs/remotes/origin/main", before: null, after: "a".repeat(40) }] } };
+		},
+		pushRemote: async (...args) => {
+			calls.push(["push", ...args]);
+			return { ok: true, outcome: { outcome: "pushed", refspec: "refs/heads/main:refs/heads/main" } };
+		},
+		pullRemote: async (...args) => {
+			calls.push(["pull", ...args]);
+			return { ok: true, outcome: { mode: "fast-forward", head: "b".repeat(40) } };
+		},
+	});
+	await f.reads.loadSync();
+	assert.deepEqual(plain(f.current().sync), syncFacts);
+	await f.reads.refresh();
+	await f.reads.loadSync();
+	await f.reads.fetch("origin");
+	assert.deepEqual(plain(calls.filter((call) => call[0] === "fetch").at(-1)), ["fetch", "project", "origin", syncSnapshot.fetchToken]);
+	assert.deepEqual(plain(f.current().syncNotice), { kind: "fetch", outcome: "updated:1" });
+	await f.reads.loadSync();
+	await f.reads.push("origin", "main");
+	assert.deepEqual(plain(calls.filter((call) => call[0] === "push").at(-1)), ["push", "project", "origin", "main", syncSnapshot.pushToken]);
+	assert.deepEqual(plain(f.current().syncNotice), { kind: "push", outcome: "pushed" });
+	await f.reads.loadSync();
+	await f.reads.pull("origin", "main");
+	assert.deepEqual(plain(calls.filter((call) => call[0] === "pull").at(-1)), ["pull", "project", "origin", "main", syncSnapshot.pullToken]);
+	assert.deepEqual(plain(f.current().syncNotice), { kind: "pull", outcome: "fast-forward" });
+	// The notice survives the refresh the verb performs, and the facts are re-read with it.
+	await f.reads.refresh();
+	assert.deepEqual(plain(f.current().syncNotice), { kind: "pull", outcome: "fast-forward" });
+});
+
+test("sync refusals and unknown outcomes are never replayed or guessed", async () => {
+	const refused = fixture({ remoteSnapshot: async () => ({ ok: true, snapshot: syncSnapshot }), syncFacts: async () => ({ ok: true, facts: syncFacts }), pushRemote: async () => ({ ok: false, code: "GIT_PUSH_REJECTED" }) });
+	await refused.reads.refresh();
+	await refused.reads.loadSync();
+	await refused.reads.push("origin", "main");
+	assert.equal(refused.current().errorCode, "GIT_PUSH_REJECTED");
+	assert.equal(refused.current().snapshot, undefined, "a refused verb drops the facts instead of showing a stale tree");
+	const unknown = fixture({
+		remoteSnapshot: async () => ({ ok: true, snapshot: syncSnapshot }),
+		syncFacts: async () => ({ ok: true, facts: syncFacts }),
+		pullRemote: async () => {
+			throw new Error("socket closed");
+		},
+	});
+	await unknown.reads.refresh();
+	await unknown.reads.loadSync();
+	await unknown.reads.pull("origin", "main");
+	assert.equal(unknown.current().errorCode, "GIT_WRITE_RESULT_UNCONFIRMED");
+	assert.equal(unknown.current().syncNotice, undefined, "an unknown outcome promises nothing");
+	const failing = fixture({ syncFacts: async () => ({ ok: false, code: "GIT_SYNC_FAILED" }) });
+	await failing.reads.loadSync();
+	assert.equal(failing.current().syncErrorCode, "GIT_SYNC_FAILED");
+});
+
+test("a sync verb without a grant, an unknown remote or the wrong branch never reaches the API", async () => {
+	const calls = [];
+	const f = fixture({
+		remoteSnapshot: async () => ({ ok: true, snapshot: syncSnapshot }),
+		syncFacts: async () => ({ ok: true, facts: syncFacts }),
+		fetchRemote: async (...args) => {
+			calls.push(["fetch", ...args]);
+			return { ok: true, outcome: { upToDate: true, updated: [] } };
+		},
+		pushRemote: async (...args) => {
+			calls.push(["push", ...args]);
+			return { ok: true, outcome: { outcome: "up-to-date", refspec: "refs/heads/main:refs/heads/main" } };
+		},
+	});
+	await f.reads.refresh();
+	await f.reads.loadSync();
+	await f.reads.fetch("elsewhere");
+	await f.reads.push("origin", "other");
+	assert.deepEqual(calls, [], "only a remote this repository has, and only the checked-out branch, may be synced");
+	const ungranted = fixture({ remoteSnapshot: async () => ({ ok: true, snapshot: snapshot }), syncFacts: async () => ({ ok: true, facts: syncFacts }) });
+	await ungranted.reads.refresh();
+	await ungranted.reads.loadSync();
+	await ungranted.reads.fetch("origin");
+	assert.equal(ungranted.current().errorCode, undefined);
+	assert.equal(ungranted.current().syncNotice, undefined);
+});

@@ -44,7 +44,12 @@ export async function verifyRemoteGitRecovery(input: { window: Page; credentials
 			.filter({ has: window.locator(".git-resource-name", { hasText: new RegExp("^" + name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$") }) });
 		await expect(row).toBeVisible({ timeout: timeoutMs });
 		await row.hover();
-		await row.getByRole("button", { name: "回滚更改", exact: true }).click();
+		await row
+			.getByRole("button", { name: "回滚更改", exact: true })
+			.click({ timeout: 10_000 })
+			.catch(async (error: unknown) => {
+				if ((await panel.getByTestId("remote-git-discard-confirm-bar").count()) === 0) throw error;
+			});
 		await expect(panel.getByTestId("remote-git-discard-confirm-bar")).toBeVisible({ timeout: timeoutMs });
 		await panel.getByTestId("remote-git-discard-confirm").click();
 	};

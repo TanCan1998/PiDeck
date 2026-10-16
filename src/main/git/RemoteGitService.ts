@@ -1,4 +1,20 @@
-import { GitStatus, type GitReadSnapshot, type GitResource, type GitResourceGroups, type GitResourceGroupType, type GitWorkspaceFileDiff, type RemoteGitCommitDetail, type RemoteGitLogPage, type RemoteGitRefFileDiff, type RemoteGitRecoveryEntryView, type RemoteGitRefs } from "../../shared/types/git";
+import {
+	GitStatus,
+	type GitReadSnapshot,
+	type GitResource,
+	type GitResourceGroups,
+	type GitResourceGroupType,
+	type GitWorkspaceFileDiff,
+	type RemoteGitCommitDetail,
+	type RemoteGitLogPage,
+	type RemoteGitRefFileDiff,
+	type RemoteGitRecoveryEntryView,
+	type RemoteGitRefs,
+	type RemoteGitFetchOutcome,
+	type RemoteGitPullOutcome,
+	type RemoteGitPushOutcome,
+	type RemoteGitSyncFactsView,
+} from "../../shared/types/git";
 import type { ProjectFileTarget } from "../../shared/types/project";
 import { parsePorcelainStatus } from "./gitStatusParser";
 import {
@@ -18,6 +34,7 @@ import {
 	REMOTE_GIT_REF_MAX_NAME_BYTES,
 	REMOTE_GIT_STATUS_MAX_BYTES,
 	REMOTE_GIT_SUBJECT_MAX_BYTES,
+	REMOTE_GIT_SYNC_MAX_REMOTES,
 	REMOTE_GIT_TEXT_MAX_BYTES,
 	REMOTE_HELPER_PROTOCOL_VERSION,
 } from "../remote/RemoteHelperContract";
@@ -33,7 +50,7 @@ export type RemoteGitSession = {
  * authorizes. `head` is the HEAD the read confirmed, so a branch action can only ever be applied to the state
  * the user was looking at - the renderer names a branch, never the commit the branch may move to.
  */
-export type RemoteGitWriteExpectation = { kind: "index" | "commit" | "branch" | "switch" | "discard" | "restore" | "drop"; revision: string; hostRevision: number; target: RemoteGitLocator; head?: string | null };
+export type RemoteGitWriteExpectation = { kind: "index" | "commit" | "branch" | "switch" | "discard" | "restore" | "drop" | "fetch" | "push" | "pull"; revision: string; hostRevision: number; target: RemoteGitLocator; head?: string | null };
 export type RemoteGitReadSnapshot = GitReadSnapshot & {
 	writeExpectation?: RemoteGitWriteExpectation;
 	commitExpectation?: RemoteGitWriteExpectation;
@@ -42,6 +59,9 @@ export type RemoteGitReadSnapshot = GitReadSnapshot & {
 	discardExpectation?: RemoteGitWriteExpectation;
 	restoreExpectation?: RemoteGitWriteExpectation;
 	dropExpectation?: RemoteGitWriteExpectation;
+	fetchExpectation?: RemoteGitWriteExpectation;
+	pushExpectation?: RemoteGitWriteExpectation;
+	pullExpectation?: RemoteGitWriteExpectation;
 };
 
 const ERRORS = new Set([
@@ -78,6 +98,13 @@ const ERRORS = new Set([
 	"GIT_SWITCH_CONFLICT",
 	"GIT_RESTORE_CONFLICT",
 	"GIT_RECOVERY_ENTRY_NOT_FOUND",
+	"GIT_SYNC_REMOTE_UNKNOWN",
+	"GIT_SYNC_DIRTY",
+	"GIT_PULL_STRATEGY_REQUIRED",
+	"GIT_PULL_CONFLICTS",
+	"GIT_PUSH_REJECTED",
+	"GIT_PUSH_REMOTE_REFUSED",
+	"GIT_SYNC_FAILED",
 	"REMOTE_FEATURE_DISABLED",
 	"TOO_MANY_REQUESTS",
 	"GIT_TRUST_REQUIRED",
@@ -103,6 +130,9 @@ export function validateRemoteGitBranchName(value: unknown): string {
 		/[\x00-\x1f\x7f\\]/.test(value) ||
 		value === "@" ||
 		value.startsWith("-") ||
+		// Git refuses these in a ref name; refusing them here keeps the panel's local verdict equal to the remote's.
+		value.includes("..") ||
+		/[\s~^:?*[]/.test(value) ||
 		value.includes("@{") ||
 		value.startsWith("refs/") ||
 		/^(?:HEAD|FETCH_HEAD|ORIG_HEAD|MERGE_HEAD|CHERRY_PICK_HEAD|REVERT_HEAD|BISECT_HEAD)$/.test(value) ||
@@ -205,6 +235,19 @@ function remoteGitRecoveryRef(value: unknown): string {
 	if (typeof value !== "string" || !/^refs\/pideck\/recovery\/[A-Za-z0-9._-]+$/.test(value)) throw new Error("GIT_RESULT_INVALID");
 	return value;
 }
+/** A remote name and an upstream ref name are closed shapes; neither may smuggle a URL or a flag. */
+function remoteGitSyncRemote(value: unknown): string {
+	if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) throw new Error("GIT_RESULT_INVALID");
+	return value;
+}
+function remoteGitSyncUpstream(value: unknown): string {
+	if (typeof value !== "string" || !/^refs\/remotes\/[A-Za-z0-9._-]+\/.{1,1024}$/.test(value) || /[\x00-\x1f\x7f]/.test(value)) throw new Error("GIT_RESULT_INVALID");
+	return value;
+}
+function remoteGitSyncRef(value: unknown): string {
+	if (typeof value !== "string" || value.length === 0 || value.length > 1024 || /[\x00-\x1f\x7f]/.test(value)) throw new Error("GIT_RESULT_INVALID");
+	return value;
+}
 function remoteGitCount(value: unknown): number {
 	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error("GIT_RESULT_INVALID");
 	return value;
@@ -292,7 +335,26 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 	}
 	async function run<T>(
 		projectId: string,
-		method: "git.status" | "git.workspaceDiff" | "git.stage" | "git.unstage" | "git.commit" | "git.log" | "git.commitDetail" | "git.refs" | "git.refFileDiff" | "git.createBranch" | "git.switchBranch" | "git.discard" | "git.recoveryList" | "git.recoveryRestore" | "git.recoveryDrop",
+		method:
+			| "git.status"
+			| "git.workspaceDiff"
+			| "git.stage"
+			| "git.unstage"
+			| "git.commit"
+			| "git.log"
+			| "git.commitDetail"
+			| "git.refs"
+			| "git.refFileDiff"
+			| "git.createBranch"
+			| "git.switchBranch"
+			| "git.discard"
+			| "git.recoveryList"
+			| "git.recoveryRestore"
+			| "git.recoveryDrop"
+			| "git.syncFacts"
+			| "git.fetch"
+			| "git.push"
+			| "git.pull",
 		params: unknown,
 		signal: AbortSignal | undefined,
 		parse: (value: unknown, session: RemoteGitSession, capabilities: unknown[]) => T,
@@ -318,7 +380,8 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 						if (signal?.aborted) throw new Error("REQUEST_CANCELLED");
 						assertCurrent(projectId, locator);
 						try {
-							if (name === "git.stage" || name === "git.unstage" || name === "git.commit" || name === "git.createBranch" || name === "git.switchBranch" || name === "git.discard" || name === "git.recoveryRestore" || name === "git.recoveryDrop") dispatchedWrite = true;
+							if (name === "git.stage" || name === "git.unstage" || name === "git.commit" || name === "git.createBranch" || name === "git.switchBranch" || name === "git.discard" || name === "git.recoveryRestore" || name === "git.recoveryDrop" || name === "git.fetch" || name === "git.push" || name === "git.pull")
+								dispatchedWrite = true;
 							const result = await session.request(name, input, {
 								timeoutMs: REMOTE_GIT_READ_TIMEOUT_MS,
 								onRequestId: (id) => {
@@ -367,6 +430,9 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 						if (capabilities.includes("git.discard")) snapshot.discardExpectation = { kind: "discard", revision: value.revision, hostRevision, target: target(projectId) };
 						if (capabilities.includes("git.recoveryRestore")) snapshot.restoreExpectation = { kind: "restore", revision: value.revision, hostRevision, target: target(projectId) };
 						if (capabilities.includes("git.recoveryDrop")) snapshot.dropExpectation = { kind: "drop", revision: value.revision, hostRevision, target: target(projectId) };
+						if (capabilities.includes("git.fetch")) snapshot.fetchExpectation = { kind: "fetch", revision: value.revision, hostRevision, target: target(projectId) };
+						if (capabilities.includes("git.push")) snapshot.pushExpectation = { kind: "push", revision: value.revision, hostRevision, target: target(projectId) };
+						if (capabilities.includes("git.pull")) snapshot.pullExpectation = { kind: "pull", revision: value.revision, hostRevision, target: target(projectId) };
 					}
 				}
 				return snapshot;
@@ -542,6 +608,72 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 				signal,
 				(value) => {
 					if (!record(value) || value.applied !== true || Object.keys(value).length !== 1) throw new Error("GIT_RESULT_INVALID");
+				},
+				expected,
+			);
+		},
+		/** Read-only sync facts: names and counts, never a URL (a remote URL can carry credentials). */
+		syncFacts(projectId: string, signal?: AbortSignal): Promise<RemoteGitSyncFactsView> {
+			return run(projectId, "git.syncFacts", {}, signal, (value) => {
+				if (!record(value) || Object.keys(value).length !== 5 || !Array.isArray(value.remotes) || value.remotes.length > REMOTE_GIT_SYNC_MAX_REMOTES) throw new Error("GIT_RESULT_INVALID");
+				const branch = value.branch === null ? null : remoteGitSyncRef(value.branch);
+				const upstream = value.upstream === null ? null : remoteGitSyncUpstream(value.upstream);
+				return { branch, upstream, ahead: remoteGitCount(value.ahead), behind: remoteGitCount(value.behind), remotes: value.remotes.map((name) => remoteGitSyncRemote(name)) };
+			});
+		},
+		/** Fetch updates remote-tracking refs only; the helper verifies that nothing else moved. */
+		fetch(projectId: string, remote: unknown, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<RemoteGitFetchOutcome> {
+			if (expected.kind !== "fetch") throw new Error("GIT_RESULT_INVALID");
+			const name = remoteGitSyncRemote(remote);
+			return run(
+				projectId,
+				"git.fetch",
+				{ remote: name, expectedRevision: expected.revision },
+				signal,
+				(value) => {
+					if (!record(value) || value.applied !== true || typeof value.upToDate !== "boolean" || !Array.isArray(value.updated)) throw new Error("GIT_RESULT_INVALID");
+					const updated = value.updated.map((entry) => {
+						if (!record(entry) || typeof entry.ref !== "string" || !entry.ref.startsWith("refs/remotes/" + name + "/") || typeof entry.after !== "string") throw new Error("GIT_RESULT_INVALID");
+						return { ref: entry.ref, before: entry.before === null ? null : remoteGitOid(entry.before), after: remoteGitOid(entry.after) };
+					});
+					return { upToDate: value.upToDate, updated };
+				},
+				expected,
+			);
+		},
+		/** Push is never forced and never sets an upstream; the helper reports what the remote did. */
+		push(projectId: string, remote: unknown, branch: unknown, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<RemoteGitPushOutcome> {
+			if (expected.kind !== "push") throw new Error("GIT_RESULT_INVALID");
+			const name = remoteGitSyncRemote(remote),
+				local = validateRemoteGitBranchName(branch);
+			return run(
+				projectId,
+				"git.push",
+				{ remote: name, branch: local, expectedRevision: expected.revision },
+				signal,
+				(value) => {
+					if (!record(value) || value.applied !== true) throw new Error("GIT_RESULT_INVALID");
+					if (value.outcome !== "up-to-date" && value.outcome !== "pushed" && value.outcome !== "new") throw new Error("GIT_RESULT_INVALID");
+					if (value.refspec !== `refs/heads/${local}:refs/heads/${local}`) throw new Error("GIT_RESULT_INVALID");
+					return { outcome: value.outcome, refspec: value.refspec };
+				},
+				expected,
+			);
+		},
+		/** Pull may rewrite HEAD and the worktree; the helper refuses a dirty tree and any strategy choice of its own. */
+		pull(projectId: string, remote: unknown, branch: unknown, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<RemoteGitPullOutcome> {
+			if (expected.kind !== "pull") throw new Error("GIT_RESULT_INVALID");
+			const name = remoteGitSyncRemote(remote),
+				local = validateRemoteGitBranchName(branch);
+			return run(
+				projectId,
+				"git.pull",
+				{ remote: name, branch: local, expectedRevision: expected.revision },
+				signal,
+				(value) => {
+					if (!record(value) || value.applied !== true) throw new Error("GIT_RESULT_INVALID");
+					if (value.mode !== "up-to-date" && value.mode !== "fast-forward" && value.mode !== "merge") throw new Error("GIT_RESULT_INVALID");
+					return { mode: value.mode, head: remoteGitOid(value.head) };
 				},
 				expected,
 			);

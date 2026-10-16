@@ -8,6 +8,10 @@ import type {
 	RemoteGitBranchMutationResult,
 	RemoteGitCommitDetail,
 	RemoteGitDiscardResult,
+	RemoteGitFetchOutcome,
+	RemoteGitPullOutcome,
+	RemoteGitPushOutcome,
+	RemoteGitSyncFactsView,
 	RemoteGitCommitDetailResult,
 	RemoteGitLogPage,
 	RemoteGitLogResult,
@@ -26,7 +30,7 @@ export type RemoteGitViewState = {
 	errorCode?: string;
 	mutating?: boolean;
 	/** Which action is in flight; the panel says “writing the index”, “committing”, or which branch action runs. */
-	mutatingKind?: "index" | "commit" | "branch" | "switch" | "discard" | "restore" | "drop";
+	mutatingKind?: "index" | "commit" | "branch" | "switch" | "discard" | "restore" | "drop" | "fetch" | "push" | "pull";
 	/** Where the last discarded content went; null means the discarded change was a deletion (nothing to keep). */
 	discardRecovery?: { ref: string | null; path: string };
 	/* Recovery store (G4b): a manually loaded listing plus the outcome of the last restore or drop. */
@@ -34,6 +38,11 @@ export type RemoteGitViewState = {
 	recoveryLoading?: boolean;
 	recoveryErrorCode?: string;
 	recoveryNotice?: { kind: "restored" | "dropped"; path: string };
+	/* Sync (G5a): facts of the remote chain, loaded manually-by-effect, plus the outcome of the last verb. */
+	sync?: RemoteGitSyncFactsView;
+	syncLoading?: boolean;
+	syncErrorCode?: string;
+	syncNotice?: { kind: "fetch" | "push" | "pull"; outcome: string };
 	/** Counts confirmed commits, so the panel can clear its message box exactly once per success. */
 	confirmedCommits?: number;
 	diffLoading: boolean;
@@ -71,6 +80,10 @@ export type RemoteGitViewApi = {
 	recoveryList(projectId: string): Promise<{ ok: true; entries: RemoteGitRecoveryEntryView[]; truncated: boolean } | { ok: false; code: string }>;
 	recoveryRestore(projectId: string, ref: string, oid: string, path: string, token: string): Promise<{ ok: true; path: string; bytes: number } | { ok: false; code: string }>;
 	recoveryDrop(projectId: string, ref: string, oid: string, token: string): Promise<{ ok: true } | { ok: false; code: string }>;
+	syncFacts(projectId: string): Promise<{ ok: true; facts: RemoteGitSyncFactsView } | { ok: false; code: string }>;
+	fetchRemote(projectId: string, remote: string, token: string): Promise<{ ok: true; outcome: RemoteGitFetchOutcome } | { ok: false; code: string }>;
+	pushRemote(projectId: string, remote: string, branch: string, token: string): Promise<{ ok: true; outcome: RemoteGitPushOutcome } | { ok: false; code: string }>;
+	pullRemote(projectId: string, remote: string, branch: string, token: string): Promise<{ ok: true; outcome: RemoteGitPullOutcome } | { ok: false; code: string }>;
 };
 /**
  * The same name rules main enforces, kept in step with `validateRemoteGitBranchName` on purpose: the panel refuses
@@ -100,6 +113,8 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 	// The recovery listing has its own epoch: a reload triggered by a finished action must never invalidate the
 	// outcome of the action the user performs next.
 	let recoveryEpoch = 0;
+	// The sync facts belong to one generation of repository state, so they are invalidated like the other reads.
+	let syncEpoch = 0;
 	let state: RemoteGitViewState = { projectKey, loading: false, diffLoading: false };
 	function update(next: RemoteGitViewState) {
 		// The confirmed-commit counter is sticky: a later read (or a connection loss) must not resurrect the
@@ -108,7 +123,8 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 		// Both stickiness rules exist for the same reason: a later read must not erase something the user still needs.
 		const carried = sticky === undefined || next.confirmedCommits !== undefined ? next : { ...next, confirmedCommits: sticky };
 		const withDiscard = next.discardRecovery === undefined && state.discardRecovery !== undefined ? { ...carried, discardRecovery: state.discardRecovery } : carried;
-		state = next.recoveryNotice === undefined && state.recoveryNotice !== undefined ? { ...withDiscard, recoveryNotice: state.recoveryNotice } : withDiscard;
+		const withNotice = next.recoveryNotice === undefined && state.recoveryNotice !== undefined ? { ...withDiscard, recoveryNotice: state.recoveryNotice } : withDiscard;
+		state = next.syncNotice === undefined && state.syncNotice !== undefined ? { ...withNotice, syncNotice: state.syncNotice } : withNotice;
 		if (active) publish(state);
 	}
 	const controller = {
@@ -308,6 +324,73 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			} catch {
 				if (active && generation === epoch) update({ projectKey, loading: false, diffLoading: false, errorCode: "GIT_WRITE_RESULT_UNCONFIRMED" });
 			}
+		},
+		/* G5a sync: facts are read on demand; every verb is a network side effect with its own grant and never replayed. */
+		async loadSync(): Promise<void> {
+			if (!active || state.loading || state.mutating || state.syncLoading) return;
+			const generation = ++syncEpoch;
+			update({ ...state, sync: undefined, syncErrorCode: undefined, syncLoading: true });
+			try {
+				const result = await api.syncFacts(projectId);
+				if (!active || generation !== syncEpoch) return;
+				if (result.ok) update({ ...state, syncLoading: false, sync: result.facts });
+				else update({ ...state, syncLoading: false, syncErrorCode: result.code });
+			} catch (error) {
+				if (active && generation === syncEpoch) update({ ...state, syncLoading: false, syncErrorCode: errorCode(error) });
+			}
+		},
+		/** One network verb: it may change the remote or the worktree, so an unknown result is never replayed. */
+		async sync(kind: "fetch" | "push" | "pull", remote: string, branch: string): Promise<void> {
+			if (!active || state.loading || state.diffLoading || state.mutating || !state.sync) return;
+			const token = kind === "fetch" ? state.snapshot?.fetchToken : kind === "push" ? state.snapshot?.pushToken : state.snapshot?.pullToken;
+			if (token === undefined || state.sync.remotes.indexOf(remote) < 0) return;
+			if (kind !== "fetch" && state.sync.branch !== branch) return;
+			const generation = ++epoch;
+			syncEpoch += 1;
+			diffEpoch += 1;
+			historyEpoch += 1;
+			detailEpoch += 1;
+			refsEpoch += 1;
+			recoveryEpoch += 1;
+			update({ ...state, mutating: true, mutatingKind: kind, syncNotice: undefined, errorCode: undefined, diff: undefined, diffErrorCode: undefined });
+			try {
+				// Each verb answers its own shape, so the outcome is read where the type is known instead of cast.
+				let outcome: string | undefined;
+				let failure: string | undefined;
+				if (kind === "fetch") {
+					const result = await api.fetchRemote(projectId, remote, token);
+					if (result.ok) outcome = result.outcome.upToDate ? "up-to-date" : `updated:${result.outcome.updated.length}`;
+					else failure = result.code;
+				} else if (kind === "push") {
+					const result = await api.pushRemote(projectId, remote, branch, token);
+					if (result.ok) outcome = result.outcome.outcome;
+					else failure = result.code;
+				} else {
+					const result = await api.pullRemote(projectId, remote, branch, token);
+					if (result.ok) outcome = result.outcome.mode;
+					else failure = result.code;
+				}
+				if (!active || generation !== epoch) return;
+				if (outcome === undefined) {
+					update({ projectKey, loading: false, diffLoading: false, errorCode: failure });
+					return;
+				}
+				update({ projectKey, loading: false, diffLoading: false, syncNotice: { kind, outcome } });
+				await controller.refresh();
+				await controller.loadSync();
+			} catch {
+				// The remote may have moved: say so instead of pretending nothing happened, and never retry.
+				if (active && generation === epoch) update({ projectKey, loading: false, diffLoading: false, errorCode: "GIT_WRITE_RESULT_UNCONFIRMED" });
+			}
+		},
+		fetch(remote: string): Promise<void> {
+			return controller.sync("fetch", remote, state.sync?.branch ?? "");
+		},
+		push(remote: string, branch: string): Promise<void> {
+			return controller.sync("push", remote, branch);
+		},
+		pull(remote: string, branch: string): Promise<void> {
+			return controller.sync("pull", remote, branch);
 		},
 		/* G4b recovery store: the listing is a manual read, restore and drop are one-shot writes with their own grants. */
 		async loadRecovery(): Promise<void> {

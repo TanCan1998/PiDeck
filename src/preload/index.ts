@@ -797,6 +797,11 @@ const api = {
 		switchRemoteBranch: (projectId: string, name: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteSwitchBranch, projectId, name, token) as Promise<import("../shared/types").RemoteGitBranchMutationResult>,
 		// 可恢复丢弃（G4a）：先写恢复快照再动文件；返回可恢复 ref，main 注入指纹
 		discardRemote: (projectId: string, group: "workingTree" | "untracked", target: ProjectFileTarget, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteDiscard, projectId, group, target, token) as Promise<import("../shared/types").RemoteGitDiscardResult>,
+		// 同步（G5a）：facts 只读；fetch/push/pull 各自需要 grant，从不 force、不写配置、不注入凭据
+		syncFacts: (projectId: string) => ipcRenderer.invoke(ipcChannels.gitRemoteSyncFacts, projectId) as Promise<import("../shared/types").RemoteGitSyncFactsResult>,
+		fetchRemote: (projectId: string, remote: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteFetch, projectId, remote, token) as Promise<import("../shared/types").RemoteGitFetchOutcomeResult>,
+		pushRemote: (projectId: string, remote: string, branch: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemotePush, projectId, remote, branch, token) as Promise<import("../shared/types").RemoteGitPushOutcomeResult>,
+		pullRemote: (projectId: string, remote: string, branch: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemotePull, projectId, remote, branch, token) as Promise<import("../shared/types").RemoteGitPullOutcomeResult>,
 		// 恢复存储（G4b）：列表只读；还原/删除各需自己的 grant，ref 只允许 refs/pideck/recovery/*
 		recoveryList: (projectId: string) => ipcRenderer.invoke(ipcChannels.gitRemoteRecoveryList, projectId) as Promise<import("../shared/types").RemoteGitRecoveryListResult>,
 		recoveryRestore: (projectId: string, ref: string, oid: string, path: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteRecoveryRestore, projectId, ref, oid, path, token) as Promise<import("../shared/types").RemoteGitRecoveryRestoreResult>,

@@ -42,6 +42,18 @@ export function useRemoteGitView(project: RemoteProject) {
 	const dropRecovery = useCallback((entry: Parameters<NonNullable<typeof controller.current>["dropRecovery"]>[0]) => {
 		void controller.current?.dropRecovery(entry);
 	}, []);
+	const loadSync = useCallback(() => {
+		void controller.current?.loadSync();
+	}, []);
+	const fetchRemote = useCallback((remote: string) => {
+		void controller.current?.fetch(remote);
+	}, []);
+	const pushRemote = useCallback((remote: string, branch: string) => {
+		void controller.current?.push(remote, branch);
+	}, []);
+	const pullRemote = useCallback((remote: string, branch: string) => {
+		void controller.current?.pull(remote, branch);
+	}, []);
 	const discard = useCallback((group: "workingTree" | "untracked", target: Parameters<NonNullable<typeof controller.current>["discard"]>[1]) => {
 		void controller.current?.discard(group, target);
 	}, []);
@@ -80,5 +92,9 @@ export function useRemoteGitView(project: RemoteProject) {
 		loadRecovery,
 		restoreRecovery,
 		dropRecovery,
+		loadSync,
+		fetchRemote,
+		pushRemote,
+		pullRemote,
 	};
 }

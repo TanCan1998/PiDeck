@@ -51,7 +51,7 @@ const {
 	REMOTE_HELPER_MAX_METHOD_LENGTH,
 	REMOTE_HELPER_PROTOCOL_VERSION,
 } = loadTsCommonJs("src/main/remote/RemoteHelperContract.ts");
-const { REMOTE_HELPER_ARTIFACTS, REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_HELPER_ENTRY_SHA256, REMOTE_HELPER_ENTRY_VERSION, REMOTE_HELPER_GIT_READ_SHA256, REMOTE_HELPER_GIT_WRITE_SHA256, REMOTE_HELPER_INLINE_SOURCE } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
+const { REMOTE_HELPER_ARTIFACTS, REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_HELPER_ENTRY_SHA256, REMOTE_HELPER_ENTRY_VERSION, REMOTE_HELPER_GIT_READ_SHA256, REMOTE_HELPER_GIT_SYNC_SHA256, REMOTE_HELPER_GIT_WRITE_SHA256, REMOTE_HELPER_INLINE_SOURCE } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
 const { materializeRemoteHelperArtifacts } = await import("./helpers/remoteHelperArtifacts.mjs");
 const { REMOTE_FRAME_DIAGNOSTIC_CODES, createRemoteControlClient } = loadTsCommonJs("src/main/remote/RemoteControlClient.ts");
 
@@ -60,7 +60,7 @@ const HOST_ID = "01234567-89ab-4def-8123-456789abcdef";
 /** The helper never resolves HOME into a path, so a POSIX literal is the honest fixture on any platform. */
 const HELPER_HOME = "/home/pideck-helper";
 /** Frozen digest, pinned here as well as in the module: editing the source means editing both. */
-const FROZEN_SHA256 = "63710a1f8e750115d6b4c56abe57d2fe01c78b621719b47bcf0554169ff631a3";
+const FROZEN_SHA256 = "e7ce3425737da28b2f850ab3153ca18e59da490030d205d3f5a8b4a88d97d480";
 const MAX_TEXT = 4096;
 const TEST_TIMEOUT_MS = 30_000;
 const GUARD_TIMEOUT_MS = 10_000;
@@ -377,8 +377,9 @@ helperTest("every frozen bundle artifact is one byte-frozen ASCII line with its 
 	// legitimate together with a deliberate update of that file's digest.
 	const expected = new Map([
 		["helper.mjs", { sha256: FROZEN_SHA256, builtins: ["node:fs", "node:path"], imports: ["git-read.mjs"] }],
-		["git-read.mjs", { sha256: REMOTE_HELPER_GIT_READ_SHA256, builtins: ["node:child_process", "node:crypto"], imports: ["git-write.mjs"] }],
+		["git-read.mjs", { sha256: REMOTE_HELPER_GIT_READ_SHA256, builtins: ["node:child_process", "node:crypto"], imports: ["git-write.mjs", "git-sync.mjs"] }],
 		["git-write.mjs", { sha256: REMOTE_HELPER_GIT_WRITE_SHA256, builtins: [], imports: [] }],
+		["git-sync.mjs", { sha256: REMOTE_HELPER_GIT_SYNC_SHA256, builtins: [], imports: [] }],
 	]);
 	assert.deepEqual(
 		Array.from(REMOTE_HELPER_ARTIFACTS, (artifact) => artifact.name),

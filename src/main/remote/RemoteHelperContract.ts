@@ -91,6 +91,13 @@ export const REMOTE_HELPER_ERROR_CODES = [
 	"GIT_SWITCH_CONFLICT",
 	"GIT_RESTORE_CONFLICT",
 	"GIT_RECOVERY_ENTRY_NOT_FOUND",
+	"GIT_SYNC_REMOTE_UNKNOWN",
+	"GIT_SYNC_DIRTY",
+	"GIT_PULL_STRATEGY_REQUIRED",
+	"GIT_PULL_CONFLICTS",
+	"GIT_PUSH_REJECTED",
+	"GIT_PUSH_REMOTE_REFUSED",
+	"GIT_SYNC_FAILED",
 ] as const;
 export type RemoteHelperErrorCode = (typeof REMOTE_HELPER_ERROR_CODES)[number];
 
@@ -167,6 +174,21 @@ export const REMOTE_GIT_RECOVERY_REF_PREFIX = "refs/pideck/recovery/";
 /** Fixed author identity of a recovery commit: PiDeck's own journal entry, never the user's Git configuration. */
 export const REMOTE_GIT_RECOVERY_IDENTITY = { name: "PiDeck recovery", email: "pideck-recovery@localhost" } as const;
 export const REMOTE_HELPER_METHOD_GIT_DISCARD = "git.discard";
+/** Network verbs get their own budget: a fetch or push over a slow link is not a 30-second read. */
+export const REMOTE_GIT_SYNC_TIMEOUT_MS = 600_000;
+export const REMOTE_GIT_SYNC_MAX_REMOTES = 64;
+export const REMOTE_HELPER_METHOD_GIT_SYNC_FACTS = "git.syncFacts";
+export const REMOTE_HELPER_METHOD_GIT_FETCH = "git.fetch";
+export const REMOTE_HELPER_METHOD_GIT_PUSH = "git.push";
+export const REMOTE_HELPER_METHOD_GIT_PULL = "git.pull";
+/** Read-only facts the sync bar needs; `remotes` are names only, never URLs (a URL can carry a token). */
+export type RemoteGitSyncFacts = { branch: string | null; upstream: string | null; ahead: number; behind: number; remotes: readonly string[] };
+export type RemoteGitFetchParams = { remote: string; expectedRevision: string };
+export type RemoteGitFetchResult = { applied: true; upToDate: boolean; updated: readonly { ref: string; before: string | null; after: string }[] };
+export type RemoteGitPushParams = { remote: string; branch: string; expectedRevision: string };
+export type RemoteGitPushResult = { applied: true; outcome: "up-to-date" | "pushed" | "new"; refspec: string };
+export type RemoteGitPullParams = { remote: string; branch: string; expectedRevision: string };
+export type RemoteGitPullResult = { applied: true; mode: "up-to-date" | "fast-forward" | "merge"; head: string };
 export type RemoteGitDiscardParams = { path: string; group: "workingTree" | "untracked"; expectedRevision: string };
 /**
  * `mode` says what happened to the file: restored to the staged version, or removed from the working tree.
@@ -226,7 +248,32 @@ export const REMOTE_GIT_COMMIT_MESSAGE_MAX_BYTES = 4096;
 export type RemoteGitWorkspaceDiffParams = { group: "merge" | "index" | "workingTree" | "untracked"; path: string };
 export type RemoteGitWorkspaceDiffResult = { originalContent: string; modifiedContent: string };
 
-export const REMOTE_HELPER_CAPABILITIES = ["echo", "fs.stat", "fs.list", "fs.read", "fs.searchNames", "git.status", "git.workspaceDiff", "git.stage", "git.unstage", "git.commit", "git.log", "git.commitDetail", "git.refs", "git.refFileDiff", "git.createBranch", "git.switchBranch", "git.discard", "git.recoveryList", "git.recoveryRestore", "git.recoveryDrop"] as const;
+export const REMOTE_HELPER_CAPABILITIES = [
+	"echo",
+	"fs.stat",
+	"fs.list",
+	"fs.read",
+	"fs.searchNames",
+	"git.status",
+	"git.workspaceDiff",
+	"git.stage",
+	"git.unstage",
+	"git.commit",
+	"git.log",
+	"git.commitDetail",
+	"git.refs",
+	"git.refFileDiff",
+	"git.createBranch",
+	"git.switchBranch",
+	"git.discard",
+	"git.recoveryList",
+	"git.recoveryRestore",
+	"git.recoveryDrop",
+	"git.syncFacts",
+	"git.fetch",
+	"git.push",
+	"git.pull",
+] as const;
 export type RemoteHelperCapability = (typeof REMOTE_HELPER_CAPABILITIES)[number];
 /**
  * Ceiling for one requested relative path. It is applied to the raw string before any filesystem access,

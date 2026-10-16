@@ -105,7 +105,21 @@ export type GitResourceGroups = {
 };
 
 /** Complete read-only repository snapshot; unsupported or failed reads never masquerade as empty status. */
-export type GitReadSnapshot = { groups: GitResourceGroups; head: string | null; branch: string | null; mutationToken?: string; commitToken?: string; branchToken?: string; switchToken?: string; discardToken?: string; restoreToken?: string; dropToken?: string };
+export type GitReadSnapshot = {
+	groups: GitResourceGroups;
+	head: string | null;
+	branch: string | null;
+	mutationToken?: string;
+	commitToken?: string;
+	branchToken?: string;
+	switchToken?: string;
+	discardToken?: string;
+	restoreToken?: string;
+	dropToken?: string;
+	fetchToken?: string;
+	pushToken?: string;
+	pullToken?: string;
+};
 
 // ── G3a：远端历史／引用／提交详情／两个版本之间的单文件差异（只读、有界、超限即拒）──
 
@@ -145,6 +159,15 @@ export type RemoteGitRecoveryEntryView = { ref: string; oid: string; path: strin
 export type RemoteGitRecoveryListResult = { ok: true; entries: RemoteGitRecoveryEntryView[]; truncated: boolean } | { ok: false; code: string };
 export type RemoteGitRecoveryRestoreResult = { ok: true; path: string; bytes: number } | { ok: false; code: string };
 export type RemoteGitRecoveryDropResult = { ok: true } | { ok: false; code: string };
+/** G5a sync: facts are read-only, the three verbs each need their own grant and never force anything. */
+export type RemoteGitSyncFactsView = { branch: string | null; upstream: string | null; ahead: number; behind: number; remotes: string[] };
+export type RemoteGitSyncFactsResult = { ok: true; facts: RemoteGitSyncFactsView } | { ok: false; code: string };
+export type RemoteGitFetchOutcome = { upToDate: boolean; updated: { ref: string; before: string | null; after: string }[] };
+export type RemoteGitFetchOutcomeResult = { ok: true; outcome: RemoteGitFetchOutcome } | { ok: false; code: string };
+export type RemoteGitPushOutcome = { outcome: "up-to-date" | "pushed" | "new"; refspec: string };
+export type RemoteGitPushOutcomeResult = { ok: true; outcome: RemoteGitPushOutcome } | { ok: false; code: string };
+export type RemoteGitPullOutcome = { mode: "up-to-date" | "fast-forward" | "merge"; head: string };
+export type RemoteGitPullOutcomeResult = { ok: true; outcome: RemoteGitPullOutcome } | { ok: false; code: string };
 /** An uncertain mutation must be checked by a fresh read, never automatically replayed. */
 export type GitIndexMutationResult = { ok: true } | { ok: false; code: string };
 /** A commit has no renderer-visible result beyond success: the new HEAD is read back through a fresh snapshot. */
