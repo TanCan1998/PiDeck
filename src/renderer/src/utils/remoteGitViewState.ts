@@ -7,6 +7,7 @@ import type {
 	GitWorkspaceFileDiff,
 	RemoteGitBranchMutationResult,
 	RemoteGitCommitDetail,
+	RemoteGitDiscardResult,
 	RemoteGitCommitDetailResult,
 	RemoteGitLogPage,
 	RemoteGitLogResult,
@@ -24,7 +25,9 @@ export type RemoteGitViewState = {
 	errorCode?: string;
 	mutating?: boolean;
 	/** Which action is in flight; the panel says “writing the index”, “committing”, or which branch action runs. */
-	mutatingKind?: "index" | "commit" | "branch" | "switch";
+	mutatingKind?: "index" | "commit" | "branch" | "switch" | "discard";
+	/** Where the last discarded content went; null means the discarded change was a deletion (nothing to keep). */
+	discardRecovery?: { ref: string | null; path: string };
 	/** Counts confirmed commits, so the panel can clear its message box exactly once per success. */
 	confirmedCommits?: number;
 	diffLoading: boolean;
@@ -58,6 +61,7 @@ export type RemoteGitViewApi = {
 	remoteRefFileDiff(projectId: string, base: string | null, head: string, target: ProjectFileTarget): Promise<RemoteGitRefFileDiffResult>;
 	createRemoteBranch(projectId: string, name: string, token: string): Promise<RemoteGitBranchMutationResult>;
 	switchRemoteBranch(projectId: string, name: string, token: string): Promise<RemoteGitBranchMutationResult>;
+	discardRemote(projectId: string, group: "workingTree" | "untracked", target: ProjectFileTarget, token: string): Promise<RemoteGitDiscardResult>;
 };
 /**
  * The same name rules main enforces, kept in step with `validateRemoteGitBranchName` on purpose: the panel refuses
@@ -89,7 +93,9 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 		// The confirmed-commit counter is sticky: a later read (or a connection loss) must not resurrect the
 		// message box the user already cleared.
 		const sticky = state.confirmedCommits;
-		state = sticky === undefined || next.confirmedCommits !== undefined ? next : { ...next, confirmedCommits: sticky };
+		// Both stickiness rules exist for the same reason: a later read must not erase something the user still needs.
+		const carried = sticky === undefined || next.confirmedCommits !== undefined ? next : { ...next, confirmedCommits: sticky };
+		state = next.discardRecovery === undefined && state.discardRecovery !== undefined ? { ...carried, discardRecovery: state.discardRecovery } : carried;
 		if (active) publish(state);
 	}
 	const controller = {
@@ -255,6 +261,35 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 				else update({ ...state, diffLoading: false, diff });
 			} catch (error) {
 				if (active && generation === epoch && request === diffEpoch) update({ ...state, diffLoading: false, diffErrorCode: errorCode(error) });
+			}
+		},
+		/**
+		 * The recoverable destructive action: main authorizes it with its own grant, the helper snapshots the bytes
+		 * first, and the panel only ever learns where they went. An unknown outcome keeps the warning and is never
+		 * replayed, because the file has already been touched by the time the reply could be lost.
+		 */
+		async discard(group: "workingTree" | "untracked", target: ProjectFileTarget): Promise<void> {
+			if (!active || state.loading || state.diffLoading || state.mutating || !state.snapshot?.discardToken) return;
+			if (target.projectId !== projectId || (group !== "workingTree" && group !== "untracked")) return;
+			if (!state.snapshot.groups[group].some((resource) => resource.target.projectId === projectId && resource.target.relativePath === target.relativePath)) return;
+			const token = state.snapshot.discardToken;
+			const generation = ++epoch;
+			diffEpoch += 1;
+			historyEpoch += 1;
+			detailEpoch += 1;
+			refsEpoch += 1;
+			update({ ...state, mutating: true, mutatingKind: "discard", discardRecovery: undefined, errorCode: undefined, diff: undefined, diffErrorCode: undefined });
+			try {
+				const result = await api.discardRemote(projectId, group, target, token);
+				if (!active || generation !== epoch) return;
+				if (!result.ok) {
+					update({ projectKey, loading: false, diffLoading: false, errorCode: result.code });
+					return;
+				}
+				update({ projectKey, loading: false, diffLoading: false, discardRecovery: { ref: result.recoveryRef, path: target.relativePath } });
+				await controller.refresh();
+			} catch {
+				if (active && generation === epoch) update({ projectKey, loading: false, diffLoading: false, errorCode: "GIT_WRITE_RESULT_UNCONFIRMED" });
 			}
 		},
 		/* G3b branch write face: one explicit action per click, an unknown outcome is never replayed, and only a

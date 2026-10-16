@@ -153,11 +153,7 @@ test("history pages append on demand and a failed page keeps the rows already on
 	const f = fixture({
 		remoteLog: async (...args) => {
 			calls.push(args);
-			return calls.length === 1
-				? { ok: true, page: { commits: [historyRow(oid("1"), "first")], hasMore: true } }
-				: failOnce
-					? { ok: false, code: "GIT_COMMAND_FAILED" }
-					: { ok: true, page: { commits: [historyRow(oid("3"), "second")], hasMore: false } };
+			return calls.length === 1 ? { ok: true, page: { commits: [historyRow(oid("1"), "first")], hasMore: true } } : failOnce ? { ok: false, code: "GIT_COMMAND_FAILED" } : { ok: true, page: { commits: [historyRow(oid("3"), "second")], hasMore: false } };
 		},
 	});
 	await f.reads.loadHistory();
@@ -222,7 +218,11 @@ test("a refused or crashed detail read reports its own code and keeps the select
 	await f.reads.openCommitDetail(oid("b"));
 	assert.equal(f.current().detailOid, oid("b"));
 	assert.equal(f.current().detailErrorCode, "GIT_OBJECT_NOT_FOUND");
-	const thrown = fixture({ remoteCommitDetail: async () => { throw new Error("invoke failed with SSH_HOST_DISCONNECTED"); } });
+	const thrown = fixture({
+		remoteCommitDetail: async () => {
+			throw new Error("invoke failed with SSH_HOST_DISCONNECTED");
+		},
+	});
 	await thrown.reads.openCommitDetail(oid("b"));
 	assert.equal(thrown.current().detailErrorCode, "SSH_HOST_DISCONNECTED");
 });
@@ -364,4 +364,91 @@ test("switching uses its own grant, refreshes on confirmation and reports a conf
 	await conflict.reads.switchBranch("feature");
 	assert.equal(conflict.current().errorCode, "GIT_SWITCH_CONFLICT");
 	assert.equal(conflict.current().mutating, undefined);
+});
+
+const discardSnapshot = {
+	...snapshot,
+	discardToken: "d".repeat(32),
+	groups: { merge: [], index: [], workingTree: [{ target, path: target.relativePath, displayPath: target.relativePath, status: 5, letter: "M" }], untracked: [{ target: { projectId, relativePath: "junk.txt" }, path: "junk.txt", displayPath: "junk.txt", status: 7, letter: "?" }] },
+};
+
+test("discarding a file asks main for the backup, keeps the recovery ref and re-reads the repository", async () => {
+	const calls = [];
+	const f = fixture({
+		remoteSnapshot: async () => ({ ok: true, snapshot: discardSnapshot }),
+		discardRemote: async (...args) => {
+			calls.push(args);
+			return { ok: true, recoveryRef: "refs/pideck/recovery/20261016120000-ab12cd34" };
+		},
+	});
+	await f.reads.refresh();
+	await f.reads.discard("workingTree", target);
+	assert.deepEqual(plain(calls), [["project", "workingTree", target, discardSnapshot.discardToken]]);
+	assert.deepEqual(plain(f.current().discardRecovery), { ref: "refs/pideck/recovery/20261016120000-ab12cd34", path: "file.txt" });
+	// The note is what tells the user how to get the bytes back, so a later read must not erase it.
+	await f.reads.refresh();
+	assert.ok(f.current().discardRecovery, "the recovery note survives a refresh");
+	// A second discard replaces the note instead of accumulating stale ones.
+	await f.reads.discard("untracked", { projectId, relativePath: "junk.txt" });
+	assert.deepEqual(plain(f.current().discardRecovery), { ref: "refs/pideck/recovery/20261016120000-ab12cd34", path: "junk.txt" });
+	assert.deepEqual(plain(calls.at(-1)), ["project", "untracked", { projectId, relativePath: "junk.txt" }, discardSnapshot.discardToken]);
+});
+
+test("a discard that has nothing to back up reports that honestly", async () => {
+	const f = fixture({ remoteSnapshot: async () => ({ ok: true, snapshot: discardSnapshot }), discardRemote: async () => ({ ok: true, recoveryRef: null }) });
+	await f.reads.refresh();
+	await f.reads.discard("workingTree", target);
+	assert.deepEqual(plain(f.current().discardRecovery), { ref: null, path: "file.txt" });
+	assert.equal(f.current().errorCode, undefined);
+});
+
+test("a refused or unknown discard drops the facts, keeps the warning and is never replayed", async () => {
+	const refused = fixture({ remoteSnapshot: async () => ({ ok: true, snapshot: discardSnapshot }), discardRemote: async () => ({ ok: false, code: "RESULT_TOO_LARGE" }) });
+	await refused.reads.refresh();
+	await refused.reads.discard("workingTree", target);
+	assert.equal(refused.current().errorCode, "RESULT_TOO_LARGE");
+	assert.equal(refused.current().snapshot, undefined, "a refusal drops facts rather than showing a half-true tree");
+	assert.equal(refused.current().discardRecovery, undefined);
+	const unknown = fixture({
+		remoteSnapshot: async () => ({ ok: true, snapshot: discardSnapshot }),
+		discardRemote: async () => {
+			throw new Error("socket closed");
+		},
+	});
+	await unknown.reads.refresh();
+	await unknown.reads.discard("workingTree", target);
+	assert.equal(unknown.current().errorCode, "GIT_WRITE_RESULT_UNCONFIRMED");
+	assert.equal(unknown.current().discardRecovery, undefined, "an unknown outcome promises no backup");
+});
+
+test("a discard without a grant, with the wrong group or for another project never reaches the API", async () => {
+	const calls = [];
+	const f = fixture({
+		remoteSnapshot: async () => ({ ok: true, snapshot: discardSnapshot }),
+		discardRemote: async (...args) => {
+			calls.push(args);
+			return { ok: true, recoveryRef: null };
+		},
+	});
+	await f.reads.refresh();
+	await f.reads.discard("index", target);
+	await f.reads.discard("workingTree", { projectId: "other", relativePath: "file.txt" });
+	await f.reads.discard("workingTree", { projectId, relativePath: "not-in-snapshot.txt" });
+	assert.deepEqual(calls, []);
+	const ungranted = fixture({ remoteSnapshot: async () => ({ ok: true, snapshot }) });
+	await ungranted.reads.refresh();
+	await ungranted.reads.discard("workingTree", target);
+	assert.equal(ungranted.current().errorCode, undefined);
+	// One action at a time: the second click while the first is in flight is ignored.
+	const busy = fixture({
+		remoteSnapshot: async () => ({ ok: true, snapshot: discardSnapshot }),
+		discardRemote: async (...args) => {
+			calls.push(args);
+			return new Promise(() => {});
+		},
+	});
+	await busy.reads.refresh();
+	void busy.reads.discard("workingTree", target);
+	await busy.reads.discard("workingTree", target);
+	assert.equal(calls.length, 1);
 });

@@ -142,6 +142,24 @@ export const REMOTE_GIT_LOG_MAX_PARENTS = 8;
  * happens to allow) and any control character. Branch names travel as names, never as full refs or object ids.
  */
 export const REMOTE_GIT_BRANCH_NAME_MAX_BYTES = 1024;
+/**
+ * G4a recoverable discard: before a working-tree change is thrown away or an untracked file is removed, its raw
+ * bytes go into the repository's own object store behind a `refs/pideck/recovery/<stamp>` ref. A snapshot larger
+ * than this bound is refused instead of being copied, and nothing prunes these refs automatically: the user deletes
+ * one with `git update-ref -d <ref>` when they no longer need it.
+ */
+export const REMOTE_GIT_DISCARD_MAX_BYTES = 8 * 1024 * 1024;
+export const REMOTE_GIT_RECOVERY_REF_PREFIX = "refs/pideck/recovery/";
+/** Fixed author identity of a recovery commit: PiDeck's own journal entry, never the user's Git configuration. */
+export const REMOTE_GIT_RECOVERY_IDENTITY = { name: "PiDeck recovery", email: "pideck-recovery@localhost" } as const;
+export const REMOTE_HELPER_METHOD_GIT_DISCARD = "git.discard";
+export type RemoteGitDiscardParams = { path: string; group: "workingTree" | "untracked"; expectedRevision: string };
+/**
+ * `mode` says what happened to the file: restored to the staged version, or removed from the working tree.
+ * `recoveryRef` is null only when the discarded change itself was the deletion of the file (a " D" resource):
+ * there are no bytes to preserve, and restoring reads the already durable staged version.
+ */
+export type RemoteGitDiscardResult = { applied: true; recoveryRef: string | null; path: string; mode: "restored" | "removed" };
 export const REMOTE_HELPER_METHOD_GIT_CREATE_BRANCH = "git.createBranch";
 export const REMOTE_HELPER_METHOD_GIT_SWITCH_BRANCH = "git.switchBranch";
 /** `expectedHead: null` means the repository is unborn; the branch is created at the confirmed HEAD otherwise. */
@@ -194,7 +212,7 @@ export const REMOTE_GIT_COMMIT_MESSAGE_MAX_BYTES = 4096;
 export type RemoteGitWorkspaceDiffParams = { group: "merge" | "index" | "workingTree" | "untracked"; path: string };
 export type RemoteGitWorkspaceDiffResult = { originalContent: string; modifiedContent: string };
 
-export const REMOTE_HELPER_CAPABILITIES = ["echo", "fs.stat", "fs.list", "fs.read", "fs.searchNames", "git.status", "git.workspaceDiff", "git.stage", "git.unstage", "git.commit", "git.log", "git.commitDetail", "git.refs", "git.refFileDiff", "git.createBranch", "git.switchBranch"] as const;
+export const REMOTE_HELPER_CAPABILITIES = ["echo", "fs.stat", "fs.list", "fs.read", "fs.searchNames", "git.status", "git.workspaceDiff", "git.stage", "git.unstage", "git.commit", "git.log", "git.commitDetail", "git.refs", "git.refFileDiff", "git.createBranch", "git.switchBranch", "git.discard"] as const;
 export type RemoteHelperCapability = (typeof REMOTE_HELPER_CAPABILITIES)[number];
 /**
  * Ceiling for one requested relative path. It is applied to the raw string before any filesystem access,

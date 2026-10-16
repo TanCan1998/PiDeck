@@ -33,6 +33,9 @@ export function useRemoteGitView(project: RemoteProject) {
 	const loadRefs = useCallback(() => {
 		void controller.current?.loadRefs();
 	}, []);
+	const discard = useCallback((group: "workingTree" | "untracked", target: Parameters<NonNullable<typeof controller.current>["discard"]>[1]) => {
+		void controller.current?.discard(group, target);
+	}, []);
 	const createBranch = useCallback((name: string) => {
 		void controller.current?.createBranch(name);
 	}, []);
@@ -64,5 +67,6 @@ export function useRemoteGitView(project: RemoteProject) {
 		openHistoryFileDiff,
 		createBranch,
 		switchBranch,
+		discard,
 	};
 }

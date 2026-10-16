@@ -32,8 +32,8 @@ export type RemoteGitSession = {
  * authorizes. `head` is the HEAD the read confirmed, so a branch action can only ever be applied to the state
  * the user was looking at - the renderer names a branch, never the commit the branch may move to.
  */
-export type RemoteGitWriteExpectation = { kind: "index" | "commit" | "branch" | "switch"; revision: string; hostRevision: number; target: RemoteGitLocator; head?: string | null };
-export type RemoteGitReadSnapshot = GitReadSnapshot & { writeExpectation?: RemoteGitWriteExpectation; commitExpectation?: RemoteGitWriteExpectation; branchExpectation?: RemoteGitWriteExpectation; switchExpectation?: RemoteGitWriteExpectation };
+export type RemoteGitWriteExpectation = { kind: "index" | "commit" | "branch" | "switch" | "discard"; revision: string; hostRevision: number; target: RemoteGitLocator; head?: string | null };
+export type RemoteGitReadSnapshot = GitReadSnapshot & { writeExpectation?: RemoteGitWriteExpectation; commitExpectation?: RemoteGitWriteExpectation; branchExpectation?: RemoteGitWriteExpectation; switchExpectation?: RemoteGitWriteExpectation; discardExpectation?: RemoteGitWriteExpectation };
 
 const ERRORS = new Set([
 	"PATH_OUTSIDE_ROOT",
@@ -272,7 +272,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 	}
 	async function run<T>(
 		projectId: string,
-		method: "git.status" | "git.workspaceDiff" | "git.stage" | "git.unstage" | "git.commit" | "git.log" | "git.commitDetail" | "git.refs" | "git.refFileDiff" | "git.createBranch" | "git.switchBranch",
+		method: "git.status" | "git.workspaceDiff" | "git.stage" | "git.unstage" | "git.commit" | "git.log" | "git.commitDetail" | "git.refs" | "git.refFileDiff" | "git.createBranch" | "git.switchBranch" | "git.discard",
 		params: unknown,
 		signal: AbortSignal | undefined,
 		parse: (value: unknown, session: RemoteGitSession, capabilities: unknown[]) => T,
@@ -298,7 +298,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 						if (signal?.aborted) throw new Error("REQUEST_CANCELLED");
 						assertCurrent(projectId, locator);
 						try {
-							if (name === "git.stage" || name === "git.unstage" || name === "git.commit" || name === "git.createBranch" || name === "git.switchBranch") dispatchedWrite = true;
+							if (name === "git.stage" || name === "git.unstage" || name === "git.commit" || name === "git.createBranch" || name === "git.switchBranch" || name === "git.discard") dispatchedWrite = true;
 							const result = await session.request(name, input, {
 								timeoutMs: REMOTE_GIT_READ_TIMEOUT_MS,
 								onRequestId: (id) => {
@@ -344,6 +344,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 						if (capabilities.includes("git.commit")) snapshot.commitExpectation = { kind: "commit", revision: value.revision, hostRevision, target: target(projectId) };
 						if (capabilities.includes("git.createBranch")) snapshot.branchExpectation = { kind: "branch", revision: value.revision, hostRevision, target: target(projectId), head: snapshot.head };
 						if (capabilities.includes("git.switchBranch")) snapshot.switchExpectation = { kind: "switch", revision: value.revision, hostRevision, target: target(projectId), head: snapshot.head };
+						if (capabilities.includes("git.discard")) snapshot.discardExpectation = { kind: "discard", revision: value.revision, hostRevision, target: target(projectId) };
 					}
 				}
 				return snapshot;
@@ -446,6 +447,30 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 					if (!record(value) || value.applied !== true || Object.keys(value).length !== 3 || value.branch !== branch) throw new Error("GIT_RESULT_INVALID");
 					if (value.head !== null && (typeof value.head !== "string" || !REMOTE_GIT_OID_PATTERN.test(value.head))) throw new Error("GIT_RESULT_INVALID");
 					return { branch, head: value.head };
+				},
+				expected,
+			);
+		},
+		/**
+		 * The recoverable one: main only ever names a project-relative path and a group, and the helper refuses the
+		 * whole action unless the bytes are safely in the object store behind the returned recovery ref first.
+		 */
+		discard(projectId: string, group: unknown, file: ProjectFileTarget, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<{ recoveryRef: string | null }> {
+			if (expected.kind !== "discard") throw new Error("GIT_RESULT_INVALID");
+			if (file.projectId !== projectId || (group !== "workingTree" && group !== "untracked")) throw new Error("GIT_RESULT_INVALID");
+			const path = validateRemoteGitPath(file.relativePath);
+			return run(
+				projectId,
+				"git.discard",
+				{ path, group, expectedRevision: expected.revision },
+				signal,
+				(value) => {
+					if (!record(value) || value.applied !== true || Object.keys(value).length !== 4 || value.path !== path) throw new Error("GIT_RESULT_INVALID");
+					if (value.mode !== "restored" && value.mode !== "removed") throw new Error("GIT_RESULT_INVALID");
+					if (value.recoveryRef === null) return { recoveryRef: null };
+					// The ref name is remote output: it may only name one of our own recovery refs, never another ref.
+					if (typeof value.recoveryRef !== "string" || !new RegExp("^refs/pideck/recovery/[A-Za-z0-9._-]+$").test(value.recoveryRef)) throw new Error("GIT_RESULT_INVALID");
+					return { recoveryRef: value.recoveryRef };
 				},
 				expected,
 			);

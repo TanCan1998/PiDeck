@@ -467,6 +467,7 @@ export const ipcChannels = {
 	gitRemoteRefFileDiff: "git:remote-ref-file-diff",
 	gitRemoteCreateBranch: "git:remote-create-branch",
 	gitRemoteSwitchBranch: "git:remote-switch-branch",
+	gitRemoteDiscard: "git:remote-discard",
 	gitRemoteCancelReads: "git:remote-cancel-reads",
 	gitWorkspaceFileDiff: "git:workspace-file-diff",
 	gitStage: "git:stage",

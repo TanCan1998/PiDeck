@@ -1,4 +1,23 @@
-/** Frozen, self-contained Git read program embedded in helper.mjs; no Git engine or runtime dependency is shipped. */
+/**
+ * Frozen, self-contained Git read program embedded in helper.mjs; no Git engine or runtime dependency is shipped.
+ *
+ * The comments inside the frozen body are deliberately one-line invariants: the frozen source is the audited
+ * artifact and its ceiling is 96 KiB (see tests/remoteHelperEntry.test.mjs). The long-form rationale lives here:
+ *
+ * - the canonical root is resolved once with realpath, so every later containment check compares that exact
+ *   string; a root that is itself a symlink is resolved before it becomes the boundary;
+ * - containment is decided on canonical values (equality admits the root itself, and the separator keeps a
+ *   sibling such as "/srv/root-other" from passing a prefix test);
+ * - the read batch never follows a link: `fs.stat` walks the path component by component, so a link above the
+ *   entry refuses the whole path, and the entry itself is described as itself (a link is "other", never its
+ *   target's kind or size);
+ * - `fs.list` detects its entry cap by reading one entry past it and refuses as RESULT_TOO_LARGE; it reaches the
+ *   directory the way stat does, keeps link entries as "other", sorts by name in code-unit order and carries
+ *   bytes for regular files only;
+ * - `fs.searchNames` visits at most SEARCH_SLICE entries per slice and only enqueues directories below the depth
+ *   ceiling, so the directory sitting at the ceiling is never entered;
+ * - a read is published only while the identity it was answered from is still on disk (`unchangedRead`).
+ */
 export const REMOTE_GIT_READ_SOURCE = String.raw`function createGitReadProgram(root, fs, path) {
 	const cp = process.getBuiltinModule("node:child_process");
 	const crypto = process.getBuiltinModule("node:crypto");
@@ -334,6 +353,8 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`function createGitReadProgram(r
 	}
 	const committer = createGitCommitProgram(fs, { crypto: crypto, failure: failure, text: text, readFile: readFile, execute: execute, rawStatus: rawStatus, snapshot: snapshot, head: head }, { gates: writer.gates, entries: writer.entries, reaped: writer.reaped, fingerprint: writer.fingerprint }, commitIdentity);
 	const branches = createGitBranchProgram(fs, { failure: failure, execute: execute, rawStatus: rawStatus, snapshot: snapshot, head: head, text: text }, writer.gates);
+	/* Fixed journal identity for recovery commits: must stay equal to REMOTE_GIT_RECOVERY_IDENTITY in RemoteHelperContract.ts. */
+	const discarder = createGitDiscardProgram(fs, { failure: failure, crypto: crypto, execute: execute, rawStatus: rawStatus, snapshot: snapshot, head: head, entries: writer.entries, readFile: readFile, belongs: belongs, fingerprint: writer.fingerprint, reaped: writer.reaped }, writer.gates, { name: "PiDeck recovery", email: "pideck-recovery@localhost" });
 	async function run(ctx, params) {
 		ctx.check();
 		if (process.platform !== "linux") throw failure("GIT_PLATFORM_UNSUPPORTED");
@@ -355,6 +376,7 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`function createGitReadProgram(r
 		const first = snapshot(ctx), firstHead = await head(ctx);
 		if (params.method === "git.commit") return committer.run(ctx, params, first, firstHead);
 		if (params.method === "git.createBranch" || params.method === "git.switchBranch") return branches.run(ctx, params, first, firstHead);
+		if (params.method === "git.discard") return discarder.run(ctx, params, first, firstHead);
 		if (params.method === "git.stage" || params.method === "git.unstage") return writer.run(ctx, params, first, firstHead);
 		if (params.method === "git.log") return unchangedRead(ctx, first, firstHead, log(ctx, params));
 		if (params.method === "git.commitDetail") return unchangedRead(ctx, first, firstHead, commitDetail(ctx, params));
@@ -387,6 +409,10 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`function createGitReadProgram(r
 		if (method === "git.refFileDiff") {
 			if (keys.length !== 3 || !keys.includes("base") || !keys.includes("head") || !keys.includes("path")) throw failure("GIT_RESULT_INVALID");
 			return { method: method, base: params.base === null ? null : readHash(params.base), head: readHash(params.head), path: relative(params.path) };
+		}
+		if (method === "git.discard") {
+			if (keys.length !== 3 || !keys.includes("path") || !keys.includes("group") || !keys.includes("expectedRevision") || !["workingTree", "untracked"].includes(params.group) || typeof params.expectedRevision !== "string" || !/^[0-9a-f]{64}$/.test(params.expectedRevision)) throw failure("GIT_RESULT_INVALID");
+			return { method: method, path: relative(params.path), group: params.group, expectedRevision: params.expectedRevision };
 		}
 		if (method === "git.createBranch" || method === "git.switchBranch") {
 			if (keys.length !== 2 || !keys.includes("name") || !keys.includes("expectedHead") || (params.expectedHead !== null && (typeof params.expectedHead !== "string" || !HASH_PATTERN.test(params.expectedHead)))) throw failure("GIT_RESULT_INVALID");

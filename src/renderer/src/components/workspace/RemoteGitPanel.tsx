@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
-import type { RemoteProject } from "../../../../shared/types/project";
+import type { ProjectFileTarget, RemoteProject } from "../../../../shared/types/project";
 import type { GitResourceGroupType } from "../../../../shared/types/git";
 import { useRemoteGitView } from "../../hooks/useRemoteGitView";
 import { t } from "../../i18n";
@@ -52,12 +52,13 @@ export function remoteGitErrorMessage(code: string): string {
 
 /** Reuses SCM rows and the existing diff renderer without native graph/watch/write/background-sync APIs. */
 export function RemoteGitPanel({ project }: { project: RemoteProject }) {
-	const { state, refresh, openDiff, closeDiff, mutate, commit, loadHistory, loadMoreHistory, openCommitDetail, loadRefs, openHistoryFileDiff, createBranch, switchBranch } = useRemoteGitView(project);
+	const { state, refresh, openDiff, closeDiff, mutate, commit, loadHistory, loadMoreHistory, openCommitDetail, loadRefs, openHistoryFileDiff, createBranch, switchBranch, discard } = useRemoteGitView(project);
 	const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
 	const [message, setMessage] = useState("");
 	const [historyOpen, setHistoryOpen] = useState(false);
 	const [refsOpen, setRefsOpen] = useState(false);
 	const [newBranch, setNewBranch] = useState("");
+	const [pendingDiscard, setPendingDiscard] = useState<{ group: "workingTree" | "untracked"; path: string; target: ProjectFileTarget } | null>(null);
 	const confirmedCommits = state.confirmedCommits ?? 0;
 	// A confirmed commit clears the box; a refusal or an unknown result keeps the text so nothing is retyped.
 	useEffect(() => {
@@ -72,6 +73,9 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 	const canCommit = snapshot?.commitToken !== undefined && !busy && message.trim().length > 0 && messageBytes <= 4096;
 	const canCreateBranch = snapshot?.branchToken !== undefined && !busy && validRemoteGitBranchName(newBranch);
 	const canSwitchBranch = snapshot?.switchToken !== undefined && !busy;
+	const canDiscard = snapshot?.discardToken !== undefined && !busy;
+	// The tree offers index actions and the recoverable discard as separate capabilities: either grant is enough.
+	const writable = snapshot?.mutationToken !== undefined || snapshot?.discardToken !== undefined;
 	// Expanding a section is the user action that loads it; an error stays until the header is clicked again.
 	useEffect(() => {
 		if (historyOpen && snapshot !== undefined && state.history === undefined && !state.historyLoading && state.historyErrorCode === undefined && !state.loading && !state.mutating) loadHistory();
@@ -92,7 +96,7 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 					<RefreshCw size={14} />
 				</Button>
 			</div>
-			<p className="shrink-0 border-b border-border px-3 py-2 text-xs text-text-secondary">{t(snapshot?.mutationToken ? "remoteGit.managedIndex" : "remoteGit.readOnly")}</p>
+			<p className="shrink-0 border-b border-border px-3 py-2 text-xs text-text-secondary">{t(snapshot && (snapshot.mutationToken || snapshot.commitToken || snapshot.branchToken || snapshot.switchToken || snapshot.discardToken) ? "remoteGit.managedIndex" : "remoteGit.readOnly")}</p>
 			{snapshot && !viewingDiff ? (
 				<div className="shrink-0 space-y-2 border-b border-border px-3 py-2">
 					<Textarea data-testid="remote-git-commit-message" aria-label={t("remoteGit.commitMessage")} placeholder={t("remoteGit.commitPlaceholder")} value={message} rows={2} disabled={busy || snapshot.commitToken === undefined} onChange={(event) => setMessage(event.target.value)} />
@@ -108,7 +112,9 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 			{state.loading || state.diffLoading || state.mutating ? (
 				<div role="status" className="flex items-center gap-2 p-3 text-text-secondary">
 					<LoaderCircle size={14} className="animate-spin" />
-					{t(state.mutating ? (state.mutatingKind === "commit" ? "remoteGit.committing" : "remoteGit.writing") : "remoteGit.loading")}
+					{t(
+						state.mutating ? (state.mutatingKind === "commit" ? "remoteGit.committing" : state.mutatingKind === "branch" ? "remoteGit.creatingBranch" : state.mutatingKind === "switch" ? "remoteGit.switchingBranch" : state.mutatingKind === "discard" ? "remoteGit.discarding" : "remoteGit.writing") : "remoteGit.loading",
+					)}
 				</div>
 			) : null}
 			{state.errorCode ? (
@@ -155,10 +161,10 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 									{t(GROUP_LABELS[group])} ({snapshot.groups[group].length})
 								</h3>
 								<FileTree
-									readOnly={!snapshot.mutationToken}
-									indexActionsOnly
-									stageFile={(target) => mutate("stage", group, target)}
-									unstageFile={(target) => mutate("unstage", group, target)}
+									readOnly={!writable}
+									stageFile={snapshot.mutationToken === undefined ? undefined : (target) => mutate("stage", group, target)}
+									unstageFile={snapshot.mutationToken === undefined ? undefined : (target) => mutate("unstage", group, target)}
+									discardFile={!canDiscard ? undefined : (target, discardGroup) => setPendingDiscard({ group: discardGroup, path: target.relativePath, target })}
 									resources={snapshot.groups[group]}
 									groupType={group}
 									mutating={!!state.mutating}
@@ -176,6 +182,33 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 							</section>
 						) : null,
 					)}
+					{pendingDiscard ? (
+						<div data-testid="remote-git-discard-confirm-bar" className="mx-3 my-1 rounded border border-danger p-2 text-xs">
+							<p>{t(pendingDiscard.group === "untracked" ? "remoteGit.discardConfirmDelete" : "remoteGit.discardConfirm", { path: pendingDiscard.path })}</p>
+							<div className="flex items-center gap-2 pt-1">
+								<Button
+									type="button"
+									size="sm"
+									data-testid="remote-git-discard-confirm"
+									onClick={() => {
+										const pending = pendingDiscard;
+										setPendingDiscard(null);
+										if (pending) discard(pending.group, pending.target);
+									}}
+								>
+									{t("remoteGit.discardAction")}
+								</Button>
+								<Button type="button" variant="ghost" size="sm" data-testid="remote-git-discard-cancel" onClick={() => setPendingDiscard(null)}>
+									{t("remoteGit.discardCancel")}
+								</Button>
+							</div>
+						</div>
+					) : null}
+					{state.discardRecovery ? (
+						<p data-testid="remote-git-recovery-note" className="px-3 py-1 text-xs text-text-secondary">
+							{state.discardRecovery.ref === null ? t("remoteGit.discardRestored", { path: state.discardRecovery.path }) : t("remoteGit.discardRecovered", { ref: state.discardRecovery.ref, path: state.discardRecovery.path })}
+						</p>
+					) : null}
 					{/* G3a: history and refs are read-only sections; there is no checkout, branch, tag or push control anywhere below. */}
 					<section data-testid="remote-git-history" className="pb-2">
 						<button type="button" className="flex w-full items-center gap-1 px-3 py-1 text-xs font-medium text-text-secondary" aria-expanded={historyOpen} onClick={() => (historyOpen ? (state.historyErrorCode ? loadHistory() : setHistoryOpen(false)) : setHistoryOpen(true))}>

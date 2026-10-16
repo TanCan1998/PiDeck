@@ -105,7 +105,7 @@ export type GitResourceGroups = {
 };
 
 /** Complete read-only repository snapshot; unsupported or failed reads never masquerade as empty status. */
-export type GitReadSnapshot = { groups: GitResourceGroups; head: string | null; branch: string | null; mutationToken?: string; commitToken?: string; branchToken?: string; switchToken?: string };
+export type GitReadSnapshot = { groups: GitResourceGroups; head: string | null; branch: string | null; mutationToken?: string; commitToken?: string; branchToken?: string; switchToken?: string; discardToken?: string };
 
 // ── G3a：远端历史／引用／提交详情／两个版本之间的单文件差异（只读、有界、超限即拒）──
 
@@ -138,6 +138,8 @@ export type RemoteGitRefFileDiff = { path: string; target: ProjectFileTarget; di
 export type RemoteGitRefFileDiffResult = { ok: true; diff: RemoteGitRefFileDiff } | { ok: false; code: string };
 /** G3b branch write face: creating and switching both move a ref the user explicitly asked for. */
 export type RemoteGitBranchMutationResult = { ok: true } | { ok: false; code: string };
+/** G4a recoverable discard: the snapshot ref (null when the discarded change was a deletion) goes back to the panel. */
+export type RemoteGitDiscardResult = { ok: true; recoveryRef: string | null } | { ok: false; code: string };
 /** An uncertain mutation must be checked by a fresh read, never automatically replayed. */
 export type GitIndexMutationResult = { ok: true } | { ok: false; code: string };
 /** A commit has no renderer-visible result beyond success: the new HEAD is read back through a fresh snapshot. */

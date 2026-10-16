@@ -795,6 +795,8 @@ const api = {
 		// 分支写面（G3b）：新建分支不移动 HEAD，切换走原生 switch 且冲突即拒（绝不 force）
 		createRemoteBranch: (projectId: string, name: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteCreateBranch, projectId, name, token) as Promise<import("../shared/types").RemoteGitBranchMutationResult>,
 		switchRemoteBranch: (projectId: string, name: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteSwitchBranch, projectId, name, token) as Promise<import("../shared/types").RemoteGitBranchMutationResult>,
+		// 可恢复丢弃（G4a）：先写恢复快照再动文件；返回可恢复 ref，main 注入指纹
+		discardRemote: (projectId: string, group: "workingTree" | "untracked", target: ProjectFileTarget, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteDiscard, projectId, group, target, token) as Promise<import("../shared/types").RemoteGitDiscardResult>,
 		// 只读历史（G3a）：分页日志／提交详情／本地引用／两版本间单文件；与 status 同一信任边界，无 token
 		remoteLog: (projectId: string, options?: { maxCount?: number; skip?: number }) => ipcRenderer.invoke(ipcChannels.gitRemoteLog, projectId, options) as Promise<import("../shared/types").RemoteGitLogResult>,
 		remoteCommitDetail: (projectId: string, oid: string) => ipcRenderer.invoke(ipcChannels.gitRemoteCommitDetail, projectId, oid) as Promise<import("../shared/types").RemoteGitCommitDetailResult>,

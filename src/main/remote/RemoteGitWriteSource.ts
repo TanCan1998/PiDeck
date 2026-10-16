@@ -1,4 +1,28 @@
-/** Managed index writes: native Git runs in an owned private metadata context, never with live hooks/filters. */
+/**
+ * Managed Git writes: native Git runs in an owned private metadata context, never with live hooks/filters.
+ *
+ * The frozen body keeps one-line invariants only (its ceiling is 96 KiB). The long-form rules behind them:
+ *
+ * - every write takes the official `.git/index.lock`, verifies the caller's confirmed fingerprint, and runs in a
+ *   scratch metadata context (`GIT_DIR`/`GIT_INDEX_FILE`/`GIT_WORK_TREE`/`GIT_OBJECT_DIRECTORY` plus
+ *   `GIT_CONFIG_NOSYSTEM`/`GIT_CONFIG_GLOBAL=/dev/null`) whose configuration is frozen and whose hooks directory
+ *   is empty; effective hooks/filter/signing requirements are refused before AND after, and no gate is bypassed;
+ * - `git.stage`/`git.unstage` publish validated, path-scoped index bytes only; `git.commit` publishes no index
+ *   bytes at all, because the confirmed index already describes the tree about to become HEAD, and moves the ref
+ *   with a native CAS (before it nothing is published, after it a failure is unconfirmed rather than a denial);
+ * - `git.createBranch` is a create-only CAS on `refs/heads/<name>` that can never move HEAD; a name is asked of
+ *   Git first (`check-ref-format --branch`) and then held to the protocol's own rules; `git.switchBranch` runs
+ *   native `git switch`, where a conflicting worktree is refused rather than forced and a post-checkout hook is a
+ *   refusal, not something to skip;
+ * - `git.discard` is the recoverable one: the file's raw bytes (`hash-object -w --no-filters` writes them
+ *   verbatim and runs no clean filter) go into a create-only `refs/pideck/recovery/<stamp>` ref authored by a
+ *   fixed PiDeck identity, the ref is read back, and the file is only touched afterwards - so a failure before
+ *   that point leaves it alone and any failure after it is reported as unconfirmed. A `" D"` resource needs no
+ *   snapshot (restoring it recreates the index version). Nothing prunes those refs automatically;
+ * - scratch directories are 0700 with random names, are only unwound when their recorded identities still match,
+ *   and unknown or externally replaced artifacts are retained instead of recursively removed;
+ * - an unreaped native writer keeps its lock, which is why cleanup waits for killed children first.
+ */
 export const REMOTE_GIT_WRITE_SOURCE = String.raw`function createGitWriteProgram(fs, port) {
 	const crypto = port.crypto;
 	const fail = port.failure, MAX_INDEX = 16777216, MAX_TEXT = 262144;
@@ -93,8 +117,7 @@ export const REMOTE_GIT_WRITE_SOURCE = String.raw`function createGitWriteProgram
 			const attrs = attributes(ctx, params.path);
 			if (source !== null) put("index", source);
 			const info = optional(ctx.cwd, ".git/info/attributes", MAX_TEXT); if (info !== null) put("info/attributes", info);
-			/* A private metadata context freezes safe configuration and has no executable hooks/filter definitions.
-			Effective real hooks/config are refused before AND after; no existing gate is bypassed to publish. */
+			/* The private metadata context has no executable hooks/filters; real hooks/config are refused before AND after, and no gate is bypassed. */
 			const env = Object.assign({}, ctx.env, { GIT_DIR: scratch, GIT_INDEX_FILE: scratch + "/index", GIT_WORK_TREE: ctx.cwd, GIT_OBJECT_DIRECTORY: base + "/objects", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" });
 			const shadow = Object.assign({}, ctx, { env: env });
 			const status = await port.rawStatus(shadow);
@@ -146,10 +169,7 @@ export const REMOTE_GIT_WRITE_SOURCE = String.raw`function createGitWriteProgram
 	}
 	return { run: run, fingerprint: fingerprint, gates: gates, entries: entries, reaped: reaped };
 }
-/* Managed commit: the tree comes from the verified index, the ref move is a native compare-and-swap.
-Errors before the CAS publish nothing; after the CAS the ref is the only thing that moved, so a failure
-there is reported as an unconfirmed result instead of a refusal that pretends nothing happened.
-Identity comes from the repository's own config chain (read-only); PiDeck never writes Git config. */
+/* Managed commit: verified index tree plus a native ref CAS; failures after it are unconfirmed and identity is read-only. */
 function createGitCommitProgram(fs, port, shared, identityOf) {
 	const fail = port.failure, MAX_INDEX = 16777216, MAX_TEXT = 262144, ZERO = "0".repeat(40), HASH = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 	function utf8(bytes) { try { return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); } catch { throw fail("GIT_RESULT_INVALID"); } }
@@ -173,8 +193,7 @@ function createGitCommitProgram(fs, port, shared, identityOf) {
 			if ([fs.fstatSync(gitFd, { bigint: true }).dev, fs.fstatSync(gitFd, { bigint: true }).ino].map(String).join(":") !== ctx.gitIdentity) throw fail("GIT_RESOURCE_CHANGED");
 			try { lockFd = fs.openSync(base + "/index.lock", fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 384); } catch (error) { if (error.code === "EEXIST") throw fail("GIT_INDEX_LOCKED"); throw error; }
 			const lockStats = fs.fstatSync(lockFd, { bigint: true }); lockIdentity = identity(lockStats);
-			/* The index is only read here: the commit publishes no index bytes, because the index the user confirmed
-			already describes the tree that is about to become HEAD. */
+			/* The index is only read here: the confirmed index already describes the tree that is about to become HEAD, so no index bytes are published. */
 			const source = optional(base, "index", MAX_INDEX), sourceStats = source === null ? null : fs.lstatSync(base + "/index", { bigint: true });
 			if (sourceStats !== null && (sourceStats.uid !== lockStats.uid || sourceStats.gid !== lockStats.gid || (sourceStats.mode & 3584n) !== 0n)) throw fail("GIT_WRITE_UNSUPPORTED");
 			if (port.snapshot(ctx) !== first) throw fail("GIT_RESOURCE_CHANGED");
@@ -194,9 +213,7 @@ function createGitCommitProgram(fs, port, shared, identityOf) {
 			if (firstHead.head === null && before.size === 0) throw fail("GIT_COMMIT_NOTHING_STAGED");
 			const tree = utf8((await port.execute(shadow, ["write-tree"], 256)).bytes).trim();
 			if (!HASH.test(tree)) throw fail("GIT_RESULT_INVALID");
-			/* write-tree records its cache tree in the index, so the owned copy is a new inode now. The scratch
-			directory is 0700 with a random name only this run knows; re-recording is what lets cleanup remove
-			that file instead of retaining the whole directory. */
+			/* write-tree gives the owned index copy a new inode; re-recording it is what lets cleanup remove that file instead of retaining the scratch directory. */
 			files.set("index", identity(fs.lstatSync(scratch + "/index", { bigint: true })));
 			if (firstHead.head !== null) {
 				const headTree = utf8((await port.execute(shadow, ["rev-parse", firstHead.head + "^{tree}"], 256)).bytes).trim();
@@ -250,11 +267,7 @@ function createGitCommitProgram(fs, port, shared, identityOf) {
 	}
 	return { run: run };
 }
-/* G3b branch write face. Creating a branch is one native compare-and-swap on refs/heads/<name> with a zero
-old value, so it can only ever create a branch that does not exist yet and can never move HEAD; a name is
-first asked of Git itself (check-ref-format --branch) and then held to this protocol's own rules, because
-that command accepts "@" on its own. Switching runs native git switch and nothing else: it refuses a
-conflicting worktree instead of forcing it, and a post-checkout hook is a refusal, not something to skip. */
+/* Branch write face: create is a create-only CAS that cannot move HEAD, with the name checked by Git and then by our own rules; switch runs native git switch, refuses a conflicting worktree and treats a post-checkout hook as a refusal. */
 function createGitBranchProgram(fs, port, gates) {
 	const fail = port.failure, HASH = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 	function utf8(bytes) { try { return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); } catch { throw fail("GIT_RESULT_INVALID"); } }
@@ -264,8 +277,7 @@ function createGitBranchProgram(fs, port, gates) {
 	}
 	/* A branch name must be accepted by Git and must not read as a full ref, an object id or a revision. */
 	async function checked(ctx, value) {
-		/* Measured: git answers 1 or 128 for a name it refuses (for example 128 for a leading dash), and any of
-		those means the same thing to us - an invalid name, refused before any ref exists. */
+		/* Measured: git answers 1 or 128 for a name it refuses; both mean an invalid name, refused before any ref exists. */
 		const result = await port.execute(ctx, ["check-ref-format", "--branch", value], 1024, [1, 128]);
 		if (result.exitCode !== 0) throw fail("GIT_RESULT_INVALID");
 		if (/^(?:HEAD|FETCH_HEAD|ORIG_HEAD)$/.test(value) || value.indexOf("refs/") === 0 || HASH.test(value)) throw fail("GIT_RESULT_INVALID");
@@ -282,8 +294,7 @@ function createGitBranchProgram(fs, port, gates) {
 		const name = await checked(ctx, validName(params.name));
 		if (params.expectedHead !== null && !HASH.test(String(params.expectedHead))) throw fail("GIT_RESULT_INVALID");
 		const expected = params.expectedHead;
-		/* A caller that confirmed nothing has confirmed an unborn repository: that is only true when there is
-		really no HEAD, and it is never a state a switch can start from. */
+		/* A caller that confirmed nothing claims an unborn repository: true only when there is really no HEAD, and never a state a switch starts from. */
 		if (expected === null && params.method === "git.createBranch") throw fail("GIT_COMMIT_HEAD_CHANGED");
 		if (params.method === "git.createBranch") {
 			if (expected !== null && firstHead.head !== expected) throw fail("GIT_COMMIT_HEAD_CHANGED");
@@ -311,14 +322,12 @@ function createGitBranchProgram(fs, port, gates) {
 		const target = "refs/heads/" + name;
 		const existing = await branchHead(ctx, target);
 		if (existing === null) throw fail("GIT_REF_NOT_FOUND");
-		/* Existence is answered first: in an unborn repository no branch can exist, and that is the honest reason.
-		A caller that confirmed "unborn" (null) while a real HEAD exists is exactly as stale as a wrong oid. */
+		/* Existence is answered first (an unborn repository has no branch); a confirmed null with a real HEAD is as stale as a wrong oid. */
 		if (firstHead.head !== expected) throw fail("GIT_COMMIT_HEAD_CHANGED");
 		const current = await port.head(ctx);
 		if (current.branch === name) return { applied: true, branch: name, head: existing };
 		if (port.snapshot(ctx) !== first) throw fail("GIT_RESOURCE_CHANGED");
-		/* Effective hooks/config first: a post-checkout hook runs during a real switch, so a repository that
-		has one is refused before switch is ever called, never run with hooks silently skipped. */
+		/* Hooks/config first: a real switch runs post-checkout, so such a repository is refused, never run with hooks skipped. */
 		await gates(ctx);
 		/* Native switch: a conflicting worktree is refused by Git (rc != 0) and nothing is forced. */
 		try { await port.execute(ctx, ["switch", "--", name], 65536); }
@@ -337,6 +346,113 @@ function createGitBranchProgram(fs, port, gates) {
 		if ((await port.execute(ctx, ["diff", "--quiet", "--no-ext-diff", "--no-textconv", "HEAD", "--"], 1024, [1])).exitCode !== 0) throw fail("GIT_WRITE_RESULT_UNCONFIRMED");
 		ctx.check();
 		return { applied: true, branch: name, head: existing };
+	}
+	return { run: run };
+}
+/* Discard: raw bytes (hash-object --no-filters) go into a create-only refs/pideck/recovery ref and are read back BEFORE the file is touched. */
+function createGitDiscardProgram(fs, port, gates, identity) {
+	const fail = port.failure, crypto = port.crypto, MAX_DISCARD = 8388608, ZERO = "0".repeat(40), HASH = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+	function fingerprint(stats) { return [stats.dev, stats.ino, stats.uid, stats.gid].map(String).join(":"); }
+	function owned(path, expected) { try { const stats = fs.lstatSync(path, { bigint: true }); return stats.isFile() && !stats.isSymbolicLink() && fingerprint(stats) === expected; } catch { return false; } }
+	function utf8(bytes) { try { return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); } catch { throw fail("GIT_RESULT_INVALID"); } }
+	async function run(ctx, params, first, firstHead) {
+		const configured = await gates(ctx);
+		const status = await port.rawStatus(ctx);
+		if (port.fingerprint(ctx, first, firstHead, status) !== params.expectedRevision) throw fail("GIT_RESOURCE_CHANGED");
+		const resource = status.resources.find(function (entry) { return entry.path === params.path && port.belongs(entry, params.group); });
+		if (!resource) throw fail("GIT_RESOURCE_CHANGED");
+		const absolute = ctx.cwd + "/" + params.path;
+		const staged = params.group === "workingTree" ? (await port.entries(ctx)).get(params.path) : null;
+		if (params.group === "workingTree" && (!staged || !/^100(?:644|755) /.test(staged))) throw fail("GIT_WRITE_UNSUPPORTED");
+		let present = null;
+		try { present = fs.lstatSync(absolute, { bigint: true }); } catch (error) { if (error.code !== "ENOENT") throw error; }
+		let bytes = null, mode = "100644";
+		if (present !== null) {
+			if (!present.isFile() || present.isSymbolicLink()) throw fail("GIT_WRITE_UNSUPPORTED");
+			mode = (present.mode & 73n) !== 0n ? "100755" : "100644";
+			bytes = port.readFile(ctx.cwd, params.path, MAX_DISCARD);
+			if (bytes.length !== Number(present.size)) throw fail("GIT_RESOURCE_CHANGED");
+		} else if (params.group === "untracked") throw fail("GIT_RESOURCE_CHANGED");
+		/* A " D" resource has no bytes left to preserve: discarding it recreates the index version, so it needs no snapshot and cannot lose anything. */
+		const gitFd = fs.openSync(ctx.cwd + "/.git", fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+		const base = "/proc/" + process.pid + "/fd/" + gitFd;
+		let lockFd = null, lockIdentity = null, scratch = null, scratchIdentity = null, ref = null, touched = false, safeCleanup = true;
+		const files = new Map(), directories = [];
+		function put(name, value) { const file = scratch + "/" + name; const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 384); try { fs.writeFileSync(fd, value); files.set(name, fingerprint(fs.fstatSync(fd, { bigint: true }))); } finally { fs.closeSync(fd); } }
+		function directory(name) { fs.mkdirSync(scratch + "/" + name, { mode: 448 }); directories.push(name); }
+		function held() { if (lockFd === null || !owned(base + "/index.lock", lockIdentity) || fingerprint(fs.fstatSync(lockFd, { bigint: true })) !== lockIdentity) throw fail("GIT_RESOURCE_CHANGED"); }
+		try {
+			const gitStats = fs.fstatSync(gitFd, { bigint: true });
+			if ([gitStats.dev, gitStats.ino].map(String).join(":") !== ctx.gitIdentity) throw fail("GIT_RESOURCE_CHANGED");
+			try { lockFd = fs.openSync(base + "/index.lock", fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 384); } catch (error) { if (error.code === "EEXIST") throw fail("GIT_INDEX_LOCKED"); throw error; }
+			lockIdentity = fingerprint(fs.fstatSync(lockFd, { bigint: true }));
+			if (port.snapshot(ctx) !== first) throw fail("GIT_RESOURCE_CHANGED");
+			scratch = base + "/pideck-index-" + crypto.randomBytes(16).toString("hex");
+			fs.mkdirSync(scratch, { mode: 448 });
+			scratchIdentity = fingerprint(fs.lstatSync(scratch, { bigint: true }));
+			/* restore refreshes the index, so it works on an owned copy: the real index is never written. */
+			const realIndex = (function () { try { return port.readFile(base, "index", 16777216); } catch (error) { if (error.message !== "PATH_NOT_FOUND") throw error; return null; } })();
+			if (params.group === "workingTree" && realIndex === null) throw fail("GIT_WRITE_UNSUPPORTED");
+			if (realIndex !== null) put("worktree-index", realIndex);
+			/* Both contexts run inside the scratch metadata directory. */
+			const env = Object.assign({}, ctx.env, { GIT_DIR: scratch, GIT_INDEX_FILE: scratch + "/index", GIT_WORK_TREE: ctx.cwd, GIT_OBJECT_DIRECTORY: base + "/objects", GIT_AUTHOR_NAME: identity.name, GIT_AUTHOR_EMAIL: identity.email, GIT_COMMITTER_NAME: identity.name, GIT_COMMITTER_EMAIL: identity.email, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" });
+			const shadow = Object.assign({}, ctx, { env: env });
+			const restoreCtx = Object.assign({}, ctx, { env: Object.assign({}, env, { GIT_INDEX_FILE: scratch + "/worktree-index" }) });
+			/* restore needs a repository layout, so the scratch metadata exists even when nothing is snapshotted (a " D" resource). */
+			directory("refs"); directory("objects"); directory("info"); directory("hooks");
+			put("HEAD", firstHead.head === null ? "ref: refs/heads/pideck-shadow\n" : firstHead.head + "\n");
+			put("config", configured.config + "[core]\nbare = false\nfsmonitor = false\nuntrackedCache = false\n");
+			if (bytes !== null) {
+				put("blob", bytes);
+				const blob = utf8((await port.execute(ctx, ["hash-object", "-w", "--no-filters", "--", scratch + "/blob"], 256)).bytes).trim();
+				if (!HASH.test(blob)) throw fail("GIT_RESULT_INVALID");
+				await port.execute(shadow, ["read-tree", "--empty"], 65536);
+				await port.execute(shadow, ["update-index", "--add", "--cacheinfo", mode + "," + blob + "," + params.path], 65536);
+				const tree = utf8((await port.execute(shadow, ["write-tree"], 256)).bytes).trim();
+				/* read-tree/write-tree rewrote this file inside our scratch: re-record it so cleanup can remove it. */
+				files.set("index", fingerprint(fs.lstatSync(scratch + "/index", { bigint: true })));
+				if (!HASH.test(tree)) throw fail("GIT_RESULT_INVALID");
+				const commit = utf8((await port.execute(shadow, ["commit-tree", tree, "-m", "discard: " + params.path], 256)).bytes).trim();
+				if (!HASH.test(commit)) throw fail("GIT_RESULT_INVALID");
+				for (let attempt = 0; attempt < 2 && ref === null; attempt += 1) {
+					const candidate = "refs/pideck/recovery/" + new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14) + "-" + crypto.randomBytes(4).toString("hex");
+					try { await port.execute(ctx, ["update-ref", "--create-reflog", "-m", "discard: " + params.path, candidate, commit, ZERO], 65536); ref = candidate; }
+					catch (error) { if (error.message !== "GIT_COMMAND_FAILED") throw error; }
+				}
+				/* A reference that does not read our bytes back is not a snapshot, so the file is left alone. */
+				if (ref === null) throw fail("GIT_WRITE_UNSUPPORTED");
+				if (utf8((await port.execute(ctx, ["rev-parse", ref + ":" + params.path], 256)).bytes).trim() !== blob) throw fail("GIT_WRITE_RESULT_UNCONFIRMED");
+			}
+			if (params.group === "untracked" && present !== null && !owned(absolute, fingerprint(present))) throw fail("GIT_RESOURCE_CHANGED");
+			held();
+			touched = true;
+			if (params.group === "workingTree") { await port.execute(restoreCtx, ["restore", "--worktree", "--", params.path], 65536); /* restore rewrote the owned index copy, so record its new identity before cleanup. */ files.set("worktree-index", fingerprint(fs.lstatSync(scratch + "/worktree-index", { bigint: true }))); }
+			else fs.unlinkSync(absolute);
+			if (params.group === "workingTree") {
+				if ((await port.execute(ctx, ["diff", "--quiet", "--no-ext-diff", "--no-textconv", "--", params.path], 1024, [1])).exitCode !== 0) throw fail("GIT_WRITE_RESULT_UNCONFIRMED");
+				/* restore rewrites the index stat cache, so the invariant is the staged content, not the index bytes. */
+				if ((await port.entries(ctx)).get(params.path) !== staged) throw fail("GIT_WRITE_RESULT_UNCONFIRMED");
+			} else if (fs.existsSync(absolute)) throw fail("GIT_WRITE_RESULT_UNCONFIRMED");
+			if (JSON.stringify(await port.head(ctx)) !== JSON.stringify(firstHead)) throw fail("GIT_WRITE_RESULT_UNCONFIRMED");
+			if (JSON.stringify(await gates(ctx)) !== JSON.stringify(configured)) throw fail("GIT_WRITE_RESULT_UNCONFIRMED");
+			ctx.check();
+			return { applied: true, recoveryRef: ref, path: params.path, mode: params.group === "workingTree" ? "restored" : "removed" };
+		} catch (error) { if (touched) throw fail("GIT_WRITE_RESULT_UNCONFIRMED"); throw error; }
+		finally {
+			safeCleanup = await port.reaped(ctx);
+			if (safeCleanup && scratch !== null) {
+				try {
+					const stats = fs.lstatSync(scratch, { bigint: true });
+					if (stats.isDirectory() && !stats.isSymbolicLink() && fingerprint(stats) === scratchIdentity) {
+						for (const pair of files) if (owned(scratch + "/" + pair[0], pair[1])) fs.unlinkSync(scratch + "/" + pair[0]);
+						for (const name of directories.reverse()) { try { fs.rmdirSync(scratch + "/" + name); } catch {} }
+						try { fs.rmdirSync(scratch); } catch {}
+					}
+				} catch { /* Unknown or externally replaced artifacts are retained, never recursively removed. */ }
+			}
+			if (safeCleanup && lockFd !== null && owned(base + "/index.lock", lockIdentity)) { try { fs.unlinkSync(base + "/index.lock"); } catch {} }
+			if (lockFd !== null) fs.closeSync(lockFd); fs.closeSync(gitFd);
+		}
 	}
 	return { run: run };
 }`.replace(/\r?\n[\t ]*/g, "");

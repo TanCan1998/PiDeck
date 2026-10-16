@@ -1,6 +1,6 @@
 import { ipcMain, type IpcMainInvokeEvent } from "electron";
 import { ipcChannels } from "../../shared/ipc";
-import type { GitCommitResult, GitIndexMutationResult, GitReadSnapshotResult, GitResourceGroups, GitWorkspaceFileDiff, RemoteGitBranchMutationResult, RemoteGitCommitDetailResult, RemoteGitLogResult, RemoteGitRefFileDiffResult, RemoteGitRefsResult } from "../../shared/types/git";
+import type { GitCommitResult, GitIndexMutationResult, GitReadSnapshotResult, GitResourceGroups, GitWorkspaceFileDiff, RemoteGitBranchMutationResult, RemoteGitCommitDetailResult, RemoteGitDiscardResult, RemoteGitLogResult, RemoteGitRefFileDiffResult, RemoteGitRefsResult } from "../../shared/types/git";
 import type { ProjectFileTarget } from "../../shared/types/project";
 import { createRemoteGitService, remoteGitFailureCode, validateRemoteGitPath, type RemoteGitLocator } from "../git/RemoteGitService";
 import { createRemoteGitMutationTokens } from "../git/RemoteGitMutationTokens";
@@ -75,13 +75,14 @@ export function registerRemoteGitReadIpc(input: { enabled: boolean; locator(proj
 	ipcMain.handle(ipcChannels.gitRemoteSnapshot, async (event, projectId: unknown): Promise<GitReadSnapshotResult> => {
 		try {
 			tokens.revoke(event.sender.id, typeof projectId === "string" ? projectId : "");
-			const { writeExpectation, commitExpectation, branchExpectation, switchExpectation, ...snapshot } = await read(event, projectId, undefined, (id, signal) => git.status(id, signal));
+			const { writeExpectation, commitExpectation, branchExpectation, switchExpectation, discardExpectation, ...snapshot } = await read(event, projectId, undefined, (id, signal) => git.status(id, signal));
 			if (typeof projectId === "string") {
 				if (writeExpectation) snapshot.mutationToken = tokens.issue(event.sender.id, projectId, writeExpectation);
 				if (commitExpectation) snapshot.commitToken = tokens.issue(event.sender.id, projectId, commitExpectation);
 				if (branchExpectation) snapshot.branchToken = tokens.issue(event.sender.id, projectId, branchExpectation);
 				if (switchExpectation) snapshot.switchToken = tokens.issue(event.sender.id, projectId, switchExpectation);
-				if (snapshot.mutationToken !== undefined || snapshot.commitToken !== undefined || snapshot.branchToken !== undefined || snapshot.switchToken !== undefined) watchSender(event.sender);
+				if (discardExpectation) snapshot.discardToken = tokens.issue(event.sender.id, projectId, discardExpectation);
+				if (snapshot.mutationToken !== undefined || snapshot.commitToken !== undefined || snapshot.branchToken !== undefined || snapshot.switchToken !== undefined || snapshot.discardToken !== undefined) watchSender(event.sender);
 			}
 			return { ok: true, snapshot };
 		} catch (error) {
@@ -131,6 +132,14 @@ export function registerRemoteGitReadIpc(input: { enabled: boolean; locator(proj
 		try {
 			await read(event, projectId, undefined, (id, signal) => git.switchBranch(id, name, tokens.take(event.sender.id, id, "switch", token), signal), true);
 			return { ok: true };
+		} catch (error) {
+			return { ok: false, code: remoteGitFailureCode(error) };
+		}
+	});
+	ipcMain.handle(ipcChannels.gitRemoteDiscard, async (event, projectId: unknown, group: unknown, value: unknown, token: unknown): Promise<RemoteGitDiscardResult> => {
+		try {
+			const result = await read(event, projectId, undefined, (id, signal) => git.discard(id, group, fileTarget(id, value), tokens.take(event.sender.id, id, "discard", token), signal), true);
+			return { ok: true, recoveryRef: result.recoveryRef };
 		} catch (error) {
 			return { ok: false, code: remoteGitFailureCode(error) };
 		}
