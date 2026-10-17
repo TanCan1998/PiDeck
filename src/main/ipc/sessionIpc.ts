@@ -1034,6 +1034,9 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			if (child?.filePath) record.childSessionPath = child.filePath;
 			if (child) record.childSessionId = child.id;
 		}
+		if (liveTarget?.agentId) {
+			agentManager.syncSubagentPerfSpans(liveTarget.agentId, records);
+		}
 		return records;
 	});
 	/**
