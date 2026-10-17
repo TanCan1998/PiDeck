@@ -81,6 +81,7 @@
     "build:session-index": "node scripts/build-session-index.mjs",
     "build:file-index": "node scripts/build-file-index.mjs",
     "build:session-store": "node scripts/build-session-store.mjs",
+    "gen:pinyin-table": "node scripts/gen-pinyin-table.mjs",
     "build:announcements": "node scripts/build-announcements.js",
     "check:announcements": "node scripts/build-announcements.js --check",
     "check:xueprompts": "node scripts/check-xueprompts.mjs",

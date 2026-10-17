@@ -28,6 +28,7 @@ import { HostPluginDockButtons } from "../plugins/HostPluginDockButtons";
 import { BridgeGuiSlot } from "../bridge/BridgeSlot";
 import { MorphingSearch, type MorphingSearchItem } from "../motion/morphing-search";
 import { parseSidebarNavTab } from "../../utils/sidebarNavTab";
+import { pinyinKeys } from "../../utils/pinyinSearch";
 import { displayProjectDirectoryName, isChatProject } from "../../rendererUtils";
 import { formatAccelerator } from "../../../../shared/shortcuts";
 import { desktopApi } from "../../desktopApi";
@@ -247,12 +248,15 @@ export function SidebarContent(props: SidebarContentProps) {
 
 	// MorphingSearch 检索项：扁平化所有项目 + 会话，供命令面板跳转。
 	// 项目项用目录名（chat 用「Chat」），会话项用标题 + 预览；选中即打开/选中目标。
+	// pinyin：中文标题的首字母/全拼键（纯字母查询才能命中，键按标题缓存）。
 	const searchItems: MorphingSearchItem[] = [];
 	for (const project of controller.catalog.projects) {
+		const projectTitle = displayProjectDirectoryName(project);
 		searchItems.push({
 			id: `project:${project.id}`,
-			title: displayProjectDirectoryName(project),
+			title: projectTitle,
 			description: project.path,
+			pinyin: pinyinKeys(projectTitle),
 			icon: isChatProject(project) ? MessageSquare : Folder,
 			onSelect: () => {
 				actions.projects.select(project.id);
@@ -260,10 +264,12 @@ export function SidebarContent(props: SidebarContentProps) {
 			},
 		});
 		for (const session of controller.catalog.sessionsByProject[project.id] ?? []) {
+			const sessionTitle = sessionDisplayName(session.title, session.forked) ?? session.title;
 			searchItems.push({
 				id: `session:${session.id}`,
-				title: sessionDisplayName(session.title, session.forked) ?? session.title,
+				title: sessionTitle,
 				description: session.preview,
+				pinyin: pinyinKeys(sessionTitle),
 				icon: MessageSquare,
 				onSelect: () => {
 					void actions.sessions.open(project.id, session.id);

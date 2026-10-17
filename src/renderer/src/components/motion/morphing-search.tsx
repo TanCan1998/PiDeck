@@ -10,6 +10,7 @@ import { useOnOpen } from "@/lib/hooks/use-on-open";
 import { useRowCursor } from "@/lib/hooks/use-row-cursor";
 import { cn } from "@/lib/utils";
 import { MORPHING_SEARCH_HEADER_HEIGHT, isPlausibleAnchorRect, resolveMorphingSearchGeometry } from "./morphingSearchGeometry";
+import { filterSearchItems } from "./morphingSearchFilter";
 
 // Keeps the Wallet Card feel with a little more time to read the morph.
 const SEARCH_MORPH: Transition = {
@@ -30,6 +31,12 @@ export type MorphingSearchItem = {
 	title: string;
 	description?: string;
 	keywords?: string[];
+	/**
+	 * 标题的拼音键（`src/renderer/src/utils/pinyinSearch.ts`）：给了就能被首字母/
+	 * 全拼命中（"ylcx" → 用量查询）。渲染层本地过滤拿不到 sidecar 索引，所以键
+	 * 由调用方算好（自带按标题缓存）。
+	 */
+	pinyin?: import("../../utils/pinyinSearch").PinyinKeys | null;
 	icon?: LucideIcon;
 	onSelect?: () => void;
 };
@@ -112,12 +119,7 @@ export function MorphingSearch({ items, placeholder = "Search", shortcut = "f", 
 		setOpen(true);
 	}, [measureAnchor, setOpen]);
 
-	const filteredItems = useMemo(() => {
-		const needle = query.trim().toLowerCase();
-		if (!needle) return items;
-
-		return items.filter((item) => [item.title, item.description ?? "", ...(item.keywords ?? [])].join(" ").toLowerCase().includes(needle));
-	}, [items, query]);
+	const filteredItems = useMemo(() => filterSearchItems(items, query), [items, query]);
 
 	const { activeIndex, moveTo, moveActive } = useRowCursor(filteredItems, query);
 
