@@ -27,6 +27,7 @@ import { RemoteHostRepair, type HostRepairAction } from "../remote/RemoteHostRep
 import { PendingConfirmationBroker } from "../security/PendingConfirmationBroker";
 import type { RemoteHostConnectionService } from "../remote/RemoteHostConnectionService";
 import { parseSshConfig } from "../remote/SshConfigCandidates";
+import { normalizeRemoteHostIdentityFile, REMOTE_HOST_IDENTITY_FILE_INVALID } from "../remote/RemoteHostIdentityFile";
 import { RemoteHostStore } from "../remote/RemoteHostStore";
 import { SshHostPinStore } from "../remote/SshHostPinStore";
 
@@ -109,28 +110,40 @@ function safeCurrentUser(): string {
  * Validate a manual add. Every field becomes part of SSH argv or a known_hosts alias, so it is checked
  * here rather than trusted: the renderer's form is a convenience, not a guarantee.
  */
-function readAddInput(value: unknown): { label: string; hostName: string; user?: string; port?: number; identityFile?: string } | null {
-	if (typeof value !== "object" || value === null) return null;
+type AddInput = { label: string; hostName: string; user?: string; port?: number; identityFile?: string };
+type AddInputRead = { ok: true; input: AddInput } | { ok: false; code: string };
+
+function readAddInput(value: unknown): AddInputRead {
+	const invalid = (): AddInputRead => ({ ok: false, code: "REMOTE_HOST_ADD_INVALID" });
+	if (typeof value !== "object" || value === null) return invalid();
 	const input = value as Record<string, unknown>;
 	const label = typeof input.label === "string" ? input.label.trim() : "";
 	const hostName = typeof input.hostName === "string" ? input.hostName.trim() : "";
-	if (label.length === 0 || label.length > MAX_LABEL || /[\x00-\x1f\x7f]/.test(label)) return null;
-	if (hostName.length === 0 || hostName.length > 1024 || !HOST_NAME.test(hostName)) return null;
+	if (label.length === 0 || label.length > MAX_LABEL || /[\x00-\x1f\x7f]/.test(label)) return invalid();
+	if (hostName.length === 0 || hostName.length > 1024 || !HOST_NAME.test(hostName)) return invalid();
 	const user = typeof input.user === "string" ? input.user.trim() : "";
-	if (user.length > 0 && (user.length > 256 || !SAFE_USER.test(user))) return null;
+	if (user.length > 0 && (user.length > 256 || !SAFE_USER.test(user))) return invalid();
 	const rawPort = input.port;
 	let port: number | undefined;
 	if (rawPort !== undefined && rawPort !== null && rawPort !== "") {
 		const parsed = typeof rawPort === "number" ? rawPort : Number(rawPort);
 		// A bad port is rejected rather than defaulted: silently using 22 would connect somewhere else.
-		if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 65535) return null;
+		if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 65535) return invalid();
 		port = parsed;
 	}
-	const identityFile = typeof input.identityFile === "string" && input.identityFile.trim().length > 0 ? input.identityFile.trim() : undefined;
-	if (identityFile !== undefined && (identityFile.length > 4096 || /[\x00-\x1f\x7f]/.test(identityFile))) return null;
+	// F4（security review）：SSH config 里 `IdentityFile ~/.ssh/id_*` 是最常见形态，而 store 只接受本机
+	// 绝对路径（`-i` 实参，不经过 shell，`~` 不会被展开）。展开/规范化是 main 的职责，且必须发生在
+	// `createDraft` 之前——否则失败会以不透明的 `REMOTE_HOST_STORE_INVALID` 冒出来。
+	// 「路径本身不合法」用独立稳定码，与「表单其它字段不合法」区分：这是真实配置形态，用户需要知道原因。
+	const rawIdentityFile = typeof input.identityFile === "string" && input.identityFile.trim().length > 0 ? input.identityFile : undefined;
+	let identityFile: string | undefined;
+	if (rawIdentityFile !== undefined) {
+		identityFile = normalizeRemoteHostIdentityFile(rawIdentityFile);
+		if (identityFile === undefined) return { ok: false, code: REMOTE_HOST_IDENTITY_FILE_INVALID };
+	}
 	// `null` and "absent" both mean "use the default"; the store models absence as undefined, so collapse here
 	// rather than letting a null reach it and be written as a literal.
-	return { label, hostName, ...(user.length > 0 ? { user } : {}), ...(port === undefined ? {} : { port }), ...(identityFile === undefined ? {} : { identityFile }) };
+	return { ok: true, input: { label, hostName, ...(user.length > 0 ? { user } : {}), ...(port === undefined ? {} : { port }), ...(identityFile === undefined ? {} : { identityFile }) } };
 }
 
 /**
@@ -282,16 +295,14 @@ export function registerRemoteHostIpc(input: { enabled: boolean; list: () => Pro
 	ipcMain.handle(ipcChannels.remoteHostAdd, async (event, value: unknown): Promise<RemoteHostAddResult> => {
 		if (!input.enabled) return { ok: false, code: "REMOTE_FEATURE_DISABLED" };
 		const parsed = readAddInput(value);
-		if (parsed === null) return { ok: false, code: "REMOTE_HOST_ADD_INVALID" };
+		if (!parsed.ok) return { ok: false, code: parsed.code };
+		const add = parsed.input;
 		const senderId = senderIdOf(event.sender);
 		if (senderId === undefined) return { ok: false, code: "REMOTE_HOST_ADD_INVALID" };
 		try {
 			const { store } = await openStores();
 			const revision = store.getSnapshot().revision;
-			const profile = await store.createDraft(
-				{ label: parsed.label, sshHost: parsed.hostName, connectTimeoutMs: 10_000, ...(parsed.user === undefined ? {} : { user: parsed.user }), ...(parsed.port === undefined ? {} : { port: parsed.port }), ...(parsed.identityFile === undefined ? {} : { identityFile: parsed.identityFile }) },
-				revision,
-			);
+			const profile = await store.createDraft({ label: add.label, sshHost: add.hostName, connectTimeoutMs: 10_000, ...(add.user === undefined ? {} : { user: add.user }), ...(add.port === undefined ? {} : { port: add.port }), ...(add.identityFile === undefined ? {} : { identityFile: add.identityFile }) }, revision);
 			// `createDraft` is a CAS write, so the revision it committed under is already stale here.
 			// `offerPin` validates against the *current* revision, so it has to be re-read after the write;
 			// passing the pre-write value always fails as REMOTE_HOST_REVISION_CONFLICT. Same discipline the

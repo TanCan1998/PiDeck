@@ -98,6 +98,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function refuse(code: string): never {
 	throw new Error(code);
 }
+/**
+ * 标记「这次失败是**输出不可信**」（缺标记 / JSON 撕裂 / 结果形状非法 / 远端 revision 畸形），
+ * 而不是「守卫脚本亲自报告了一个确定码」。提交路径必须区分两者：
+ * - 确定码（fileChanged/transferInvalid/... 由脚本写在 result 里）⇒ rename 没有发生，报告原码；
+ * - 输出不可信 ⇒ 脚本可能已经 rename 后才丢失回执，只能报「结果未确认」（F5）。
+ * message 仍是既有稳定码，跨模块/稳定码断言不受影响。
+ */
+function untrusted(): never {
+	const error = new Error(REMOTE_SESSION_WRITE_GUARD_CODES.transferInvalid) as Error & { untrustedOutput?: true };
+	error.untrustedOutput = true;
+	throw error;
+}
+
+/** 只读判据：`true` 表示「输出不可信」（与脚本明确报告的码区分）。 */
+export function isRemoteSessionWriteGuardUntrustedOutput(error: unknown): boolean {
+	return isRecord(error) && error.untrustedOutput === true;
+}
 const DIGEST = /^[0-9a-f]{64}$/;
 const INTEGER_ID = /^\d{1,40}$/;
 
@@ -148,19 +165,27 @@ export function buildRemoteSessionWriteGuardCommand(input: { nodePath: string; r
 /** 标记后只接受一个 JSON 结果；失败码与体积参数白名单化，不回传 errno/路径/命令。 */
 export function parseRemoteSessionWriteGuardResult(stdout: string, marker: string): RemoteSessionFileRevision | undefined {
 	const start = stdout.indexOf(marker);
-	if (start < 0) refuse(REMOTE_SESSION_WRITE_GUARD_CODES.transferInvalid);
+	if (start < 0) untrusted();
 	let value: unknown;
 	try {
 		value = JSON.parse(stdout.slice(start + marker.length));
 	} catch {
-		refuse(REMOTE_SESSION_WRITE_GUARD_CODES.transferInvalid);
+		untrusted();
 	}
-	if (!isRecord(value)) refuse(REMOTE_SESSION_WRITE_GUARD_CODES.transferInvalid);
-	if (value.ok === true) return value.revision === undefined ? undefined : readRemoteSessionFileRevision(value.revision);
-	if (value.ok !== false || typeof value.code !== "string" || !(value.code in REMOTE_SESSION_WRITE_GUARD_CODES) || !Object.prototype.hasOwnProperty.call(REMOTE_SESSION_WRITE_GUARD_CODES, value.code)) refuse(REMOTE_SESSION_WRITE_GUARD_CODES.transferInvalid);
+	if (!isRecord(value)) untrusted();
+	if (value.ok === true) {
+		if (value.revision === undefined) return undefined;
+		// 远端量到的 revision 形状非法 = 输出不可信，不是脚本报告的码。
+		try {
+			return readRemoteSessionFileRevision(value.revision);
+		} catch {
+			untrusted();
+		}
+	}
+	if (value.ok !== false || typeof value.code !== "string" || !(value.code in REMOTE_SESSION_WRITE_GUARD_CODES) || !Object.prototype.hasOwnProperty.call(REMOTE_SESSION_WRITE_GUARD_CODES, value.code)) untrusted();
 	const key = value.code;
 	const code = Object.entries(REMOTE_SESSION_WRITE_GUARD_CODES).find(([name]) => name === key)?.[1];
-	if (!code) refuse(REMOTE_SESSION_WRITE_GUARD_CODES.transferInvalid);
+	if (!code) untrusted();
 	const error = new Error(code);
 	if (
 		value.code === "fileTooLarge" &&

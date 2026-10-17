@@ -2037,6 +2037,10 @@ export class SessionRuntimeCoordinator {
 		const failure = remoteSessionHistoryWriteFailure(error);
 		if (failure.code === REMOTE_SESSION_HISTORY_WRITER_CODES.fileTooLarge) return new SessionRuntimeCommandError("SESSION_FILE_TOO_LARGE", failure.code, failure.details);
 		if (failure.code === REMOTE_SESSION_HISTORY_WRITER_CODES.messageNotFound) return new SessionRuntimeCommandError("MESSAGE_NOT_FOUND", failure.code);
+		// F5：提交 rename 已发生但回执丢失（REMOTE_SESSION_HISTORY_WRITER_RESULT_UNCONFIRMED）也落在这里，
+		// 但 debugDetails 保留独立稳定码——渲染层必须据此显示「结果未确认，重新加载核对，不自动重试」，
+		// 不能显示通用的「会话操作失败，请重试」（与远端 Git / 远端文本保存同一条产品口径）。
+		// 语义方向：本机不知道远端是否已经替换，宁可让用户核对，也不谎报成功或提示重试。
 		return new SessionRuntimeCommandError("SESSION_COMMAND_FAILED", failure.code);
 	}
 

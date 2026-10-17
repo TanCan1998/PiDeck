@@ -94,7 +94,7 @@ async function fixture(t, overrides) {
 		},
 	};
 	const input = { hostId: HOST_ID, generation: 1, nonce: NONCE, expectedBundleSha256: manifest.bundleSha256, sshConnection: SSH, scpConnection: SCP, launcher };
-	return { manifest, session, starts, input };
+	return { manifest, session, starts, input, launcher };
 }
 
 test("an unsupported remote Node is rejected before opening the entry", async () => {
@@ -195,6 +195,84 @@ test("a supported remote Node reaches the bootstrap launch with fresh pinned inv
 		["ssh-batch", "ssh-batch", "scp"],
 	);
 	assert.ok(built[1].options.bootstrap, "the entry uses a separate fresh preflight from the version probe");
+});
+
+test("a confirmed bootstrap runs the host-side retention sweep after activation (F2)", async (t) => {
+	const { manifest, input, launcher } = await fixture(t);
+	const calls = { sweeps: [], debug: [], warn: [] };
+	const { bootstrapPinnedHost } = loadTsCommonJs("src/main/remote/RemoteBootstrapSession.ts", {
+		stubs: {
+			"./SshVerifiedConnection": {
+				async buildPinnedSshInvocation(_directory, _hostId, kind) {
+					return kind === "scp" ? SCP : SSH;
+				},
+			},
+			"./RemoteBundleMaintenance": {
+				async maintainDeployedBundles(value) {
+					calls.sweeps.push(value);
+					return { removedBundles: 1, keptBundles: 2, removedStaging: 0, keptStaging: 1, removedStaleLock: false, unverifiable: 0, skipped: [] };
+				},
+			},
+			"../logging/sharedLogger": { getAppLogger: () => ({ debug: (...args) => calls.debug.push(args), warn: (...args) => calls.warn.push(args) }) },
+		},
+	});
+	const client = {
+		sshPath: SSH.executable,
+		scpPath: SCP.executable,
+		env: SSH.env,
+		async run() {
+			return { exitCode: 0, stdout: "v22.3.0\n" };
+		},
+	};
+	const deployed = await bootstrapPinnedHost({ userDataDir: "/ignored", hostId: HOST_ID, generation: 1, nonce: NONCE, nodePath: "/usr/bin/node", client, launcher });
+	assert.equal(deployed.bundleSha256, manifest.bundleSha256);
+	// sweep 的参数来自**已确认的激活结果**，不是输入或猜测。
+	assert.deepEqual(
+		calls.sweeps.map((value) => [value.hostId, value.nodePath, value.deployRoot, value.activeBundleSha256]),
+		[[HOST_ID, "/usr/bin/node", "/home/test/.pideck/remote-host", manifest.bundleSha256]],
+	);
+	assert.equal(calls.warn.length, 0);
+	// 成功只记 debug 摘要；日志里只有身份与计数，没有远端路径。
+	assert.equal(calls.debug.length, 1);
+	assert.equal(calls.debug[0][0], "remote");
+	assert.equal(calls.debug[0][1], "REMOTE_MAINTENANCE_SWEEP");
+	assert.equal(calls.debug[0][2].hostId, HOST_ID);
+	assert.equal(JSON.stringify(calls.debug[0][2]).includes("/home/test"), false, "日志不得出现远端路径");
+});
+
+test("a sweep failure is non-fatal and is logged as a stable code only (F2)", async (t) => {
+	const { manifest, input, launcher } = await fixture(t);
+	const calls = { warn: [] };
+	const { bootstrapPinnedHost } = loadTsCommonJs("src/main/remote/RemoteBootstrapSession.ts", {
+		stubs: {
+			"./SshVerifiedConnection": {
+				async buildPinnedSshInvocation(_directory, _hostId, kind) {
+					return kind === "scp" ? SCP : SSH;
+				},
+			},
+			"./RemoteBundleMaintenance": {
+				async maintainDeployedBundles() {
+					throw new Error("REMOTE_MAINTENANCE_SWEEP_FAILED");
+				},
+			},
+			"../logging/sharedLogger": { getAppLogger: () => ({ debug: () => undefined, warn: (...args) => calls.warn.push(args) }) },
+		},
+	});
+	const client = {
+		sshPath: SSH.executable,
+		scpPath: SCP.executable,
+		env: SSH.env,
+		async run() {
+			return { exitCode: 0, stdout: "v22.3.0\n" };
+		},
+	};
+	// 部署已经成功：清理失败绝不能把它变成一次失败的 bootstrap。
+	const deployed = await bootstrapPinnedHost({ userDataDir: "/ignored", hostId: HOST_ID, generation: 1, nonce: NONCE, nodePath: "/usr/bin/node", client, launcher });
+	assert.equal(deployed.bundleSha256, manifest.bundleSha256);
+	assert.equal(calls.warn.length, 1);
+	assert.equal(calls.warn[0][1], "REMOTE_MAINTENANCE_SWEEP_FAILED");
+	assert.equal(calls.warn[0][2].hostId, HOST_ID);
+	assert.equal(calls.warn[0][2].code, "REMOTE_MAINTENANCE_SWEEP_FAILED");
 });
 
 test("ready matches nonce and helper manifest before pinned scp and finalize", async (t) => {

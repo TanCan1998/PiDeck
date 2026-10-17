@@ -129,6 +129,22 @@ test("paths that could break out of the quoted command are refused", () => {
 	assert.throws(() => buildRemoteSessionWindowCommand({ remotePath: "/a'; rm -rf /.jsonl", windowBytes: 10, nonce: "abc12345abc12345" }), /REMOTE_SESSION_HISTORY_PATH_INVALID/);
 });
 
+test("only already-canonical absolute paths are accepted (F6: no empty/./.. segments, no duplicate separators)", () => {
+	// 审查探针：旧实现原样接受它，认为「反正远端 shell 会解析」。路径权威必须自己拒绝。
+	assert.equal(validateRemoteSessionHistoryPath("/home/u/.pi/agent/sessions/../../../etc/passwd"), undefined);
+	assert.equal(validateRemoteSessionHistoryPath("/home/u/.pi/agent/sessions/../x.jsonl"), undefined);
+	// 其余非规范形式：重复分隔符、空段、当前目录段、尾斜杠、根、控制字符/单引号（原有判据）。
+	for (const bad of ["//home/u/a.jsonl", "/home//u/a.jsonl", "/home/u/./a.jsonl", "/home/u/a.jsonl/.", "/home/u/a.jsonl/..", "/home/u/a.jsonl//", "/", "/home/u/\n.jsonl", "/home/u/it's.jsonl"]) assert.equal(validateRemoteSessionHistoryPath(bad), undefined, `expected rejection: ${JSON.stringify(bad)}`);
+	// 合法形状保持不变：普通文件、隐藏目录、名字里带点、深路径。
+	for (const good of ["/a", "/home/dev/a.jsonl", "/home/dev/.pi/agent/sessions/encoded-cwd/2026_x.jsonl", "/home/dev/a.b.c", "/x/.hidden/y"]) assert.equal(validateRemoteSessionHistoryPath(good), good);
+	// 读写命令的构造期同样拒绝，且一个远端命令都不发：判据是同一实现，不存在第二套「宽松入口」。
+	assert.throws(() => buildRemoteSessionWindowCommand({ remotePath: "/home/dev/.pi/../etc/passwd", windowBytes: 10, nonce: "abc12345abc12345" }), /REMOTE_SESSION_HISTORY_PATH_INVALID/);
+	assert.equal(joinRemoteSessionRoot("/home/dev/.pi/agent/sessions", "/home/dev/elsewhere.jsonl"), undefined);
+	assert.equal(joinRemoteSessionRoot("/home/dev//agent/sessions", "a.jsonl"), undefined);
+	assert.equal(joinRemoteSessionRoot("/home/dev/.pi/agent/sessions", "./a.jsonl"), undefined);
+	assert.equal(joinRemoteSessionRoot("/home/dev/.pi/agent/sessions", "a/../b.jsonl"), undefined);
+});
+
 test("a relative remote identity is joined onto the resolved session root, never guessed", () => {
 	assert.equal(joinRemoteSessionRoot("/home/dev/.pi/agent/sessions", "encoded-cwd/2026_x.jsonl"), "/home/dev/.pi/agent/sessions/encoded-cwd/2026_x.jsonl");
 	assert.equal(joinRemoteSessionRoot("/home/dev/.pi/agent/sessions", "../escape.jsonl"), undefined);

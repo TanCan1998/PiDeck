@@ -1861,6 +1861,13 @@ test("remote write failures map onto the session command error codes without lea
 	const failed = await failing(new Error("REMOTE_SESSION_HISTORY_WRITER_COMMAND_FAILED")).deleteCatalogMessage("session-1", "message-1");
 	assert.equal(failed.error.code, "SESSION_COMMAND_FAILED");
 	assert.equal(failed.error.debugDetails, "REMOTE_SESSION_HISTORY_WRITER_COMMAND_FAILED");
+	// F5：提交 rename 已发生但回执丢失 = 结果未确认（可能已生效）。必须保留独立 debugDetails，
+	// 渲染层据此显示「重新加载核对、不自动重试」，而不是通用「会话操作失败，请重试」。
+	const unconfirmed = await failing(new Error("REMOTE_SESSION_HISTORY_WRITER_RESULT_UNCONFIRMED")).deleteCatalogMessage("session-1", "message-1");
+	assert.equal(unconfirmed.ok, false);
+	assert.equal(unconfirmed.error.code, "SESSION_COMMAND_FAILED");
+	assert.equal(unconfirmed.error.debugDetails, "REMOTE_SESSION_HISTORY_WRITER_RESULT_UNCONFIRMED");
+	assert.notEqual(unconfirmed.error.debugDetails, "REMOTE_SESSION_HISTORY_WRITER_COMMAND_FAILED");
 	// 裸异常（写面之外的装配错误）折叠成传输失败码，不外传自由文本。
 	const folded = await failing(new Error("boom /home/dev/.pi/agent/sessions/x.jsonl")).editCatalogMessage("session-1", "message-1", "updated");
 	assert.equal(folded.error.debugDetails, "REMOTE_SESSION_HISTORY_WRITER_TRANSPORT_FAILED");

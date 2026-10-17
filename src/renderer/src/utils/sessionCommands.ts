@@ -20,6 +20,13 @@ const SESSION_COMMAND_ERROR_KEYS: Record<SessionCommandError["code"], Translatio
 	SESSION_FILE_TOO_LARGE: "sessionCommand.fileTooLarge",
 };
 
+/** F5: stable remote-write debugDetails get dedicated copy (only for SESSION_COMMAND_FAILED). */
+const REMOTE_WRITE_DETAIL_KEYS: Record<string, TranslationKey> = {
+	REMOTE_SESSION_HISTORY_WRITER_FILE_CHANGED: "sessionCommand.remoteFileChanged",
+	// The commit rename may already have happened: the copy must say "reload to check, no automatic retry", not "try again".
+	REMOTE_SESSION_HISTORY_WRITER_RESULT_UNCONFIRMED: "sessionCommand.remoteWriteUnconfirmed",
+};
+
 export class SessionCommandFailure extends Error {
 	readonly code: SessionCommandError["code"];
 	readonly params?: SessionCommandError["params"];
@@ -28,7 +35,8 @@ export class SessionCommandFailure extends Error {
 	readonly needsRestart?: boolean;
 
 	constructor(error: SessionCommandError) {
-		super(t(error.code === "SESSION_COMMAND_FAILED" && error.debugDetails === "REMOTE_SESSION_HISTORY_WRITER_FILE_CHANGED" ? "sessionCommand.remoteFileChanged" : SESSION_COMMAND_ERROR_KEYS[error.code], error.params));
+		const detailKey = error.code === "SESSION_COMMAND_FAILED" && error.debugDetails !== undefined ? REMOTE_WRITE_DETAIL_KEYS[error.debugDetails] : undefined;
+		super(t(detailKey ?? SESSION_COMMAND_ERROR_KEYS[error.code], error.params));
 		this.name = "SessionCommandFailure";
 		this.code = error.code;
 		this.params = error.params;

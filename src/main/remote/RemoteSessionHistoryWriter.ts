@@ -47,7 +47,7 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { buildRemoteSessionWriteGuardCommand, parseRemoteSessionWriteGuardResult, REMOTE_SESSION_WRITE_GUARD_CODES, REMOTE_SESSION_WRITE_MAX_BYTES, type RemoteSessionFileRevision } from "./RemoteSessionWriteGuard";
+import { buildRemoteSessionWriteGuardCommand, isRemoteSessionWriteGuardUntrustedOutput, parseRemoteSessionWriteGuardResult, REMOTE_SESSION_WRITE_GUARD_CODES, REMOTE_SESSION_WRITE_MAX_BYTES, type RemoteSessionFileRevision } from "./RemoteSessionWriteGuard";
 // hostId 与 ssh 身份判据只允许有一份：与持久化边界共用 shared 的权威取值域。
 import { PROJECT_HOST_ID_PATTERN, readSshSessionLocator, type SshSessionLocator } from "../../shared/projectLocation";
 import type { ImageContent } from "../../shared/types";
@@ -81,8 +81,22 @@ export const REMOTE_SESSION_HISTORY_WRITER_CODES = {
 	pathUnresolved: "REMOTE_SESSION_HISTORY_WRITER_PATH_UNRESOLVED",
 	/** 传输层失败（ssh 起不来、超时、输出超上界）且自身不带稳定码。 */
 	transportFailed: "REMOTE_SESSION_HISTORY_WRITER_TRANSPORT_FAILED",
-	/** 远端命令退出码非 0（stderr 不外传）：目标文件没被改动，本机状态必须原样不动。 */
+	/**
+	 * 提交点**之前**的远端命令失败（读、写临时文件、快照）：目标文件没被改动，本机状态必须原样不动，
+	 * 调用方可以安全地重读后重试。
+	 *
+	 * 提交命令（rename）本身不适用这条保证：见 `resultUnconfirmed`。
+	 */
 	commandFailed: "REMOTE_SESSION_HISTORY_WRITER_COMMAND_FAILED",
+	/**
+	 * 提交命令已经发出、但它的回执丢了（传输层失败/非 0 退出/stdout 里没有可解析结果）：
+	 * **rename 可能已经发生**，远端文件可能已是新内容。
+	 *
+	 * 为什么需要独立码：旧实现把所有提交错误都报成 `commandFailed`/「目标文件没被改动」，而守卫脚本
+	 * 是「先 renameSync 再写结果」，SSH 恰好在 rename 之后断开时用户会被误导为「什么都没发生，重试即可」。
+	 * 这个码的语义是「结果未确认」——必须重新加载远端会话核对，**不自动重试**（重试可能基于旧快照再写一次）。
+	 */
+	resultUnconfirmed: "REMOTE_SESSION_HISTORY_WRITER_RESULT_UNCONFIRMED",
 	/** 读回的字节与命令请求的不一致（标记缺失/长度不符/编码非法）：输出不可信，绝不据此改写。 */
 	transferInvalid: "REMOTE_SESSION_HISTORY_WRITER_TRANSFER_INVALID",
 	/** 文件超出可改写上界（读 + 写都是 O(字节/分块) 条命令）。 */
@@ -754,7 +768,15 @@ export function createRemoteSessionHistoryWriter(ports: RemoteSessionHistoryWrit
 
 	/**
 	 * 私密临时文件分块写完 → 验证源版本与上传摘要 → 保留权限并同目录原子替换。
-	 * 失败不重试；临时文件上传为0600，提交失败尝试恢复私密权限；本切片不自动删除远端文件。
+	 *
+	 * 失败分两类，**不能混用**（F5，security review §(f)）：
+	 * - 提交命令之前（分块写临时文件）失败 ⇒ `commandFailed`：目标文件一个字节都没动，可以安全地重读后重试；
+	 * - 提交命令本身失败 ⇒ `resultUnconfirmed`：守卫脚本的执行顺序是「校验 → renameSync → 写结果」，
+	 *   传输层断开、非 0 退出、或 stdout 里没有可解析结果时，rename **可能已经发生**。旧实现把它归成
+	 *   `commandFailed`（注释还写着「目标文件没被改动」），用户会被告知「重试即可」——那是基于错误前提的重试。
+	 *   这个分支绝不自动重试，也绝不谎报成功；调用方/渲染层必须重新加载核对（见 coordinator 的错误映射）。
+	 *
+	 * 临时文件上传为 0600；本切片不自动删除远端文件（未确认时残留的 `.pideck-tmp` 不在本切片的清理面内）。
 	 */
 	async function writeRemoteFile(hostId: string, nodePath: string, remotePath: string, bytes: Buffer, source: RemoteSessionFileRevision): Promise<void> {
 		if (bytes.length > maxFileBytes) throw stable(REMOTE_SESSION_HISTORY_WRITER_CODES.fileTooLarge, { size: bytes.length, limit: maxFileBytes });
@@ -765,9 +787,27 @@ export function createRemoteSessionHistoryWriter(ports: RemoteSessionHistoryWrit
 			if (result.exitCode !== 0) throw stable(REMOTE_SESSION_HISTORY_WRITER_CODES.commandFailed);
 		}
 		const nonce = randomBytes(8).toString("hex");
-		const replaced = await run(hostId, buildRemoteSessionWriteGuardCommand({ operation: "commit", nodePath, remotePath, temporaryPath: tempPath, source, nonce, maxBytes: maxFileBytes, nextDigest: createHash("sha256").update(bytes).digest("hex"), nextSize: bytes.length }));
-		if (replaced.exitCode !== 0) throw stable(REMOTE_SESSION_HISTORY_WRITER_CODES.commandFailed);
-		if (parseRemoteSessionWriteGuardResult(replaced.stdout, remoteSessionHistoryMarker(nonce)) !== undefined) throw stable(REMOTE_SESSION_HISTORY_WRITER_CODES.transferInvalid);
+		const marker = remoteSessionHistoryMarker(nonce);
+		let replaced: { exitCode: number; stdout: string };
+		try {
+			replaced = await run(hostId, buildRemoteSessionWriteGuardCommand({ operation: "commit", nodePath, remotePath, temporaryPath: tempPath, source, nonce, maxBytes: maxFileBytes, nextDigest: createHash("sha256").update(bytes).digest("hex"), nextSize: bytes.length }));
+		} catch {
+			// 传输层抛错（ssh 断开/超时/输出超上界）：命令已发出，rename 是否发生无法从本地判断。
+			throw stable(REMOTE_SESSION_HISTORY_WRITER_CODES.resultUnconfirmed);
+		}
+		if (replaced.exitCode !== 0) throw stable(REMOTE_SESSION_HISTORY_WRITER_CODES.resultUnconfirmed);
+		let revision: RemoteSessionFileRevision | undefined;
+		try {
+			revision = parseRemoteSessionWriteGuardResult(replaced.stdout, marker);
+		} catch (error) {
+			// 输出不可信（标记缺失/JSON 撕裂/形状非法）⇒ 无法证明 rename 没发生 ⇒ 未确认。
+			// 但脚本亲自报告的守卫码（fileChanged/transferInvalid 等）是**提交前**的明确拒绝（result 只在
+			// catch 里写，rename 之后只会写 {ok:true}），必须原样保留——把它们也折叠成「未确认」会让冲突诊断失真。
+			if (isRemoteSessionWriteGuardUntrustedOutput(error)) throw stable(REMOTE_SESSION_HISTORY_WRITER_CODES.resultUnconfirmed);
+			throw error;
+		}
+		// commit 动作的成功应答是 {ok:true}（没有 revision）；带 revision 说明这不是本次提交的结果，输出不可信。
+		if (revision !== undefined) throw stable(REMOTE_SESSION_HISTORY_WRITER_CODES.transferInvalid);
 	}
 
 	async function resolveRemotePath(input: { hostId: string; locator: SshSessionLocator }): Promise<string> {

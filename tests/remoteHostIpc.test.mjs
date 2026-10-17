@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
@@ -228,12 +229,15 @@ test("diagnostics history is capped per request", async () => {
 function addFlowHandlers(options = {}) {
 	const calls = { createDraft: [], offerPin: [], confirmPin: [], sent: [], discarded: [] };
 	const handlers = new Map();
+	// `~/.ssh/...` 的展开目标是**本机** home（F4）；注入固定值，测试不依赖运行机器的真实 HOME。
+	const home = options.home ?? (process.platform === "win32" ? "C:\\Users\\tester" : "/home/tester");
 	// 真实 store 的 revision 存在磁盘上，每个 open() 读回的是**同一份状态**。桩若每次 open()
 	// 都从 7 重开，就与真实语义不符（一次写入会被下一次 open 遗忘）。
 	let revision = 7;
 	const { registerRemoteHostIpc } = loadTsCommonJs("src/main/ipc/remoteHostIpc.ts", {
 		stubs: {
 			electron: { ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) } },
+			"node:os": { homedir: () => home, userInfo: () => ({ username: "tester" }) },
 			"../remote/RemoteHostStore": {
 				RemoteHostStore: {
 					async open() {
@@ -285,7 +289,7 @@ function addFlowHandlers(options = {}) {
 		isDestroyed: () => false,
 		send: (channel, payload) => calls.sent.push({ channel, payload }),
 	};
-	return { handlers, calls, sender };
+	return { handlers, calls, sender, home };
 }
 
 test("add validates every field before the store is touched", async () => {
@@ -309,6 +313,41 @@ test("add validates every field before the store is touched", async () => {
 		assert.equal(result.code, "REMOTE_HOST_ADD_INVALID");
 	}
 	assert.equal(calls.createDraft.length, 0, "invalid input must not reach the store");
+});
+
+test("add expands an SSH-config IdentityFile ~/... to a local absolute path before the draft (F4)", async () => {
+	const { handlers, calls, sender, home } = addFlowHandlers();
+	const handler = handlers.get("remote:add");
+	// 真实 config 里最常见的形态：候选列表把 `IdentityFile ~/.ssh/id_*` 原样带过来。
+	const result = await handler({ sender }, { label: "serve", hostName: "10.81.2.15", user: "deploy", identityFile: "~/.ssh/id_ed25519" });
+	assert.deepEqual(JSON.parse(JSON.stringify(result)), { ok: true, hostId: HOST_ID, status: "pending" });
+	assert.equal(calls.createDraft.length, 1);
+	assert.equal(calls.createDraft[0].draft.identityFile, join(home, ".ssh", "id_ed25519"));
+	// 展开对象是本机 home：保存值必须能被 host store 的 isAbsolute 判据接受，而不是原样带 `~`。
+	assert.equal(calls.createDraft[0].draft.identityFile.startsWith("~"), false);
+
+	// 绝对路径同样被接受（规范化后保存）。
+	const absolute = join(home, ".ssh", "id_rsa");
+	const second = await handler({ sender }, { label: "serve2", hostName: "host2.example", identityFile: absolute });
+	assert.equal(second.ok, true);
+	assert.equal(calls.createDraft[1].draft.identityFile, absolute);
+});
+
+test("add refuses identity-file forms it cannot normalize with a dedicated stable code (F4)", async () => {
+	const { handlers, calls, sender } = addFlowHandlers();
+	const handler = handlers.get("remote:add");
+	for (const identityFile of ["~root/.ssh/id_ed25519", ".ssh/id_ed25519", "keys/id", "~/.ssh/id\u0000_ed25519", `~/${"x".repeat(4090)}`]) {
+		const result = await handler({ sender }, { label: "serve", hostName: "10.81.2.15", identityFile });
+		assert.equal(result.ok, false, `expected rejection: ${JSON.stringify(identityFile)}`);
+		// 与「表单字段不合法」区分：这是真实配置形态的路径问题，UI 的 `{code}` 文案能直接指出原因。
+		assert.equal(result.code, "REMOTE_HOST_IDENTITY_FILE_INVALID");
+	}
+	assert.equal(calls.createDraft.length, 0, "an invalid identity path must not create a draft (no opaque REMOTE_HOST_STORE_INVALID)");
+
+	// 不填 identityFile 时字段保持缺省（store 里没有这个 key，表示走 alias/agent 身份链）。
+	const omitted = await handler({ sender }, { label: "serve", hostName: "10.81.2.15" });
+	assert.equal(omitted.ok, true);
+	assert.equal("identityFile" in calls.createDraft[0].draft, false);
 });
 
 test("add binds the pin offer to the calling webContents, not a renderer-supplied id", async () => {

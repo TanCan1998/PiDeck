@@ -121,14 +121,26 @@ function codeOf(error: unknown, fallback: string): string {
  * 远端会话文件的绝对路径判据（本模块唯一的路径入口）。
  *
  * 判据与 `readSshSessionLocator` / `readCanonicalRemoteProjectPath` 同域（绝对 POSIX、有界、无控制字节），
- * 只多一条**本地约束**：不接受单引号。远端命令只把路径放在单引号字面量里（`'<path>'`），放行单引号就
- * 等于允许远端路径提前闭合字面量——这里选择拒绝而不是实现一套转义，因为 pi 的会话目录形状里没有单引号，
- * 而「拒绝」能被测试与审计完整覆盖。
+ * 另加两条**本地约束**：
+ * - 不接受单引号。远端命令只把路径放在单引号字面量里（`'<path>'`），放行单引号就等于允许远端路径提前
+ *   闭合字面量——这里选择拒绝而不是实现一套转义，因为 pi 的会话目录形状里没有单引号；
+ * - 必须已经是**规范形式**（F6，security review §(f)）：重复分隔符、空段、`.`/`..` 段一律拒绝，
+ *   尾斜杠也已拒绝。文档一直称这条判据是 canonical 的，旧实现却放行
+ *   `/home/u/.pi/agent/sessions/../../../etc/passwd`；生产 catalog 写入侧虽然另有拒绝，但「唯一路径权威」
+ *   不该依赖上游都记得再查一遍（未来新增写面或 catalog 被篡改时就是缺口）。
+ *   选择拒绝而不是本地规范化：命令里的路径必须与远端真实文件逐字一致，静默 `path.posix.normalize`
+ *   会把两个不同字符串映射到同一个远端路径（符号链接语义下甚至不是同一个文件），也会掩盖调用方的
+ *   拼接错误。拒绝是可测试、可审计的。
+ *
+ * 注意 `..` 的拒绝是**词法**的：本判据不解析符号链接（远端真实身份由写守卫/读取命令自己保证）。
  */
 export function validateRemoteSessionHistoryPath(value: unknown): string | undefined {
 	if (typeof value !== "string" || value.length === 0 || value.length > MAX_REMOTE_PATH_LENGTH) return undefined;
 	if (PATH_FORBIDDEN_CHARS.test(value)) return undefined;
 	if (!value.startsWith("/") || value.endsWith("/")) return undefined;
+	// startsWith("/") 保证 segments[0] 是空串（根前缀）；其余段必须非空且不是 "." / ".."。
+	const segments = value.slice(1).split("/");
+	if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) return undefined;
 	return value;
 }
 

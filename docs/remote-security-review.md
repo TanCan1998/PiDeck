@@ -9,6 +9,9 @@
 > Audited by an AI agent lane (security-audit). This is **not** an independent human security review; see
 > §7 for that follow-up. No real host, packaged build, or cross-platform client was available in this
 > session; no Playwright/e2e test and no full `npm test` was run (both were forbidden by the task).
+> **Remediation status:** F2/F4/F5/F6 have main-side fixes + targeted tests in the follow-up batch — see
+> [remote-security-remediation.md](remote-security-remediation.md). This report's findings remain the
+> unmodified snapshot at `11f68b27d`.
 
 ## 0. Review snapshot (read this before trusting line numbers)
 

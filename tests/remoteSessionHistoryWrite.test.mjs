@@ -486,12 +486,72 @@ test("a failing remote command stops immediately: stable code, target bytes unto
 	assert.equal(writeFailure.bytes().toString("utf8"), document);
 	assert.deepEqual(writeFailure.replaceCommands(), []);
 
-	// ③ mv 失败（临时文件写成功了也不算成功）：稳定码 + 目标文件不变。
+	// ③ 提交命令失败：守卫脚本是「renameSync 之后才写结果」，所以非 0 退出/回执丢失不能声称「目标未改动」，
+	// 必须报独立的「结果未确认」码（F5）；此处假 shell 没有执行 rename，故文件确实没变，但语义上不允许依赖这点。
 	const replaceFailure = fakeShell({ [TARGET_PATH]: document }, { failAt: isCommit });
-	assert.equal(await rejectionCode(() => remoteMutation(replaceFailure, "delete", { entryId: "a3" })), REMOTE_SESSION_HISTORY_WRITER_CODES.commandFailed);
+	assert.equal(await rejectionCode(() => remoteMutation(replaceFailure, "delete", { entryId: "a3" })), REMOTE_SESSION_HISTORY_WRITER_CODES.resultUnconfirmed);
 	assert.equal(replaceFailure.commands.length, 5);
 	assert.equal(replaceFailure.bytes().toString("utf8"), document);
-	assert.equal(REMOTE_SESSION_HISTORY_WRITER_CODES.commandFailed.match(STABLE_CODE) !== null, true);
+	assert.equal(replaceFailure.replaceCommands().length, 1, "失败即停：提交命令只发一次，绝不自动重试");
+	assert.equal(REMOTE_SESSION_HISTORY_WRITER_CODES.resultUnconfirmed.match(STABLE_CODE) !== null, true);
+	assert.notEqual(REMOTE_SESSION_HISTORY_WRITER_CODES.resultUnconfirmed, REMOTE_SESSION_HISTORY_WRITER_CODES.commandFailed);
+});
+
+test("a commit whose rename succeeded but whose reply was lost reports result-unconfirmed, never a false 'untouched' (F5)", async (t) => {
+	const document = fixtureDocument();
+	const applied = await localMutation(t, document, "delete", ASSISTANT_TARGET);
+	/** 提交命令的标记（守卫脚本把它写在结果最前面）。 */
+	const commitMarker = (command) => GUARD_SHAPE.exec(command)?.[3];
+
+	// ① SSH 在 rename 之后断开：真实 rename 已由假 shell 执行，回执抛传输错误。
+	const dropped = fakeShell({ [TARGET_PATH]: document });
+	const droppedRun = dropped.transport.runRemoteCommand;
+	dropped.transport.runRemoteCommand = async (input) => {
+		const result = await droppedRun(input);
+		if (isCommit(input.remoteCommand)) throw new Error("SSH_HOST_COMMAND_TIMEOUT");
+		return result;
+	};
+	assert.equal(await rejectionCode(() => remoteMutation(dropped, "delete", { entryId: "a3" })), REMOTE_SESSION_HISTORY_WRITER_CODES.resultUnconfirmed);
+	assert.deepEqual(dropped.bytes(), applied, "rename 已经发生 —— 这正是‘目标未改动’不成立的原因");
+	assert.equal(dropped.replaceCommands().length, 1, "未确认不等于自动重试：提交命令只发了一次");
+
+	// ② 退出码 0 但 stdout 丢了（标记缺失）：远端已替换，本机只能报未确认。
+	const lost = fakeShell({ [TARGET_PATH]: document });
+	const lostRun = lost.transport.runRemoteCommand;
+	lost.transport.runRemoteCommand = async (input) => {
+		const result = await lostRun(input);
+		return isCommit(input.remoteCommand) ? { exitCode: 0, stdout: "" } : result;
+	};
+	assert.equal(await rejectionCode(() => remoteMutation(lost, "delete", { entryId: "a3" })), REMOTE_SESSION_HISTORY_WRITER_CODES.resultUnconfirmed);
+	assert.deepEqual(lost.bytes(), applied);
+	assert.equal(lost.replaceCommands().length, 1);
+
+	// ③ 结果行撕裂（半个 JSON）：同样无法证明 rename 没发生 ⇒ 未确认，而不是 transferInvalid。
+	const torn = fakeShell({ [TARGET_PATH]: document });
+	const tornRun = torn.transport.runRemoteCommand;
+	torn.transport.runRemoteCommand = async (input) => {
+		const result = await tornRun(input);
+		return isCommit(input.remoteCommand) ? { exitCode: 0, stdout: `${commitMarker(input.remoteCommand)}{"ok":tru` } : result;
+	};
+	assert.equal(await rejectionCode(() => remoteMutation(torn, "delete", { entryId: "a3" })), REMOTE_SESSION_HISTORY_WRITER_CODES.resultUnconfirmed);
+	assert.deepEqual(torn.bytes(), applied);
+
+	// ④ 守卫脚本**亲自报告**的提交前失败（fileChanged）必须保留原码：那是确定没有 rename 的拒绝，
+	// 折叠成「未确认」会让真正的冲突诊断失真。
+	const conflict = fakeShell({ [TARGET_PATH]: document });
+	const conflictRun = conflict.transport.runRemoteCommand;
+	let conflictCommits = 0;
+	conflict.transport.runRemoteCommand = async (input) => {
+		// 模拟守卫脚本「校验失败 ⇒ rename 未执行 ⇒ 写出 {ok:false}」：不调用原始实现，因此文件保持原样。
+		if (isCommit(input.remoteCommand)) {
+			conflictCommits += 1;
+			return { exitCode: 0, stdout: `${commitMarker(input.remoteCommand)}{"ok":false,"code":"fileChanged"}` };
+		}
+		return conflictRun(input);
+	};
+	assert.equal(await rejectionCode(() => remoteMutation(conflict, "delete", { entryId: "a3" })), REMOTE_SESSION_HISTORY_WRITER_CODES.fileChanged);
+	assert.equal(conflict.bytes().toString("utf8"), document, "脚本明确拒绝时目标文件确实未改动");
+	assert.equal(conflictCommits, 1, "未确认/失败都不自动重试：提交命令只发一次");
 });
 
 test("a truncated read is refused instead of writing back half the history", async () => {
@@ -585,6 +645,13 @@ test("invalid remote paths and identities are refused before any command is sent
 	const quoted = fakeShell({ [TARGET_PATH]: fixtureDocument() });
 	assert.equal(await rejectionCode(() => createWriter(quoted).mutate({ hostId: HOST, locator: locatorWith(`${SESSION_ROOT}/ws/it's.jsonl`), operation: "delete", messageId: "m" })), REMOTE_SESSION_HISTORY_WRITER_CODES.pathInvalid);
 	assert.deepEqual(quoted.commands, [], "路径非法时一个远端命令都不发");
+
+	// 非规范绝对路径（F6）：与读取侧同一判据，写面同样在发命令前拒绝。
+	for (const badPath of ["${SESSION_ROOT}//ws/x.jsonl", "${SESSION_ROOT}/../escape.jsonl", "${SESSION_ROOT}/./ws/x.jsonl"]) {
+		const nonCanonical = fakeShell({ [TARGET_PATH]: fixtureDocument() });
+		assert.equal(await rejectionCode(() => createWriter(nonCanonical).mutate({ hostId: HOST, locator: locatorWith(badPath), operation: "delete", messageId: "m" })), REMOTE_SESSION_HISTORY_WRITER_CODES.pathInvalid, badPath);
+		assert.deepEqual(nonCanonical.commands, [], `非规范路径必须零命令: ${badPath}`);
+	}
 
 	// hostId / locator / operation 判据。
 	const identity = fakeShell({ [TARGET_PATH]: fixtureDocument() });

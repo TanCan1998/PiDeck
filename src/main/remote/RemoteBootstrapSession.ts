@@ -1,5 +1,7 @@
 import { buildPinnedSshInvocation, type PinnedSshInvocation } from "./SshVerifiedConnection";
 import { frozenHelperBundleManifest, deployFrozenHelperBundle, type PreparedBundleResult } from "./RemoteBootstrapDeployment";
+import { maintainDeployedBundles, type RemoteBundleMaintenanceOutcome } from "./RemoteBundleMaintenance";
+import { getAppLogger } from "../logging/sharedLogger";
 import { decodeBootstrapResult, type BootstrapReadyFrame } from "./RemoteBootstrapTransfer";
 import { assertSupportedRemoteNodeVersion, buildRemoteNodeVersionCommand, REMOTE_BOOTSTRAP_ENTRY_ERROR_CODES } from "./RemoteBootstrapContract";
 import { buildLoginShellPathCommand, listNodeCandidatesFromPath, parseLoginShellPath } from "./RemoteNodeDiscovery";
@@ -190,6 +192,32 @@ export async function resolveRemoteNodeExecutable(input: { userDataDir: string; 
 	throw unsupported;
 }
 
+/**
+ * Fold a thrown value into a bare stable code for logging: messages that are not already codes could carry a
+ * path or command line, and the log must stay on the "stable codes only" discipline shared by this domain.
+ */
+function maintenanceCodeOf(error: unknown): string {
+	const message = typeof error === "object" && error !== null && "message" in error ? (error as { message?: unknown }).message : undefined;
+	return typeof message === "string" && /^[A-Z][A-Z0-9_]{2,63}$/.test(message) ? message : "REMOTE_MAINTENANCE_SWEEP_FAILED";
+}
+
+/**
+ * Run the host-side retention sweep after a **confirmed** activation（plan §4.2 / security review F2）。
+ *
+ * 非致命是构造性的：部署已经激活并验证过，清理跑不了不能把一次成功部署判成失败。日志只带 hostId 与稳定码
+ * （不含远端路径/命令），失败也只记 warn；sweep 内部自己的输出已折叠成稳定码。
+ */
+async function sweepDeployedBundles(input: { userDataDir: string; hostId: string; client: SshClientRuntime; nodePath: string; deployRoot: string; activeBundleSha256: string }): Promise<void> {
+	let outcome: RemoteBundleMaintenanceOutcome;
+	try {
+		outcome = await maintainDeployedBundles(input);
+	} catch (error) {
+		getAppLogger()?.warn("remote", "REMOTE_MAINTENANCE_SWEEP_FAILED", { hostId: input.hostId, code: maintenanceCodeOf(error) });
+		return;
+	}
+	getAppLogger()?.debug("remote", "REMOTE_MAINTENANCE_SWEEP", { hostId: input.hostId, removedBundles: outcome.removedBundles, removedStaging: outcome.removedStaging, removedStaleLock: outcome.removedStaleLock, skipped: outcome.skipped });
+}
+
 /** Re-preflight both commands against the persisted pin, then run the frozen one-file bootstrap. */
 export async function bootstrapPinnedHost(input: { userDataDir: string; hostId: string; generation: number; nonce: string; nodePath: string; client: SshClientRuntime; launcher: SshProcessLauncher }): Promise<PreparedBundleResult> {
 	const manifest = frozenHelperBundleManifest();
@@ -205,5 +233,8 @@ export async function bootstrapPinnedHost(input: { userDataDir: string; hostId: 
 	assertSupportedRemoteNodeVersion(nodeVersion.stdout);
 	const sshConnection = await buildPinnedSshInvocation(input.userDataDir, input.hostId, "ssh-batch", { client: input.client, bootstrap: { nodeExecutable: input.nodePath, protocolVersion: REMOTE_BOOTSTRAP_PROTOCOL_VERSION, bundleSha256: manifest.bundleSha256, nonce: input.nonce } });
 	const scpConnection = await buildPinnedSshInvocation(input.userDataDir, input.hostId, "scp", { client: input.client });
-	return runPreparedBootstrap({ hostId: input.hostId, generation: input.generation, nonce: input.nonce, expectedBundleSha256: manifest.bundleSha256, sshConnection, scpConnection, launcher: input.launcher });
+	const deployed = await runPreparedBootstrap({ hostId: input.hostId, generation: input.generation, nonce: input.nonce, expectedBundleSha256: manifest.bundleSha256, sshConnection, scpConnection, launcher: input.launcher });
+	// 只在**已确认激活**之后清理（plan §4.2「清理与激活判据」；F2）。sweep 失败不影响本次部署的结果。
+	await sweepDeployedBundles({ userDataDir: input.userDataDir, hostId: input.hostId, client: input.client, nodePath: input.nodePath, deployRoot: deployed.deployRoot, activeBundleSha256: deployed.bundleSha256 });
+	return deployed;
 }
