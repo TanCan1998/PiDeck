@@ -66,9 +66,9 @@ export async function initializeRemoteGitFixture(credentials: RemoteAcceptanceCr
 /** Independent Git CLI/blob/file oracle, plus hashes and metadata of every fixture file; no optional index refresh. */
 async function evidence(credentials: RemoteAcceptanceCredentials, path: string) {
 	const prefix = "set -eu; cd " + quote(path) + "; ";
-	const disk = (await runRemoteCommand(credentials, prefix + "find . -type f -exec sha256sum {} + | sort; find . -printf '%y %m %s %i %T@ %C@ %p\\n' | sort", 20_000)).stdout;
-	const status = (await runRemoteCommand(credentials, prefix + "GIT_OPTIONAL_LOCKS=0 git status --porcelain=v1 -z --untracked-files=all | base64 -w0", 20_000)).stdout;
-	const blobs = (await runRemoteCommand(credentials, prefix + "git --no-optional-locks show HEAD:tracked.txt; git --no-optional-locks show :tracked.txt; cat tracked.txt untracked.txt", 20_000)).stdout;
+	const disk = (await runRemoteCommand(credentials, prefix + "find . -type f -exec sha256sum {} + | sort; find . -printf '%y %m %s %i %T@ %C@ %p\\n' | sort", 60_000)).stdout;
+	const status = (await runRemoteCommand(credentials, prefix + "GIT_OPTIONAL_LOCKS=0 git status --porcelain=v1 -z --untracked-files=all | base64 -w0", 60_000)).stdout;
+	const blobs = (await runRemoteCommand(credentials, prefix + "git --no-optional-locks show HEAD:tracked.txt; git --no-optional-locks show :tracked.txt; cat tracked.txt untracked.txt", 60_000)).stdout;
 	return { disk, status, blobs };
 }
 

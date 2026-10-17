@@ -50,6 +50,9 @@ const {
 	REMOTE_HELPER_MAX_ID_LENGTH,
 	REMOTE_HELPER_MAX_METHOD_LENGTH,
 	REMOTE_HELPER_PROTOCOL_VERSION,
+	REMOTE_HELPER_MAX_REQUEST_TIMEOUT_MS,
+	REMOTE_GIT_READ_TIMEOUT_MS,
+	REMOTE_GIT_SYNC_TIMEOUT_MS,
 } = loadTsCommonJs("src/main/remote/RemoteHelperContract.ts");
 const { REMOTE_HELPER_ARTIFACTS, REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_HELPER_ENTRY_SHA256, REMOTE_HELPER_ENTRY_VERSION, REMOTE_HELPER_GIT_READ_SHA256, REMOTE_HELPER_GIT_SYNC_SHA256, REMOTE_HELPER_GIT_WRITE_SHA256, REMOTE_HELPER_INLINE_SOURCE } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
 const { materializeRemoteHelperArtifacts } = await import("./helpers/remoteHelperArtifacts.mjs");
@@ -60,7 +63,7 @@ const HOST_ID = "01234567-89ab-4def-8123-456789abcdef";
 /** The helper never resolves HOME into a path, so a POSIX literal is the honest fixture on any platform. */
 const HELPER_HOME = "/home/pideck-helper";
 /** Frozen digest, pinned here as well as in the module: editing the source means editing both. */
-const FROZEN_SHA256 = "e7ce3425737da28b2f850ab3153ca18e59da490030d205d3f5a8b4a88d97d480";
+const FROZEN_SHA256 = "d8ad6e5c9a2b54ab8dd77f8ef5f5091c7295ad82fd4b852ee70fe747944461fa";
 const MAX_TEXT = 4096;
 const TEST_TIMEOUT_MS = 30_000;
 const GUARD_TIMEOUT_MS = 10_000;
@@ -443,6 +446,21 @@ helperTest("the exported entry identity matches the frozen source", () => {
 	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes(`"${REMOTE_HELPER_METHOD_FS_SEARCH_NAMES}"`), "the search method must be dispatched in the frozen body");
 	for (const ceiling of [REMOTE_HELPER_MAX_SEARCH_MATCHES, REMOTE_HELPER_MAX_SEARCH_SCANNED, REMOTE_HELPER_MAX_SEARCH_DEPTH, REMOTE_HELPER_MAX_SEARCH_QUERY_LENGTH]) assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes(String(ceiling)), `${ceiling} must be visible in the frozen source`);
 	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes('"QUERY_INVALID"'), "the search refusal code must be a literal of the frozen body");
+});
+
+helperTest("network verbs own the long request budget while other Git methods keep the read deadline", () => {
+	// G5a follow-up (plan §5.16.2): the client cap and the helper's per-method clamp are both literals of the
+	// deployed bytes, and both used to truncate the sync budget to 30s. Keep all three numbers in step.
+	assert.ok(REMOTE_HELPER_MAX_REQUEST_TIMEOUT_MS >= REMOTE_GIT_SYNC_TIMEOUT_MS, "the frame ceiling must not truncate the sync budget");
+	assert.equal(REMOTE_GIT_READ_TIMEOUT_MS, 30_000);
+	assert.equal(REMOTE_GIT_SYNC_TIMEOUT_MS, 600_000);
+	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes("Math.min(value, " + REMOTE_HELPER_MAX_REQUEST_TIMEOUT_MS + ")"), "the frame deadline ceiling must equal the contract value");
+	const budget = /const budget = method === "git\.fetch" \|\| method === "git\.push" \|\| method === "git\.pull" \? (\d+) : (\d+);/.exec(REMOTE_HELPER_INLINE_SOURCE);
+	assert.ok(budget, "the per-method budget split must be a literal of the frozen body");
+	assert.equal(Number(budget[1]), REMOTE_GIT_SYNC_TIMEOUT_MS, "only the network verbs take the sync budget");
+	assert.equal(Number(budget[2]), REMOTE_GIT_READ_TIMEOUT_MS, "every other Git method keeps the read deadline");
+	// The methods that take it are exactly the three network verbs, never a read.
+	for (const method of ["git.fetch", "git.push", "git.pull"]) assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes('"' + method + '"'), method);
 });
 
 helperTest("hello answers the contract handshake through the production client", async (t) => {

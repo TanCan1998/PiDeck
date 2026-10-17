@@ -811,6 +811,8 @@ const api = {
 		remoteCommitDetail: (projectId: string, oid: string) => ipcRenderer.invoke(ipcChannels.gitRemoteCommitDetail, projectId, oid) as Promise<import("../shared/types").RemoteGitCommitDetailResult>,
 		remoteRefs: (projectId: string) => ipcRenderer.invoke(ipcChannels.gitRemoteRefs, projectId) as Promise<import("../shared/types").RemoteGitRefsResult>,
 		remoteRefFileDiff: (projectId: string, base: string | null, head: string, target: ProjectFileTarget) => ipcRenderer.invoke(ipcChannels.gitRemoteRefFileDiff, projectId, base, head, target) as Promise<import("../shared/types").RemoteGitRefFileDiffResult>,
+		// G5b：两个全名本地引用之间的只读树对比（无 token）；逐文件两侧内容仍走 remoteRefFileDiff
+		remoteCompare: (projectId: string, base: string, head: string) => ipcRenderer.invoke(ipcChannels.gitRemoteCompare, projectId, base, head) as Promise<import("../shared/types").RemoteGitCompareResult>,
 		status: (projectId: string, repoPath?: ProjectFileTarget) => ipcRenderer.invoke(ipcChannels.gitStatus, projectId, repoPath) as Promise<import("../shared/types").GitResourceGroups>,
 		// Git Changes 中单个文件的两侧快照（按点击惰性读取）
 		workspaceFileDiff: (projectId: string, group: GitWorkspaceDiffGroup, fileTarget: ProjectFileTarget, repoPath?: ProjectFileTarget) => ipcRenderer.invoke(ipcChannels.gitWorkspaceFileDiff, projectId, group, fileTarget, repoPath) as Promise<GitWorkspaceFileDiff | null>,

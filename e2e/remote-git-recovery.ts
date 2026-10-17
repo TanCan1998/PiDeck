@@ -30,7 +30,7 @@ export async function initializeRemoteGitRecoveryFixture(credentials: RemoteAcce
 export async function verifyRemoteGitRecovery(input: { window: Page; credentials: RemoteAcceptanceCredentials; root: string; timeoutMs: number; testInfo: TestInfo }) {
 	const { window, credentials, root, timeoutMs, testInfo } = input;
 	const panel = window.getByTestId("remote-git-panel");
-	const command = async (script: string) => (await runRemoteCommand(credentials, "set -eu; cd " + quote(root) + "; " + script, 20_000)).stdout;
+	const command = async (script: string) => (await runRemoteCommand(credentials, "set -eu; cd " + quote(root) + "; " + script, 60_000)).stdout;
 	const git = (script: string) => command("git --no-optional-locks " + script);
 	const refNames = async () => (await git("for-each-ref --format='%(refname)' refs/pideck")).trim().split("\n").filter(Boolean);
 	const openRecovery = async () => {

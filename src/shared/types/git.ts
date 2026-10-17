@@ -150,6 +150,14 @@ export type RemoteGitRefsResult = { ok: true; refs: RemoteGitRefs } | { ok: fals
 /** `base: null` 表示该侧不存在（根提交，或该侧新增文件）；两侧都不存在时拒绝。 */
 export type RemoteGitRefFileDiff = { path: string; target: ProjectFileTarget; displayPath: string; base: string | null; head: string; originalContent: string; modifiedContent: string };
 export type RemoteGitRefFileDiffResult = { ok: true; diff: RemoteGitRefFileDiff } | { ok: false; code: string };
+/**
+ * G5b refs compare：两个**全名本地引用**（refs/heads/* 或 refs/tags/*）之间的有界变更文件列表。
+ * 结果携带解析后的 OID，逐文件两侧内容仍走既有 `remoteRefFileDiff`（同一 diff 视图），不新增内容通道。
+ */
+export type RemoteGitCompareSide = { ref: string; oid: string };
+export type RemoteGitCompareFile = { status: string; path: string; oldPath?: string };
+export type RemoteGitCompare = { base: RemoteGitCompareSide; head: RemoteGitCompareSide; files: RemoteGitCompareFile[] };
+export type RemoteGitCompareResult = { ok: true; compare: RemoteGitCompare } | { ok: false; code: string };
 /** G3b branch write face: creating and switching both move a ref the user explicitly asked for. */
 export type RemoteGitBranchMutationResult = { ok: true } | { ok: false; code: string };
 /** G4a recoverable discard: the snapshot ref (null when the discarded change was a deletion) goes back to the panel. */

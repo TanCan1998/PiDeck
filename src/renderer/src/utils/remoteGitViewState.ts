@@ -7,6 +7,8 @@ import type {
 	GitWorkspaceFileDiff,
 	RemoteGitBranchMutationResult,
 	RemoteGitCommitDetail,
+	RemoteGitCompare,
+	RemoteGitCompareResult,
 	RemoteGitDiscardResult,
 	RemoteGitFetchOutcome,
 	RemoteGitPullOutcome,
@@ -63,6 +65,10 @@ export type RemoteGitViewState = {
 	refs?: RemoteGitRefs;
 	refsLoading?: boolean;
 	refsErrorCode?: string;
+	/* G5b compare: last click wins; the file list carries the resolved OIDs used for the per-file read. */
+	compare?: RemoteGitCompare;
+	compareLoading?: boolean;
+	compareErrorCode?: string;
 };
 export type RemoteGitViewApi = {
 	cancelRemoteReads(projectId: string): Promise<void>;
@@ -74,6 +80,7 @@ export type RemoteGitViewApi = {
 	remoteCommitDetail(projectId: string, oid: string): Promise<RemoteGitCommitDetailResult>;
 	remoteRefs(projectId: string): Promise<RemoteGitRefsResult>;
 	remoteRefFileDiff(projectId: string, base: string | null, head: string, target: ProjectFileTarget): Promise<RemoteGitRefFileDiffResult>;
+	remoteCompare(projectId: string, base: string, head: string): Promise<RemoteGitCompareResult>;
 	createRemoteBranch(projectId: string, name: string, token: string): Promise<RemoteGitBranchMutationResult>;
 	switchRemoteBranch(projectId: string, name: string, token: string): Promise<RemoteGitBranchMutationResult>;
 	discardRemote(projectId: string, group: "workingTree" | "untracked", target: ProjectFileTarget, token: string): Promise<RemoteGitDiscardResult>;
@@ -97,6 +104,22 @@ export function validRemoteGitBranchName(name: unknown): name is string {
 	return !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(name);
 }
 
+/**
+ * A compare names full local refs (refs/heads/* or refs/tags/*), exactly the strings `remoteRefs` returns.
+ * These rules mirror main's `validateRemoteGitRefFullName` and the frozen helper's readRef; the panel refuses
+ * locally so an unusable pair never leaves the window. Git's own check-ref-format is not enough: it accepts
+ * an option-like component, a lone `@` and braces (measured), all of which this protocol refuses.
+ */
+const REMOTE_GIT_REF_FORBIDDEN = /[\u0000-\u0020\u007f~^:?*[\\{}]/;
+export function validRemoteGitRefFullName(value: unknown): value is string {
+	if (typeof value !== "string" || new TextEncoder().encode(value).length > 1024 || REMOTE_GIT_REF_FORBIDDEN.test(value) || value.includes("..") || value.includes("@{") || value.includes("//")) return false;
+	const prefix = value.startsWith("refs/heads/") ? "refs/heads/" : value.startsWith("refs/tags/") ? "refs/tags/" : null;
+	if (prefix === null) return false;
+	const name = value.slice(prefix.length);
+	if (!name) return false;
+	return !name.split("/").some((part) => !part || part === "." || part === ".." || part === "@" || part.startsWith(".") || part.startsWith("-") || part.endsWith(".") || part.endsWith(".lock"));
+}
+
 function errorCode(error: unknown): string {
 	const raw = error instanceof Error ? error.message : String(error);
 	// Electron invoke prefixes errors with the channel; only the bounded code becomes visible text.
@@ -115,6 +138,12 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 	let recoveryEpoch = 0;
 	// The sync facts belong to one generation of repository state, so they are invalidated like the other reads.
 	let syncEpoch = 0;
+	// G5b: the compare answer and the refs poll each have a generation. A slow earlier compare must not replace
+	// the pair of refs the user clicked last, and a manual refs load invalidates an in-flight poll (only one
+	// visible refs answer may publish).
+	let compareEpoch = 0;
+	let refsPollEpoch = 0;
+	let refsPollInFlight = false;
 	let state: RemoteGitViewState = { projectKey, loading: false, diffLoading: false };
 	function update(next: RemoteGitViewState) {
 		// The confirmed-commit counter is sticky: a later read (or a connection loss) must not resurrect the
@@ -136,6 +165,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			historyEpoch += 1;
 			detailEpoch += 1;
 			refsEpoch += 1;
+			compareEpoch += 1;
 			recoveryEpoch += 1;
 			// Clear previous facts during refresh; a failed read must not display a stale clean repository.
 			const uncertainWrite = state.errorCode === "GIT_WRITE_RESULT_UNCONFIRMED";
@@ -160,6 +190,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			historyEpoch += 1;
 			detailEpoch += 1;
 			refsEpoch += 1;
+			compareEpoch += 1;
 			recoveryEpoch += 1;
 			update({ ...state, mutating: true, mutatingKind: "index", errorCode: undefined, diff: undefined, diffErrorCode: undefined });
 			try {
@@ -185,6 +216,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			historyEpoch += 1;
 			detailEpoch += 1;
 			refsEpoch += 1;
+			compareEpoch += 1;
 			recoveryEpoch += 1;
 			update({ ...state, mutating: true, mutatingKind: "commit", errorCode: undefined, diff: undefined, diffErrorCode: undefined });
 			try {
@@ -267,6 +299,8 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 		},
 		async loadRefs(): Promise<void> {
 			if (!active || state.loading || state.mutating || state.refsLoading) return;
+			// A manual load owns the next visible answer; an in-flight poll's answer is retired below.
+			refsPollEpoch += 1;
 			const generation = ++refsEpoch;
 			update({ ...state, refs: undefined, refsErrorCode: undefined, refsLoading: true });
 			try {
@@ -277,6 +311,51 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			} catch (error) {
 				if (active && generation === refsEpoch) update({ ...state, refsLoading: false, refsErrorCode: errorCode(error) });
 			}
+		},
+		/**
+		 * Two full local refs, compared by tree. Every click opens a new generation, so the last click wins:
+		 * a slower earlier answer is dropped instead of overwriting the pair the user is looking at.
+		 */
+		async runCompare(base: string, head: string): Promise<void> {
+			if (!active || state.loading || state.mutating) return;
+			// The panel only offers refs from the loaded list; main and the helper re-check the same rules.
+			if (!validRemoteGitRefFullName(base) || !validRemoteGitRefFullName(head)) return;
+			const generation = ++compareEpoch;
+			update({ ...state, compare: undefined, compareErrorCode: undefined, compareLoading: true });
+			try {
+				const result = await api.remoteCompare(projectId, base, head);
+				if (!active || generation !== compareEpoch) return;
+				if (result.ok && result.compare.base.ref === base && result.compare.head.ref === head) update({ ...state, compareLoading: false, compare: result.compare });
+				else update({ ...state, compareLoading: false, compareErrorCode: result.ok ? "GIT_RESOURCE_CHANGED" : result.code });
+			} catch (error) {
+				if (active && generation === compareEpoch) update({ ...state, compareLoading: false, compareErrorCode: errorCode(error) });
+			}
+		},
+		/**
+		 * A quiet refs read for the bounded poll: it never clears the rows on screen (a tick must not flash an
+		 * empty section) and a failed tick keeps the last good list plus its stable code. It is a read only:
+		 * no fetch, no write, no sync facts.
+		 */
+		async pollRefs(): Promise<void> {
+			// Single-flight: one poll at a time, never alongside a manual load, and only once facts exist.
+			if (!active || state.loading || state.mutating || state.refsLoading || refsPollInFlight || state.refs === undefined) return;
+			refsPollInFlight = true;
+			const generation = ++refsPollEpoch;
+			const refsGeneration = refsEpoch;
+			try {
+				const result = await api.remoteRefs(projectId);
+				if (!active || generation !== refsPollEpoch || refsGeneration !== refsEpoch) return;
+				if (result.ok) update({ ...state, refs: result.refs, refsErrorCode: undefined });
+				else update({ ...state, refsErrorCode: result.code });
+			} catch (error) {
+				if (active && generation === refsPollEpoch && refsGeneration === refsEpoch) update({ ...state, refsErrorCode: errorCode(error) });
+			} finally {
+				refsPollInFlight = false;
+			}
+		},
+		/** Collapsing, hiding, switching project or unmounting must retire a poll that is still in flight. */
+		stopRefsPolling() {
+			refsPollEpoch += 1;
 		},
 		/** One file's two sides between two revisions, on the same surface as a workspace diff. */
 		async openHistoryFileDiff(base: string | null, head: string, target: ProjectFileTarget) {
@@ -310,6 +389,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			historyEpoch += 1;
 			detailEpoch += 1;
 			refsEpoch += 1;
+			compareEpoch += 1;
 			recoveryEpoch += 1;
 			update({ ...state, mutating: true, mutatingKind: "discard", discardRecovery: undefined, errorCode: undefined, diff: undefined, diffErrorCode: undefined });
 			try {
@@ -353,6 +433,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			historyEpoch += 1;
 			detailEpoch += 1;
 			refsEpoch += 1;
+			compareEpoch += 1;
 			recoveryEpoch += 1;
 			update({ ...state, mutating: true, mutatingKind: kind, syncNotice: undefined, errorCode: undefined, diff: undefined, diffErrorCode: undefined });
 			try {
@@ -418,6 +499,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			historyEpoch += 1;
 			detailEpoch += 1;
 			refsEpoch += 1;
+			compareEpoch += 1;
 			recoveryEpoch += 1;
 			update({ ...state, mutating: true, mutatingKind: "restore", recoveryNotice: undefined, errorCode: undefined, diff: undefined, diffErrorCode: undefined });
 			try {
@@ -467,6 +549,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			historyEpoch += 1;
 			detailEpoch += 1;
 			refsEpoch += 1;
+			compareEpoch += 1;
 			recoveryEpoch += 1;
 			update({ ...state, mutating: true, mutatingKind: "branch", errorCode: undefined, diff: undefined, diffErrorCode: undefined });
 			try {
@@ -492,6 +575,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			historyEpoch += 1;
 			detailEpoch += 1;
 			refsEpoch += 1;
+			compareEpoch += 1;
 			recoveryEpoch += 1;
 			update({ ...state, mutating: true, mutatingKind: "switch", errorCode: undefined, diff: undefined, diffErrorCode: undefined });
 			try {
@@ -516,6 +600,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			historyEpoch += 1;
 			detailEpoch += 1;
 			refsEpoch += 1;
+			compareEpoch += 1;
 			recoveryEpoch += 1;
 			void api.cancelRemoteReads(projectId).catch(() => undefined);
 			// Reconnect may emit several failure states; retain uncertainty until a successful explicit refresh.
@@ -531,6 +616,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			historyEpoch += 1;
 			detailEpoch += 1;
 			refsEpoch += 1;
+			compareEpoch += 1;
 			recoveryEpoch += 1;
 		},
 	};

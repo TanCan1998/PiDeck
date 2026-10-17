@@ -106,10 +106,17 @@ test("fetch moves only the remote-tracking refs, and reports what moved", option
 	assert.equal(result.applied, true);
 	assert.equal(result.upToDate, false);
 	const updated = Array.from(result.updated);
-	assert.equal(updated.length, 1);
-	assert.equal(updated[0].ref, `refs/remotes/origin/${remote.branch}`);
-	assert.equal(updated[0].before, refBefore);
-	assert.equal(updated[0].after, remote.remoteHead());
+	// Git 2.53 (measured on this machine) materialises the remote's symbolic HEAD as refs/remotes/origin/HEAD
+	// on the first fetch when it is absent. That ref is inside the allowed remote-tracking namespace and is
+	// reported truthfully, so the contract assertion is "the branch moved and nothing else outside
+	// refs/remotes/<remote>/* was reported" rather than "exactly one ref". Older Git never creates it and the
+	// filter is empty there; this is a test-compat fix, not a product change (G5b batch, WSL git 2.53).
+	const branchRef = `refs/remotes/origin/${remote.branch}`;
+	assert.equal(updated.filter((entry) => entry.ref === branchRef).length, 1);
+	for (const entry of updated) assert.ok(entry.ref === branchRef || entry.ref === "refs/remotes/origin/HEAD", `unexpected updated ref ${entry.ref}`);
+	const branchUpdate = updated.find((entry) => entry.ref === branchRef);
+	assert.equal(branchUpdate.before, refBefore);
+	assert.equal(branchUpdate.after, remote.remoteHead());
 	// index, HEAD, branches, tags and the worktree are exactly as they were: a fetch is a remote-tracking-ref update.
 	assert.deepEqual(witness(f), before);
 	const facts = successful(await f.request("git.syncFacts"));

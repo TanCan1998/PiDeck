@@ -704,3 +704,22 @@ P4.5b 的单会话归档/恢复已完成真实 Electron＋SSH 验证，不能据
 - **面板同步条已交付**：固定两行高度（facts ＋ 预留消息行）、推送内联确认、没有 remote／上游时在消息行说明且不写配置；抖动根因是「facts 由 effect 监视快照自动重载」与 `refresh()` 互相触发，修法＝facts 只在项目身份变化后读一次 ＋ `loadSync` 不受 `state.loading`／`state.mutating` 阻塞（自带单飞）＋ 几何恒定常量高度；显式手势（刷新／trust 通过）与动词成功后才重读。真机六合一回到 6 passed（3.9m），G1 等无写控件断言按新能力更新。
 - **真机同步 e2e 已通过**：`e2e/remote-git-sync.ts`（run 内 bare remote＋第二工作副本扮演队友）走真实面板——同步条不显示远端路径、获取只动远端跟踪引用（计数随 fetch 变化、HEAD/工作区不动）、拉取快进把文件带回工作区、原生写脏后拉取被拒且文件不动、推送先确认（取消不动远端／确认后远端 ref == 本地 HEAD）；仓库自己配置合并策略后制造分叉，拉取如实报「冲突」且 `.git/MERGE_HEAD`／`UU tracked.txt` 留在原地（产品不自动 abort）。稳定关键是**以按钮可用性做时序**（token 在一次读取后才签发 ⇒ 等按钮 = 等快照就绪），加上「计数只在 fetch 后断言」「拒绝文案断言到面板错误行」。
 - **验证**：helper 级 `remoteGitSync` 9/9、`remoteGitSyncIpc` 4/4、view 29/29（含同步）、helper 全链路 104/104、typecheck／Biome／build 0、真机 6 passed（4.0m）。证据：`/tmp/g5-sync8.log`、`/tmp/g5-ipc5.log`、`/tmp/g5-focused-final.log`、`/tmp/g5-e2e-gate8.log`、`/tmp/g5-probe2.sh`（原生事实）。细则见 [Git 计划 §5.16／§5.16.1](remote-git-plan.md)。
+
+## 远端 Git G5b（2026-10-17，引用对比＋有界 refs polling 已交付；含两处 G5a 修正）
+
+- **交付（helper 1.16.0）**：`git.compare {base, head}`（两个全名本地引用 → 有界变更文件列表；固定 argv `diff --name-status -z --find-renames --no-ext-diff --no-textconv`；1 MiB／4096 文件预算超限拒绝；结果携带解析时 OID，逐文件复用 `refFileDiff`；只读见证走 `unchangedRead`）。main 新通道 `git:remote-compare`（无 token、纯读、逐字段重验），renderer 引用区内「分支对比」区（testid `remote-git-compare` 系列）+ 逐文件既有 diff surface；i18n 中英同步。
+- **有界 refs polling（renderer only，无新 helper op）**：15s 固定间隔，仅引用区展开＋窗口可见＋项目当前＋host ready＋已有 refs 事实时运行；quiet read（不清空行、失败留旧行）、单飞、手动 `loadRefs` 使在飞回答作废、收起/隐藏/切项目/卸载/断线清 interval、迟到回答按 epoch＋身份丢弃；不调用 `loadSync`、不新增 effect（`remoteGitSyncBar` 守卫保持绿）。与 §6.3 字面的 control-helper 事件推送存在偏差，已在契约 §5.17 显式记录。
+- **两处 G5a 修正**：① **同步 10 分钟预算未接线**（独立安全审查 F1，medium）：main 传 30s、control client clamp 300s、helper 再 clamp 30s ⇒ 真实 fetch/push/pull 超 30s 即失败；三层同源修复（contract 上限 600000、helper 仅网络动词用 600000、`run()` 仅同步动词传 `REMOTE_GIT_SYNC_TIMEOUT_MS`），详见 [Git 计划 §5.16.2](remote-git-plan.md)。② **同步条显式刷新竞态**（本批真机门禁抓出）：`refreshAll` 并发 `refresh()`＋`loadSync()`，snapshot 的 update 重建 view state 会丢掉 sync facts，facts 先返回时同步条永久停在加载；修法 `refresh().then(() => loadSync())`。修复前 G5a 连续 3 次红，修复后 35.4s 绿。
+- **验证**：Windows 定向 8 套件 **113/113**；WSL helper 真实子进程＋原生 Git **125/125**（含新 `remoteGitCompare` 套件）；typecheck／format／`build:fast` 0；e2e `--list` 8 tests；**真机八合一 8 passed（6.0m）**（G5b 单项 1.3m：对比行与原生 `git diff --name-status` 一致、rename 保留 oldPath、逐文件两侧内容等于 `git show`、可见时原生建 tag ≤2 间隔自动出现且不 fetch、HEAD/index/refs/工作区见证不变、`CLEANUP_OK`）；全量回归与干净 HEAD 基线对照零新增（见 Git 计划 §5.17.1）。
+- **验证环境记录**：DSH 宿主注入 `ELECTRON_RUN_AS_NODE=1` 时须先清除再跑 Playwright；WSL git 2.53 首次 fetch 会创建 `refs/remotes/origin/HEAD`（已做测试兼容，非产品变更）；e2e oracle SSH 预算 20s→60s（G6c 传输预算教训），add-host 候选断言改为可等待 `toBeVisible`。
+- **未完成**：`git init`／嵌套仓库发现；Windows/macOS、打包集成、真实慢网络（>30s 同步）未验收。细则见 [Git 计划 §5.17／§5.17.1](remote-git-plan.md)。
+
+## G6 独立安全审查（2026-10-17，只读报告）
+
+- 交付 `docs/remote-security-review.md`（独立只读审查，快照为 dirty tree）：**0 critical / 0 high / 1 medium / 5 low / 4 info**；明确列出 Phase 5 §12 安全门禁未满足项：terminal.prepare ticket、create-project、file rename/delete、remote config backend、跨平台 smoke、pack/upgrade-downgrade/power-loss。
+- **F1（medium）已在本批修复**：见 Git 计划 §5.16.2（同步预算未接线）。其余 findings **未处理**：F2 bundle/TTL 清理、F3 terminal ticket、F4 `IdentityFile ~` 不展开、F5 会话写回执丢失文案、F6 会话路径 `./..` 校验，以及 F7–F10 info 项。审查文档 §0 记录快照与行号漂移，实施前须按当前 HEAD 复核。
+
+## 远端文件管理冻结契约（2026-10-17，设计草案待签收）
+
+- 交付 `docs/remote-file-management-plan.md`（**design draft — not implemented**）：补齐 Phase 5 缺失文件面——新建文件/目录、重命名/移动、删除（项目内 `.pideck-trash` 可恢复回收站）、回收站 list/restore/prune、新建空远端项目；机制决定沿用 main-built 有界 Node 命令（**不新增 helper op／不改 helper 版本与能力**）；8 条新 IPC＋enroll `mode` 扩展、18 个新稳定码、UI/testid/i18n 与真机 e2e 计划齐全。
+- **11 项用户签收点**（文档 §14，均附建议）未答复前不动 src；其中删除恢复采用「项目内回收站（A）＋仅清空回收站才无恢复（C）」为建议方案。

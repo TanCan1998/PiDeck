@@ -40,7 +40,7 @@ export async function initializeRemoteGitBranchFixture(credentials: RemoteAccept
 export async function verifyRemoteGitBranch(input: { window: Page; credentials: RemoteAcceptanceCredentials; root: string; timeoutMs: number; testInfo: TestInfo }) {
 	const { window, credentials, root, timeoutMs, testInfo } = input;
 	const panel = window.getByTestId("remote-git-panel");
-	const command = async (script: string) => (await runRemoteCommand(credentials, "set -eu; cd " + quote(root) + "; " + script, 20_000)).stdout;
+	const command = async (script: string) => (await runRemoteCommand(credentials, "set -eu; cd " + quote(root) + "; " + script, 60_000)).stdout;
 	const git = (script: string) => command("git --no-optional-locks " + script);
 	const witness = async () => ({
 		refs: await git("for-each-ref --format='%(refname) %(objectname)'"),

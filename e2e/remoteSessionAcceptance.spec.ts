@@ -15,6 +15,7 @@ import { initializeRemoteGitBranchFixture, verifyRemoteGitBranch } from "./remot
 import { initializeRemoteGitDiscardFixture, verifyRemoteGitDiscard } from "./remote-git-discard";
 import { initializeRemoteGitRecoveryFixture, verifyRemoteGitRecovery } from "./remote-git-recovery";
 import { initializeRemoteGitSyncFixture, verifyRemoteGitSync } from "./remote-git-sync";
+import { verifyRemoteGitCompare } from "./remote-git-compare";
 import { verifyRemoteHistoryMutations } from "./remote-history-mutations";
 import { REMOTE_ACCEPTANCE_ENV, createRemoteSessionInProject, matchesRemoteFingerprint, readRemoteAcceptanceCredentials, readRemoteAcceptanceTimeouts, remoteProjectRow, runRemoteCommand, test, type RemoteAcceptanceCredentials, type RemoteAcceptanceTimeouts } from "./remote-fixtures";
 
@@ -178,7 +179,9 @@ async function addVerifiedRemoteHostAndConnect(window: Page, credentials: Remote
 	// 候选来自真实 ~/.ssh/config：按 user@host 精确匹配，同一条 config 可能有多条别名指向同一主机，
 	// 所以断言「至少一条」再取第一条。
 	const candidate = addDialog.getByRole("button", { name: new RegExp(credentials.user + "@" + credentials.host.replace(/\./g, "\\.")) });
-	expect(await candidate.count(), "ssh config 里需要至少一条 " + credentials.user + "@" + credentials.host + " 候选").toBeGreaterThan(0);
+	// 扫描是异步的：列表可能比对话框晚到。用可等待的可见性断言而不是 count() 立即采样，否则主机负载高
+	// 时会把「还没渲染」误判成「没有候选」（2026-10-17 真机门禁偶发，均停在此断言）。
+	await expect(candidate.first(), "ssh config 里需要至少一条 " + credentials.user + "@" + credentials.host + " 候选").toBeVisible({ timeout: 30_000 });
 	await candidate.first().click();
 	await addDialog.getByRole("button", { name: "保存", exact: true }).click();
 	// pin 流程：主进程推送真实 host key，界面必须原样展示；期望指纹必须命中它。
@@ -804,6 +807,33 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 			await enrollRemoteProjectInSidebar(remoteWindow, paths.projectPath, timeouts);
 			await createRemoteSessionAndReadId(remoteWindow, paths.projectName, timeouts);
 			await verifyRemoteGitSync({ window: remoteWindow, credentials: creds, root: paths.projectPath, origin: sync.origin, other: sync.other, timeoutMs: 60_000, testInfo });
+			await localControl.verify();
+		} finally {
+			preserveAppLogs(remoteUserDataRoot, paths.runId);
+			await localControl.dispose();
+			await cleanupRemoteRun(creds, paths, "");
+		}
+	});
+
+	test("远端 Git G5b：引用对比与原生 diff 一致 → 逐文件两侧内容 → 可见时轮询 → 收起后不轮询", async ({ remoteWindow, remoteUserDataRoot }, testInfo) => {
+		test.setTimeout(600_000);
+		const creds = credentials;
+		if (!creds) {
+			test.skip(true, HELP_TEXT);
+			return;
+		}
+		const paths = await createRemoteRunPaths(creds);
+		const localControl = await createLocalGitReadControl();
+		try {
+			await dismissOnboarding(remoteWindow, 8_000);
+			await createRemoteProjectDirectory(creds, paths);
+			// The G3a fixture already has two tags, a second commit with a rename, and a decoy branch: exactly the
+			// refs a compare and a polling observation need, without a second fixture shape.
+			await initializeRemoteGitHistoryFixture(creds, paths.projectPath);
+			await addVerifiedRemoteHostAndConnect(remoteWindow, creds, timeouts);
+			await enrollRemoteProjectInSidebar(remoteWindow, paths.projectPath, timeouts);
+			await createRemoteSessionAndReadId(remoteWindow, paths.projectName, timeouts);
+			await verifyRemoteGitCompare({ window: remoteWindow, credentials: creds, root: paths.projectPath, timeoutMs: 40_000, testInfo });
 			await localControl.verify();
 		} finally {
 			preserveAppLogs(remoteUserDataRoot, paths.runId);

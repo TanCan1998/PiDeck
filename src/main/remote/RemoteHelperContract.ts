@@ -34,7 +34,13 @@ export const REMOTE_HELPER_MAX_CHUNK_BYTES = 1024 * 1024;
 /** Bounded concurrency: long transfers must not head-of-line block short requests. */
 export const REMOTE_HELPER_MAX_CONCURRENT_REQUESTS = 4;
 export const REMOTE_HELPER_DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
-export const REMOTE_HELPER_MAX_REQUEST_TIMEOUT_MS = 300_000;
+/**
+ * Ceiling on what one frame may ask for. It must stay at or above REMOTE_GIT_SYNC_TIMEOUT_MS: network verbs
+ * are the only methods that legitimately run longer than a read, and a lower ceiling here silently truncates
+ * the sync budget before the helper's own per-method clamp even sees it (the G5a follow-up in §5.16.2).
+ * Per-method handler caps still apply: only fetch/push/pull are admitted for the long budget.
+ */
+export const REMOTE_HELPER_MAX_REQUEST_TIMEOUT_MS = 600_000;
 
 /**
  * Stable helper error codes. Free text never travels as a code (diagnostics stay redacted).
@@ -232,6 +238,19 @@ export type RemoteGitRefsResult = { head: string | null; branch: string | null; 
 /** `base: null` means the file has no other side (root commit, or a file added by this commit). */
 export type RemoteGitRefFileDiffParams = { base: string | null; head: string; path: string };
 export type RemoteGitRefFileDiffResult = { originalContent: string; modifiedContent: string };
+/**
+ * G5b refs compare: both inputs are full local ref names (refs/heads/* or refs/tags/*) — the same
+ * `fullName` values the refs read returns — and both sides are resolved to commits before the diff.
+ * The comparison is the direct tree diff of the two commits (two-dot), not a merge-base or three-dot
+ * view: there is no common-ancestor discovery to fail or to disagree with the per-file read.
+ */
+export const REMOTE_GIT_COMPARE_MAX_FILES = 4096;
+export const REMOTE_HELPER_METHOD_GIT_COMPARE = "git.compare";
+export type RemoteGitCompareParams = { base: string; head: string };
+/** The OID a ref resolved to at read time; a later ref move cannot rewrite this answer. */
+export type RemoteGitCompareSide = { ref: string; oid: string };
+export type RemoteGitCompareFile = { status: string; path: string; oldPath?: string };
+export type RemoteGitCompareResult = { base: RemoteGitCompareSide; head: RemoteGitCompareSide; files: readonly RemoteGitCompareFile[] };
 /** Managed single-resource index mutations. The expectation is main-owned, never renderer authority. */
 export type RemoteGitMutationParams = { path: string; group: "index" | "workingTree" | "untracked"; expectedRevision: string };
 export type RemoteGitMutationResult = { applied: true };
@@ -263,6 +282,7 @@ export const REMOTE_HELPER_CAPABILITIES = [
 	"git.commitDetail",
 	"git.refs",
 	"git.refFileDiff",
+	"git.compare",
 	"git.createBranch",
 	"git.switchBranch",
 	"git.discard",

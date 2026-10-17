@@ -4,6 +4,7 @@ import type { RemoteGitRecoveryEntryView } from "../../../../shared/types/git";
 import type { ProjectFileTarget, RemoteProject } from "../../../../shared/types/project";
 import type { GitResourceGroupType } from "../../../../shared/types/git";
 import { useRemoteGitView } from "../../hooks/useRemoteGitView";
+import { useRemoteGitRefsPolling } from "../../hooks/useRemoteGitRefsPolling";
 import { t } from "../../i18n";
 import { relativeTimeParts } from "../../utils/providerUsageDisplay";
 import { validRemoteGitBranchName } from "../../utils/remoteGitViewState";
@@ -11,6 +12,7 @@ import { Button } from "../ui-shadcn/button";
 import { Input } from "../ui-shadcn/input";
 import { Textarea } from "../ui-shadcn/textarea";
 import { FileTree } from "../app/git/GitResourceTree";
+import { RemoteGitCompareSection } from "./RemoteGitCompareSection";
 import { RemoteGitTrustGate } from "./RemoteGitTrustGate";
 
 const FileDiffViewer = lazy(() => import("../app/FileDiffViewer").then((module) => ({ default: module.FileDiffViewer })));
@@ -77,7 +79,33 @@ export function remoteGitErrorMessage(code: string): string {
 
 /** Reuses SCM rows and the existing diff renderer without native graph/watch/write/background-sync APIs. */
 export function RemoteGitPanel({ project }: { project: RemoteProject }) {
-	const { state, refresh, openDiff, closeDiff, mutate, commit, loadHistory, loadMoreHistory, openCommitDetail, loadRefs, openHistoryFileDiff, createBranch, switchBranch, discard, loadRecovery, restoreRecovery, dropRecovery, loadSync, fetchRemote, pushRemote, pullRemote } = useRemoteGitView(project);
+	const {
+		state,
+		refresh,
+		openDiff,
+		closeDiff,
+		mutate,
+		commit,
+		loadHistory,
+		loadMoreHistory,
+		openCommitDetail,
+		loadRefs,
+		openHistoryFileDiff,
+		createBranch,
+		switchBranch,
+		discard,
+		loadRecovery,
+		restoreRecovery,
+		dropRecovery,
+		loadSync,
+		fetchRemote,
+		pushRemote,
+		pullRemote,
+		runCompare,
+		pollRefs,
+		stopRefsPolling,
+		hostReady,
+	} = useRemoteGitView(project);
 	const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
 	const [message, setMessage] = useState("");
 	const [historyOpen, setHistoryOpen] = useState(false);
@@ -87,11 +115,19 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 	const [recoveryOpen, setRecoveryOpen] = useState(false);
 	const [pendingDrop, setPendingDrop] = useState<RemoteGitRecoveryEntryView | null>(null);
 	const [pushConfirm, setPushConfirm] = useState(false);
+	// Bounded refs polling: only while this section is expanded, the window is visible, the host is ready and
+	// refs facts exist. Collapsing/hiding/switching project/unmounting stops it; it never reads sync facts.
+	useRemoteGitRefsPolling({ active: refsOpen, refsLoaded: state.refs !== undefined, hostReady, poll: pollRefs, stop: stopRefsPolling });
 	// An explicit refresh is the user gesture that re-reads both the repository facts and the remote chain: the sync
 	// facts never reload on their own, so nothing can move the rows below this bar without the user asking for it.
 	const refreshAll = () => {
-		refresh();
-		loadSync();
+		// The snapshot read rebuilds the view state and drops the sync facts: read them only after it settles, or a
+		// fast facts answer can be wiped by the snapshot and the bar sits on "loading" forever (G5b regression run).
+		void refresh().then(() => loadSync());
+	};
+	// Expanding compare may need the refs list; the refs section itself keeps its own expand-load effect.
+	const needCompareRefs = () => {
+		if (state.refs === undefined && !state.refsLoading && !state.loading && !state.mutating) loadRefs();
 	};
 	const confirmedCommits = state.confirmedCommits ?? 0;
 	// A confirmed commit clears the box; a refusal or an unknown result keeps the text so nothing is retyped.
@@ -487,6 +523,22 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 											</div>
 										))
 									: null}
+								<p data-testid="remote-git-refs-auto" className="px-3 pt-1 text-xs text-text-secondary">
+									{t("remoteGit.refsAutoRefresh")}
+								</p>
+								{/* G5b: compare two local refs by tree; per-file content reuses the revision diff surface. */}
+								<RemoteGitCompareSection
+									refs={state.refs}
+									refsLoading={state.refsLoading === true}
+									refsErrorCode={state.refsErrorCode}
+									compare={state.compare}
+									compareLoading={state.compareLoading === true}
+									compareErrorCode={state.compareErrorCode}
+									errorMessage={remoteGitErrorMessage}
+									onNeedRefs={needCompareRefs}
+									onRun={(base, head) => runCompare(base, head)}
+									onOpenFile={(baseOid, headOid, path) => openHistoryFileDiff(baseOid, headOid, { projectId: project.id, relativePath: path })}
+								/>
 							</>
 						) : null}
 					</section>

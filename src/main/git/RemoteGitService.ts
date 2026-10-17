@@ -14,6 +14,7 @@ import {
 	type RemoteGitPullOutcome,
 	type RemoteGitPushOutcome,
 	type RemoteGitSyncFactsView,
+	type RemoteGitCompare,
 } from "../../shared/types/git";
 import type { ProjectFileTarget } from "../../shared/types/project";
 import { parsePorcelainStatus } from "./gitStatusParser";
@@ -21,6 +22,7 @@ import {
 	REMOTE_GIT_BRANCH_NAME_MAX_BYTES,
 	REMOTE_GIT_COMMIT_MAX_FILES,
 	REMOTE_GIT_COMMIT_MESSAGE_MAX_BYTES,
+	REMOTE_GIT_COMPARE_MAX_FILES,
 	REMOTE_GIT_DETAIL_MESSAGE_MAX_BYTES,
 	REMOTE_GIT_IDENTITY_MAX_BYTES,
 	REMOTE_GIT_LOG_DEFAULT_COUNT,
@@ -35,6 +37,7 @@ import {
 	REMOTE_GIT_STATUS_MAX_BYTES,
 	REMOTE_GIT_SUBJECT_MAX_BYTES,
 	REMOTE_GIT_SYNC_MAX_REMOTES,
+	REMOTE_GIT_SYNC_TIMEOUT_MS,
 	REMOTE_GIT_TEXT_MAX_BYTES,
 	REMOTE_HELPER_PROTOCOL_VERSION,
 } from "../remote/RemoteHelperContract";
@@ -139,6 +142,25 @@ export function validateRemoteGitBranchName(value: unknown): string {
 		/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value)
 	)
 		throw new Error("GIT_RESULT_INVALID");
+	return value;
+}
+
+/**
+ * A comparison names the same full local refs the refs read returns: `refs/heads/*` or `refs/tags/*`.
+ * A full name cannot be mistaken for an option, and both sides are resolved by the helper before any diff.
+ * These rules are the main-process copy of the frozen helper's `readRef`; they run before an SSH session is
+ * opened, and the helper re-checks them. Git's own check-ref-format accepts `refs/heads/-x`, `refs/heads/@` and
+ * `refs/tags/v1.0{}` (measured), so those shapes are refused here on purpose: an option-like component, a lone
+ * `@` component and braces (which would collide with the `^{commit}` argument the helper appends) are not names
+ * this protocol uses.
+ */
+const REMOTE_GIT_REF_FORBIDDEN = /[\u0000-\u0020\u007f~^:?*[\\{}]/;
+export function validateRemoteGitRefFullName(value: unknown): string {
+	if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > REMOTE_GIT_REF_MAX_NAME_BYTES || REMOTE_GIT_REF_FORBIDDEN.test(value) || value.includes("..") || value.includes("@{") || value.includes("//")) throw new Error("GIT_RESULT_INVALID");
+	const prefix = value.startsWith("refs/heads/") ? "refs/heads/" : value.startsWith("refs/tags/") ? "refs/tags/" : null;
+	if (prefix === null) throw new Error("GIT_RESULT_INVALID");
+	const name = value.slice(prefix.length);
+	if (!name || name.split("/").some((part) => !part || part === "." || part === ".." || part === "@" || part.startsWith(".") || part.startsWith("-") || part.endsWith(".") || part.endsWith(".lock"))) throw new Error("GIT_RESULT_INVALID");
 	return value;
 }
 
@@ -321,6 +343,33 @@ export function readRemoteGitRefs(value: unknown): RemoteGitRefs {
 	};
 }
 
+/**
+ * Two full local refs, their trees, and a bounded changed-file list. The helper's echoed refs must be exactly
+ * the requested names, so a remote answer can never redirect the panel to a different pair; each file is
+ * re-validated with the same rules as a commit detail's file list.
+ */
+export function readRemoteGitCompare(value: unknown, base: string, head: string): RemoteGitCompare {
+	if (!record(value) || Object.keys(value).length !== 3 || !record(value.base) || !record(value.head) || !Array.isArray(value.files) || value.files.length > REMOTE_GIT_COMPARE_MAX_FILES) throw new Error("GIT_RESULT_INVALID");
+	const side = (raw: Record<string, unknown>, expected: string): RemoteGitCompare["base"] => {
+		if (Object.keys(raw).length !== 2 || raw.ref !== expected) throw new Error("GIT_RESULT_INVALID");
+		return { ref: expected, oid: remoteGitOid(raw.oid) };
+	};
+	return {
+		base: side(value.base, base),
+		head: side(value.head, head),
+		files: value.files.map((file) => {
+			if (!record(file)) throw new Error("GIT_RESULT_INVALID");
+			const keys = Object.keys(file);
+			if (typeof file.status !== "string" || !REMOTE_GIT_FILE_STATUS_PATTERN.test(file.status)) throw new Error("GIT_RESULT_INVALID");
+			// Rename/copy records carry the old path; every other status must not pretend to have one.
+			const renamed = file.status.startsWith("R") || file.status.startsWith("C");
+			if (keys.includes("oldPath") !== renamed || !keys.includes("path") || keys.length !== (renamed ? 3 : 2)) throw new Error("GIT_RESULT_INVALID");
+			const path = validateRemoteGitPath(file.path);
+			return renamed ? { status: file.status, path, oldPath: validateRemoteGitPath(file.oldPath) } : { status: file.status, path };
+		}),
+	};
+}
+
 /** Main-owned operation boundary: live project values, live trust and bound helper requests; never a local cwd. */
 export function createRemoteGitService(ports: { locator(projectId: string): RemoteGitLocator | undefined; trusted(target: RemoteGitLocator): Promise<boolean>; withProject<T>(target: RemoteGitLocator, work: (session: RemoteGitSession) => Promise<T>, signal?: AbortSignal): Promise<T> }) {
 	function target(projectId: string): RemoteGitLocator {
@@ -345,6 +394,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 			| "git.commitDetail"
 			| "git.refs"
 			| "git.refFileDiff"
+			| "git.compare"
 			| "git.createBranch"
 			| "git.switchBranch"
 			| "git.discard"
@@ -382,8 +432,12 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 						try {
 							if (name === "git.stage" || name === "git.unstage" || name === "git.commit" || name === "git.createBranch" || name === "git.switchBranch" || name === "git.discard" || name === "git.recoveryRestore" || name === "git.recoveryDrop" || name === "git.fetch" || name === "git.push" || name === "git.pull")
 								dispatchedWrite = true;
+							// Network verbs own the long budget (G5a follow-up, plan section 5.16.2); every other Git
+							// method keeps the read deadline. The client's request cap and the helper's per-method clamp
+							// repeat the same split, so this value survives both boundaries instead of being truncated.
+							const timeoutMs = name === "git.fetch" || name === "git.push" || name === "git.pull" ? REMOTE_GIT_SYNC_TIMEOUT_MS : REMOTE_GIT_READ_TIMEOUT_MS;
 							const result = await session.request(name, input, {
-								timeoutMs: REMOTE_GIT_READ_TIMEOUT_MS,
+								timeoutMs,
 								onRequestId: (id) => {
 									activeId = id;
 									if (signal?.aborted) cancel();
@@ -505,6 +559,12 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 		},
 		refs(projectId: string, signal?: AbortSignal): Promise<RemoteGitRefs> {
 			return run(projectId, "git.refs", {}, signal, (value) => readRemoteGitRefs(value));
+		},
+		/** Read-only refs comparison: no token, no write expectation, nothing staged or moved. */
+		compare(projectId: string, base: unknown, head: unknown, signal?: AbortSignal): Promise<RemoteGitCompare> {
+			const baseRef = validateRemoteGitRefFullName(base);
+			const headRef = validateRemoteGitRefFullName(head);
+			return run(projectId, "git.compare", { base: baseRef, head: headRef }, signal, (value) => readRemoteGitCompare(value, baseRef, headRef));
 		},
 		/** Creating a branch is a create-only native CAS at the HEAD the read confirmed; HEAD itself never moves. */
 		createBranch(projectId: string, name: unknown, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<{ branch: string }> {

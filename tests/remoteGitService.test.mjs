@@ -3,6 +3,7 @@ import test from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
 const { createRemoteGitService, readRemoteGitStatus, validateRemoteGitPath } = loadTsCommonJs("src/main/git/RemoteGitService.ts");
+const { REMOTE_GIT_READ_TIMEOUT_MS, REMOTE_GIT_SYNC_TIMEOUT_MS } = loadTsCommonJs("src/main/remote/RemoteHelperContract.ts");
 const { GitStatus } = loadTsCommonJs("src/shared/types/git.ts");
 const projectId = "project-a";
 const oid = "a".repeat(40);
@@ -15,7 +16,7 @@ function fixture(overrides = {}) {
 	const calls = [];
 	const session = {
 		request: async (method, params, options) => {
-			calls.push({ method, params });
+			calls.push({ method, params, timeoutMs: options?.timeoutMs });
 			options?.onRequestId?.(`request-${calls.length}`);
 			if (method === "hello") return { protocolVersion: 1, root: locator.remotePath, capabilities: ["git.status", "git.workspaceDiff"] };
 			if (method === "git.workspaceDiff") return { originalContent: "old\n", modifiedContent: "new\n" };
@@ -174,4 +175,35 @@ test("aborting a read cancels its exact request and discards any late success", 
 	f.calls.length = 0;
 	await assert.rejects(f.service.status(projectId, controller.signal), /REQUEST_CANCELLED/);
 	assert.equal(f.calls.length, 0);
+});
+
+test("network verbs carry the sync budget while every other Git method keeps the read budget", async () => {
+	const f = fixture();
+	f.session.hostRevision = 1;
+	const expectation = (kind) => ({ kind, revision: "f".repeat(64), hostRevision: 1, target: locator });
+	const capabilities = ["git.status", "git.log", "git.fetch", "git.push", "git.pull"];
+	f.session.request = async (method, params, options) => {
+		f.calls.push({ method, params, timeoutMs: options?.timeoutMs });
+		options?.onRequestId?.("request-" + f.calls.length);
+		if (method === "hello") return { protocolVersion: 1, root: locator.remotePath, capabilities };
+		if (method === "git.status") return encode(" M tracked.txt\0");
+		if (method === "git.log") return { commits: [], hasMore: false };
+		if (method === "git.fetch") return { applied: true, upToDate: true, updated: [] };
+		if (method === "git.push") return { applied: true, outcome: "up-to-date", refspec: "refs/heads/main:refs/heads/main" };
+		if (method === "git.pull") return { applied: true, mode: "up-to-date", head: oid };
+		throw new Error("unexpected method " + method);
+	};
+	await f.service.status(projectId);
+	await f.service.log(projectId);
+	await f.service.fetch(projectId, "origin", expectation("fetch"));
+	await f.service.push(projectId, "origin", "main", expectation("push"));
+	await f.service.pull(projectId, "origin", "main", expectation("pull"));
+	const byMethod = new Map(f.calls.map((call) => [call.method, call.timeoutMs]));
+	// G5a follow-up (plan §5.16.2): the 30s read deadline used to be passed to every method, truncating the
+	// contract's 10-minute network budget before it ever left main.
+	assert.equal(REMOTE_GIT_SYNC_TIMEOUT_MS, 600_000);
+	assert.equal(byMethod.get("git.status"), REMOTE_GIT_READ_TIMEOUT_MS);
+	assert.equal(byMethod.get("git.log"), REMOTE_GIT_READ_TIMEOUT_MS);
+	assert.equal(byMethod.get("hello"), REMOTE_GIT_READ_TIMEOUT_MS);
+	for (const method of ["git.fetch", "git.push", "git.pull"]) assert.equal(byMethod.get(method), REMOTE_GIT_SYNC_TIMEOUT_MS, method);
 });

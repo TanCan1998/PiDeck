@@ -7,14 +7,14 @@ function quote(value: string): string {
 
 /** Only a newly allocated run-owned directory is initialized; no user/global Git config is changed. */
 export async function initializeRemoteUnbornGitFixture(credentials: RemoteAcceptanceCredentials, root: string) {
-	await runRemoteCommand(credentials, "set -eu; umask 077; mkdir -p " + quote(root) + "; cd " + quote(root) + "; git init -q; printf 'UNBORN_NEW\\n' > new.txt; printf 'KEEP_STAGED\\n' > keep.txt; git add -- keep.txt", 20_000);
+	await runRemoteCommand(credentials, "set -eu; umask 077; mkdir -p " + quote(root) + "; cd " + quote(root) + "; git init -q; printf 'UNBORN_NEW\\n' > new.txt; printf 'KEEP_STAGED\\n' > keep.txt; git add -- keep.txt", 60_000);
 }
 
 /** Real UI writes checked against independent native Git/index and untouched worktree facts. */
 export async function verifyRemoteGitIndex(input: { window: Page; credentials: RemoteAcceptanceCredentials; root: string; unborn: string; timeoutMs: number; testInfo: TestInfo }) {
 	const { window, credentials, root, unborn, timeoutMs, testInfo } = input;
 	const panel = window.getByTestId("remote-git-panel");
-	const command = async (path: string, script: string) => (await runRemoteCommand(credentials, "set -eu; cd " + quote(path) + "; " + script, 20_000)).stdout;
+	const command = async (path: string, script: string) => (await runRemoteCommand(credentials, "set -eu; cd " + quote(path) + "; " + script, 60_000)).stdout;
 	const worktree = (path: string) => command(path, "find . -path './.git' -prune -o -type f -exec sha256sum {} + | sort; find . -path './.git' -prune -o -type f -printf '%m %s %i %T@ %C@ %p\\n' | sort");
 	const head = await command(root, "git --no-optional-locks rev-parse HEAD");
 	const filesBefore = await worktree(root),

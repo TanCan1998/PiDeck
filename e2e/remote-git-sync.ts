@@ -47,14 +47,14 @@ export async function initializeRemoteGitSyncFixture(credentials: RemoteAcceptan
 export async function verifyRemoteGitSync(input: { window: Page; credentials: RemoteAcceptanceCredentials; root: string; origin: string; other: string; timeoutMs: number; testInfo: TestInfo }) {
 	const { window, credentials, root, origin, other, timeoutMs, testInfo } = input;
 	const panel = window.getByTestId("remote-git-panel");
-	const command = async (script: string) => (await runRemoteCommand(credentials, "set -eu; cd " + quote(root) + "; " + script, 20_000)).stdout;
+	const command = async (script: string) => (await runRemoteCommand(credentials, "set -eu; cd " + quote(root) + "; " + script, 60_000)).stdout;
 	const git = (script: string) => command("git --no-optional-locks " + script);
 	const facts = panel.getByTestId("remote-git-sync-facts");
 	const message = panel.getByTestId("remote-git-sync-message");
 	const fetchButton = panel.getByTestId("remote-git-sync-fetch");
 	const pushButton = panel.getByTestId("remote-git-sync-push");
 	const pullButton = panel.getByTestId("remote-git-sync-pull");
-	const remoteHead = async () => (await runRemoteCommand(credentials, "set -eu; git --no-optional-locks --git-dir=" + quote(origin) + " rev-parse HEAD", 20_000)).stdout.trim();
+	const remoteHead = async () => (await runRemoteCommand(credentials, "set -eu; git --no-optional-locks --git-dir=" + quote(origin) + " rev-parse HEAD", 60_000)).stdout.trim();
 	/**
 	 * The panel's buttons are enabled only once a snapshot has handed out that verb's grant, which happens after a
 	 * repository read. Waiting for the button is therefore the sequencing this flow needs: a click can never race

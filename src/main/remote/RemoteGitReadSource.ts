@@ -18,7 +18,14 @@
  *   bytes for regular files only;
  * - `fs.searchNames` visits at most SEARCH_SLICE entries per slice and only enqueues directories below the depth
  *   ceiling, so the directory sitting at the ceiling is never entered;
- * - a read is published only while the identity it was answered from is still on disk (`unchangedRead`).
+ * - a read is published only while the identity it was answered from is still on disk (`unchangedRead`);
+ * - the refs compare is the direct tree diff of the two commits the refs resolved to (two-dot), never a
+ *   merge-base/three-dot view: the per-file read names the same two OIDs, so the list and the content cannot
+ *   disagree even if a ref moves after the compare. Both inputs are full local ref names (`refs/heads/*`,
+ *   `refs/tags/*`) because those are exactly what `git.refs` returns and because a full name can never be
+ *   mistaken for an option; the frozen `readRef` re-implements the check-ref-format rules and additionally
+ *   refuses the shapes Git itself accepts but this protocol does not use (a component starting with `-`, an
+ *   `@` component, and `{}` which would collide with the `^{commit}` argument that follows the name).
  */
 export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,createGitCommitProgram,createGitBranchProgram,createGitDiscardProgram,createGitRecoveryProgram}from"./git-write.mjs";import{createGitSyncProgram}from"./git-sync.mjs";export function createGitReadProgram(root, fs, path) {
 	const cp = process.getBuiltinModule("node:child_process");
@@ -240,6 +247,15 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,cr
 	function nulText(buffer) { try { return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer); } catch { throw failure("GIT_NOT_TEXT"); } }
 	function readHash(value) { if (typeof value !== "string" || !HASH_PATTERN.test(value)) throw failure("GIT_RESULT_INVALID"); return value; }
 	function readName(value, limit) { if (typeof value !== "string" || value.length === 0 || Buffer.byteLength(value, "utf8") > limit || NAME_CONTROL.test(value)) throw failure("GIT_RESULT_INVALID"); return value; }
+	/* Full local refs only; the rules mirror check-ref-format and add the shapes Git accepts but this protocol rejects. */
+	function readRef(value) {
+		if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_REF_NAME || /[\u0000-\u0020\u007f~^:?*[\\{}]/.test(value) || value.includes("..") || value.includes("@{") || value.includes("//")) throw failure("GIT_RESULT_INVALID");
+		const prefix = value.startsWith("refs/heads/") ? "refs/heads/" : value.startsWith("refs/tags/") ? "refs/tags/" : null;
+		if (prefix === null) throw failure("GIT_RESULT_INVALID");
+		const name = value.slice(prefix.length);
+		if (!name || name.split("/").some(function (part) { return !part || part === "." || part === ".." || part === "@" || part.startsWith(".") || part.startsWith("-") || part.endsWith(".") || part.endsWith(".lock"); })) throw failure("GIT_RESULT_INVALID");
+		return value;
+	}
 	/* Each record starts with its separator, so the newline git appends per record is unambiguous. */
 	function splitRecords(raw, limit) {
 		const parts = raw.length === 0 ? [] : raw.split("\u001e");
@@ -340,6 +356,33 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,cr
 		if (params.base !== null && !original.present && !modified.present) throw failure("GIT_RESOURCE_CHANGED");
 		return { originalContent: original.content, modifiedContent: modified.content };
 	}
+	/* One full local ref to the commit it names: a missing ref is its own code, a non-commit target is not a ref this batch can compare. */
+	async function resolveRef(ctx, value) {
+		const probe = await execute(ctx, ["check-ref-format", value], 256, [1, 128]);
+		if (probe.exitCode !== 0) throw failure("GIT_RESULT_INVALID");
+		const resolved = await execute(ctx, ["rev-parse", "--verify", "--quiet", value + "^{commit}"], 256, [1, 128]);
+		if (resolved.exitCode === 0) return readHash(text(resolved.bytes).trim());
+		try { await objectType(ctx, value); } catch (error) { if (error && error.message === "GIT_OBJECT_NOT_FOUND") throw failure("GIT_REF_NOT_FOUND"); throw error; }
+		throw failure("GIT_RESULT_INVALID");
+	}
+	/* Two refs, their trees, native diff; the OIDs travel with the answer so a later ref move cannot rewrite it. */
+	async function compare(ctx, params) {
+		const base = await resolveRef(ctx, params.base), head = await resolveRef(ctx, params.head);
+		if (base === head) return { base: { ref: params.base, oid: base }, head: { ref: params.head, oid: head }, files: [] };
+		const raw = nulText((await execute(ctx, ["diff", "--name-status", "-z", "--find-renames", "--no-ext-diff", "--no-textconv", base, head], MAX_STATUS)).bytes);
+		const tokens = raw.length === 0 ? [] : raw.split("\u0000");
+		if (tokens.length > 0 && tokens[tokens.length - 1] === "") tokens.pop();
+		const files = [];
+		for (let index = 0; index < tokens.length; ) {
+			const status = tokens[index++], renamed = status.charAt(0) === "R" || status.charAt(0) === "C";
+			if (!/^(?:[AMDTUXB]|[RC]\d{1,3})$/.test(status) || index >= tokens.length) throw failure("GIT_RESULT_INVALID");
+			const first = relative(tokens[index++]);
+			if (renamed) { if (index >= tokens.length) throw failure("GIT_RESULT_INVALID"); files.push({ status: status, path: relative(tokens[index++]), oldPath: first }); }
+			else files.push({ status: status, path: first });
+			if (files.length > MAX_RESOURCES) throw failure("RESULT_TOO_LARGE");
+		}
+		return { base: { ref: params.base, oid: base }, head: { ref: params.head, oid: head }, files: files };
+	}
 
 	/* Commit identity is read from the repository's own config chain (local wins over global) and never written. */
 	async function configValue(ctx, key) {
@@ -392,6 +435,7 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,cr
 		if (params.method === "git.commitDetail") return unchangedRead(ctx, first, firstHead, commitDetail(ctx, params));
 		if (params.method === "git.refs") return unchangedRead(ctx, first, firstHead, refs(ctx));
 		if (params.method === "git.refFileDiff") return unchangedRead(ctx, first, firstHead, refFileDiff(ctx, params));
+		if (params.method === "git.compare") return unchangedRead(ctx, first, firstHead, compare(ctx, params));
 		const status = await rawStatus(ctx);
 		return unchangedRead(ctx, first, firstHead, params.method === "git.status" ? { status: status.bytes.toString("base64"), head: firstHead.head, branch: firstHead.branch, revision: writer.fingerprint(ctx, first, firstHead, status) } : readDiff(ctx, params, status, firstHead));
 	}
@@ -419,6 +463,10 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,cr
 		if (method === "git.refFileDiff") {
 			if (keys.length !== 3 || !keys.includes("base") || !keys.includes("head") || !keys.includes("path")) throw failure("GIT_RESULT_INVALID");
 			return { method: method, base: params.base === null ? null : readHash(params.base), head: readHash(params.head), path: relative(params.path) };
+		}
+		if (method === "git.compare") {
+			if (keys.length !== 2 || !keys.includes("base") || !keys.includes("head")) throw failure("GIT_RESULT_INVALID");
+			return { method: method, base: readRef(params.base), head: readRef(params.head) };
 		}
 		if (method === "git.recoveryList") { if (keys.length) throw failure("GIT_RESULT_INVALID"); return { method: method }; }
 		if (method === "git.recoveryRestore") {

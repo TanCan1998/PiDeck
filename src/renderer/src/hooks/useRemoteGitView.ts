@@ -7,6 +7,9 @@ import { createRemoteGitViewController, type RemoteGitViewState } from "../utils
 export function useRemoteGitView(project: RemoteProject) {
 	const projectKey = JSON.stringify([project.id, project.locator.hostId, project.locator.remotePath]);
 	const [state, setState] = useState<RemoteGitViewState>({ projectKey, loading: true, diffLoading: false });
+	// Polling is bounded by the host's observed state, not by guessing from a failed read: the optimistic initial
+	// value only covers the window before the first host event (the panel's own first read reports any failure).
+	const [hostReady, setHostReady] = useState(true);
 	const controller = useRef<ReturnType<typeof createRemoteGitViewController> | null>(null);
 	useEffect(() => {
 		const reads = createRemoteGitViewController(project.id, projectKey, desktopApi.git, setState);
@@ -16,7 +19,10 @@ export function useRemoteGitView(project: RemoteProject) {
 		// the snapshot, so a refresh can never trigger a second, self-feeding load that moves the rows under the user.
 		void reads.refresh().then(() => reads.loadSync());
 		const unsubscribe = desktopApi.remoteHosts.onStateChange((change) => {
-			if (change.hostId === project.locator.hostId && ["disconnected", "offline", "degraded", "needs-attention", "reconnecting"].includes(change.state)) reads.invalidateConnection();
+			if (change.hostId !== project.locator.hostId) return;
+			// Only "ready" resumes polling; every other observed transition pauses it until the host is ready again.
+			setHostReady(change.state === "ready");
+			if (["disconnected", "offline", "degraded", "needs-attention", "reconnecting"].includes(change.state)) reads.invalidateConnection();
 		});
 		void reads.refresh();
 		return () => {
@@ -49,6 +55,13 @@ export function useRemoteGitView(project: RemoteProject) {
 	const loadSync = useCallback(() => {
 		void controller.current?.loadSync();
 	}, []);
+	const runCompare = useCallback((base: string, head: string) => {
+		void controller.current?.runCompare(base, head);
+	}, []);
+	const pollRefs = useCallback((): Promise<void> => controller.current?.pollRefs() ?? Promise.resolve(), []);
+	const stopRefsPolling = useCallback(() => {
+		controller.current?.stopRefsPolling();
+	}, []);
 	const fetchRemote = useCallback((remote: string) => {
 		void controller.current?.fetch(remote);
 	}, []);
@@ -72,9 +85,9 @@ export function useRemoteGitView(project: RemoteProject) {
 	}, []);
 	return {
 		state: state.projectKey === projectKey ? state : { projectKey, loading: true, diffLoading: false },
-		refresh: () => {
-			void controller.current?.refresh();
-		},
+		// Returning the promise lets an explicit refresh gesture sequence the sync-facts read after the snapshot
+		// read; the snapshot update replaces the whole state and would wipe facts read concurrently.
+		refresh: (): Promise<void> => controller.current?.refresh() ?? Promise.resolve(),
 		openDiff: (group: Parameters<NonNullable<typeof controller.current>["openDiff"]>[0], target: Parameters<NonNullable<typeof controller.current>["openDiff"]>[1]) => {
 			void controller.current?.openDiff(group, target);
 		},
@@ -97,6 +110,10 @@ export function useRemoteGitView(project: RemoteProject) {
 		restoreRecovery,
 		dropRecovery,
 		loadSync,
+		runCompare,
+		pollRefs,
+		stopRefsPolling,
+		hostReady,
 		fetchRemote,
 		pushRemote,
 		pullRemote,

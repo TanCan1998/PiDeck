@@ -43,7 +43,7 @@ export async function initializeRemoteGitHistoryFixture(credentials: RemoteAccep
 export async function verifyRemoteGitHistory(input: { window: Page; credentials: RemoteAcceptanceCredentials; root: string; timeoutMs: number; testInfo: TestInfo }) {
 	const { window, credentials, root, timeoutMs, testInfo } = input;
 	const panel = window.getByTestId("remote-git-panel");
-	const command = async (path: string, script: string) => (await runRemoteCommand(credentials, "set -eu; cd " + quote(path) + "; " + script, 20_000)).stdout;
+	const command = async (path: string, script: string) => (await runRemoteCommand(credentials, "set -eu; cd " + quote(path) + "; " + script, 60_000)).stdout;
 	const git = (script: string) => command(root, "git --no-optional-locks " + script);
 	/** Nothing in this batch may write: index bytes and metadata, refs, HEAD and worktree stay exactly as they were. */
 	const witness = async () => ({

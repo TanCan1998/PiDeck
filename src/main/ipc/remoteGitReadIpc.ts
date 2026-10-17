@@ -8,6 +8,7 @@ import type {
 	GitWorkspaceFileDiff,
 	RemoteGitBranchMutationResult,
 	RemoteGitCommitDetailResult,
+	RemoteGitCompareResult,
 	RemoteGitDiscardResult,
 	RemoteGitLogResult,
 	RemoteGitRecoveryDropResult,
@@ -254,6 +255,14 @@ export function registerRemoteGitReadIpc(input: { enabled: boolean; locator(proj
 		try {
 			const refs = await read(event, projectId, undefined, (id, signal) => git.refs(id, signal));
 			return { ok: true, refs };
+		} catch (error) {
+			return { ok: false, code: remoteGitFailureCode(error) };
+		}
+	});
+	/* G5b refs compare: same read boundary as history, no token; both refs are full local ref names. */
+	ipcMain.handle(ipcChannels.gitRemoteCompare, async (event, projectId: unknown, base: unknown, head: unknown): Promise<RemoteGitCompareResult> => {
+		try {
+			return { ok: true, compare: await read(event, projectId, undefined, (id, signal) => git.compare(id, base, head, signal)) };
 		} catch (error) {
 			return { ok: false, code: remoteGitFailureCode(error) };
 		}

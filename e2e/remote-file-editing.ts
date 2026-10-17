@@ -16,7 +16,7 @@ export async function initializeRemoteCodeFixture(credentials: RemoteAcceptanceC
 		["test.cjs", testCode],
 		["crlf.txt", "\ufefffirst\r\nsecond\r\n"],
 	])
-		await runRemoteCommand(credentials, "umask 077; printf '%s' '" + Buffer.from(content).toString("base64") + "' | base64 -d > '" + projectPath + "/" + name + "'", 20_000);
+		await runRemoteCommand(credentials, "umask 077; printf '%s' '" + Buffer.from(content).toString("base64") + "' | base64 -d > '" + projectPath + "/" + name + "'", 60_000);
 }
 
 async function replaceEditor(window: Page, content: string): Promise<void> {
@@ -31,8 +31,8 @@ async function replaceEditor(window: Page, content: string): Promise<void> {
 export async function verifyRemoteCodeEditing(input: { window: Page; credentials: RemoteAcceptanceCredentials; projectPath: string; testInfo: TestInfo; timeoutMs: number }): Promise<void> {
 	const { window, credentials, projectPath, testInfo, timeoutMs } = input;
 	const path = projectPath + "/calc.cjs";
-	const read = async () => (await runRemoteCommand(credentials, "cat -- '" + path + "'", 20_000)).stdout;
-	const mode = async () => (await runRemoteCommand(credentials, "stat -c '%a' -- '" + path + "'", 20_000)).stdout.trim();
+	const read = async () => (await runRemoteCommand(credentials, "cat -- '" + path + "'", 60_000)).stdout;
+	const mode = async () => (await runRemoteCommand(credentials, "stat -c '%a' -- '" + path + "'", 60_000)).stdout.trim();
 	const region = window.getByRole("region", { name: "远端文件编辑器" });
 	await window.getByRole("button", { name: "calc.cjs", exact: false }).click();
 	await expect(region.locator(".cm-content")).toContainText("value: 1", { timeout: timeoutMs });
@@ -49,7 +49,7 @@ export async function verifyRemoteCodeEditing(input: { window: Page; credentials
 	await expect(region.locator(".cm-content")).toContainText("中文保存验收", { timeout: timeoutMs });
 	await testInfo.attach("remote-code-after-save", { body: Buffer.from(await read()), contentType: "text/plain" });
 
-	await runRemoteCommand(credentials, "printf '%s' '" + Buffer.from(EXTERNAL).toString("base64") + "' | base64 -d > '" + path + "'", 20_000);
+	await runRemoteCommand(credentials, "printf '%s' '" + Buffer.from(EXTERNAL).toString("base64") + "' | base64 -d > '" + path + "'", 60_000);
 	await replaceEditor(window, DRAFT);
 	await region.getByRole("button", { name: "保存远端文件", exact: true }).click();
 	await expect(region.getByRole("alert")).toContainText("已拒绝覆盖", { timeout: timeoutMs });
@@ -80,7 +80,7 @@ export async function verifyRemoteCodeEditing(input: { window: Page; credentials
 	await window.keyboard.press("Enter");
 	await region.getByRole("button", { name: "保存远端文件", exact: true }).click();
 	await expect(region.getByText("已保存", { exact: true })).toBeVisible({ timeout: timeoutMs });
-	expect((await runRemoteCommand(credentials, "cat -- '" + projectPath + "/crlf.txt'", 20_000)).stdout).toBe("\ufefffirst\r\nsecond\r\n// appended\r\n");
+	expect((await runRemoteCommand(credentials, "cat -- '" + projectPath + "/crlf.txt'", 60_000)).stdout).toBe("\ufefffirst\r\nsecond\r\n// appended\r\n");
 	await window.getByRole("button", { name: "calc.cjs", exact: false }).click();
 	await expect(region.locator(".cm-content")).toContainText("value: 2");
 	console.log("[remote-file-acceptance] saveAndReload=true externalChangePreserved=true draftSurvivesNavigation=true mode600=true bomAndCrlfPreserved=true");
@@ -97,8 +97,8 @@ export async function verifyRemoteCodeIsolation(window: Page, credentials: Remot
 	await replaceEditor(window, "module.exports = { value: 102 };\n");
 	await region.getByRole("button", { name: "保存远端文件", exact: true }).click();
 	await expect(region.getByText("已保存", { exact: true })).toBeVisible({ timeout: timeoutMs });
-	expect((await runRemoteCommand(credentials, "cat -- '" + neighborPath + "/calc.cjs'", 20_000)).stdout).toBe("module.exports = { value: 102 };\n");
-	expect((await runRemoteCommand(credentials, "cat -- '" + projectPath + "/calc.cjs'", 20_000)).stdout).toBe(REMOTE_EDITED_CODE);
+	expect((await runRemoteCommand(credentials, "cat -- '" + neighborPath + "/calc.cjs'", 60_000)).stdout).toBe("module.exports = { value: 102 };\n");
+	expect((await runRemoteCommand(credentials, "cat -- '" + projectPath + "/calc.cjs'", 60_000)).stdout).toBe(REMOTE_EDITED_CODE);
 	await remoteProjectRow(window, projectPath.split("/").at(-1) ?? "")
 		.locator(".project-draggable")
 		.click();
@@ -124,7 +124,7 @@ export async function verifyRemoteCodeDisconnect(window: Page, credentials: Remo
 	await region.getByRole("button", { name: "保存远端文件", exact: true }).click();
 	await expect(region.getByRole("alert")).toContainText("远端连接不可用", { timeout: timeoutMs });
 	await expect(region.locator(".cm-content")).toContainText("disconnected draft");
-	expect((await runRemoteCommand(credentials, "cat -- '" + projectPath + "/calc.cjs'", 20_000)).stdout).toBe(REMOTE_EDITED_CODE);
+	expect((await runRemoteCommand(credentials, "cat -- '" + projectPath + "/calc.cjs'", 60_000)).stdout).toBe(REMOTE_EDITED_CODE);
 	await window.getByRole("button", { name: /^设置/ }).click();
 	await settings.getByRole("tab", { name: "连接", exact: true }).click();
 	await settings.getByRole("button", { name: "连接", exact: true }).first().click();
