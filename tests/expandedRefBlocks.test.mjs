@@ -122,14 +122,3 @@ test("textForSessionTitle strips vision bridge blocks (marker + description are 
 	// 引用块在前、视觉桥块在尾的混排：两者都剥，只留用户手写正文。
 	assert.equal(textForSessionTitle(`<quoted_context label="引用A" message_id="m1">\nA 全文\n</quoted_context>\n照着改\n\n${success}`), "照着改");
 });
-
-test("looksLikeExpandedRefBlockTitle flags vision bridge marker titles (image-only sessions)", () => {
-	// 只发图的消息被写成的占位标题没有信息价值，必须判成占位名，自动命名才有机会重写它（存量脏标题自愈）。
-	assert.equal(looksLikeExpandedRefBlockTitle("[图片 #1（视觉桥已查看，以下为图片实际内容）]"), true);
-	assert.equal(looksLikeExpandedRefBlockTitle("[图片 #1 未发送给模型：视觉桥未配置]"), true);
-	assert.equal(looksLikeExpandedRefBlockTitle("[图片 #1 视觉桥转换失败：接口超时。请检查视觉桥设置（模型/接口地址/API Key）后重试，此图片内容不可见]"), true);
-	// 用户真实提问里出现「视觉桥/图片」字样不能误判：三类标记总是被追加在正文后，
-	// 真实标题不会以「[图片 #N」开头。
-	assert.equal(looksLikeExpandedRefBlockTitle("视觉桥转换失败怎么办"), false);
-	assert.equal(looksLikeExpandedRefBlockTitle("看看 [图片 #1 这个写法"), false);
-});

@@ -327,10 +327,8 @@ export function textForSessionTitle(text: string): string {
  *（2026-10 现场：总结失败时 XML 标题永久留在侧栏）。
  */
 export function looksLikeExpandedRefBlockTitle(title: string | undefined): boolean {
-	// 视觉桥脏标题：只发图的消息把占位标记写成了标题（同上 2026-10 现场），没有信息价值，必须当占位名允许自动重命名修复。
-	// 三类标记都以「[图片 #N」开头且用户手写标题不会以它开头（标记总是被追加在正文后），前缀即强信号，
-	// 不用短语包含判定：避免把「视觉桥转换失败怎么办」这类真实提问的标题误当成脏标题。
-	if (typeof title === "string" && /^\[图片 #\d+/.test(title.trim())) return true;
+	// 视觉桥标记开头的存量脏标题按用户决定不自动重命名（旧会话名保持稳定），
+	// 不在此判定；新会话的正确命名由 textForSessionTitle 剥块保证。
 	if (!title?.includes("<")) return false;
 	// 完整块（带闭合标签）一定能解析出来，块不在开头（`帮我看看 <quoted_context …>`）也命中。
 	if (parseExpandedRefBlocks(title).length > 0) return true;
