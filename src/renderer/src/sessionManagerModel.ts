@@ -179,7 +179,18 @@ export function managerArchivedDshLabel(row: Extract<ManagerArchivedRow, { kind:
 /** 归档视图合并行：pi 会话按文件恢复；DSH 会话按 host id 恢复。 */
 export type ManagerArchivedRow = { kind: "pi"; item: ArchivedPiSession } | { kind: "dsh"; item: ArchivedDshSession };
 
-/** 远端无回收站：归档行可以恢复，但不能进入单行或批量永久删除链路。 */
+/**
+ * 行是否属于**远端归档**（Phase 5）：远端没有回收站/本机路径，删除必须走 main 的
+ * 「id-only 请求 → 一次性确认 → 有界远端 rm」链路，因此单行按钮与文案都不同。
+ */
+export function isRemoteArchivedPiRow(row: ManagerArchivedRow): row is Extract<ManagerArchivedRow, { kind: "pi" }> {
+	return row.kind === "pi" && Boolean(row.item.archivedRemoteSessionId);
+}
+
+/**
+ * 远端无回收站：归档行可以恢复，但不能进入本机回收站删除链路（单行按钮/批量/全选）。
+ * 远端归档行有自己的显式永久删除入口（isRemoteArchivedPiRow + 一次性确认），两者不合并。
+ */
 export function canDeleteManagerArchivedRow(row: ManagerArchivedRow): boolean {
 	return row.kind !== "pi" || !row.item.archivedRemoteSessionId;
 }

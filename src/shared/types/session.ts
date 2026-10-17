@@ -214,6 +214,25 @@ export type ArchivedPiSession = {
 	archivedRemoteSessionId?: string;
 };
 
+/**
+ * 远端归档会话「永久删除」的两步信封（Phase 5）。
+ *
+ * 为什么是「请求 → 一次性确认 → 回答」而不是一个 confirmed 参数：高风险破坏性操作不能相信
+ * renderer 自报的 confirmed；main 用 PendingConfirmationBroker 持有短暂、sender 绑定、状态摘要绑定
+ * 的一次性 requestId，消费即失效（重放/过期/别的窗口回答都只能得到 CONFIRMATION_REQUIRED）。
+ * 请求入参只有本机 catalog 会话 id，远端路径永远由 main 从归档索引读取。
+ */
+export type RemoteArchivedSessionDeleteRequestResult =
+	| { ok: true; status: "pending"; requestId: string; expiresAt: number }
+	/** 失败码见 shared/sessionDeleteCodes.ts 的闭集（busy/unavailable/entryNotFound/notArchived…）。 */
+	| { ok: false; code: string };
+
+export type RemoteArchivedSessionDeleteAnswerResult =
+	/** deleted=false 表示用户拒绝（deny），不是失败。 */
+	| { ok: true; deleted: boolean }
+	/** 失败码；RESULT_UNCONFIRMED 表示远端可能已删除，UI 必须保留未知态且不自动刷新掉。 */
+	| { ok: false; code: string };
+
 /** PiDeck-owned session identity, independent from a running Pi process. */
 export type SessionRecord = {
 	id: string;

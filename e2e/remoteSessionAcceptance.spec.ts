@@ -460,7 +460,7 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 				await expect(timeline.locator(".user-turn-text").filter({ hasText: PROMPT }), "重载后必须仍能看到 prompt（远端正文读取）").toBeVisible({ timeout: timeouts.helperMs });
 				await expect(timeline.locator(".assistant-text").first(), "重载后必须仍能看到回复正文（远端正文读取）").toBeVisible({ timeout: timeouts.helperMs });
 			});
-			await test.step("远端归档 → 归档弹窗可见且无删除动作 → 按 ID 恢复 → 文件与历史原样返回", async () => {
+			await test.step("远端归档 → 归档弹窗可见（恢复 + 删除（永久））→ 按 ID 恢复 → 文件与历史原样返回", async () => {
 				const evidenceFile = (remoteSessionEvidence.match(/(\/\S+\.jsonl)/) ?? [])[1];
 				expect(evidenceFile, "归档前必须定位到本次会话的远端文件").toBeTruthy();
 				if (!evidenceFile) throw new Error("REMOTE_ARCHIVE_EVIDENCE_FILE_MISSING");
@@ -478,7 +478,9 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 				await dialog.getByRole("button", { name: "已归档", exact: true }).click();
 				const archivedRow = dialog.locator("tbody tr").filter({ has: window.getByRole("button", { name: "恢复", exact: true }) });
 				await expect(archivedRow).toHaveCount(1, { timeout: timeouts.helperMs });
+				// 远端行不进入本机回收站链路（“删除”精确名不存在），但必须有显式永久删除入口。
 				await expect(archivedRow.getByRole("button", { name: "删除", exact: true })).toHaveCount(0);
+				await expect(archivedRow.getByTestId("remote-archived-delete"), "远端归档行必须有显式永久删除入口").toBeVisible();
 				await expect(archivedRow.getByRole("checkbox")).toBeDisabled();
 				await expect(dialog.getByRole("checkbox").first()).toBeDisabled();
 				await archivedRow.getByRole("button", { name: "恢复", exact: true }).click();
@@ -567,6 +569,42 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 			const mutationFile = (remoteSessionEvidence.match(/(\/\S+\.jsonl)/) ?? [])[1];
 			if (!mutationFile) throw new Error("REMOTE_MUTATION_EVIDENCE_FILE_MISSING");
 			await verifyRemoteHistoryMutations({ window, credentials: creds, evidenceFile: mutationFile, evidenceDirectory: paths.sessionEvidenceDir, prompt: PROMPT, timeoutMs: timeouts.helperMs, testInfo });
+			await test.step("远端归档的永久删除：行内不可恢复确认 → 远端文件真正消失 → 归档行消失", async () => {
+				const evidenceFile = (remoteSessionEvidence.match(/(\/\S+\.jsonl)/) ?? [])[1];
+				expect(evidenceFile, "永久删除前必须定位到本次会话的远端文件").toBeTruthy();
+				if (!evidenceFile) throw new Error("REMOTE_DELETE_EVIDENCE_FILE_MISSING");
+				const archiveFile = evidenceFile.replace(/\/([^/]+)$/, "/.pideck-archive/$1");
+				// 再次归档（上一步最后已恢复并打开会话，运行中的会话会被主进程拒绝归档 ⇒ 先停 Agent）。
+				const dialog = await openRemoteSessionManager(window, paths.projectName);
+				const activeRow = dialog
+					.locator("tbody tr")
+					.filter({ has: window.getByRole("button", { name: "归档", exact: true }) })
+					.filter({ hasText: PROMPT })
+					.filter({ hasNotText: "(fork)" });
+				await expect(activeRow, "再次归档前会话必须回到普通管理列表").toHaveCount(1);
+				await activeRow.getByRole("button", { name: "归档", exact: true }).click();
+				await expect(dialog).toHaveCount(0, { timeout: timeouts.helperMs });
+				expect((await runRemoteCommand(creds, "[ -f '" + archiveFile + "' ] && printf archived", 20_000)).stdout.trim()).toBe("archived");
+				let archivedDialog = await openRemoteSessionManager(window, paths.projectName);
+				await archivedDialog.getByRole("button", { name: "已归档", exact: true }).click();
+				const archivedRow = archivedDialog.locator("tbody tr").filter({ has: window.getByRole("button", { name: "恢复", exact: true }) });
+				await expect(archivedRow).toHaveCount(1, { timeout: timeouts.helperMs });
+				// 本机归档/DSH 行的删除入口不出现；远端行显示「删除（永久）」。
+				await expect(archivedRow.getByRole("button", { name: "删除", exact: true })).toHaveCount(0);
+				await archivedRow.getByTestId("remote-archived-delete").click();
+				const confirmBar = window.getByTestId("remote-archived-delete-confirm");
+				await expect(confirmBar).toBeVisible();
+				// 文案必须明说不可恢复，不能只显示“删除”。
+				await expect(confirmBar).toContainText("无法恢复");
+				await expect(archivedRow.getByTestId("remote-archived-delete-confirm-action")).toBeEnabled();
+				await archivedRow.getByTestId("remote-archived-delete-confirm-action").click();
+				await expect(archivedRow).toHaveCount(0, { timeout: timeouts.helperMs });
+				// 主进程有界 rm 真的删掉了远端文件；不是只移除本机索引。
+				expect((await runRemoteCommand(creds, "[ ! -e '" + archiveFile + "' ] && printf deleted", 20_000)).stdout.trim()).toBe("deleted");
+				// 成功路径不得留下“结果未确认”提示（未确认是另一条独立分支）。
+				await expect(archivedDialog.getByTestId("remote-archived-delete-unconfirmed")).toHaveCount(0);
+				await archivedDialog.getByRole("button", { name: "关闭", exact: true }).click();
+			});
 		} finally {
 			if (consoleErrors.length > 0) console.log("[p42-acceptance] renderer console errors:\n" + consoleErrors.join("\n"));
 			preserveAppLogs(remoteUserDataRoot, paths.runId);

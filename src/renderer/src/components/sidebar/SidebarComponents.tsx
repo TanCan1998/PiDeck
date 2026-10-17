@@ -47,7 +47,7 @@ import { cn } from "../../lib/utils";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "../ui-shadcn/dropdown-menu";
 import { Button } from "../ui-shadcn/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui-shadcn/table";
-import type { SessionSummary, Project, AgentTab, ArchivedDshSession, ArchivedPiSession } from "../../../../shared/types";
+import type { SessionSummary, Project, AgentTab, ArchivedDshSession, ArchivedPiSession, RemoteArchivedSessionDeleteAnswerResult, RemoteArchivedSessionDeleteRequestResult } from "../../../../shared/types";
 import { worktreeSlugify } from "../../../../shared/worktreeSlug";
 import { SessionSourceBadge, SessionBackendMark, DshSourceBadge, ImageGenSourceBadge } from "../session/SessionSourceBadge";
 import { Checkbox } from "../ui-shadcn/checkbox";
@@ -60,6 +60,7 @@ import {
 	canDeleteManagerArchivedRow,
 	filterArchivedDshByFamily,
 	filterArchivedPiByFamily,
+	isRemoteArchivedPiRow,
 	managerArchivedDshLabel,
 	managerArchivedRowKey,
 	mergeManagerArchived,
@@ -68,6 +69,8 @@ import {
 	worktreeFamilyProjects,
 	type ManagerArchivedRow,
 } from "../../sessionManagerModel";
+import { remoteArchivedDeleteErrorKey, remoteArchivedDeleteRowPhase } from "../../utils/remoteArchivedDeleteState";
+import { useRemoteArchivedSessionDelete } from "../../hooks/useRemoteArchivedSessionDelete";
 
 /**
  * 工作区标签（会话管理弹窗内复用）：worktree 家族聚合后，非主工作区会话
@@ -106,6 +109,13 @@ export function SessionManagerModal(props: {
 	onUnarchiveDsh: (dshSessionId: string) => Promise<void>;
 	/** 永久删除已归档 DSH 会话（host 目录移入回收站） */
 	deleteArchivedDsh: (dshSessionId: string) => Promise<void>;
+	/**
+	 * 远端归档行「永久删除」第一步：只传本机 catalog 会话 id（远端路径永不过 IPC）。
+	 * main 校验运行态/归档索引后返回一次性确认 requestId；此调用本身不删任何远端数据。
+	 */
+	requestDeleteArchivedRemote: (sessionId: string) => Promise<RemoteArchivedSessionDeleteRequestResult>;
+	/** 第二步：回答一次性确认；只有 approve 才执行不可恢复的远端删除（id 已由 main 绑定）。 */
+	answerDeleteArchivedRemote: (requestId: string, choice: "approve" | "deny") => Promise<RemoteArchivedSessionDeleteAnswerResult>;
 }) {
 	// 弹窗项目上下文 = 整个 worktree 家族（根 + 全部子工作区），与侧栏工作区树语义一致。
 	const family = useMemo(() => worktreeFamilyProjects(props.projects, props.projectId), [props.projects, props.projectId]);
@@ -124,6 +134,14 @@ export function SessionManagerModal(props: {
 	const deletableArchivedRows = useMemo(() => (archivedRows ?? []).filter(canDeleteManagerArchivedRow), [archivedRows]);
 	// 已归档行待删除确认：单行/批量均收敛到这里（数组）；确认后调主进程删除并刷新归档列表。
 	const [pendingDeleteArchived, setPendingDeleteArchived] = useState<ManagerArchivedRow[] | null>(null);
+	// 远端归档行的「永久删除」：页面级内联确认 + main 一次性确认（两步 IPC）。列表刷新只由成功/确定失败触发；
+	// RESULT_UNCONFIRMED 时状态机停在 unconfirmed，避免刷新把「可能已删除」的证据冲掉。
+	const remoteArchivedDelete = useRemoteArchivedSessionDelete({
+		request: props.requestDeleteArchivedRemote,
+		answer: props.answerDeleteArchivedRemote,
+		onDeleted: () => loadArchivedRows(),
+		onDefiniteFailure: () => loadArchivedRows(),
+	});
 
 	// 按 pill 过滤（一个会话只归属一个 pill，DSH 不与 Pi 重复计数）
 	const filteredSessions = useMemo(() => filterSessionsByPills(props.sessions, activePills), [props.sessions, activePills]);
@@ -347,6 +365,10 @@ export function SessionManagerModal(props: {
 											const workspaceLabel = row.kind === "pi" ? archivedPiWorkspaceLabel(row.item, family) : archivedDshWorkspaceLabel(row.item, family);
 											const rowKey = managerArchivedRowKey(row);
 											const isChecked = archivedSelected.has(rowKey);
+											// 远端归档行：删除必须走 main 的 id-only 一次性确认；进行中禁用恢复，避免同一文件被并发移动/删除。
+											const remoteSessionId = row.kind === "pi" ? row.item.archivedRemoteSessionId : undefined;
+											const remotePhase = remoteSessionId === undefined ? "other" : remoteArchivedDeleteRowPhase(remoteArchivedDelete.state, remoteSessionId);
+											const remoteBusy = remotePhase === "requesting" || remotePhase === "confirming" || remotePhase === "deleting";
 											return (
 												<TableRow key={rowKey} className="group bg-bg-panel" data-state={isChecked ? "selected" : undefined}>
 													<TableCell className="w-10">
@@ -374,25 +396,82 @@ export function SessionManagerModal(props: {
 														)}
 													</TableCell>
 													<TableCell className="w-40 text-right">
-														<div className="flex items-center justify-end gap-0.5">
-															<Button
-																variant="ghost"
-																size="sm"
-																className="h-auto gap-[3px] rounded-[4px] px-2 text-caption text-text-tertiary transition-all duration-150 hover:bg-bg-hover hover:text-[var(--color-accent)]"
-																onClick={() => {
-																	// 恢复后重新拉取归档列表（主列表由 catalog refresh 自动更新）
-																	const restored = row.kind === "pi" ? props.onUnarchive(row.item) : props.onUnarchiveDsh(row.item.dshSessionId);
-																	void restored.then(loadArchivedRows).catch(loadArchivedRows);
-																}}
-																title={t("sessionManager.restore")}
-															>
-																{t("sessionManager.restore")}
-															</Button>
-															{canDeleteManagerArchivedRow(row) && (
-																<Button variant="ghost" size="sm" className="h-auto gap-[3px] rounded-[4px] px-2 text-caption text-text-tertiary transition-all duration-150 hover:bg-[var(--color-danger-soft)] hover:text-[var(--color-danger)]" onClick={() => setPendingDeleteArchived([row])} title={t("common.delete")}>
-																	<Trash2 size={12} aria-hidden="true" />
-																	{t("common.delete")}
+														<div className="flex flex-col items-end gap-1">
+															<div className="flex items-center justify-end gap-0.5">
+																<Button
+																	variant="ghost"
+																	size="sm"
+																	disabled={remoteBusy}
+																	className="h-auto gap-[3px] rounded-[4px] px-2 text-caption text-text-tertiary transition-all duration-150 hover:bg-bg-hover hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50"
+																	onClick={() => {
+																		// 恢复后重新拉取归档列表（主列表由 catalog refresh 自动更新）
+																		const restored = row.kind === "pi" ? props.onUnarchive(row.item) : props.onUnarchiveDsh(row.item.dshSessionId);
+																		void restored.then(loadArchivedRows).catch(loadArchivedRows);
+																	}}
+																	title={t("sessionManager.restore")}
+																>
+																	{t("sessionManager.restore")}
 																</Button>
+																{canDeleteManagerArchivedRow(row) && (
+																	<Button variant="ghost" size="sm" className="h-auto gap-[3px] rounded-[4px] px-2 text-caption text-text-tertiary transition-all duration-150 hover:bg-[var(--color-danger-soft)] hover:text-[var(--color-danger)]" onClick={() => setPendingDeleteArchived([row])} title={t("common.delete")}>
+																		<Trash2 size={12} aria-hidden="true" />
+																		{t("common.delete")}
+																	</Button>
+																)}
+																{remoteSessionId !== undefined && remotePhase === "idle" && (
+																	<Button
+																		variant="ghost"
+																		size="sm"
+																		disabled={remoteArchivedDelete.state.phase !== "idle"}
+																		data-testid="remote-archived-delete"
+																		className="h-auto gap-[3px] rounded-[4px] px-2 text-caption text-text-tertiary transition-all duration-150 hover:bg-[var(--color-danger-soft)] hover:text-[var(--color-danger)]"
+																		onClick={() => void remoteArchivedDelete.request(remoteSessionId)}
+																		title={t("sessionManager.remoteArchivedDelete")}
+																	>
+																		<Trash2 size={12} aria-hidden="true" />
+																		{t("sessionManager.remoteArchivedDelete")}
+																	</Button>
+																)}
+															</div>
+															{remotePhase === "confirming" && (
+																<div className="flex max-w-72 flex-col items-end gap-1" data-testid="remote-archived-delete-confirm">
+																	<p className="text-caption leading-snug text-[var(--color-danger)]">{t("sessionManager.remoteArchivedDeleteConfirm", { name: row.kind === "pi" ? row.item.summary.name || t("common.untitled") : "" })}</p>
+																	<div className="flex items-center gap-1">
+																		<Button variant="ghost" size="sm" data-testid="remote-archived-delete-cancel" className="h-auto rounded-[4px] px-2 text-caption" onClick={() => remoteArchivedDelete.cancel()}>
+																			{t("common.cancel")}
+																		</Button>
+																		<Button size="sm" data-testid="remote-archived-delete-confirm-action" className="h-auto rounded-[4px] bg-[var(--color-danger)] px-2 text-caption text-white hover:bg-[var(--color-danger)]" onClick={() => void remoteArchivedDelete.confirm()}>
+																			{t("sessionManager.remoteArchivedDeleteAction")}
+																		</Button>
+																	</div>
+																</div>
+															)}
+															{(remotePhase === "requesting" || remotePhase === "deleting") && (
+																<span className="text-caption text-text-tertiary" data-testid="remote-archived-delete-busy">
+																	{t("sessionManager.remoteArchivedDeleteDeleting")}
+																</span>
+															)}
+															{remotePhase === "unconfirmed" && (
+																<div className="flex max-w-72 flex-col items-end gap-1" data-testid="remote-archived-delete-unconfirmed">
+																	<p className="text-caption leading-snug text-[var(--color-danger)]">{t("sessionManager.remoteArchivedDeleteUnconfirmed")}</p>
+																	<Button variant="ghost" size="sm" data-testid="remote-archived-delete-dismiss" className="h-auto rounded-[4px] px-2 text-caption" onClick={() => remoteArchivedDelete.acknowledge()}>
+																		{t("sessionManager.remoteArchivedDeleteDismiss")}
+																	</Button>
+																</div>
+															)}
+															{remotePhase === "failed" && (
+																<div className="flex max-w-72 flex-col items-end gap-1" data-testid="remote-archived-delete-error">
+																	<p className="text-caption leading-snug text-[var(--color-danger)]">
+																		{(() => {
+																			const code = remoteArchivedDelete.state.phase === "failed" ? remoteArchivedDelete.state.code : "";
+																			const key = remoteArchivedDeleteErrorKey(code);
+																			return key === undefined ? t("sessionManager.remoteArchivedDeleteFailedCode", { code }) : t(key);
+																		})()}
+																	</p>
+																	<Button variant="ghost" size="sm" data-testid="remote-archived-delete-dismiss" className="h-auto rounded-[4px] px-2 text-caption" onClick={() => remoteArchivedDelete.acknowledge()}>
+																		{t("sessionManager.remoteArchivedDeleteDismiss")}
+																	</Button>
+																</div>
 															)}
 														</div>
 													</TableCell>

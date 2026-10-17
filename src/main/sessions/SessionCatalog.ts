@@ -927,6 +927,26 @@ export class SessionCatalog implements HostRebindStorePort {
 	}
 
 	/**
+	 * 远端归档数据被**永久删除**成功后清掉同一身份的墓碑（Phase 5）。
+	 *
+	 * 墓碑的语义是「远端文件还在，但用户把它从列表移除了，别再自动导入」。永久删除之后远端
+	 * 文件已经不存在，这条墓碑不再有保护对象；留着只会在用户以后重新创建同路径会话时造成
+	 * 「怎么又导不进来」的幽灵状态。幂等：没有墓碑就是 no-op（不产生写事务）。
+	 */
+	async forgetDismissedRemoteSession(input: DismissedRemoteSessionEntry): Promise<void> {
+		this.assertLoaded();
+		const hostId = input?.hostId?.trim();
+		const remoteSessionId = input?.remoteSessionId?.trim();
+		if (!hostId || !remoteSessionId) return;
+		const key = remoteDismissalKey(hostId, remoteSessionId);
+		await this.enqueueMutation(() => {
+			if (!this.dismissedRemoteSessionIds.has(key)) return { value: undefined, changed: false };
+			this.dismissedRemoteSessionIds.delete(key);
+			return { value: undefined, changed: true };
+		});
+	}
+
+	/**
 	 * 归档一条远端会话：记下本机归档索引（列表与恢复的唯一依据）。
 	 *
 	 * 调用时机是**远端移动成功之后**（见 sessionIpc 的远端归档分支）：远端失败时本机状态必须原样不动，

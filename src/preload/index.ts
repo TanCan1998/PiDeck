@@ -587,6 +587,13 @@ const api = {
 		listArchived: () => ipcRenderer.invoke(ipcChannels.sessionsCatalogListArchived) as Promise<import("../shared/types").ArchivedPiSession[]>,
 		/** 永久删除已归档会话（归档文件移入系统回收站并移出索引；不可恢复） */
 		deleteArchivedRecord: (archivedPath: string) => ipcRenderer.invoke(ipcChannels.sessionsCatalogDeleteArchived, archivedPath) as Promise<boolean>,
+		/**
+		 * 请求永久删除**远端归档会话**的数据（Phase 5）：只传本机 catalog 会话 id，远端路径永不过 IPC。
+		 * 返回一次性确认 requestId；真正删除要再调用 answerDeleteArchivedRemoteRecord(approve)。
+		 */
+		deleteArchivedRemoteRecord: (sessionId: string) => ipcRenderer.invoke(ipcChannels.sessionsCatalogDeleteArchivedRemote, sessionId) as Promise<import("../shared/types").RemoteArchivedSessionDeleteRequestResult>,
+		/** 回答上面的一次性确认；只有 approve 才执行不可恢复的远端删除。 */
+		answerDeleteArchivedRemoteRecord: (requestId: string, choice: "approve" | "deny") => ipcRenderer.invoke(ipcChannels.sessionsCatalogAnswerDeleteArchivedRemote, requestId, choice) as Promise<import("../shared/types").RemoteArchivedSessionDeleteAnswerResult>,
 		readRecordMessages: (sessionId: string) => ipcRenderer.invoke(ipcChannels.sessionsCatalogReadMessages, sessionId) as Promise<import("../shared/types").ChatMessage[]>,
 		readRecordMessagePage: (sessionId: string, before?: number, pageSize?: number, options?: { beforeEntryId?: string }) => ipcRenderer.invoke(ipcChannels.sessionsCatalogReadMessagePage, sessionId, before, pageSize, options) as Promise<import("../shared/types").SessionMessagePage>,
 		/** 无 runtime 时直接改 JSONL（编辑）。运行中必须先停 Agent。 */

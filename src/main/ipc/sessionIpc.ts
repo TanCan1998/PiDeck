@@ -5,7 +5,7 @@
 
 import { existsSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import { dialog, ipcMain, type BrowserWindow } from "electron";
+import { dialog, ipcMain, type BrowserWindow, type WebContents } from "electron";
 import { ipcChannels } from "../../shared/ipc";
 import { isLocalProject } from "../../shared/projectLocation";
 import { isDshPermissionPreset } from "../../shared/types/agent";
@@ -48,6 +48,9 @@ import { DIRECTORY_IMPORT_MAX_SUMMARIES } from "../sessions/directorySessionImpo
 import type { DirectorySessionImporter } from "../sessions/DirectorySessionImporter";
 import { REMOTE_SESSION_ARCHIVE_CODES } from "../remote/RemoteSessionArchive";
 import type { SshSessionLocator } from "../../shared/projectLocation";
+import { REMOTE_SESSION_DELETE_CODES } from "../../shared/sessionDeleteCodes";
+import type { RemoteArchivedSessionDeleteAnswerResult, RemoteArchivedSessionDeleteRequestResult } from "../../shared/types";
+import { createRemoteArchivedSessionDelete } from "../sessions/RemoteArchivedSessionDelete";
 
 function isDshModelDiscoveryInput(input: unknown): input is DshModelDiscoveryInput {
 	if (!isRecord(input) || typeof input.settingsNs !== "string" || !input.settingsNs.trim()) return false;
@@ -399,6 +402,12 @@ export type SessionIpcDeps = {
 	 * 入参是本机 catalog 会话 id → 索引条目的路径，不是“本机归档路径”（远端没有这种路径）。
 	 */
 	unarchiveRemoteSession?: (input: { hostId: string; originalPath: string; archivedPath: string }) => Promise<void>;
+	/**
+	 * 远端归档会话**永久删除**（Phase 5）：删除归档区里的那一个 JSONL 文件（有界 Node rm + canonical
+	 * containment 复核）。入参只来自本机归档索引（绝不由渲染层提供远端路径）；未装配 ⇒ 请求返回
+	 * REMOTE_SESSION_DELETE_UNAVAILABLE，绝不落回本机路径分支。
+	 */
+	deleteArchivedRemoteSession?: (input: { hostId: string; archivedPath: string }) => Promise<void>;
 	replaceAgentSession: (agentId: string, fn: () => Promise<any>, options?: { markForked?: boolean }) => Promise<any>;
 	/** DSH 后端专用 IPC 依赖（C1 分组；未装配 = 无 DSH 后端）。 */
 	dshBackend?: DshBackendIpcDeps;
@@ -472,7 +481,30 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		readRemoteSessionHistoryPage,
 		archiveRemoteSession,
 		unarchiveRemoteSession,
+		deleteArchivedRemoteSession,
 	} = deps;
+	/**
+	 * 远端归档会话永久删除（Phase 5）：main 持有一步式确认状态（sender 绑定/60s/一次性），
+	 * 请求只收 id，执行目标由本机归档索引给出。窗口销毁时撤销该 sender 的待确认请求。
+	 */
+	const remoteArchivedSessionDelete = createRemoteArchivedSessionDelete({
+		catalog: sessionCatalog,
+		isRuntimeBound: (sessionId) => Boolean(sessionRuntimeCoordinator.getTarget(sessionId) || sessionRuntimeCoordinator.isActivating(sessionId)),
+		deleteRemote: deleteArchivedRemoteSession,
+	});
+	const watchedDeleteSenders = new Set<number>();
+	function watchDeleteConfirmationSender(sender: WebContents | undefined): number | undefined {
+		const senderId = sender?.id;
+		if (!Number.isSafeInteger(senderId) || senderId === undefined || senderId < 1) return undefined;
+		if (!watchedDeleteSenders.has(senderId) && typeof sender?.once === "function") {
+			watchedDeleteSenders.add(senderId);
+			sender.once("destroyed", () => {
+				watchedDeleteSenders.delete(senderId);
+				remoteArchivedSessionDelete.cancelSender(senderId);
+			});
+		}
+		return senderId;
+	}
 	const localSessionFilePath = (sessionId: string) => sessionCatalog.getLocalFilePath(sessionId);
 	// C1：DSH 后端依赖从 dshBackend 分组解构（未装配 = 空对象，相关通道降级）。
 	const {
@@ -1031,6 +1063,43 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		await sessionScanner.deleteArchived(archivedPath);
 		void appLogger.info("session", "Archived session deleted", { archivedPath });
 		return true;
+	});
+	/**
+	 * 远端归档会话**永久删除**请求（Phase 5）：入参只有本机 catalog 会话 id。
+	 *
+	 * 为什么先请求再回答：这是不可恢复的远端数据删除，main 必须自己持有一次性确认状态
+	 * （PendingConfirmationBroker）。请求阶段只做校验并签发 requestId，不执行任何远端命令；
+	 * 只有携带同一 requestId 的 approve 回答才会真正删除——renderer 无法通过任何参数伪造 confirmed。
+	 */
+	ipcMain.handle(ipcChannels.sessionsCatalogDeleteArchivedRemote, async (event, rawSessionId: unknown): Promise<RemoteArchivedSessionDeleteRequestResult> => {
+		const senderId = watchDeleteConfirmationSender(event?.sender);
+		if (senderId === undefined) return { ok: false, code: REMOTE_SESSION_DELETE_CODES.confirmationRequired };
+		const sessionId = parseSessionId(rawSessionId);
+		const result = await remoteArchivedSessionDelete.request({ senderId, sessionId });
+		if (result.ok) {
+			void appLogger.info("session", "Remote archived session delete confirmation requested", { sessionId });
+		} else {
+			void appLogger.warn("session", "Remote archived session delete refused", { sessionId, code: result.code });
+		}
+		return result;
+	});
+	/**
+	 * 回答远端归档会话永久删除的一次性确认：requestId + approve/deny。
+	 * 只有 approve 才执行远端删除；成功后由协调器摘索引/清墓碑。回执不可信 ⇒ RESULT_UNCONFIRMED，
+	 * 索引保留（UI 不得自动刷新掉，必须让用户刷新核对）。
+	 */
+	ipcMain.handle(ipcChannels.sessionsCatalogAnswerDeleteArchivedRemote, async (event, rawRequestId: unknown, rawChoice: unknown): Promise<RemoteArchivedSessionDeleteAnswerResult> => {
+		const senderId = watchDeleteConfirmationSender(event?.sender);
+		if (senderId === undefined || typeof rawRequestId !== "string" || rawRequestId.length === 0 || rawRequestId.length > 128) return { ok: false, code: REMOTE_SESSION_DELETE_CODES.confirmationRequired };
+		if (rawChoice !== "approve" && rawChoice !== "deny") return { ok: false, code: REMOTE_SESSION_DELETE_CODES.confirmationRequired };
+		const result = await remoteArchivedSessionDelete.answer({ senderId, requestId: rawRequestId, choice: rawChoice });
+		if (result.ok && result.deleted) {
+			// 只记「哪条会话被删」；不记远端路径/命令（与读/归档同一股敏纪律）。
+			void appLogger.info("session", "Remote archived session data permanently deleted", { requestId: rawRequestId });
+		} else if (!result.ok) {
+			void appLogger.warn("session", "Remote archived session delete failed", { code: result.code });
+		}
+		return result;
 	});
 	ipcMain.handle(ipcChannels.sessionsCatalogReadMessages, async (_event, rawSessionId: unknown) => {
 		const sessionId = parseSessionId(rawSessionId);

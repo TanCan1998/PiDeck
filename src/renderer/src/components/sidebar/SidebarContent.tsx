@@ -101,6 +101,10 @@ export type SidebarActions = {
 		listArchivedDsh: () => Promise<ArchivedDshSession[]>;
 		/** 永久删除已归档 DSH 会话（host 目录移入回收站） */
 		deleteArchivedDsh: (dshSessionId: string) => Promise<void>;
+		/** 远端归档行永久删除：请求 main 的一次性确认（只传本机 catalog 会话 id）。 */
+		requestDeleteArchivedRemote: (sessionId: string) => Promise<import("../../../../shared/types").RemoteArchivedSessionDeleteRequestResult>;
+		/** 回答远端永久删除的一次性确认（approve 才真正删远端数据）。 */
+		answerDeleteArchivedRemote: (requestId: string, choice: "approve" | "deny") => Promise<import("../../../../shared/types").RemoteArchivedSessionDeleteAnswerResult>;
 	};
 	agents: {
 		rename: (agent: AgentTab) => void;
@@ -786,6 +790,8 @@ export function SidebarContent(props: SidebarContentProps) {
 					onUnarchiveDsh={(dshSessionId) => actions.sessions.unarchiveDsh(dshSessionId, managerProject.id)}
 					listArchivedDsh={actions.sessions.listArchivedDsh}
 					deleteArchivedDsh={(dshSessionId) => actions.sessions.deleteArchivedDsh(dshSessionId)}
+					requestDeleteArchivedRemote={(sessionId) => actions.sessions.requestDeleteArchivedRemote(sessionId)}
+					answerDeleteArchivedRemote={(requestId, choice) => actions.sessions.answerDeleteArchivedRemote(requestId, choice)}
 				/>
 			)}
 			{controller.worktreeCreateProjectId && (

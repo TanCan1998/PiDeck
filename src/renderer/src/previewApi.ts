@@ -641,6 +641,8 @@ export function createPreviewApi(): PiDesktopApi {
 			unarchiveRemoteRecord: async () => true,
 			listArchived: async () => [],
 			deleteArchivedRecord: async () => true,
+			deleteArchivedRemoteRecord: async () => ({ ok: false as const, code: "REMOTE_FEATURE_DISABLED" }),
+			answerDeleteArchivedRemoteRecord: async () => ({ ok: false as const, code: "REMOTE_FEATURE_DISABLED" }),
 			copyRecord: async (sessionId) => ({
 				cancelled: false,
 				targetSessionId: `${sessionId}:copy`,

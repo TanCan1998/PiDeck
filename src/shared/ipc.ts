@@ -182,6 +182,15 @@ export const ipcChannels = {
 	sessionsCatalogListArchived: "sessions:catalog-list-archived",
 	/** 永久删除已归档会话：归档区文件移入系统回收站并从索引移除（区别于恢复）。 */
 	sessionsCatalogDeleteArchived: "sessions:catalog-delete-archived",
+	/**
+	 * 远端归档会话「永久删除」的**请求**（Phase 5 必须）：入参只有本机 catalog 会话 id——
+	 * 远端路径永远不从渲染层传（main 只认本机归档索引）。main 校验运行态/索引后签发一次性
+	 * 确认 requestId（PendingConfirmationBroker，sender 绑定、60s 过期、消费一次即失效），
+	 * 本通道不执行任何远端命令。
+	 */
+	sessionsCatalogDeleteArchivedRemote: "sessions:catalog-delete-archived-remote",
+	/** 回答上一条一次性确认：requestId + approve/deny；仅 approve 才执行有界远端 rm 与索引清理。 */
+	sessionsCatalogAnswerDeleteArchivedRemote: "sessions:catalog-answer-delete-archived-remote",
 	sessionsCatalogReadMessages: "sessions:catalog-read-messages",
 	sessionsCatalogReadMessagePage: "sessions:catalog-read-message-page",
 	/** 会话 JSONL 过程事件（session/model/thinking/custom/compaction），供轨迹复盘，不进聊天时间线。 */

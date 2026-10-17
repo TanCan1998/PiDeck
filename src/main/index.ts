@@ -278,6 +278,7 @@ import { createSshClientRuntime, resolvePosixSshClient, type SshClientRuntime } 
 import { buildPinnedSshInvocation } from "./remote/SshVerifiedConnection";
 import { createRemoteSessionHistoryReader } from "./remote/RemoteSessionHistoryReader";
 import { createRemoteSessionArchive } from "./remote/RemoteSessionArchive";
+import { createRemoteSessionDelete } from "./remote/RemoteSessionDelete";
 import { createRemoteSessionHistoryWriter, type RemoteSessionMessageMutationPort } from "./remote/RemoteSessionHistoryWriter";
 import { exportRemoteSessionHtml, REMOTE_SESSION_EXPORT_LIMITS } from "./remote/RemoteSessionHtmlExport";
 import { createRemoteSessionScanner } from "./sessions/RemoteSessionScanner";
@@ -2822,6 +2823,23 @@ function registerIpc() {
 		: undefined;
 
 	/**
+	 * 远端归档会话永久删除（Phase 5）：pinned SSH 上的固定 Node 脚本，只 unlink 本机归档索引指向的
+	 * 那一个 .pideck-archive/*.jsonl（脚本内做 canonical containment + 身份复核）。远端 Node 路径与
+	 * 写入守卫同源（remotePiRuntimeFacts），不新增 helper op；实验开关关掉时不装配 ⇒ 请求得到
+	 * REMOTE_SESSION_DELETE_UNAVAILABLE（fail closed，绝不落回本机路径）。
+	 */
+	const remoteSessionDelete = remoteExperimentEnabled
+		? createRemoteSessionDelete({
+				transport: { runRemoteCommand: runPinnedRemoteCommand },
+				resolveNodePath: async (hostId) => {
+					const port = await remoteHostServiceIfEnabled();
+					if (!port) throw new Error("REMOTE_CONNECTION_SERVICE_UNAVAILABLE");
+					return (await port.remotePiRuntimeFacts(hostId)).nodePath;
+				},
+			})
+		: undefined;
+
+	/**
 	 * 远端会话的**受控改写**（P4.5c）：编辑消息 / 删除消息（写墓碑）/ 准备重发（截断该消息及其后继）。
 	 *
 	 * 与远端历史读、远端归档**同一条** pinned SSH 短命令通道（同一 `runPinnedRemoteCommand`：每次都
@@ -2880,6 +2898,7 @@ function registerIpc() {
 					await remoteSessionArchive.moveBack(input);
 				}
 			: undefined,
+		deleteArchivedRemoteSession: remoteSessionDelete ? (input: { hostId: string; archivedPath: string }) => remoteSessionDelete.deleteArchived(input) : undefined,
 		replaceAgentSession,
 		// C1：DSH 后端专用 IPC 依赖按后端分组（注册表化铺路；未来新增后端各自提供一份）
 		dshBackend: {

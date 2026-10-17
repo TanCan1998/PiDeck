@@ -3144,6 +3144,9 @@ export function App() {
 			deleteArchivedDsh: async (dshSessionId) => {
 				await deleteArchivedDshSidebarSession(dshSessionId);
 			},
+			// 远端归档行的永久删除：两步 IPC（main 一次性确认），只传本机 catalog 会话 id。
+			requestDeleteArchivedRemote: (sessionId) => api.sessions.deleteArchivedRemoteRecord(sessionId),
+			answerDeleteArchivedRemote: (requestId, choice) => api.sessions.answerDeleteArchivedRemoteRecord(requestId, choice),
 		},
 		agents: {
 			rename: rename.openAgentRename,
