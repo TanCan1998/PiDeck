@@ -806,8 +806,17 @@ P4.5b 的单会话归档/恢复已完成真实 Electron＋SSH 验证，不能据
 
 ## 最终门禁（2026-10-18 夜，13 项真机 + 全量回归 + 打包）
 
-- **十三项真机门禁 13 passed（12.4m，`CLEANUP_OK`）**：G1–G5e 十项 + 文件管理 v1（含新增远端配置 e2e：host target → secret 徽标读取 → 非密钥 merge-patch → SSH 落盘核验 → finally 字节还原，59s）+ 终端（1.7–1.8m）+ 远端会话产品路（含归档/恢复/永久删除；曾因删除步骤早于 fork 导致 oracle 失败，已把删除步骤移到历史变更步骤之后并单独复跑通过）。
-- **全量回归零新增**：工作树 **8479 项 / 8177 通过 / 30 败 / 272 skip**，与干净 HEAD `567bf2d8a` 的失败集合**完全一致**；30 条为本机既有环境/基线红。
+- **十三项真机门禁 13 passed（12.4m，`CLEANUP_OK`，最终复跑含模型目录）**：G1–G5e 十项 + 文件管理 v1（含新增远端配置 e2e：host target → secret 徽标读取 → 非密钥 merge-patch → SSH 落盘核验 → finally 字节还原，59s）+ 终端（1.7–1.8m）+ 远端会话产品路（含归档/恢复/永久删除；曾因删除步骤早于 fork 导致 oracle 失败，已把删除步骤移到历史变更步骤之后并单独复跑通过）。
+- **全量回归零新增**：工作树 **8507 项 / 8205 通过 / 30 败 / 272 skip**，与干净 HEAD `a52eb53ea` 的失败集合**完全一致**；30 条为本机既有环境/基线红。
 - **打包**：`npm run pack` 0；`release/win-unpacked/resources` 含 pi-auth-host/extensions(manifest)/prompts/skills/pets/xueprompts.db/pi-ai-catalog；app.asar 命中 `config.read`/`config.patch`/`CONFIG_RESULT_UNCONFIRMED`/`REMOTE_CONFIG_PROVIDER_OPERATION_UNSUPPORTED` 及新增的保留键/secret 逻辑与既有终端/Git 冻结标记。**packaged 仍被 `!app.isPackaged && PIDECK_REMOTE_EXPERIMENTAL=1` 挡住（需产品决定是否放开）。**
 - **已知测试基础设施抖动（非产品失败）**：主机高负载时 G2a/终端 oracle 的 SSH 瞬时断连各出现过 1 次，均单独复跑通过；已加 oracle 单次重连重试与收敛等待。最终干净门禁一次通过。
-- **仍需人工**：打包版真实 SSH 点按 smoke、macOS 客户端、Linux 客户端长稳 soak、独立人工安全 reviewer 签字；provider 连接测试/模型目录仍 deferred。
+- **仍需人工**：打包版真实 SSH 点按 smoke、macOS 客户端、Linux 客户端长稳 soak、独立人工安全 reviewer 签字；逐供应商合成探测/用量查询为计划内 deferred（模型目录/连接探测已交付）。
+
+
+## 远端模型目录（2026-10-18，Phase 5 行 819 收口）
+
+- **交付**：`RemoteModelProbe`（main）只接受 `hostId`；从 `ProjectStore` 解析该 host 的远端项目 → 窄 `AgentManager.findLiveRemoteAgentId(projectIds)`（只回 agentId，渲染层永远不提供 agentId/路径）→ 既有 `getAvailableModels(agentId)` RPC 单次 60s 有界调用（不重试）→ 只回脱敏 allowlist（`{id,name?,provider,contextWindow?,maxTokens?,reasoning?,input?,images?}`，provider+id 去重、上限 1000、排序），错误一律闭集码（TARGET_INVALID/NO_PROJECT/NO_RUNTIME/UNAVAILABLE/FAILED/EMPTY），运行时自由文本不跨边界。新通道 `remote:pi-models`、preload `probeRemoteModels(hostId)`，与其它 remote 域同一实验门禁。
+- **语义**：v1 的「provider 连接测试」= 目标 host 上 live pi runtime 的可用模型探测（与本地模型选择器同一来源，凭据只在 host 上）；**逐供应商合成 HTTP 探测与用量查询仍 deferred**，UI 明确禁用并给 stable code 文案。
+- **渲染层**：远端 models 面板把旧的禁用「测试连接/拉取模型」替换为真实动作（loading、按 provider 分组、EMPTY 中性态、闭集码文案、deferred 说明），auth/trust/mcp/raw/usage 保持禁用；17 个 zh/en key 且 parity。作者态 e2e 挂在产品路验收（live remote agent）里，只读；真机门禁已实际跑通（非空 provider 列表）。
+- **验证**：Windows targeted 84/84、WSL 55/55、typecheck/format/build:fast 0、e2e `--list` 136/56；全量回归 8507 项（8205 通过/30 败/272 skip），失败集合与干净 HEAD **完全一致**；`remoteHostCrossStoreContract` 新增 `RemoteModelProbeResult` 的 runtime 属主登记（回显 hostId、不落盘）。
+- **已知偏差**：EMPTY 以 `ok:false` 闭集码返回但 UI 渲染为中性空态；models.json 读失败时 catalog 动作不可达（v1）；无 DOM 级 UI 测试（仓库无 harness，纯模型 + 源码契约）。
