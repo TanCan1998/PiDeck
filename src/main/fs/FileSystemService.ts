@@ -5,9 +5,19 @@ import { parseWslUncPath } from "../wsl/WslPaths";
 import type { FileSearchResult, FileTreeNode } from "../../shared/types";
 import { DEFAULT_FILE_TREE_MAX_DEPTH, FILE_TREE_ABSOLUTE_MAX_DEPTH, FILE_TREE_MAX_DIRECTORY_ENTRIES, FILE_SEARCH_MAX_RESULTS, FILE_SEARCH_TIMEOUT_MS, FILE_SEARCH_MAX_DIRECTORY_ENTRIES } from "../../shared/fileTree";
 
-// target 是 Maven/Gradle 构建产物目录，与 build/dist 同类；不忽略会让 composer @
-// 整树搜索深挖进 target/（含大量 class 文件），既拖慢又污染引用候选。
-const ignoredNames = new Set([".git", "node_modules", "dist", "build", "target", ".next", "coverage", ".venv", "__pycache__"]);
+// 忽略规则分两档（历史上只有一份，把构建产物一起藏了）：
+// - ALWAYS：VCS 元数据与依赖目录，体量巨大且没有浏览价值，任何场景都不展示；
+// - SCAN_ONLY：构建/缓存产物。只在 composer @ 引用的整树扫描里跳过（深挖 target/ 的 class 文件
+//   既拖慢又污染候选）；文件抽屉是「浏览工作区」的入口，藏起来会让用户找不到自己生成的文件，
+//   也没有任何开关能打开，所以浏览/文件名搜索必须展示它们。
+const ALWAYS_IGNORED_NAMES = new Set([".git", "node_modules"]);
+const SCAN_ONLY_IGNORED_NAMES = new Set(["dist", "build", "target", ".next", "coverage", ".venv", "__pycache__"]);
+const SCAN_IGNORED_NAMES = new Set([...ALWAYS_IGNORED_NAMES, ...SCAN_ONLY_IGNORED_NAMES]);
+
+export interface FileTreeListOptions {
+	/** composer @ 引用的整树扫描：额外跳过 build/dist/target 等产物目录。抽屉浏览不传。 */
+	skipGeneratedDirs?: boolean;
+}
 
 /** 路径必须落在项目根内（resolve 后比较，防 ../ 逃逸）。 */
 export function isPathInsideProject(root: string, target: string): boolean {
@@ -36,16 +46,17 @@ export class FileSystemService {
 	 * maxDepth=0：只读当前目录一层，子目录 children=[] 且 hasChildren 标记是否可再展开。
 	 * maxDepth>0：继续向下递归，供 composer @ 引用一次性拿到有限深度清单。
 	 */
-	async listTree(root: string, maxDepth = DEFAULT_FILE_TREE_MAX_DEPTH, directory?: string): Promise<FileTreeNode[]> {
+	async listTree(root: string, maxDepth = DEFAULT_FILE_TREE_MAX_DEPTH, directory?: string, options?: FileTreeListOptions): Promise<FileTreeNode[]> {
 		const current = directory ? resolve(directory) : resolve(root);
 		if (!isPathInsideProject(root, current)) {
 			throw new Error(`Invalid path: "${directory}" escapes project directory`);
 		}
 		const depthLimit = Math.max(0, Math.min(maxDepth, FILE_TREE_ABSOLUTE_MAX_DEPTH));
-		return this.readDirectory(root, current, 0, depthLimit);
+		const ignored = options?.skipGeneratedDirs ? SCAN_IGNORED_NAMES : ALWAYS_IGNORED_NAMES;
+		return this.readDirectory(root, current, 0, depthLimit, ignored);
 	}
 
-	private async readDirectory(root: string, current: string, depth: number, maxDepth: number): Promise<FileTreeNode[]> {
+	private async readDirectory(root: string, current: string, depth: number, maxDepth: number, ignored: Set<string>): Promise<FileTreeNode[]> {
 		const entries = await readdir(current, { withFileTypes: true });
 		// 单层过大时拒绝构造整层节点：否则 IPC + React 树会把渲染进程打崩。
 		if (entries.length > FILE_TREE_MAX_DIRECTORY_ENTRIES) {
@@ -67,7 +78,7 @@ export class FileSystemService {
 
 		for (let i = 0; i < entries.length; i++) {
 			const entry = entries[i];
-			if (ignoredNames.has(entry.name)) continue;
+			if (ignored.has(entry.name)) continue;
 
 			const absolutePath = join(current, entry.name);
 			const relativePath = relative(root, absolutePath).replace(/\\/g, "/");
@@ -77,7 +88,7 @@ export class FileSystemService {
 			if (entry.isDirectory()) {
 				// 达到深度上限时不再递归，只看一层是否还有可见子项，避免抽屉一次拉整棵仓库。
 				const canRecurse = depth < maxDepth;
-				const children = canRecurse ? await this.readDirectory(root, absolutePath, depth + 1, maxDepth) : undefined;
+				const children = canRecurse ? await this.readDirectory(root, absolutePath, depth + 1, maxDepth, ignored) : undefined;
 				nodes.push({
 					name: entry.name,
 					path: absolutePath,
@@ -87,7 +98,7 @@ export class FileSystemService {
 					// 未递归时 children 为 undefined，省略该字段；已递归的空目录是 []。
 					// 渲染层用「有没有 children 数组」区分未加载 vs 已加载空目录。
 					...(children ? { children } : {}),
-					hasChildren: canRecurse ? (children?.length ?? 0) > 0 : await this.directoryHasVisibleChildren(absolutePath),
+					hasChildren: canRecurse ? (children?.length ?? 0) > 0 : await this.directoryHasVisibleChildren(absolutePath, ignored),
 				});
 			} else if (entry.isFile()) {
 				nodes.push({
@@ -108,10 +119,10 @@ export class FileSystemService {
 	}
 
 	/** 浅层 listing 用：目录是否还有未被忽略的子项，决定是否显示展开箭头。 */
-	private async directoryHasVisibleChildren(directory: string): Promise<boolean> {
+	private async directoryHasVisibleChildren(directory: string, ignored: Set<string>): Promise<boolean> {
 		try {
 			const entries = await readdir(directory, { withFileTypes: true });
-			return entries.some((entry) => !ignoredNames.has(entry.name) && (entry.isDirectory() || entry.isFile()));
+			return entries.some((entry) => !ignored.has(entry.name) && (entry.isDirectory() || entry.isFile()));
 		} catch {
 			return false;
 		}
@@ -124,6 +135,9 @@ export class FileSystemService {
 	 * - 需要可中断：达到结果上限或超时立即返回已收集部分，用户拿到的是「够用的结果」
 	 *   而不是报错（对超大 monorepo 尤其重要）。
 	 * 查询按小写子串匹配；空查询由 IPC 层拦截，这里不再校验。
+	 * 忽略规则与文件抽屉的文件树同档（只看 ALWAYS）：树里能看到的文件必须搜得到。
+	 * 构建产物目录（build/dist/target…）排在第二轮扫：可见也可搜，但大仓库里 target/
+	 * 的 class 文件会瞬间吃掉结果上限，先扫源码目录更符合「找文件」的预期。
 	 */
 	async searchNames(root: string, query: string): Promise<FileSearchResult[]> {
 		const normalizedQuery = query.trim().toLowerCase();
@@ -132,6 +146,8 @@ export class FileSystemService {
 		const rootResolved = resolve(root);
 		// BFS 队列：先宽后深，优先命中浅层文件；目录命中也收集（跳转到目录/在文件夹中显示都有用）。
 		const queue: string[] = [rootResolved];
+		// 构建产物目录的子孙延后扫：见方法注释的重测顺序说明
+		const deferredDirs: string[] = [];
 		const results: FileSearchResult[] = [];
 		// Date.now 只用来卡总耗时；单次 readdir 不单独限时（单目录失败即跳过）。
 		const deadline = Date.now() + FILE_SEARCH_TIMEOUT_MS;
@@ -150,10 +166,10 @@ export class FileSystemService {
 			for (const entry of entries) {
 				if (results.length >= FILE_SEARCH_MAX_RESULTS) break;
 				const name = entry.name;
-				if (ignoredNames.has(name)) continue;
+				if (ALWAYS_IGNORED_NAMES.has(name)) continue;
 				if (!name.toLowerCase().includes(normalizedQuery)) {
 					// 未命中也要入队目录继续下钻：搜索目标是「路径任意位置包含查询词的文件」
-					if (entry.isDirectory()) pendingDirs.push(join(current, name));
+					if (entry.isDirectory()) (SCAN_ONLY_IGNORED_NAMES.has(name) ? deferredDirs : pendingDirs).push(join(current, name));
 					continue;
 				}
 				const absolutePath = join(current, name);
@@ -167,10 +183,12 @@ export class FileSystemService {
 					relativePath: relative(rootResolved, absolutePath).replace(/\\/g, "/"),
 					type,
 				});
-				if (entry.isDirectory()) pendingDirs.push(absolutePath);
+				if (entry.isDirectory()) (SCAN_ONLY_IGNORED_NAMES.has(name) ? deferredDirs : pendingDirs).push(absolutePath);
 			}
 			// 目录统一排在文件后入队：同层先收完文件再下钻，浅层文件命中优先于深层目录
 			queue.push(...pendingDirs);
+			// 源码目录全部扫完（队列空）才进入构建产物，避免 target/ 抢先占满结果上限
+			if (queue.length === 0 && deferredDirs.length > 0) queue.push(...deferredDirs.splice(0, deferredDirs.length));
 		}
 		return results;
 	}

@@ -78,7 +78,7 @@ export function registerFilesIpc({ fileSystemService, projectStore, settingsStor
 		return result.canceled ? [] : result.filePaths;
 	});
 
-	ipcMain.handle(ipcChannels.filesList, async (_event, projectId: string, options?: { maxDepth?: number; directory?: string }) => {
+	ipcMain.handle(ipcChannels.filesList, async (_event, projectId: string, options?: { maxDepth?: number; directory?: string; skipGeneratedDirs?: boolean }) => {
 		const project = projectStore.get(projectId);
 		if (!project) throw new Error(`Project not found: ${projectId}`);
 		const maxDepth = typeof options?.maxDepth === "number" && Number.isFinite(options.maxDepth) ? options.maxDepth : undefined;
@@ -86,7 +86,7 @@ export function registerFilesIpc({ fileSystemService, projectStore, settingsStor
 		// directory 必须落在项目内；越界由 FileSystemService.listTree 拒绝。
 		const projectPath = toWindowsPath(project.path);
 		try {
-			return await fileSystemService.listTree(projectPath, maxDepth, directory);
+			return await fileSystemService.listTree(projectPath, maxDepth, directory, { skipGeneratedDirs: options?.skipGeneratedDirs === true });
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 			// 项目根被外部删除时用稳定错误码替代 Node/Electron 的整段 ENOENT scandir，
