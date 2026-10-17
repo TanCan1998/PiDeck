@@ -467,6 +467,45 @@ Phase 5 helper method 与 preload/UI capability 必须从这张表生成同一�
 - 远端 Raw Files、MCP 和可能含未知 secret 的配置在完成字段级脱敏与保留写入前保持禁用；不能为了功能对齐把完整文件拉回本机。
 - 项目级 prompts/skills/extensions 由 project location backend 读取；远端 user scope 默认使用远端既有资源。跨 host 复制/同步仍属于 Phase 6，必须显式选择且永不包含 `auth.json`。
 
+#### 6.4.1 远端配置后端 v1（冻结契约，2026-10-18 task-14）
+
+**范围与明确不支持**
+
+- 交付：目标路由的 `models.json` / `settings.json` **读取**（secret 只回 `configured | missing`）与**显式 merge-patch 写入**（`expectedVersion` + 原子写）；远端目标只能是已 pin/已验证的 SSH host。
+- 明确 DEFERRED（不得伪造、不得回落本机）：provider 连接测试、模型目录拉取、用量查询、`auth.json` / `trust.json` / `mcp.json` / 任意 raw 文件编辑、项目级配置。remote target 下这些入口禁用并回稳定码 `REMOTE_CONFIG_PROVIDER_OPERATION_UNSUPPORTED` / `REMOTE_CONFIG_UNSUPPORTED` + zh/en 文案；零网络、零 helper 请求，绝不把本机 key 或本机网络当远端结果。
+- 本机（local）路径行为逐字不变：现有表单、raw 编辑器、校验与回收站/备份语义都不因本批改变。
+
+**共享契约**
+
+- `PiConfigTarget = { kind: "local" } | { kind: "ssh"; hostId: string }`；`PiConfigFileKey = "models" | "settings"`；hostId 只接受 host store 形状。renderer 只保存当前设置页查看的 target，不改变任何 Session/runtime 的配置来源。
+- 现有 `config:get-models` / `config:get-settings` / `config:save-models` / `config:save-settings` 增加**可选** options 参数；缺省 = local（兼容）。ssh 目标：读取返回脱敏 DTO（`remote` 元数据 `{kind,hostId,file,version,sha256,secrets}`，`data` 中 secret 位置为 `configured | missing` 状态字符串，绝不出现明文/原始坏文本）；写入只接受 `{ expectedVersion, patch }`（RFC 7396 JSON Merge Patch：对象递归合并、数组整体替换、`null` 删除非 secret 键；secret 只在 patch 提供**新字符串**时替换，占位/null/缺省 = 保留）。
+- 稳定码闭集（shared 单一定义）：`REMOTE_CONFIG_TARGET_INVALID`、`REMOTE_CONFIG_HOST_NOT_READY`、`REMOTE_CONFIG_UNAVAILABLE`、`REMOTE_CONFIG_UNSUPPORTED`、`REMOTE_CONFIG_FILE_INVALID`、`REMOTE_CONFIG_VERSION_CONFLICT`、`REMOTE_CONFIG_RESULT_UNCONFIRMED`、`REMOTE_CONFIG_PROVIDER_OPERATION_UNSUPPORTED`。版本冲突必须重新读取后才能再写；回执丢失 = UNCONFIRMED，不重试、不自动覆盖。
+
+**helper 1.21.0（新增独立 bundle 文件 `config.mjs`，与 git-read.mjs 同形态）**
+
+- 方法只有 `config.read` / `config.patch`，参数只接受 `{ file: "models" | "settings" }`；目标固定 `$HOME/.pi/agent/<file>.json`（HOME 来自 hello：绝对 POSIX、≤4096、无控制字节），**不接受任意路径、不读 auth.json、不列目录**。
+- 安全与边界：`.pi`/`agent` 若存在必须是实目录（非软链）；`agent` 缺失可按 0700 创建；目标文件必须 no-follow 普通文件、UTF-8、≤1 MiB；符号链接/其他类型/越界形状 → `CONFIG_PATH_UNSUPPORTED`；超限 → `CONFIG_FILE_TOO_LARGE`；JSON 解析失败 → `CONFIG_FILE_INVALID`（坏文本不外传、不覆盖）。
+- `config.read` → `{ version, sha256, data, secrets }`：version/sha256 为原字节 sha256 hex（缺失文件按规范空对象字节计算，version 稳定）；递归识别 secret 键名（`apiKey`/`api_key`/`accessToken`/`refreshToken`/`token`/`secret`/`password`/`passwd`/`authorization`/`cookie`/`credential`/`privateKey`，大小写不敏感），把值替换为 `configured | missing` 并输出 `secrets: [{path,status}]`；其余字段原样返回（helper 不解释业务语义）。
+- `config.patch`：先重读并核对 `expectedVersion`（不符 → `CONFIG_VERSION_CONFLICT`）；patch 必须 plain object、深度/节点/总字节有界；合并后再序列化校验 ≤1 MiB；同目录 0600 临时文件 write+fsync → rename → 目录 fsync（保留未知字段与其余字段；失败清理 temp）；写后回读计算版本并再次脱敏返回。**rename 之后**回读失败 → `CONFIG_RESULT_UNCONFIRMED`，不重试、不谎报成功。
+- 新 helper 错误码进入 `REMOTE_HELPER_ERROR_CODES` 闭集：`CONFIG_FILE_INVALID`、`CONFIG_FILE_TOO_LARGE`、`CONFIG_VERSION_CONFLICT`、`CONFIG_PATH_UNSUPPORTED`、`CONFIG_RESULT_UNCONFIRMED`、`CONFIG_UNAVAILABLE`；`config.read`/`config.patch` 加入 hello capabilities。旧 helper 无这些方法 → `METHOD_NOT_FOUND` → main 统一映射 `REMOTE_CONFIG_UNSUPPORTED`（不得回落本地）。
+
+**main 路由**
+
+- `RemotePiConfigBackend`：每次先校验 target 形状/file 枚举/hostId 形状；ssh 目标经既有 `RemoteHostConnectionService.request(hostId, "config.read"|"config.patch")`（pinned/已验证 host，必须 ready；配置读写不借用某个 project session，也不读写项目根）；同一 host 的配置请求在 host 操作锁内串行，跨 host 不共享缓存/状态。
+- 对 helper 回复**逐字段重验**：file/target 一致、version/sha256 形状、data 为对象、递归 secret 位置只允许 `configured | missing`、`secrets` 与 data 重算一致、models 顶层 `providers` 为对象；任一失败折叠 `REMOTE_CONFIG_FILE_INVALID`，原始 helper 错误/路径/内容不外传、不落日志。
+- 路由只依据 `target.hostId`：local 永不发 helper 请求；ssh 失败不得回落本机 ConfigManager。未装配远端实验开关时 ssh 目标 → `REMOTE_CONFIG_UNAVAILABLE`。
+
+**renderer（实施分批：Batch A 只做 helper/shared/main + 后端测试；本节为 Batch B / task-15，不在 Batch A 改动）**
+
+- ConfigModal 的 models/settings 两个 section 顶部共享一个 target selector（本机 + 已验证 SSH host；未连接 host 仍可选，读取时给可执行提示）；切换 target 重新加载；丢弃远端未保存草稿前显式确认。
+- ssh target：只展示脱敏数据；secret 以 `configured | missing` 徽标展示，绝不显示明文；编辑走显式 merge-patch（只提交本次变更），保存携带 expectedVersion；冲突保留编辑并提示重新加载后重试；替换 secret 必须显式填新值。
+- ssh target 下 auth/trust/mcp/raw/用量/测试连接/拉取模型入口禁用，显示稳定码对应 zh/en 文案；local target 的现有渲染与交互逐字不变。
+
+**测试与工件**
+
+- Batch A（本批）：helper POSIX 真实子进程：read/patch/原子写/expectedVersion 冲突/未知字段保留/secret 脱敏与替换/坏 JSON/auth 不可达/路径与软链拒绝/超限；main backend：target 路由、回复重验、helper 码映射、跨 host 拒绝、非法 target 零请求、冲突、UNCONFIRMED。Batch B（task-15）：renderer target 切换/脱敏显示/patch 冲突与禁用文案，e2e 作者态（读 + 一次非 secret patch），不运行真机。
+- 工件：helper **1.21.0**；新增 `config.mjs` 独立 sha 固定；entry 版本/digest 与全部既有 artifact pin、bundle manifest 清单测试同批更新（单一提交内完成，否则部署校验先红）。
+
 ### 6.5 终端
 
 #### 6.5.1 当前已批准的最小切片（2026-10-14）
@@ -492,8 +531,9 @@ Phase 5 helper method 与 preload/UI capability 必须从这张表生成同一�
 - runner 从远端账号环境取得登录 shell；只接受不带参数和控制字符、可 `stat` 且通过 `X_OK` 检查的绝对文件路径，无效时回退 `/bin/sh`。runner 以 `shell: false`、受信任 cwd 和 login argv0 启动它并继承 TTY stdio，不得把 renderer 文本交给 shell 解释。node-pty 的 `resize` 作用于本机 ssh PTY，由 OpenSSH 转发 window-change；集成测试必须验证 rows/cols 到达远端 shell。
 - `terminal.close` 必须幂等：main 先从可写 tab registry 中撤销该 tab，再请求关闭本地 ssh PTY；短宽限后若进程仍存活则强制回收本地 ssh 进程树，close 后到达的 output/exit 事件只做资源收尾，不能复活 tab 或写入新 owner。runner/sshd 对正常前台 shell 做 HUP/TERM 的 best-effort 收敛。PiDeck 不宣称拥有远端 shell pid/pgid，也不承诺杀掉用户主动 daemonize/disown 的进程；只有受 PiDeck Agent runner 管理且有 nonce lease 的进程组使用 TERM → KILL 保证清理。关闭一个 tab 不得调用 host 级 `pkill` 或影响同主机其他终端/Agent。
 
-> **实施结果（F3，2026-10-18，helper 1.20.0）**：上述 ticket/runner 设计已按冻结契约实现。helper 新增 `terminal.prepare`：ticket 写入 `<deployRoot>/terminal-tickets/`（目录 0700 owner-only，文件 0600），绑定 `kind/projectId/hostId/routeDigest/canonical cwd/bundleSha256/nonce/expiresAt`（120s TTL），原子创建（temp 0600 → link/rename + fsync）+ 有界（≤256）过期/畸形/自有 temp sweep，只返回 opaque ref；`terminal.prepare` 进入 CAPABILITIES 与 dispatch，参数只由 main 从 live session（hostId/routeDigest/projectId/canonical root）构造。bundle 现有**五个 helper artifacts**（helper／git-read／git-write／git-sync／terminal-runner），部署 manifest 共六个条目（含既有 `runner.mjs`）；新增冻结 `terminal-runner.mjs`（build 1.0.0，单行 ASCII 12,835 字符，0600 非可执行，内容寻址随 bundle 激活）。main 侧 `SshTerminalSessionLauncher` 用 `ssh -tt` 启动受信任 node + active bundle 内 runner（命令行不含 cwd/shell/ticket/用户文本），握手 READY → 换行终止 base64url init `{ticketRef}` → START（携带所选登录 shell），`stty` 捕获/恢复 on every path，错误为闭集稳定码；`LocalTerminalSessionLauncher` 原样承接本地/WSL 候选、cwd 转换与 node-pty 行为，`RemoteTerminalSessionManager` 保留 tab/replay/input/resize/close 单一所有权。验证：Windows 定向 **70/70**（含 entry 39/39、launcher/manager/adapter/command/shell）；WSL 真实 PTY 与真实 helper 子进程 **15/15**（runner 9 + prepare 6）；typecheck／触达 Biome／`build:fast` 0；真机 e2e 未执行（由 Lead 串行）。仍未覆盖：agent terminal target 的 ticket 变体、Windows/macOS 客户端、打包集成、F2 的存储级 lease 语义。
-> **2026-10-18 追加（helper 1.20.1 / terminal-runner 1.0.1，真机 Windows ConPTY 回归）**：真机 e2e 发现 Windows node-pty ConPTY 会剥离 C0 包装字节（RS 0x1e / US 0x1f）但保留 CRLF，原解析按 `\u001e…\u001f` 精确匹配导致 READY 永不合帧、init 永不发送。修复：runner 的 READY/START/ERROR 现在统一以 `\r\n` 终止（保留 RS/US 包装）；main 解析按 plain ASCII marker 定位、读取到首个 CRLF（容忍可选 US、Linux ONLCR 产生的 CR CR LF、以及 ConPTY 注入的自身控制序列），消费到 CRLF 后只把 START 之后的字节交付一次；ERROR 同样按 marker + CRLF 解析稳定错误码。回归覆盖：launcher 的 ConPTY-loss 模拟（RS/US 剥离、CRLF 保留、noise 夹层、跨 chunk 拆分）、WSL 真实 PTY 的 CRLF 帧断言与 main 式解析、entry/artifact 版本与 pin。helper 1.20.1，terminal-runner 1.0.1（sha256 0c9e382f…），helper.mjs sha256 ff5d7de6…；`pideck-term-debug` 全仓 grep 为空。真机复测由 Lead 串行执行。
+> **实施结果（F3，2026-10-18，helper 1.20.0）**：上述 ticket/runner 设计已按冻结契约实现。helper 新增 `terminal.prepare`：ticket 写入 `<deployRoot>/terminal-tickets/`（目录 0700 owner-only，文件 0600），绑定 `kind/projectId/hostId/routeDigest/canonical cwd/bundleSha256/nonce/expiresAt`（60s TTL），原子创建（temp 0600 → link/rename + fsync）+ 有界（≤256）过期/畸形/自有 temp sweep，只返回 opaque ref；`terminal.prepare` 进入 CAPABILITIES 与 dispatch，参数只由 main 从 live session（hostId/routeDigest/projectId/canonical root）构造。bundle 现有**五个 helper artifacts**（helper／git-read／git-write／git-sync／terminal-runner），部署 manifest 共六个条目（含既有 `runner.mjs`）；新增冻结 `terminal-runner.mjs`（build 1.0.0，单行 ASCII 12,835 字符，0600 非可执行，内容寻址随 bundle 激活）。main 侧 `SshTerminalSessionLauncher` 用 `ssh -tt` 启动受信任 node + active bundle 内 runner（命令行不含 cwd/shell/ticket/用户文本），握手 READY → 换行终止 base64url init `{ticketRef}` → START（携带所选登录 shell），`stty` 捕获/恢复 on every path，错误为闭集稳定码；`LocalTerminalSessionLauncher` 原样承接本地/WSL 候选、cwd 转换与 node-pty 行为，`RemoteTerminalSessionManager` 保留 tab/replay/input/resize/close 单一所有权。验证：Windows 定向 **70/70**（含 entry 39/39、launcher/manager/adapter/command/shell）；WSL 真实 PTY 与真实 helper 子进程 **15/15**（runner 9 + prepare 6）；typecheck／触达 Biome／`build:fast` 0；真机 e2e 未执行（由 Lead 串行）。仍未覆盖：agent terminal target 的 ticket 变体、Windows/macOS 客户端、打包集成、F2 的存储级 lease 语义。
+> **2026-10-18 追加（helper 1.20.1 / terminal-runner 1.0.1，真机 Windows ConPTY 回归）**：真机 e2e 发现 Windows node-pty ConPTY 会剥离 C0 包装字节（RS 0x1e / US 0x1f）但保留 CRLF，原解析按 `\u001e…\u001f` 精确匹配导致 READY 永不合帧、init 永不发送。修复：runner 的 READY/START/ERROR 现在统一以 `\r\n` 终止（保留 RS/US 包装）；main 解析按 plain ASCII marker 定位、读取到首个 CRLF（容忍可选 US、Linux ONLCR 产生的 CR CR LF、以及 ConPTY 注入的自身控制序列），消费到 CRLF 后只把 START 之后的字节交付一次；ERROR 同样按 marker + CRLF 解析稳定错误码。回归覆盖：launcher 的 ConPTY-loss 模拟（RS/US 剥离、CRLF 保留、noise 夹层、跨 chunk 拆分）、WSL 真实 PTY 的 CRLF 帧断言与 main 式解析、entry/artifact 版本与 pin。helper 1.20.1，terminal-runner 1.0.1（sha256 0c9e382f…），helper.mjs sha256 ff5d7de6…；调试残留检查通过（无临时 debug 文件写入或调试开关残留）。真机复测由 Lead 串行执行。
+> **2026-10-18 追加（helper 1.20.2，R2-2 ticket 生命周期对齐）**：未消费 ticket 的 TTL 由 120s 收紧到 **60s**（冻结计划 §4.2 要求 ≤60s），main 常量 `REMOTE_TERMINAL_TICKET_TTL_MS` 与 helper 冻结字面量在 entry 测试中做相等性 pin（`=== 60_000` 且与 `TERMINAL_TICKET_TTL = 60000` 解析值一致，任一侧漂移即红灯）；helper 在 **startup 与 mint 两处**执行同一条有界（≤256）sweep：startup 只对 bundle-shaped helper（从 argv 推导 deployRoot）且目录已存在时生效，绝不为了 sweep 创建目录，flat/dev helper 无 deployRoot 时安静跳过；sweep 目标仅限 `<32hex>` 过期/畸形 ticket、自有 `.new-<32hex>` 临时文件、以及 crash 遗留的 `.claim-<32hex>-<pid>` orphan（年龄 > TTL），新鲜 claim 与任何外来文件名一律不动（0700/0600 与 no-follow 规则不变）。helper.mjs 39,876 字符 sha256 `e1cae34d…`，terminal-runner 保持 1.0.1 不变；prepare 测试覆盖 startup sweep、fresh claim 保留、foreign 名字不动、mint 时 claim sweep、目录不被 sweep 创建、flat helper 正常服务；runner 冻结测试 pin 住 `.claim-` 命名。真机 e2e 由 Lead 串行复跑。
 
 ## 7. Helper 协议 v1
 
@@ -828,6 +868,8 @@ Phase 1 是全计划风险最高的契约迁移（全库 path-bearing contract �
 | checkpoint/rewind | 完整 | 首发禁用 | 必须先实现远端 backend，不能回落本地 fs |
 | DSH/imagegen/外部来源 Session | 完整 | 首发不支持远端 | 只允许 local location |
 | 浏览器服务 | 本地 | 可后续 | 需端口转发设计 |
+
+> **状态（2026-10-18，file-mgmt 赛道）**：Phase 5 远端会话数据删除已交付，范围是**已归档**远端会话（id-only 请求 → main PendingConfirmationBroker 一次性确认 → 有界 Node rm + canonical containment → 归档索引/墓碑清理；回执丢失=RESULT_UNCONFIRMED 不重试、不自动刷新掉）。活动/未归档远端会话的远端文件删除仍 fail-closed（必须先归档，才有显式永久删除入口；本机归档与 DSH 行保持回收站删除不变）。证据：tests/remoteSessionDelete.test.mjs（POSIX 真实脚本 + 真实 SessionCatalog/sessionIpc + 假 SSH exec）、tests/remoteSessionDeleteUi.test.mjs；真机 e2e 已作者化（remoteSessionAcceptance 归档步骤），未由本赛道执行。
 
 Remote v1 发布条件：完成 Phase 5；表中「必须」项和 6.3 Git 支持清单全部通过；任何“v1 禁用”都必须由 capability 驱动禁用并有 i18n 解释，不能隐藏失败、静默 no-op 或调用本地实现。
 

@@ -779,4 +779,18 @@ P4.5b 的单会话归档/恢复已完成真实 Electron＋SSH 验证，不能据
 - **全量回归与干净 HEAD `1606fc042` 基线对照**：工作树 **8413 项：8123 通过／30 败／260 skip**，基线 **8329 项：8072 通过／31 败／226 skip**；**失败集合里没有任何只出现在工作树的项（零新增）**，且基线唯一多出的红是「terminal command pins actual cwd…」（新 launcher 已替换该命令模板、对应测试同批更新，属预期消失）。+84 测试，+34 skip（Linux-only 套件在 Windows 的守卫）。
 - **仍未完成/需人工**：macOS 客户端（无机器）、打包版人工 smoke、Linux 客户端长稳 soak（`PIDECK_E2E_REMOTE_GIT_SOAK` 仅 Linux 运行）、独立第三方安全 reviewer；功能面剩**远端配置后端**（models/settings + provider 测试/模型目录）与**远端会话真删**，见 [发布门禁台账](remote-release-gate-status.md)。
 
+## 远端会话永久删除（2026-10-18，已归档远端会话的显式删除已交付）
+
+- **交付**：shared 单一闭集 `sessionDeleteCodes.ts`（14 个稳定码）+ 两条 id-only 通道；main `RemoteSessionDelete.ts`（固定 Node 脚本只 unlink 会话目录旁 `.pideck-archive/*.jsonl`：lstat 普通文件非符号链接、父目录 canonical containment、unlink 前 `(dev,ino)` 复核、marker+JSON 回执；无标记/撕裂/非零退出 ⇒ `RESULT_UNCONFIRMED`；8192 命令上界+2048 脚本预算）与 `RemoteArchivedSessionDelete.ts`（`PendingConfirmationBroker` sender/60s/索引 digest 绑定、消费一次；运行中先判后发；in-flight 锁贯穿删除+清理；成功后才摘 `archivedRemoteSessions` 并清同身份墓碑）。sessionIpc 两 handler + sender destroyed 撤销；main 装配 pinned SSH，零新增 helper op。
+- **renderer**：`remoteArchivedDeleteState` 纯 reducer（confirm 只能从 confirming、deleting 不可取消、unconfirmed 只能显式 acknowledge）、`useRemoteArchivedSessionDelete`（answer 抛错也按 UNCONFIRMED，未确认不刷新）、归档行内「删除（永久）」+ 不可恢复确认 + 未确认/失败内联提示与 testids；本机 pi/DSH 行回收站删除与批量排除不变；zh/en 11 条。
+- **验证**：新增 17 项（main 11：WSL 真实脚本 unlink/拒符号链接 11/11，Windows 10 pass/1 skip；UI 6）；相关回归 Windows 143 pass/1 skip、WSL 39/39、spec guards 14 pass/1 skip；typecheck／`build:fast` 0；e2e `--list` 136/56（acceptance 仍 16，步骤级扩展）。真机门禁待补（见下）。
+- **边界**：范围仅已归档远端会话（活动会话须先归档）；单文件 unlink 非递归 rm；检查→unlink 的 TOCTOU 与归档 move 同量级（文档与测试写明）；本机数据仍走系统回收站。
+
+## 独立安全复审 round 2（2026-10-18，只读）
+
+- 报告 [remote-security-review-round2.md](remote-security-review-round2.md)：**0 critical / 0 high / 0 medium**；round-1 的 F1（已修）、F2（已修，多客户端 residual 记录）、F3（project 终端 ticket 已实现；agent-target 变体仍缺）、F4/F5/F6 均确认关闭；F7–F10 仍为 info。
+- 新发现 2 low + 3 info：**R2-1** `.pideck-trash` 未从 `remote:project-list`/`search` 过滤（与冻结计划/台账矛盾，内容读取仍被拒）→ **本批已修**：根 list 过滤该保留名、递归 search 按首段过滤整棵 trash、子目录同名用户数据与 `.pideck-trashish` 类路径保留；新增 2 组测试，`remoteHostIpc` 75/75。**R2-2** ticket TTL 120s vs 计划 ≤60s、sweep 只在 mint 时跑、崩溃遗留 `.claim-*` 未清理、main TTL 常量未使用 → 车道修复中（helper 1.20.2：60s、启动时 sweep、claim orphan sweep、常量互钉）。O1（runner 不复核 hostId/routeDigest，主进程同 session mint+spawn 保证，未发现跨 host 路径）、O2（runner 选中的 shell 未回填 tab label，cosmetic）、O3（root-drift 码折叠到 FILE_COMMAND_FAILED，fail-closed）为 info。
+- 复审验证：493 targeted / 411 pass / 0 fail / 82 POSIX skip（分五批）；未跑 e2e/真机/pack/全量。
+
+
 

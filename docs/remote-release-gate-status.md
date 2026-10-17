@@ -14,10 +14,10 @@
 | 4 | 终端 prepare ticket 一次性/防重放/跨项目 | 🟢 已实现并真机通过 | helper 1.20.1 `terminal.prepare` 一次性 ticket + 固定 `terminal-runner.mjs`；真机终端 e2e 1.8m 通过（Windows 客户端→Linux 主机，ConPTY 帧分隔符缺陷已修）。agent-target 变体仍未做（project-only kind）。 |
 | 5 | 终端握手/输出/resize/close 与前台 shell 收敛 | 🟢 真机通过 | Windows 客户端→Linux 主机终端 e2e：项目隔离/保存代码/resize/关闭/断开/退出清理全通过；关闭后远端 shell 收敛在负载下最坏约 20–60s（测试等待已放宽到 60s，硬断言仍要求 gone）。 |
 | 6 | Git 输出尺寸与超时上限 | ✅ | 1 MiB/256 KiB/16 MiB 预算 + 同步 600s 预算（F1 修复，§5.16.2）。 |
-| 7 | Phase 0–5 全能力对照表通过 | 🟡 进行中 | 文件管理（本批）、create-project（本批）、远端配置/模型（待排）、会话真删（待排）、终端 ticket（待排）。 |
-| 8 | 独立安全审查完成 | 🟡 进行中 | 报告已有（0 critical/0 high/1 medium(F1 修复)/5 low/4 info）；F2/F4/F5/F6 本批修复；F3 待批；**独立第三方/人工 reviewer 仍缺**（现为 AI lane + Lead 复核）。 |
+| 7 | Phase 0–5 全能力对照表通过 | 🟡 进行中 | 文件管理/create-project/终端 ticket/会话真删（已归档远端会话）均已交付；**仅剩远端配置后端**（models/settings + provider 测试/模型目录）。 |
+| 8 | 独立安全审查完成 | 🟡 进行中 | round 1：0 critical/0 high/1 medium(F1 修复)/5 low/4 info；F2/F4/F5/F6 已修；round 2（[report](remote-security-review-round2.md)）：0 critical/high/medium，F1–F6 关闭，F3 project 终端已实现，新 2 low（R2-1 已修、R2-2 修复中）+3 info。**独立第三方/人工 reviewer 仍缺**（现为 AI lane + Lead 复核）。 |
 | 9 | Windows/macOS 本机 → Linux 远端 smoke | 🟡 部分 | Windows 客户端→Linux 真机：G1–G5e 真机门禁（Git/同步/初始化/嵌套仓库）+ 文件编辑链路已有自动证据；终端切片与 macOS 客户端无证据。 |
-| 10 | `npm run pack` 资源检查 | 🔴 未跑 | 待跑：pack + 校验 helper 冻结字符串/runner/pi-auth/extensions manifest 进入产物；当前 packaged 构建仍被 `!app.isPackaged && PIDECK_REMOTE_EXPERIMENTAL=1` 门禁挡住，发布前需产品决定是否放开。 |
+| 10 | `npm run pack` 资源检查 | 🟡 自动部分通过 | `npm run pack` 0（2026-10-18，release/win-unpacked）；`resources/` 含 `pi-auth-host.mjs`、`extensions/`（含 manifest）、`prompts/`、`skills/`、`pets/`、`xueprompts.db`、`pi-ai-catalog.json`；app.asar 内逐串命中冻结 helper 源码标记（`PIDECK_TERMINAL/1 READY`、`terminal-runner.mjs`、`terminal.prepare`、`createGitInitProgram`、`.pideck-trash`、F5 文案 key）。**packaged 构建仍被 `!app.isPackaged && PIDECK_REMOTE_EXPERIMENTAL=1` 挡住；发布前需产品决定是否放开 + 打包版人工 smoke（§4）。** |
 | 11 | helper 升级/降级 + 断电半写恢复 | 🟡 部分 | 版本/capability 不匹配拒绝、激活复核、abort/EOF 清理已测；F2 host 侧 bundle sweep/TTL 本批修；真实断电半写与显式降级矩阵仍缺。 |
 | 12 | 创建空远端目录 + git init | ✅ 真机通过 | create-project（enroll create 模式，独立确认 broker，pinned SSH mkdir + canonical 复核）真机 e2e 通过（含同名再建/回收站链路）；git init helper 1.17.0 另有 G5c 真机证据。 |
 | 13 | 远端文件原子写/重命名/删除 | ✅ 真机通过 | 原子写 + rename/move/delete→项目内 `.pideck-trash`（list/restore/prune）真机 e2e 54.1s 通过，`.pideck-trash` 对读面隐藏。 |
@@ -43,15 +43,17 @@
 | security lows | F2 host bundle sweep/TTL、F4 IdentityFile `~`、F5 receipt-loss、F6 session path canonical | ✅ 已实现（真机复核项见 §4） |
 | terminal ticket (F3) | `terminal.prepare` 一次性 ticket + 固定 terminal-runner 握手 | ✅ 真机通过（1.8m；含 ConPTY 修复 helper 1.20.1） |
 | 夜间总门禁 | 十二项真机门禁 + 全量回归 | ✅ 12 passed (9.8m)；回归零新增失败（8413 vs 8329，30 vs 31 败） |
+| remote session delete | 已归档远端会话行内永久删除（独立确认、pinned SSH 固定脚本、UNCONFIRMED 不重试） | ✅ 已实现（targeted 17/17 + 回归 143/1 skip；真机门禁待跑） |
+| 安全复审 round 2 | 独立只读复审 + R2-1/R2-2 修复 | 🟡 R2-1 已修（host IPC 75/75）；R2-2 修复中（helper 1.20.2） |
 | remote config backend | provider 测试/模型目录在目标 host 执行，脱敏返回 | ⬜ 待排 |
 | remote session delete | 远端会话数据真删（显式二次确认，写面 `rm`） | ⬜ 待排 |
-| release evidence | `npm run pack` 资源检查、packaged/开发态门禁口径、长稳+真实慢链路、独立复核 | ⬜ 待排 |
+| release evidence | `npm run pack` 资源检查、packaged/开发态门禁口径、长稳+真实慢链路、独立复核 | 🟡 pack 0 且资源/冻结源码检查通过；长稳（Linux 客户端）与独立复核待排 |
 
 ## 4. 需要用户/人工确认的项（不能被自动证据替代）
 
 1. **macOS 客户端**：无机器/无 session，无法今夜验证；发布口径只能写「Windows 客户端已验证，Linux 客户端已有开发态证据，macOS 未验证」。
 2. **打包版人工 smoke**：`npm run pack` 产物可以自动检查资源与启动，但真实 SSH 远端流程的人工点按体验需用户明天确认。
-3. **独立安全 reviewer**：现为 AI lane 审查 + Lead 复核；计划要求的「独立 reviewer 签字」需要人。
+3. **独立安全 reviewer**：已有两轮 AI lane 只读审查 + Lead 复核（round 2 报告见 remote-security-review-round2.md）；计划要求的「独立第三方/人工 reviewer 签字」仍需要人。
 4. **文件管理 11 项签收点**：本批按文档建议方案（回收站 A + 空回收站 C）实现；用户可在验收时改，但实现已按建议走。
 5. **真实慢网络/长稳**：可自动跑有界 soak；数小时网络抖动下的用户感知需人工判断。
 
