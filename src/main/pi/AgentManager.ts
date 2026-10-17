@@ -4006,6 +4006,27 @@ export class AgentManager {
 		this.emitState();
 	}
 
+	/**
+	 * 停止 agent 并等待进程真正退出（最多 timeoutMs）。
+	 *
+	 * 删除会话必须先等 pi 退出：Windows 上进程还持有会话 JSONL 的写句柄时，
+	 * shell.trashItem 只会报通用的「Failed to perform delete operation」（issue #364）。
+	 * 进程已经不在时立即返回 true；超时返回 false，由调用方决定是否继续删除。
+	 */
+	async stopAndWaitForExit(agentId: string, timeoutMs = 3000): Promise<boolean> {
+		const piProcess = this.agents.get(agentId)?.process;
+		// stop 本身同步清空 agents 与运行时状态，这里只补「等进程真的退出」这一步。
+		void this.stop(agentId).catch(() => undefined);
+		if (!piProcess || !piProcess.isRunning()) return true;
+		const deadline = Date.now() + timeoutMs;
+		const pollMs = 50;
+		while (piProcess.isRunning()) {
+			if (Date.now() >= deadline) return false;
+			await new Promise((resolve) => setTimeout(resolve, pollMs));
+		}
+		return true;
+	}
+
 	/** 注册本地事件监听器（供 FeishuBridge 等主进程内部模块使用） */
 	addLocalEventListener(listener: (agentId: string, event: unknown) => void): () => void {
 		this.localEventListeners.add(listener);

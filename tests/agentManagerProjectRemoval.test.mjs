@@ -100,3 +100,42 @@ test("projects:remove 先回收预热进程、按存活判定、删除后清理�
 	assert.ok(releaseAt < guardAt, "预热进程回收必须在拦截判定之前");
 	assert.ok(discardAt > guardAt, "删除成功后必须清理已退出的 runtime");
 });
+
+test("stopAndWaitForExit returns immediately for an already-exited process and drops the runtime", async () => {
+	const manager = createManager();
+	manager.agents.set("agent-dead", createRuntime({ id: "agent-dead", running: false }));
+
+	assert.equal(await manager.stopAndWaitForExit("agent-dead", 100), true);
+	assert.equal(manager.agents.has("agent-dead"), false);
+});
+
+test("stopAndWaitForExit waits until the process reports exit", async () => {
+	const manager = createManager();
+	let running = true;
+	const runtime = createRuntime({ id: "agent-live", running: true });
+	runtime.process.isRunning = () => running;
+	manager.agents.set("agent-live", runtime);
+
+	setTimeout(() => {
+		running = false;
+	}, 40);
+
+	assert.equal(await manager.stopAndWaitForExit("agent-live", 1000), true);
+});
+
+test("stopAndWaitForExit gives up after the timeout without leaving the runtime behind", async () => {
+	const manager = createManager();
+	manager.agents.set("agent-stuck", createRuntime({ id: "agent-stuck", running: true }));
+
+	const startedAt = Date.now();
+	assert.equal(await manager.stopAndWaitForExit("agent-stuck", 80), false);
+	assert.equal(Date.now() - startedAt >= 60, true);
+	// 超时只是不再等，runtime 仍要按 stop 语义移除（否则又会挡住后续删除，issue #360）。
+	assert.equal(manager.agents.has("agent-stuck"), false);
+});
+
+test("stopAndWaitForExit treats an unknown agent as already exited", async () => {
+	const manager = createManager();
+
+	assert.equal(await manager.stopAndWaitForExit("missing", 10), true);
+});
