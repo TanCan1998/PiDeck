@@ -116,6 +116,15 @@ func blobToString(blob []byte) string {
 	return string(decoded)
 }
 
+// escapeSqliteUriPath：把路径里对 sqlite URI 文件名有语法意义的字符转成 %HH。
+// sqlite 打开 URI 时对 path 段做百分号解码，所以 % ? # 必须转义；其余字符
+// （含 Windows 盘符冒号、空格、非 ASCII）原样保留——不做整体 url.PathEscape，
+// 免得把本来就合法的路径写成另一种形态。宿主路径来自 userData，通常不含这些
+// 字符，但任意合法路径都要能打开。
+func escapeSqliteUriPath(path string) string {
+	return strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23").Replace(path)
+}
+
 // LoadStore 打开（只读）xueprompts.db，解压全部 BLOB 并建内存索引。
 func LoadStore(dbPath string) (*Store, error) {
 	abs, err := filepath.Abs(dbPath)
@@ -123,7 +132,7 @@ func LoadStore(dbPath string) (*Store, error) {
 		return nil, err
 	}
 	// ro 防误写；宿主保证文件存在（打包随应用/开发仓内固定路径）
-	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(abs)+"?mode=ro")
+	db, err := sql.Open("sqlite", "file:"+escapeSqliteUriPath(filepath.ToSlash(abs))+"?mode=ro")
 	if err != nil {
 		return nil, err
 	}

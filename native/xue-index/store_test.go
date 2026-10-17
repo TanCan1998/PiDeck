@@ -391,6 +391,35 @@ func TestOverlayEmptyEqualsPureDb(t *testing.T) {
 	}
 }
 
+func TestLoadStorePathWithUriSpecialChars(t *testing.T) {
+	// 路径里的 % ? # 在 sqlite URI 文件名里有语法含义（%HH 转义 / 参数分隔），
+	// 不转义会打开错文件或直接报错；这里把 fixture 放进带特殊字符的目录验证
+	fixture := createFixtureDb(t)
+	weirdDir := filepath.Join(t.TempDir(), "prompts%3F#dir")
+	if err := os.MkdirAll(weirdDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	blob, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	weirdPath := filepath.Join(weirdDir, "fixture.db")
+	if err := os.WriteFile(weirdPath, blob, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := LoadStore(weirdPath)
+	if err != nil {
+		t.Fatalf("LoadStore(特殊字符路径): %v", err)
+	}
+	result, err := store.List(ListParams{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(result.Prompts) == 0 {
+		t.Fatal("特殊字符路径下读到的条目为空")
+	}
+}
+
 func TestLoadStoreMissingDb(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "absent.db")
 	if _, err := os.Stat(missing); !os.IsNotExist(err) {

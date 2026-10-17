@@ -216,6 +216,65 @@ test("进程退出（close）：结算 pending，下次调用重拉新进程", a
 	service.dispose();
 });
 
+test("isReady：同步就绪探测——未 spawn/booting/roots 不一致/死亡/dispose 一律 false", async () => {
+	const { service, harnesses } = createService();
+	// 连接口冷启动：还没拉进程
+	assert.equal(service.isReady(["/roots/a"]), false);
+	const pending = service.search(["/roots/a"], "x");
+	await new Promise((resolve) => setImmediate(resolve));
+	// 已 spawn 但未握手（booting）：未就绪——交互路径据此降级，不会等 boot 超时
+	assert.equal(service.isReady(["/roots/a"]), false);
+	bootReady(harnesses[0]);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(service.isReady(["/roots/a"]), true);
+	// roots 口径不一致：需要重启才能服务，不算就绪
+	assert.equal(service.isReady(["/roots/b"]), false);
+	harnesses[0].emitLine({ type: "response", id: harnesses[0].commands()[0].id, ok: true, result: SEARCH_RESULT });
+	assert.ok((await pending).ok);
+	// 进程退出：立刻回落未就绪，下一次调用重拉
+	harnesses[0].child.emit("close", 0);
+	assert.equal(service.isReady(["/roots/a"]), false);
+	service.dispose();
+	assert.equal(service.isReady(["/roots/a"]), false);
+});
+
+test("isReady：boot 超时后回落未就绪（不把后续交互挂在死进程上）", async () => {
+	const { service, harnesses } = createService({ bootTimeout: 30 });
+	const pending = service.search(["/roots/a"], "x");
+	const result = await pending;
+	assert.ok(!result.ok);
+	assert.equal(result.reason, "boot-failed");
+	assert.equal(harnesses[0].child.killed, true);
+	assert.equal(service.isReady(["/roots/a"]), false);
+	service.dispose();
+});
+
+test("warmup：无进程时后台建索引（spawn + 就绪后 refresh 帧），boot 中/已就绪不重复触发", async () => {
+	const { service, harnesses, spawnCalls } = createService();
+	service.warmup(["/roots/a"]);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(spawnCalls.length, 1);
+	// boot 中再 warmup：已有 booting 的同 roots 进程，不重复 spawn
+	service.warmup(["/roots/a"]);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(spawnCalls.length, 1);
+	bootReady(harnesses[0]);
+	await new Promise((resolve) => setImmediate(resolve));
+	const command = harnesses[0].commands().at(-1);
+	assert.equal(command.cmd, "refresh");
+	// 已就绪：warmup 什么都不做（刷新交给调用方的就绪路径）
+	service.warmup(["/roots/a"]);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(spawnCalls.length, 1);
+	assert.equal(harnesses[0].commands().length, 1);
+	// roots 不同（settings sessionDir 变更）：warmup 负责把新口径的进程拉起来
+	service.warmup(["/roots/b"]);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(spawnCalls.length, 2);
+	assert.equal(spawnCalls[1].args[1], "/roots/b");
+	service.dispose();
+});
+
 test("dispose：结算在途请求并杀进程", async () => {
 	const { service, harnesses } = createService();
 	const inFlight = service.search(["/roots/a"], "x");

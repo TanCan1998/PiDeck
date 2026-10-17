@@ -525,6 +525,19 @@ func (ix *Indexer) loadState() error {
 		return err
 	}
 	blob := body[nl+1:]
+	// 语料与快照必须同代。压缩先改名 corpus.bin、后改名 state.json，进程若在
+	// 两次改名之间被杀（boot 超时/dispose/roots 变化都可能落在压缩期），就会留下
+	// 「旧 state + 新（更小的）语料」：entry 的 offset 指向错位字节甚至越界，而
+	// 文件的 size/mtime 未变 → 增量重扫修不回来（错位文本/命中静默丢失）。
+	// 所以语料小于快照即判定快照不可用，让 BootIndex 全量重建。
+	// （语料大于快照属正常：上次被杀时写入了未记入快照的尾部，按废弃字节计入）
+	corpusInfo, statErr := os.Stat(ix.corpusPath)
+	if statErr != nil {
+		return fmt.Errorf("state corpus unavailable: %w", statErr)
+	}
+	if corpusInfo.Size() < head.CorpusSize {
+		return fmt.Errorf("state corpus size mismatch: state=%d corpus=%d", head.CorpusSize, corpusInfo.Size())
+	}
 	need := head.EntryCount * stateRecSize
 	if len(blob) < need {
 		return fmt.Errorf("state truncated: entries need %d bytes, have %d", need, len(blob))
@@ -552,6 +565,10 @@ func (ix *Indexer) loadState() error {
 	ix.nextFileId = head.NextFileId
 	ix.corpusSize = head.CorpusSize
 	ix.deadBytes = head.DeadBytes
+	// 快照之后写入的尾部字节（上次被杀）没被 entry 引用，记作废弃字节，压缩时回收
+	if tail := corpusInfo.Size() - head.CorpusSize; tail > 0 {
+		ix.deadBytes += tail
+	}
 	return nil
 }
 

@@ -16,7 +16,9 @@
  * - boot 超时（真实规模全量首建约 13s，慢盘/杀毒可拖更久；60s 上限）/
  *   进程退出 / stdin 管道错误 → 结算 pending 并标记 dead，下次调用重试；
  * - dispose → 结算 + 杀进程（quitCleanup 登记）。
- * - 所有子进程事件回调核对进程身份，旧进程迟到事件只吸收。
+ * - 所有子进程事件回调核对进程身份，旧进程迟到事件只吸收；
+ * - 就绪态用同步三元态 childState 暴露（isReady），交互路径据此降级而不是
+ *   等 boot 结束（首建可达数十秒，等下去会把渲染层请求挂住）。
  *
  * 本模块不 import electron（路径/根目录解析由装配层注入），tests 可用
  * PassThrough 假子进程直接驱动。
@@ -106,6 +108,8 @@ export class SessionIndexService {
 	private disposed = false;
 	private child: ChildProcessWithoutNullStreams | null = null;
 	private childReady: Promise<"ready" | "dead"> | null = null;
+	/** booting/ready/dead 三元态：isReady() 必须同步判断，不能 await childReady。 */
+	private childState: "booting" | "ready" | "dead" | null = null;
 	/** 当前进程的 roots 签名（\0 join）；变化即重启，防止索引口径漂移。 */
 	private childRootsKey: string | null = null;
 	private notifyReady: () => void = () => {};
@@ -126,9 +130,33 @@ export class SessionIndexService {
 	}
 
 	/**
+	 * 就绪探测：同步返回「现在发请求不会卡在 boot 上」。不拉进程、不等待。
+	 *
+	 * 交互路径（侧栏搜索）先用它判断——未就绪直接降级标题过滤，后台预热继续
+	 * 进行，索引就绪后下一次输入自然生效；只有就绪后的调用才值得走 search/refresh，
+	 * 否则渲染层请求会被挂在 boot 上（首建索引可达数十秒）。
+	 */
+	isReady(roots: string[]): boolean {
+		if (this.disposed || !this.child || this.childState !== "ready") return false;
+		return this.childRootsKey === roots.join("\0");
+	}
+
+	/**
+	 * 后台预热：确保有 roots 对应的进程在跑（已有 booting/ready 的同 roots 进程时
+	 * 什么都不做）。交互路径不想等 boot 时用它——本次降级标题过滤，但索引必须有
+	 * 人建，否则会出现「这次没人等、以后也没人建」（首次安装、settings sessionDir
+	 * 刚变更）。fire-and-forget，失败只记日志。
+	 */
+	warmup(roots: string[]): void {
+		if (this.disposed || roots.length === 0) return;
+		if (this.child && this.childRootsKey === roots.join("\0") && (this.childState === "booting" || this.childState === "ready")) return;
+		void this.refresh(roots).catch(() => {});
+	}
+
+	/**
 	 * 全文检索。roots 决定扫描口径，与当前进程不一致时自动重启（settings
-	 * sessionDir 变更场景）。boot 期间（首建索引可达数十秒）返回 not-ready，
-	 * 调用方降级标题过滤——不阻塞等待，索引就绪后下一次调用自然生效。
+	 * sessionDir 变更场景）。本方法会等 boot 结束，交互路径应先 isReady() 探测：
+	 * 未就绪直接降级标题过滤，就绪后下一次调用自然生效。
 	 */
 	async search(roots: string[], query: string, limit?: number, perSession?: number): Promise<SessionIndexCallResult<SessionSearchResult>> {
 		const boot = await this.ensureChild(roots);
@@ -183,6 +211,7 @@ export class SessionIndexService {
 		}
 		this.child = child;
 		this.childRootsKey = rootsKey;
+		this.childState = "booting";
 		this.stderrTail = [];
 		this.pending.clear();
 		this.buffer = "";
@@ -226,12 +255,14 @@ export class SessionIndexService {
 				if (settled) return;
 				settled = true;
 				clearTimeout(bootTimer);
+				this.childState = "ready";
 				resolveReady("ready");
 			};
 			this.notifyDead = () => {
 				if (settled) return;
 				settled = true;
 				clearTimeout(bootTimer);
+				this.childState = "dead";
 				resolveReady("dead");
 			};
 		});
@@ -244,6 +275,8 @@ export class SessionIndexService {
 		this.child = null;
 		this.childReady = null;
 		this.childRootsKey = null;
+		// boot 超时路径里 notifyDead 已 settled 提前返回，这里再落一次保证状态一致
+		this.childState = "dead";
 		this.buffer = "";
 		this.decoder = new StringDecoder("utf8");
 		this.notifyDead();

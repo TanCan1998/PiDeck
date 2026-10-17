@@ -37,6 +37,16 @@ function textResponse(text) {
 	return new Response(text, { status: 200 });
 }
 
+/** 保险丝：回归时让测试快速失败而不是把测试进程挂死（停滞计时失效 = promise 永不结算）。 */
+function withDeadline(promise, ms, label) {
+	let timer;
+	const guard = new Promise((_, reject) => {
+		timer = setTimeout(() => reject(new Error(`${label} 未在 ${ms}ms 内结束`)), ms);
+		timer.unref?.();
+	});
+	return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
+}
+
 function errorResponse() {
 	return new Response("gone", { status: 404 });
 }
@@ -59,7 +69,7 @@ function createFetchRouter(perSource) {
 	return { fetchImpl, calls, dbFetchCount: () => calls.filter((u) => !u.endsWith(".sha256")).length, shaFetchCount: () => calls.filter((u) => u.endsWith(".sha256")).length };
 }
 
-function createStore({ userDataDir, fetchImpl, repoDir = null, onStateChange } = {}) {
+function createStore({ userDataDir, fetchImpl, repoDir = null, onStateChange, fetchTimeoutMs = 5_000 } = {}) {
 	let nowMs = 1000;
 	const states = [];
 	const store = new XuePromptDbStore({
@@ -70,7 +80,7 @@ function createStore({ userDataDir, fetchImpl, repoDir = null, onStateChange } =
 		onStateChange: (state) => states.push(state),
 		// TTL/超时显式给小值，配合注入时钟精确控制节流窗口
 		checkTtlMs: 10_000,
-		fetchTimeoutMs: 5_000,
+		fetchTimeoutMs,
 		now: () => nowMs,
 	});
 	return { store, states, advance: (ms) => (nowMs += ms) };
@@ -215,4 +225,33 @@ test("已有缓存时网络全败：继续用缓存不降级", async (t) => {
 	assert.equal(state.state, "ready");
 	assert.equal(state.source, "cache");
 	assert.ok(existsSync(state.path));
+});
+
+test("body 停滞：按停滞上限结束并释放连接，换源后仍能装成（不永久挂着）", async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "xue-db-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	// 首块之后就再也不给数据：read() 永远 pending，只有停滞计时能结束它
+	// （fetchWithTimeout 的计时随响应头到达即结束，不覆盖 body 读取）
+	let cancelled = false;
+	const stalledBody = new ReadableStream({
+		start(controller) {
+			controller.enqueue(Buffer.from("partial"));
+		},
+		cancel() {
+			cancelled = true;
+		},
+	});
+	const dbV1 = Buffer.from("fake-xueprompts-db-v1");
+	const shaV1 = sha256Hex(dbV1);
+	const router = createFetchRouter([
+		{ sha: () => textResponse(`${shaV1}  xueprompts.db\n`), db: () => new Response(stalledBody, { status: 200 }) },
+		{ sha: () => textResponse(`${shaV1}  xueprompts.db\n`), db: () => streamResponse(dbV1) },
+	]);
+	const { store } = createStore({ userDataDir: root, fetchImpl: router.fetchImpl, fetchTimeoutMs: 30 });
+
+	const state = await withDeadline(store.ensureReady(), 4_000, "stalled body");
+	assert.equal(cancelled, true);
+	assert.equal(router.dbFetchCount(), 2);
+	assert.equal(state.state, "ready");
+	assert.equal(readFileSync(state.path).toString(), dbV1.toString());
 });

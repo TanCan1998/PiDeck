@@ -219,6 +219,61 @@ func TestCorruptStateFallsBackToFullRebuild(t *testing.T) {
 	}
 }
 
+func TestStateCorpusSizeMismatchFallsBackToFullRebuild(t *testing.T) {
+	fx := newFixture(t)
+	fx.writeSession("", userMsg("u1", "压缩未入快照MismatchMark"))
+	fx.boot()
+	fx.indexer.Close()
+	// 压缩先改 corpus.bin、后改 state.json；两次改名之间被杀 = 旧 state + 新（更小）语料。
+	// 这里用截断模拟：快照里的 offset 不再成立，必须丢弃快照全量重建，否则错位/丢命中。
+	corpusPath := filepath.Join(fx.corpus, "corpus.bin")
+	if err := os.WriteFile(corpusPath, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fx.boot()
+	stats := fx.indexer.Stats()
+	if !stats.FullRebuild {
+		t.Fatalf("stale corpus smaller than snapshot must trigger full rebuild: %+v", stats)
+	}
+	if stats.SessionCount != 1 || stats.EntryCount != 1 {
+		t.Fatalf("rebuild after size mismatch failed: %+v", stats)
+	}
+	if r := fx.indexer.Search("MismatchMark", 10, 3); r.TotalHitSessions != 1 {
+		t.Fatalf("search after rebuild failed: %+v", r)
+	}
+}
+
+func TestStateCorpusTailWithoutSnapshotStaysIncremental(t *testing.T) {
+	fx := newFixture(t)
+	fx.writeSession("", userMsg("u1", "追加尾部TailMark"))
+	fx.boot()
+	fx.indexer.Close()
+	// 语料大于快照：上次被杀时写了未入快照的尾部。entries 依然成立，应走增量（
+	// 否则每次被打断都要全量重建），多出的字节计入废弃字节。
+	corpusPath := filepath.Join(fx.corpus, "corpus.bin")
+	f, err := os.OpenFile(corpusPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("dead-tail-bytes"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fx.boot()
+	stats := fx.indexer.Stats()
+	if stats.FullRebuild {
+		t.Fatalf("corpus tail must not force a full rebuild: %+v", stats)
+	}
+	if stats.EntryCount != 1 {
+		t.Fatalf("snapshot entries lost: %+v", stats)
+	}
+	if r := fx.indexer.Search("TailMark", 10, 3); r.TotalHitSessions != 1 {
+		t.Fatalf("search after tail append failed: %+v", r)
+	}
+}
+
 func TestCompactRemapsOffsets(t *testing.T) {
 	fx := newFixture(t)
 	a := fx.writeSession("--t--a", userMsg("u1", "compact废弃段KeepMark"))

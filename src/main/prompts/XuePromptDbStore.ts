@@ -294,14 +294,38 @@ export class XuePromptDbStore {
 		let receivedBytes = 0;
 		if (response.body) {
 			const reader = response.body.getReader();
-			for (;;) {
-				const { done, value } = await reader.read();
-				if (done) break;
-				if (!value) continue;
-				receivedBytes += value.byteLength;
-				if (receivedBytes > MAX_DB_BYTES) throw new Error(`db exceeds size limit (${receivedBytes} bytes)`);
-				chunks.push(value);
-				this.setState({ state: "downloading", receivedBytes, totalBytes });
+			// fetchWithTimeout 的计时随响应头到达就结束了；body 是几十 MB 的流式读取，
+			// 连接半死时 read() 会永久挂着（ensureReady 的共享 promise 不结算 → 提示词列表
+			// 一直空态且不再重试）。按「停滞」而非总时长计时：每收一块重置，超时即 cancel
+			// 释放连接并抛出可读错误（正常大文件下载不受影响）。
+			let stalled = false;
+			let stallTimer: ReturnType<typeof setTimeout> | null = null;
+			const armStallTimer = () => {
+				if (stallTimer) clearTimeout(stallTimer);
+				stallTimer = setTimeout(() => {
+					stalled = true;
+					void reader.cancel().catch(() => {});
+				}, this.fetchTimeoutMs);
+			};
+			try {
+				armStallTimer();
+				for (;;) {
+					const { done, value } = await reader.read();
+					if (done) break;
+					if (!value) continue;
+					armStallTimer();
+					receivedBytes += value.byteLength;
+					if (receivedBytes > MAX_DB_BYTES) throw new Error(`db exceeds size limit (${receivedBytes} bytes)`);
+					chunks.push(value);
+					this.setState({ state: "downloading", receivedBytes, totalBytes });
+				}
+				if (stalled) throw new Error(`db download stalled (${this.fetchTimeoutMs}ms without progress) for ${dbUrl}`);
+			} catch (error) {
+				// 中途退出（超限/停滞/网络错）必须释放 reader，否则 body 挂着不回收
+				await reader.cancel().catch(() => {});
+				throw error;
+			} finally {
+				if (stallTimer) clearTimeout(stallTimer);
 			}
 		} else {
 			const buffer = await response.arrayBuffer();

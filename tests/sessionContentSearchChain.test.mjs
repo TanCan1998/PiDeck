@@ -33,6 +33,16 @@ test("preload/index.ts：sessions.searchContent 暴露在白名单", () => {
 	assert.match(source, /sessionsSearchContent/);
 });
 
+test("main/index.ts：搜索闭包先探测就绪（未就绪降级；refresh 失败但进程活着仍查）", () => {
+	const source = read("../src/main/index.ts");
+	assert.match(source, /sessionContentSearch:\s*async\s*\(query\)/);
+	// 未就绪直接返 null（不把渲染层请求挂到 boot，首建可达数十秒），但后台必须
+	// 有人建索引（首次安装/roots 刚变更时没别处预热）
+	assert.match(source, /!sessionIndexService\.isReady\(roots\)\)\s*\{[\s\S]{0,240}?sessionIndexService\.warmup\(roots\);\s*\n\s*return null;/);
+	// refresh 失败但进程仍活着 → 继续用现有索引搜一次
+	assert.match(source, /!refreshed\.ok\s*&&\s*!sessionIndexService\.isReady\(roots\)\s*\)\s*return\s+null/);
+});
+
 test("previewApi.ts：预览模式降级 stub 返回 null", () => {
 	const source = read("../src/renderer/src/previewApi.ts");
 	assert.match(source, /searchContent:\s*async\s*\(\)\s*=>\s*null/);

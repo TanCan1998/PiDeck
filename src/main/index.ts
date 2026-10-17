@@ -3236,13 +3236,21 @@ function registerIpc() {
 		sessionForkCommands,
 		// 跨会话正文搜索适配闭包：roots 解析（全局根+全局 settings sessionDir）+ sidecar
 		// 调用；搜索前先增量 refresh（stat 全目录毫秒级）保证新会话可搜；任何失败返回
-		// null，渲染层回退标题过滤，搜索入口永不报错
+		// null，渲染层回退标题过滤，搜索入口永不报错。未就绪（冷启动首建索引/预热中）
+		// 直接降级，不把渲染层请求挂到 boot 结束（首建可达数十秒）；refresh 失败但进程
+		// 仍活着时继续用现有索引搜一次（transient 失败不该让本次搜索静默无内容）。
 		sessionContentSearch: async (query) => {
 			if (!sessionIndexService) return null;
 			const roots = await sessionScanner.resolveGlobalSearchRoots();
 			if (roots.length === 0) return null;
+			if (!sessionIndexService.isReady(roots)) {
+				// 本次降级标题过滤，但后台必须有人建索引：首次安装/roots 刚变更时
+				// 没有别处会预热，否则内容搜索会一直空着（就绪后下一次输入自然生效）
+				sessionIndexService.warmup(roots);
+				return null;
+			}
 			const refreshed = await sessionIndexService.refresh(roots);
-			if (!refreshed.ok) return null;
+			if (!refreshed.ok && !sessionIndexService.isReady(roots)) return null;
 			const result = await sessionIndexService.search(roots, query);
 			return result.ok ? result.value : null;
 		},
@@ -4205,7 +4213,7 @@ app
 		setTimeout(() => {
 			void sessionScanner
 				.resolveGlobalSearchRoots()
-				.then((roots) => (roots.length > 0 && sessionIndexService ? sessionIndexService.refresh(roots) : null))
+				.then((roots) => sessionIndexService?.warmup(roots))
 				.catch(() => {});
 		}, 5_000);
 		skillManager = new SkillManager(undefined, mainCopy);
