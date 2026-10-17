@@ -246,6 +246,14 @@
         ]
       },
       {
+        "from": "resources/session-store/bin",
+        "to": "session-store",
+        "filter": [
+          "session-store",
+          "session-store.exe"
+        ]
+      },
+      {
         "from": "resources/quick-messages.default.json",
         "to": "quick-messages.default.json"
       },

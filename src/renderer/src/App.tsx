@@ -2471,11 +2471,12 @@ export function App() {
 	const paneLayoutRefs = useMemo(
 		() => ({
 			chatHeaderRef,
+			chatPaneRef,
 			composerRef,
 			composerOffsetHeight,
 			terminalRowHeight,
 		}),
-		[composerOffsetHeight, terminalRowHeight],
+		[chatPaneRef, composerOffsetHeight, terminalRowHeight],
 	);
 	// App 级激活 owner 键（聚焦会话/runtime 对应桶）：分屏各栏用它做“同 owner 去重”参照；
 	// 先算成稳定字符串再进 memo 依赖，避免 terminalOwner 每次渲染新建对象把 memo 打穿。

@@ -45,12 +45,17 @@ func logf(format string, args ...any) {
 
 func main() {
 	if len(os.Args) < 2 {
-		logf("usage: session-store <statePath>")
+		logf("usage: session-store <statePath> [tablesDir]")
 		os.Exit(1)
 	}
 	bootStartedAt := time.Now()
 	store := OpenStore(os.Args[1])
-	tables := newTableCache()
+	// tablesDir 可选：给了才落盘条目表（Wave 2b）；缺省退化成纯内存缓存。
+	tablesDir := ""
+	if len(os.Args) >= 3 {
+		tablesDir = os.Args[2]
+	}
+	tables := newTableCache(tablesDir)
 
 	out := bufio.NewWriter(os.Stdout)
 	writeFrame := func(frame any) {

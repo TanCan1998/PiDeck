@@ -71,6 +71,33 @@ const SEARCH_RESULT = {
 	truncated: false,
 };
 
+test("searchInSession：cmd=search-session 只带 path/query/limit（单文件检索）", async () => {
+	const { service, harnesses } = createService();
+	const pending = service.searchInSession(["/roots/a"], "C:/sessions/a.jsonl", "缓存");
+	await new Promise((resolve) => setImmediate(resolve));
+	bootReady(harnesses[0]);
+	await new Promise((resolve) => setImmediate(resolve));
+	const command = harnesses[0].commands()[0];
+	assert.equal(command.cmd, "search-session");
+	assert.equal(command.path, "C:/sessions/a.jsonl");
+	assert.equal(command.query, "缓存");
+	// 默认上限 100：会话内查找是「上一条/下一条」导航，需要一次拿到足够多的命中
+	assert.equal(command.limit, 100);
+	harnesses[0].emitLine({ type: "response", id: command.id, ok: true, result: SEARCH_RESULT });
+	const result = await pending;
+	assert.ok(result.ok);
+	service.dispose();
+});
+
+test("searchInSession：缺少会话路径时直接 not-ready，不拉进程", async () => {
+	const { service, spawnCalls } = createService();
+	const result = await service.searchInSession(["/roots/a"], "", "缓存");
+	assert.equal(result.ok, false);
+	assert.equal(result.reason, "not-ready");
+	assert.equal(spawnCalls.length, 0);
+	service.dispose();
+});
+
 test("search：boot 握手后请求 id 配对返回结果（spawn 参数带 corpusDir+roots）", async () => {
 	const { service, harnesses, spawnCalls } = createService();
 	const pending = service.search(["/roots/a", "/roots/b"], "修复");

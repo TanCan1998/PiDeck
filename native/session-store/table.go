@@ -367,18 +367,31 @@ func appendLineSegment(pending *[]byte, oversize *bool, segment []byte) {
 // 与 scanRange（store.go 的快照记账）同一套边界口径，但这里要产出**条目**，
 // 所以整行必须留在内存里解析；单行超过 maxScanLineBytes 时按超长行降级。
 func scanTable(path string, size int64, mtimeMs float64) (table, error) {
+	return scanTableFrom(path, size, mtimeMs, 0, nil, "", 0)
+}
+
+// scanTableFrom 从 start 字节处接着扫描，把新条目追加到 entries。
+//
+// 只用于「上次扫描以换行结尾、文件只变长」的追加场景（持久化条目表的增量路径）：
+// start 必须落在完整行边界，否则残行会被当成整行固化。调用方负责守这个前提。
+func scanTableFrom(path string, size int64, mtimeMs float64, start int64, entries []displayEntry, lastEntryID string, oversizedLines int) (table, error) {
 	handle, err := os.Open(path)
 	if err != nil {
 		return table{}, err
 	}
 	defer handle.Close()
+	if start > 0 {
+		if _, err := handle.Seek(start, io.SeekStart); err != nil {
+			return table{}, err
+		}
+	}
 
-	result := table{Path: path, Size: size, MtimeMs: mtimeMs}
+	result := table{Path: path, Size: size, MtimeMs: mtimeMs, Entries: entries, LastEntryID: lastEntryID, OversizedLines: oversizedLines}
 	buffer := make([]byte, scanChunkBytes)
 	var scannedBytes int64
 	pending := make([]byte, 0, 4096)
 	var pendingBytes int64
-	var offset int64
+	var offset int64 = start
 	oversize := false
 
 	// flushLine 结算一行；terminated = 该行以 \n 结尾（决定 offset 是否多推进一字节）

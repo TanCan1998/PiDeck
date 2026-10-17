@@ -621,6 +621,8 @@ export function createPreviewApi(): PiDesktopApi {
 			list: async () => getSessions(),
 			// 预览模式无 sidecar：null 让调用方回退标题过滤
 			searchContent: async () => null,
+			// 预览模式无 sidecar：会话内查找不可用（UI 显示不可用态而不是「无匹配」）
+			searchInSession: async () => null,
 			// 预览模式无 DSH host：空预设目录满足接口契约
 			listDshAgentPresets: async () => [],
 			getDshDefaultModel: async () => undefined,

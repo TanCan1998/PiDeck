@@ -50,6 +50,8 @@ type requestFrame struct {
 	Query      string          `json:"query"`
 	Limit      int             `json:"limit"`
 	PerSession int             `json:"perSession"`
+	// Path 仅 search-session 用：只在这个会话文件里检索（会话内查找）。
+	Path string `json:"path"`
 }
 
 type readyFrame struct {
@@ -158,6 +160,27 @@ func main() {
 				perSession = 3
 			}
 			result := indexer.Search(frame.Query, limit, perSession)
+			encoded, err := json.Marshal(result)
+			if err != nil {
+				writeFrame(responseFrame{Type: "response", ID: frame.ID, OK: false, Error: err.Error()})
+				continue
+			}
+			writeFrame(responseFrame{Type: "response", ID: frame.ID, OK: true, Result: encoded})
+		case "search-session":
+			// 会话内查找：只扫一个文件，命中按时间线顺序返回（逐条上一条/下一条）。
+			if frame.Query == "" {
+				writeFrame(responseFrame{Type: "response", ID: frame.ID, OK: false, Error: "empty query"})
+				continue
+			}
+			if frame.Path == "" {
+				writeFrame(responseFrame{Type: "response", ID: frame.ID, OK: false, Error: "empty path"})
+				continue
+			}
+			limit := frame.Limit
+			if limit <= 0 || limit > 500 {
+				limit = 100
+			}
+			result := indexer.SearchInSession(frame.Query, frame.Path, limit)
 			encoded, err := json.Marshal(result)
 			if err != nil {
 				writeFrame(responseFrame{Type: "response", ID: frame.ID, OK: false, Error: err.Error()})

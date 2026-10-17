@@ -12,7 +12,7 @@ import { createTsSandbox } from "./helpers/createTsSandbox.mjs";
  */
 
 const load = createTsSandbox({});
-const { stripActionMarkers, stripThinkingBlocks, stripMarkdown, prepareOutgoingText, splitForWeChat, pickLatestAssistantText, WECHAT_TEXT_CHUNK_MAX } = load("src/main/wechat/weChatText.ts");
+const { stripActionMarkers, stripThinkingBlocks, stripMarkdown, prepareOutgoingText, splitForWeChat, pickLatestAssistantText, pickLatestFailureText, WECHAT_TEXT_CHUNK_MAX } = load("src/main/wechat/weChatText.ts");
 
 test("host action markers are removed because WeChat has no attachments", () => {
 	const out = stripActionMarkers("[SEND_FILE:report.pdf]\n这是结论\n[CREATE_DOC:notes.md]");
@@ -131,4 +131,33 @@ test("a thinking-only assistant message is not used as the reply", () => {
 	];
 	assert.equal(pickLatestAssistantText(messages), "先给答案");
 	assert.equal(pickLatestAssistantText([{ role: "assistant", text: "<thinking>只有思考</thinking>" }]), "");
+});
+
+test("the backend failure text is picked up when a run produced no reply", () => {
+	// 「跑完了但没有正文」在欠费/鉴权失败时就是常态：错误原文必须能回给用户，
+	// 而不是只剩一句「任务已完成」。
+	assert.equal(pickLatestFailureText([{ role: "error", text: "余额不足，请充值" }]), "余额不足，请充值");
+	// 供应商报错也可能落在 stopReason=error 的 assistant 骨架上（DSH/pi 都有这种形态）。
+	assert.equal(pickLatestFailureText([{ role: "assistant", text: "401 invalid api key", stopReason: "error" }]), "401 invalid api key");
+	// 取最近一条：先报 500、后报额度，用户要看的是最后一次失败的原因。
+	assert.equal(
+		pickLatestFailureText([
+			{ role: "error", text: "供应商 500" },
+			{ role: "assistant", text: "半截" },
+			{ role: "error", text: "余额不足" },
+		]),
+		"余额不足",
+	);
+});
+
+test("tool failures and normal messages are never mistaken for a run failure", () => {
+	// 工具卡片的 meta.status=error 很常见：按 meta 匹配会把工具失败当成本轮失败发出去。
+	const messages = [
+		{ role: "tool", text: "命令退出码 1", meta: { status: "error" } },
+		{ role: "assistant", text: "已修好" },
+		{ role: "user", text: "谢谢" },
+	];
+	assert.equal(pickLatestFailureText(messages), "");
+	assert.equal(pickLatestFailureText([]), "");
+	assert.equal(pickLatestFailureText([{ role: "error", text: "   " }]), "", "空文本不算有效错误");
 });

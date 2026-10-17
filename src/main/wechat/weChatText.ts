@@ -132,6 +132,25 @@ export function splitForWeChat(text: string, limit = WECHAT_TEXT_CHUNK_MAX): str
 	return chunks;
 }
 
+/**
+ * 取本轮最近一条失败信息，用于「回合收口了但没有正文」时把后端错误原文回给用户。
+ *
+ * 两个来源：`role: "error"` 消息（pi 的错误气泡、DSH 的 turn/end 投影）与
+ * `stopReason: "error"` 的 assistant 消息（供应商报错被塞进 assistant 骨架的情况）。
+ * 只看这两个显式字段，不看 meta：时间线里大量 tool 消息也带 error 状态，按 meta
+ * 匹配会把工具失败当成本轮失败发出去。
+ */
+export function pickLatestFailureText(messages: ReadonlyArray<{ role: string; text?: string; stopReason?: string }>): string {
+	for (let i = messages.length - 1; i >= 0; i -= 1) {
+		const message = messages[i];
+		if (!message) continue;
+		if (message.role !== "error" && message.stopReason !== "error") continue;
+		const text = stripThinkingBlocks(message.text ?? "").trim();
+		if (text) return text;
+	}
+	return "";
+}
+
 /** 取 Agent 最近一条助手消息的文本，用于回信。 */
 export function pickLatestAssistantText(messages: ReadonlyArray<{ role: string; text?: string }>): string {
 	for (let i = messages.length - 1; i >= 0; i -= 1) {

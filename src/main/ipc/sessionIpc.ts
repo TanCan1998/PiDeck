@@ -373,6 +373,11 @@ export type SessionIpcDeps = {
 	 * 渲染层回退现有标题过滤，搜索入口永远不报错。
 	 */
 	sessionContentSearch?: (query: string) => Promise<SessionSearchResult | null>;
+	/**
+	 * 会话内查找（同一 sidecar 的单文件检索）。入参是会话文件路径（= SessionRecord.id）。
+	 * 返回 null 表示「索引未就绪/不可用」——渲染层据此提示而不是显示「无匹配」。
+	 */
+	sessionMessageSearch?: (sessionPath: string, query: string) => Promise<SessionSearchResult | null>;
 	/** DSH 后端专用 IPC 依赖（C1 分组；未装配 = 无 DSH 后端）。 */
 	dshBackend?: DshBackendIpcDeps;
 };
@@ -576,6 +581,25 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			return await searcher(trimmed);
 		} catch (error) {
 			void appLogger.warn("session", "Content search failed", { error: error instanceof Error ? error.message : String(error) });
+			return null;
+		}
+	});
+
+	// 会话内查找：只搜当前会话单个文件，命中按时间线顺序（上一条/下一条导航）。
+	ipcMain.handle(ipcChannels.sessionsSearchInSession, async (_event, sessionPath: unknown, query: unknown) => {
+		const searcher = deps.sessionMessageSearch;
+		if (!searcher) return null;
+		if (typeof sessionPath !== "string" || typeof query !== "string") return null;
+		const trimmedPath = sessionPath.trim();
+		const trimmed = query.trim();
+		// 路径必须像会话文件（绝对路径 + .jsonl）：sidecar 只索引真实会话文件，
+		// 这里再兜一道，避免把任意路径透传给子进程。
+		if (!trimmedPath || trimmedPath.length > 4096 || !/\.jsonl$/i.test(trimmedPath) || !/[\/]/.test(trimmedPath)) return null;
+		if (!trimmed || trimmed.length > 256) return null;
+		try {
+			return await searcher(trimmedPath, trimmed);
+		} catch (error) {
+			void appLogger.warn("session", "In-session search failed", { error: error instanceof Error ? error.message : String(error) });
 			return null;
 		}
 	});
