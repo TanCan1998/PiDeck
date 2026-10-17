@@ -41,8 +41,15 @@ const DEFAULT_BOOT_TIMEOUT_MS = 60_000;
  * 30s 只是对进程卡死的保险，超时由调用方降级。
  */
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
-/** stdout 单行上限：搜索响应（20 会话 × 3 命中）远小于此，防异常帧撑爆内存。 */
+/** stdout 单行上限：搜索响应（30 会话 × 5 命中）远小于此，防异常帧撑爆内存。 */
 export const MAX_SESSION_INDEX_LINE_CHARS = 4 * 1024 * 1024;
+
+/**
+ * 搜索返回上限：侧栏是「折叠的结果条」而不是结果页——单会话最多展示 5 条
+ * （Go 侧按评分取最相关的几条），最多 30 个会话。再多的用户会继续输入缩小范围。
+ */
+const DEFAULT_SEARCH_SESSION_LIMIT = 30;
+const DEFAULT_SEARCH_PER_SESSION = 5;
 
 export type SessionIndexLogger = {
 	debug: (message: string) => void;
@@ -158,7 +165,7 @@ export class SessionIndexService {
 	 * sessionDir 变更场景）。本方法会等 boot 结束，交互路径应先 isReady() 探测：
 	 * 未就绪直接降级标题过滤，就绪后下一次调用自然生效。
 	 */
-	async search(roots: string[], query: string, limit?: number, perSession?: number): Promise<SessionIndexCallResult<SessionSearchResult>> {
+	async search(roots: string[], query: string, limit = DEFAULT_SEARCH_SESSION_LIMIT, perSession = DEFAULT_SEARCH_PER_SESSION): Promise<SessionIndexCallResult<SessionSearchResult>> {
 		const boot = await this.ensureChild(roots);
 		if (!boot.ok) return boot;
 		return this.request<SessionSearchResult>({ cmd: "search", query, limit, perSession });

@@ -106,6 +106,28 @@ export type FileSearchResult = {
 	type: "file" | "directory";
 };
 
+/**
+ * 工作区文件内容检索命中（Go file-index sidecar）。
+ * `line` 为 1 起行号，`column` 为命中词在行内的 0 起字符位置，`snippet` 是窗口化后的可读片段。
+ */
+export type FileContentSearchHit = {
+	name: string;
+	path: string;
+	relativePath: string;
+	line: number;
+	column: number;
+	snippet: string;
+};
+
+/** 内容检索聚合结果：hits 已按相关度排序并截断，其余字段用于「扫了多少、是否截断」的提示。 */
+export type FileContentSearchResult = {
+	hits: FileContentSearchHit[];
+	matchedFiles: number;
+	scannedFiles: number;
+	scannedBytes: number;
+	truncated: boolean;
+};
+
 export type SessionSource = "pi" | "codex" | "claude" | "opencode" | "zcode" | "workbuddy" | "cursor" | "qoder" | "kimi" | "kimiwork" | "minimax";
 export type SessionEnvironment = "native" | "wsl";
 
@@ -557,6 +579,8 @@ export type SessionSearchSessionHit = {
 	filePath: string;
 	updatedAtMs: number;
 	matches: SessionSearchMatch[];
+	/** 命中总数（未截断）：matches 只保留评分最高的若干条，界面用它报真实条数。 */
+	hitCount?: number;
 };
 
 export type SessionSearchResult = {

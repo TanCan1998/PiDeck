@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"unicode/utf8"
 )
@@ -27,6 +28,10 @@ type searchSessionHits struct {
 	FilePath    string        `json:"filePath"`
 	UpdatedAtMs int64         `json:"updatedAtMs"`
 	Matches     []searchMatch `json:"matches"`
+	// 命中总数（未截断；matches 只保留评分最高的 perSession 条）
+	HitCount int `json:"hitCount"`
+	// 会话内最高命中评分：仅用于排序，不进线格式
+	Score int `json:"-"`
 }
 
 type searchResult struct {
@@ -41,17 +46,102 @@ const (
 	snippetMaxBytes    = 512
 )
 
+// ── 查询词元与命中评分 ──────────────────────────────────────────────
+//
+// 用户常常记不全一句话（「只记得几个词」）：单词保持原样的子串语义，多词按 AND
+// 处理——每个词都要出现，顺序无关、允许跨行/跨段落（正文里的换行不影响词元匹配，
+// 只有 snippet 展示层把换行折叠成空格）。评分只用于同一查询内的排序：会话内先给
+// 最相关的几条、会话之间按最高分排。
+const (
+	// 整句（原始查询去首尾空白）连续命中：搜一整句时，真正相关的是原句出现处
+	scorePhraseBonus = 1000
+	// 词元跨度（首词起点→末词终点，字节）越小越相关，最多 +200，每 24 字节扣 1 分
+	scoreSpanBonus = 200
+	scoreSpanDecay = 24
+	// 词元数超过它就把整个查询当一句：贴一整句话进来时「连续出现」才是用户意图，
+	// 同时避免病态长查询对每个 entry 做 N 次扫描（26 词以上视为整句）
+	maxQueryTerms = 16
+)
+
 type hit struct {
 	entryIdx        int
 	hitOffsetInText int
+	score           int
+}
+
+// splitQueryTerms：按空白拆词（strings.Fields 覆盖普通空格/制表/换行/全角空格）。
+// 空查询返回 nil（调用方已挡空查询，这里只作兜底）。
+func splitQueryTerms(query string) []string {
+	return strings.Fields(query)
+}
+
+// matchTerms 在（已按需折叠大小写的）正文里做多词 AND 匹配。
+//
+// terms / phrase 必须与正文同源（都折叠或都不折叠）。term 取各自**首次**出现位置，
+// 跨度取「首词起点→末词终点」——这是包含全部词元的窗口的近似（精确最小窗口要
+// 枚举排列，收益不值），用于区分「几个词凑在一起」和「散落在消息两端」。
+// 返回 snippet 锚点（整句命中用整句起点，否则用最早出现的词元）、评分、是否命中。
+func matchTerms(hay []byte, terms [][]byte, phrase []byte) (at, score int, ok bool) {
+	if len(terms) == 0 {
+		return 0, 0, false
+	}
+	first, last := -1, -1
+	for _, term := range terms {
+		idx := bytes.Index(hay, term)
+		if idx < 0 {
+			return 0, 0, false
+		}
+		if first < 0 || idx < first {
+			first = idx
+		}
+		if end := idx + len(term); end > last {
+			last = end
+		}
+	}
+	at = first
+	score = scoreSpanBonus - (last-first)/scoreSpanDecay
+	if score < 0 {
+		score = 0
+	}
+	if len(phrase) > 0 {
+		if p := bytes.Index(hay, phrase); p >= 0 {
+			at = p
+			score += scorePhraseBonus
+		}
+	}
+	return at, score, true
 }
 
 func (ix *Indexer) Search(query string, limit, perSession int) searchResult {
-	q := []byte(query)
-	asciiFold := containsASCIILetter(q)
-	var lowerQ []byte
+	// 词元化：单词查询就是原来的子串匹配（评分恒定，于是排序退化为时间序）；
+	// 多词要求全部出现，顺序无关、可跨行
+	wordList := splitQueryTerms(query)
+	if len(wordList) > maxQueryTerms {
+		wordList = []string{strings.TrimSpace(query)}
+	}
+	if len(wordList) == 0 {
+		return searchResult{Sessions: []searchSessionHits{}}
+	}
+	phraseText := strings.TrimSpace(query)
+	asciiFold := containsASCIILetter([]byte(query))
+	terms := make([][]byte, 0, len(wordList))
+	for _, word := range wordList {
+		terms = append(terms, []byte(word))
+	}
+	var phrase []byte
+	// 单词查询没有「整句」与「词元」的区别，整句加分无意义（所有命中都一样）
+	if len(wordList) > 1 {
+		phrase = []byte(phraseText)
+	}
 	if asciiFold {
-		lowerQ = asciiLowerTo(nil, q)
+		lowered := make([][]byte, 0, len(terms))
+		for _, term := range terms {
+			lowered = append(lowered, asciiLowerTo(nil, term))
+		}
+		terms = lowered
+		if phrase != nil {
+			phrase = asciiLowerTo(nil, phrase)
+		}
 	}
 
 	// 全程读锁：rescan/compact（写锁）等本搜索结束；corpusFile 的 ReadAt 与
@@ -110,15 +200,14 @@ func (ix *Indexer) Search(query string, limit, perSession int) searchResult {
 			for i := start; i < end; i++ {
 				e := &entries[i]
 				text := buf[e.offset-segStart : e.offset-segStart+int64(e.length)]
-				var at int
+				hay := text
 				if asciiFold {
 					lowerBuf = asciiLowerTo(lowerBuf[:0], text)
-					at = bytes.Index(lowerBuf, lowerQ)
-				} else {
-					at = bytes.Index(text, q)
+					hay = lowerBuf
 				}
-				if at >= 0 {
-					found = append(found, hit{entryIdx: i, hitOffsetInText: at})
+				at, score, matched := matchTerms(hay, terms, phrase)
+				if matched {
+					found = append(found, hit{entryIdx: i, hitOffsetInText: at, score: score})
 				}
 			}
 			results[w] = chunkHits{hits: found, text: buf}
@@ -128,9 +217,10 @@ func (ix *Indexer) Search(query string, limit, perSession int) searchResult {
 
 	// 片内命中收集；snippet 从片缓冲取（offset 归一化到 entry 内）
 	type resolvedHit struct {
-		e    *entry
-		text []byte // entry 正文（来自片缓冲）
-		at   int
+		e     *entry
+		text  []byte // entry 正文（来自片缓冲）
+		at    int
+		score int
 	}
 	var all []resolvedHit
 	for w := 0; w < workers; w++ {
@@ -139,14 +229,15 @@ func (ix *Indexer) Search(query string, limit, perSession int) searchResult {
 			e := &entries[h.entryIdx]
 			segStart := entries[w*chunk].offset
 			text := ch.text[e.offset-segStart : e.offset-segStart+int64(e.length)]
-			all = append(all, resolvedHit{e: e, text: text, at: h.hitOffsetInText})
+			all = append(all, resolvedHit{e: e, text: text, at: h.hitOffsetInText, score: h.score})
 		}
 	}
 
-	// 聚合到会话：entries 顺序即语料/时间序，会话内命中天然按时间排列
+	// 聚合到会话：先按评分挑最相关的几条（snippet 只为入选项构建，避免为成千上万条
+	// 命中都分配字符串），再按「最高分 → 最近活跃 → 路径」排会话。
 	type sessionAgg struct {
-		fs      *fileState
-		matches []searchMatch
+		fs   *fileState
+		hits []resolvedHit
 	}
 	fileById := make(map[int32]*fileState, len(ix.files))
 	for _, fs := range ix.files {
@@ -165,23 +256,37 @@ func (ix *Indexer) Search(query string, limit, perSession int) searchResult {
 			aggByFile[rh.e.fileRef] = agg
 			order = append(order, rh.e.fileRef)
 		}
-		if len(agg.matches) >= perSession {
-			continue
-		}
-		agg.matches = append(agg.matches, searchMatch{
-			MessageId:   string(rh.e.msgId),
-			Role:        roleName(rh.e.role),
-			TimestampMs: rh.e.tsMs,
-			Snippet:     buildSnippet(rh.text, rh.at),
-		})
+		agg.hits = append(agg.hits, rh)
 	}
 	sessions := make([]searchSessionHits, 0, len(order))
 	for _, fileRef := range order {
 		agg := aggByFile[fileRef]
-		sessions = append(sessions, searchSessionHits{FilePath: agg.fs.Path, UpdatedAtMs: agg.fs.UpdatedAtMs, Matches: agg.matches})
+		sort.SliceStable(agg.hits, func(i, j int) bool {
+			if agg.hits[i].score != agg.hits[j].score {
+				return agg.hits[i].score > agg.hits[j].score
+			}
+			return agg.hits[i].e.tsMs < agg.hits[j].e.tsMs
+		})
+		keep := perSession
+		if keep > len(agg.hits) {
+			keep = len(agg.hits)
+		}
+		matches := make([]searchMatch, 0, keep)
+		for _, rh := range agg.hits[:keep] {
+			matches = append(matches, searchMatch{
+				MessageId:   string(rh.e.msgId),
+				Role:        roleName(rh.e.role),
+				TimestampMs: rh.e.tsMs,
+				Snippet:     buildSnippet(rh.text, rh.at),
+			})
+		}
+		sessions = append(sessions, searchSessionHits{FilePath: agg.fs.Path, UpdatedAtMs: agg.fs.UpdatedAtMs, Matches: matches, HitCount: len(agg.hits), Score: agg.hits[0].score})
 	}
-	// 最近活跃的会话优先（时间相同按路径稳定排序）
+	// 最相关的会话优先（同分比最近活跃，再按路径稳定排序）
 	sort.SliceStable(sessions, func(i, j int) bool {
+		if sessions[i].Score != sessions[j].Score {
+			return sessions[i].Score > sessions[j].Score
+		}
 		if sessions[i].UpdatedAtMs != sessions[j].UpdatedAtMs {
 			return sessions[i].UpdatedAtMs > sessions[j].UpdatedAtMs
 		}

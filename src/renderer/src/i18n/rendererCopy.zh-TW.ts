@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: 1bc7fec23f840264329dbbc9bd3ff7830184288e5c9461a3bbecb4cb5ffd9341（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: 156b49fc495845a675c340abc2faa6038ccba11e7f35ebefb76963d92d2495ad（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -3924,6 +3924,9 @@ export const zhTW: Record<TranslationKey, string> = {
 	"drawer.fileSearchScanning": "正在掃描工作區…",
 	"drawer.fileSearchNoResults": "未找到匹配「{query}」的檔案",
 	"drawer.fileSearchEmptyHint": "輸入檔名開始搜尋，任意深度的檔案都會被掃描",
+	"drawer.fileSearchContentSection": "檔案內容",
+	"drawer.fileSearchContentScanning": "正在掃描檔案內容…",
+	"drawer.fileSearchContentTruncated": "結果已截斷",
 	"drawer.deleteFileTitle": "刪除檔案",
 	"drawer.deleteFileConfirm": "確定要刪除「{name}」嗎？此操作不可撤銷。",
 	"drawer.deleteFolderTitle": "刪除目錄",

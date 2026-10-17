@@ -10,6 +10,7 @@ import { TitleScrollText } from "./TitleScrollText";
  * 侧栏跨会话正文搜索结果：搜索词非空时展示正文命中的会话（标题 + 命中数 + 首条片段）。
  * 结果按 filePath（= SessionRecord.id，会话文件即稳定身份）映射回 catalog 记录；
  * 点击打开会话并挂 pendingMessageJump 定位到首个命中消息。
+ * 命中条数用 hitCount（未截断的真实值），首条片段是 Go 侧评分最高的那条。
  * 无 sidecar/降级/无结果时隐藏，不影响既有标题过滤。
  */
 type ContentSearchHit = { record: SessionRecord; matchCount: number; firstMessageId: string; snippet: string };
@@ -22,7 +23,7 @@ export function SessionContentSearchResults(props: { query: string; onOpen: (pro
 		.map((hit): ContentSearchHit | undefined => {
 			const record: SessionRecord | undefined = records[hit.filePath];
 			const first = hit.matches[0];
-			return record && first ? { record, matchCount: hit.matches.length, firstMessageId: first.messageId, snippet: first.snippet } : undefined;
+			return record && first ? { record, matchCount: hit.hitCount ?? hit.matches.length, firstMessageId: first.messageId, snippet: first.snippet } : undefined;
 		})
 		.filter((item): item is ContentSearchHit => Boolean(item));
 	if (matched.length === 0) return null;

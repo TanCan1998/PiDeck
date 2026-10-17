@@ -561,6 +561,7 @@ export function createPreviewApi(): PiDesktopApi {
 			open: async () => undefined,
 			// 预览模式无主进程：文件搜索按空结果处理，搜索入口可用但不返回内容
 			search: async () => [],
+			searchContent: async () => null,
 			showInFolder: async () => undefined,
 			// 预览模式无主进程：不检测文件管理器（打开方式下拉不显示该入口）
 			detectFileManager: async () => null,

@@ -315,7 +315,17 @@ function FilesPanel(props: {
 				</div>
 			</div>
 			{searchOpen ? (
-				<FileSearchResults query={fileSearch.query} onQueryChange={fileSearch.setQuery} results={fileSearch.results} isSearching={fileSearch.isSearching} onViewFile={props.onViewFile} onFileContextMenu={props.onFileContextMenu} onClear={closeSearch} />
+				<FileSearchResults
+					query={fileSearch.query}
+					onQueryChange={fileSearch.setQuery}
+					results={fileSearch.results}
+					isSearching={fileSearch.isSearching}
+					contentResults={fileSearch.contentResults}
+					isContentSearching={fileSearch.isContentSearching}
+					onViewFile={props.onViewFile}
+					onFileContextMenu={props.onFileContextMenu}
+					onClear={closeSearch}
+				/>
 			) : (
 				displayFiles.map((node) => (
 					<FileNode

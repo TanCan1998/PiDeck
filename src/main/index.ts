@@ -429,6 +429,7 @@ import { getPiAiCatalogIndex, lookupPiAiCatalogEntry, setPiAiCatalogUserDataDir 
 import { PiAiCatalogUpdater } from "./pi/PiAiCatalogUpdater";
 import { fetchModelList, refreshModelCatalogIfStale, refreshModelList, getCachedModelList } from "./pi/modelListCache";
 import { registerFilesIpc } from "./ipc/filesIpc";
+import { FileIndexService } from "./files/FileIndexService";
 import { registerClipboardIpc } from "./ipc/clipboardIpc";
 import { registerShellMenuIpc } from "./ipc/shellMenuIpc";
 import { QuickTaskWindowChrome } from "./quickTask/quickTaskWindowChrome";
@@ -484,6 +485,17 @@ let isQuitting = false;
 const rendererCrashGuard = createRendererCrashRecoveryGuard();
 let projectStore: ProjectStore;
 let fileSystemService: FileSystemService;
+/**
+ * 跨会话正文搜索的项目来源：当前环境可见的项目（WSL 项目不进——宿主 Go 进程读 UNC
+ * 不可靠，WSL 模式下 scanner 自身也会返回空根整体降级）。项目级 sessionDir 是不少
+ * 用户实际的会话落点，漏掉它就会出现「明明有这条消息却搜不到」。
+ */
+function projectPathsForContentSearch(): string[] {
+	return projectStore
+		.list()
+		.filter((project) => project.environment !== "wsl")
+		.map((project) => project.path);
+}
 let sessionScanner: SessionScanner;
 let sessionCatalog: SessionCatalog;
 let sessionRuntimeCoordinator: SessionRuntimeCoordinator;
@@ -548,6 +560,8 @@ let xuePromptManager: XuePromptManager;
 /** 提示词库 Go sidecar 客户端（null = 未装配；进程生命周期与 app 一致）。 */
 let xueIndexService: XueIndexService | null = null;
 let sessionIndexService: SessionIndexService | null = null;
+/** 工作区文件索引 sidecar（Go file-index）：名字模糊检索 + 有界内容检索，缺失时回退 BFS。 */
+let fileIndexService: FileIndexService | null = null;
 /** 提示词库 db 远程拉取/缓存服务；null = 未装配。 */
 let xuePromptDbStore: XuePromptDbStore | null = null;
 let skillManager: SkillManager;
@@ -3234,14 +3248,14 @@ function registerIpc() {
 		validationCatalogModels,
 		// fork/clone 统一命令层：重发/编辑 fork 化（mutationFork/branchMode）与 Web HTTP 同源
 		sessionForkCommands,
-		// 跨会话正文搜索适配闭包：roots 解析（全局根+全局 settings sessionDir）+ sidecar
-		// 调用；搜索前先增量 refresh（stat 全目录毫秒级）保证新会话可搜；任何失败返回
-		// null，渲染层回退标题过滤，搜索入口永不报错。未就绪（冷启动首建索引/预热中）
-		// 直接降级，不把渲染层请求挂到 boot 结束（首建可达数十秒）；refresh 失败但进程
-		// 仍活着时继续用现有索引搜一次（transient 失败不该让本次搜索静默无内容）。
+		// 跨会话正文搜索适配闭包：roots 解析（全局根 + 全局 settings sessionDir + 各项目
+		// 项目级 sessionDir）+ sidecar 调用；搜索前先增量 refresh（stat 全目录毫秒级）保证
+		// 新会话可搜；任何失败返回 null，渲染层回退标题过滤，搜索入口永不报错。未就绪
+		// （冷启动首建索引/预热中）直接降级，不把渲染层请求挂到 boot 结束（首建可达数十秒）；
+		// refresh 失败但进程仍活着时继续用现有索引搜一次（transient 失败不该让本次搜索静默无内容）。
 		sessionContentSearch: async (query) => {
 			if (!sessionIndexService) return null;
-			const roots = await sessionScanner.resolveGlobalSearchRoots();
+			const roots = await sessionScanner.resolveContentSearchRoots(projectPathsForContentSearch());
 			if (roots.length === 0) return null;
 			if (!sessionIndexService.isReady(roots)) {
 				// 本次降级标题过滤，但后台必须有人建索引：首次安装/roots 刚变更时
@@ -3833,6 +3847,8 @@ function registerIpc() {
 		fileSystemService,
 		projectStore,
 		settingsStore,
+		// 文件索引 sidecar 在下方 sidecar 装配区创建，这里用 getter 取（注册时序不受影响）
+		getFileIndexService: () => fileIndexService,
 		appLogger,
 		getMainWindow: () => mainWindow,
 		openExternalUrl,
@@ -4208,11 +4224,34 @@ app
 			sessionIndexService?.dispose();
 			sessionIndexService = null;
 		});
+		// 工作区文件索引 sidecar（Go file-index）：名字检索从实时 BFS 扫盘换成内存索引打分，
+		// 并补上文件内容检索；索引在内存里不落盘（进程重启重建由 Go 侧毫秒级完成），
+		// 缺失/失败/超时自动回退现有 BFS（fail-open）。
+		fileIndexService = new FileIndexService({
+			resolveBinaryPath: () => {
+				// 打包后：resourcesPath/file-index/file-index(.exe)（extraResources）；
+				// dev：仓库构建产物 resources/file-index/bin/（build 链自动 fail-open 构建）
+				const dir = app.isPackaged ? join(process.resourcesPath, "file-index") : join(app.getAppPath(), "resources", "file-index", "bin");
+				const name = process.platform === "win32" ? "file-index.exe" : "file-index";
+				const path = join(dir, name);
+				return existsSync(path) ? path : null;
+			},
+			logger: {
+				debug: (m) => appLogger.debug("file-index", m),
+				info: (m) => void appLogger.info("file-index", m),
+				warn: (m) => void appLogger.warn("file-index", m),
+				error: (m) => void appLogger.error("file-index", m),
+			},
+		});
+		quitCleanup.register("file-index", () => {
+			fileIndexService?.dispose();
+			fileIndexService = null;
+		});
 		// 后台预热：首次全量建索引可达十余秒，启动后稍等即预热，避免用户首搜撞上
 		// 冷启动（预热失败静默——运行时搜索会再试）
 		setTimeout(() => {
 			void sessionScanner
-				.resolveGlobalSearchRoots()
+				.resolveContentSearchRoots(projectPathsForContentSearch())
 				.then((roots) => sessionIndexService?.warmup(roots))
 				.catch(() => {});
 		}, 5_000);

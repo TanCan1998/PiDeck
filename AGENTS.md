@@ -193,7 +193,8 @@ src/
 | README/官网共用图片 | 唯一数据源 `docs/images/`，不复制到 docs-site | README 与官网共用图片 |
 | 公告 | 只编辑 `announcements-md/*.md`，json 由脚本生成，禁止手写 | 公告维护与发布 |
 | 提示词库 xueprompts.db | db 远程拉取双源成套（sha256+db 同源）；检索走 xue-index Go sidecar，缺失降级 sql.js（应用层 gunzip，SQL LIKE 中文恒不命中）；改 db 走 publish 脚本+Release 资产 | 商店提示词库维护 |
-| 跨会话正文搜索 | session-index Go sidecar（纯标准库）；语料+快照落 `<userData>/session-index/`；roots 只取全局（WSL 不支持）；任何失败 IPC 返回 null 降级标题过滤；`SESSION_INDEX_OS/ARCH` 必须进三平台 workflow | 跨会话正文搜索 |
+| 跨会话正文搜索 | session-index Go sidecar（纯标准库）；语料+快照落 `<userData>/session-index/`；roots = 全局 + 全局 sessionDir + **各项目项目级 sessionDir**（WSL 不支持）；查询多词 AND（每词必中）；任何失败 IPC 返回 null 降级标题过滤；`SESSION_INDEX_OS/ARCH` 必须进三平台 workflow | 跨会话正文搜索 |
+| 文件抽屉搜索 | 名字走 file-index Go sidecar（不可用回退 `FileSystemService.searchNames` 扫盘）；正文搜索 `files:search-content` 失败/未就绪/WSL 返回 null、UI 隐藏内容分区；内容扫描有扩展名白名单/忽略目录/单文件 1MiB/总 64MiB 预算；`FILE_INDEX_OS/ARCH` 必须进三平台 workflow | 工作区文件搜索 |
 | 技能商店安装 | 商店搜索必须走注入的 `fetchImpl`（Electron net.fetch），禁裸全局 fetch（undici 不读代理，境外 API 挂到超时）；安装用 spawn+流式解析（禁 execFile 等终态输出）、进度走 `skillHub:install-progress`、子进程必注入代理 env（CLI 内部 git 不读 npm proxy） | 技能商店安装链路 |
 | 内置扩展热更新 | 判据是逐文件 sha256 不是版本号；覆盖层必须完整快照 + vendored 依赖；磁盘根统一走 `resolveBuiltInExtensionRoots()` | 内置扩展热更新 |
 | 生图存储 | **base64 不进 JSONL**（只存 ref）；读取永远有字节上界；`<img src>` 只走 `imageContentSrc()` | 生图会话存储 |

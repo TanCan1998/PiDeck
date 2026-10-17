@@ -266,6 +266,9 @@ export class SessionScanner {
 
 	constructor(private readonly translate: SessionScannerCopy = defaultTranslate) {}
 
+	/** 项目级 sessionDir 缓存：settings 文件版本 → 解析出的目录（null = 该项目无配置）。 */
+	private readonly projectSearchRootCache = new Map<string, { version: string; root: string | null }>();
+
 	/**
 	 * wsl.exe 命令与启动模式。优先绝对路径，
 	 * 文件不存在时回退到 shell PATH 查找。
@@ -321,10 +324,9 @@ export class SessionScanner {
 	}
 
 	/**
-	 * 跨会话全文搜索（session-index sidecar）的扫描根：全局默认根 + 全局
-	 * settings 的 sessionDir（若存在）。不含项目级 .pi/settings.json 的
-	 * sessionDir——全局搜索无法枚举所有项目，项目级目录由激活时的常规扫描
-	 * 覆盖；这与 SessionIndexService 的降级语义一致（搜不到≠错误）。
+	 * 跨会话全文搜索（session-index sidecar）的**全局**扫描根：全局默认根 + 全局
+	 * settings 的 sessionDir（若存在）。项目级 .pi/settings.json 的 sessionDir 不在这里，
+	 * 由 `resolveContentSearchRoots` 追加（那里能拿到已注册项目列表）。
 	 * WSL 模式下返回 Linux 侧根（宿主 Go 进程直接读 UNC 不可靠，跨 WSL 的
 	 * 全文搜索暂不支持，返回空数组由调用方降级）。
 	 */
@@ -342,6 +344,72 @@ export class SessionScanner {
 		if (!existsSync(resolved)) return roots;
 		roots.push(resolved);
 		return roots;
+	}
+
+	/**
+	 * 正文搜索的完整扫描根 = 全局根 + 各项目的项目级 sessionDir（合并去重）。
+	 *
+	 * 为什么必须带上项目级目录：项目 `.pi/settings.json` 的 sessionDir 是不少用户实际的
+	 * 会话落点，只喂全局根会出现「明明有这条消息却搜不到」（标题/预览能搜到，因为侧栏目录
+	 * 按项目扫描）。这里只认项目自己的配置，不回退全局——全局那份已由全局根覆盖。
+	 * 调用方负责按当前环境过滤项目（WSL 项目不传进来）。
+	 */
+	async resolveContentSearchRoots(projectPaths: readonly string[]): Promise<string[]> {
+		const roots = await this.resolveGlobalSearchRoots();
+		if (roots.length === 0) return roots;
+		const seen = new Set(roots.map((root) => this.normalize(root)));
+		for (const root of await this.resolveProjectSearchRoots(projectPaths)) {
+			const normalized = this.normalize(root);
+			if (seen.has(normalized)) continue;
+			seen.add(normalized);
+			roots.push(root);
+		}
+		return roots;
+	}
+
+	/**
+	 * 各项目的项目级会话目录（项目 `.pi/settings.json` 的 sessionDir）。
+	 *
+	 * 每次搜索按键都会调用，所以每个项目只 stat 一次 settings 文件（mtime+size 做缓存键），
+	 * 内容未变时不重复读取；目录本身每次调用校验存在性（用户可能后建目录）。
+	 * 读失败/无配置/目录不存在一律跳过：搜索入口只降级、不报错。
+	 */
+	async resolveProjectSearchRoots(projectPaths: readonly string[]): Promise<string[]> {
+		if (this.wslConfig) return [];
+		const roots: string[] = [];
+		const seen = new Set<string>();
+		for (const projectPath of projectPaths) {
+			if (!projectPath) continue;
+			const root = await this.resolveCachedProjectSearchRoot(projectPath);
+			if (!root) continue;
+			const normalized = this.normalize(root);
+			if (seen.has(normalized)) continue;
+			seen.add(normalized);
+			roots.push(root);
+		}
+		return roots;
+	}
+
+	/** 项目级 sessionDir 解析（带 settings 版本缓存）；无可用目录时返回 undefined。 */
+	private async resolveCachedProjectSearchRoot(projectPath: string): Promise<string | undefined> {
+		const settingsPath = join(projectPath, ".pi", "settings.json");
+		let version: string;
+		try {
+			const info = await stat(settingsPath);
+			version = `${info.mtimeMs}:${info.size}`;
+		} catch {
+			this.projectSearchRootCache.delete(projectPath);
+			return undefined;
+		}
+		const cached = this.projectSearchRootCache.get(projectPath);
+		if (cached && cached.version === version) {
+			return cached.root && existsSync(cached.root) ? cached.root : undefined;
+		}
+		const raw = await this.readSessionDirSettingLocal(settingsPath);
+		const resolved = raw ? this.resolveSessionDirPath(raw, projectPath) : undefined;
+		// 缓存解析结果（不缓存存在性：目录可能后建，存在性在命中缓存时现查）
+		this.projectSearchRootCache.set(projectPath, { version, root: resolved ?? null });
+		return resolved && existsSync(resolved) ? resolved : undefined;
 	}
 
 	/** 判断文件路径是否为 WSL Linux 路径（以 / 开头且属于当前 WSL 配置） */

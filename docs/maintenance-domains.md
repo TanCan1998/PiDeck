@@ -42,13 +42,23 @@
 
 - **能力**：侧栏搜索词（≥2 字符，debounce 300ms）除标题过滤外，在全部历史会话**正文**里搜词，跨项目命中展示在 `SessionContentSearchResults`（DshSearchResults 同模式），点击打开会话并经 `pendingMessageJumpAtom` 定位到首个命中消息（`ChatSessionPane` 聚焦后消费；消息未就绪时保留 pending，加载完成重试）。
 - **架构**：Go sidecar（`native/session-index`，纯标准库零依赖）预提取 user/assistant text 正文到语料文件（`<userData>/session-index/corpus.bin`，29MB 级 vs 源 1.67GB）+ 定长二进制快照 `state.json`（mtime/size 增量：全量首建 ≈12s，快照启动 37ms）。搜索=多核分片 ReadAt 扫描（纯 CJK 快路径 + ASCII 大小写折叠）。
-- **降级链（fail-open）**：无 sidecar/binary 缺失/boot 中/超时/roots 为空（WSL 不支持）→ IPC 一律返回 null → 渲染层只剩既有标题过滤，搜索入口永不报错。宿主客户端 `src/main/sessions/SessionIndexService.ts`（roots 签名变化重启、迟到响应丢弃、进程身份核对，与 XueIndexService 同哲学）。
-- **roots 口径**：`SessionScanner.resolveGlobalSearchRoots()` = 默认 `~/.pi/agent/sessions` + 全局 settings 的 sessionDir（项目级不进）；每次搜索前先 `refresh(roots)` 增量重扫（stat 毫秒级）保证新会话可搜；启动 5s 后台预热首建。
+- **查询语义（多词 AND，③）**：查询按空白（含全角空格）切词、最多 16 词（超出按整句处理），**每个词都必须在同一条消息里命中**才返回（多词是收窄而非放宽）；片段与排序偏好整句连续命中（`contentPhraseBonus`）与词距更近的命中（跨度衰减），会话按「最高分 → 最近活跃」排，每会话最多 5 条命中、最多 30 个会话，`hitCount` 回传未截断的命中总数。
+- **降级链（fail-open）**：无 sidecar/binary 缺失/boot 中/超时/roots 为空（WSL 不支持）→ IPC 一律返回 null → 渲染层只剩既有标题过滤，搜索入口永不报错。宿主客户端 `src/main/sessions/SessionIndexService.ts`（roots 签名变化重启、迟到响应丢弃、进程身份核对，与 XueIndexService 同哲学；`isReady()` 同步探测 + `warmup()` 让未就绪时只降级一次、后台照常建索引）。
+- **roots 口径（①）**：`SessionScanner.resolveContentSearchRoots(projectPaths)` = 默认 `~/.pi/agent/sessions` + 全局 settings 的 sessionDir + **各项目 `.pi/settings.json` 的 sessionDir**（项目级漏掉就会出现「明明有这条消息却搜不到」——不少项目的会话落在仓库内）；WSL 项目/模式整体跳过（宿主 Go 读 UNC 不可靠）；项目设置按 `mtime:size` 版本缓存，两个项目指向同一目录会去重；每次搜索前先 `refresh(roots)` 增量重扫（stat 毫秒级）保证新会话可搜；启动 5s 后台预热首建。
 - **构建链**：`npm run build:session-index`（fail-open）；`scripts/dev.js` 自动构建；三平台 workflow `SESSION_INDEX_OS/ARCH` env；纯标准库无 go.sum（setup-go 缓存清单只列 xue-index）。
 - 测试：`tests/sessionIndexService.test.mjs`（宿主协议生命周期 9 项）+ `tests/sessionContentSearchChain.test.mjs`（IPC 三处同步/降级 stub/挂载点源码契约 7 项）+ Go 侧 `native/session-index/*_test.go`。
 
-## 技能商店安装链路（net.fetch 搜索 + spawn 进度 + 代理 env 注入）
+## 工作区文件搜索（file-index Go sidecar）
 
+- **能力**：文件抽屉（Ctrl+F）除按名称搜索外，另在**工作区文件正文**里搜词，结果按「名字命中 / 文件内容」两段展示（内容行含相对路径:行号 + 命中片段），点击打开该文件。文件名命中仍是毫秒级本地扫描，内容命中有独立的加载态。
+- **架构**：Go sidecar（`native/file-index`，纯标准库零依赖，`native/file-index/{main,index,fuzzy,textmatch}.go`）持有**单项目**的常驻内存索引（全量重扫 + 目录名/路径模糊匹配 + 文本文件内容扫描），宿主客户端 `src/main/files/FileIndexService.ts`（与 session-index 同哲学：roots 变化重启进程、请求超时、迟到响应丢弃、fail-open）。**索引跨项目切换会重建**（requests 带 roots，签名变化即杀进程重拉）——后续可扩成多项目缓存。
+- **内容扫描边界（硬性）**：文本扩展名白名单 + 已知文本文件名（Makefile/Dockerfile/.env/README…）；跳过忽略目录（与 `FileSystemService` 的 `ignoredNames` 同源，改一处必须改两处）、二进制探测（头部含 NUL 即跳过）；单文件默认 1MiB、单次查询总扫描 64MiB 字节预算，超限截断并回传 `truncated`；片段前后各截 80 字符且单行只保留前 3 条命中。
+- **降级链（fail-open）**：IPC 侧 `files:search-content` 在「没有 sidecar / 未就绪 / 异常」时返回 null，渲染层不渲染内容分区（名字结果照常返回）；`files:search`（名字）在 sidecar 不可用时回退既有 `FileSystemService.searchNames` 目录扫描，行为与今天一致。
+- **WSL**：WSL 项目不进索引（宿主 Go 进程读 UNC 不可靠），`files:search-content` 对 WSL 项目直接不启用（返回 null），名字搜索保持原样。
+- **构建链**：`npm run build:file-index`（fail-open，Go 缺失/构建失败只告警 exit 0）；`scripts/dev.js` 自动构建；`package.json` 的 `build` 链与 `extraResources`（`resources/file-index/bin` → `file-index`）；`.gitignore` 忽略产物只留 `.gitkeep`；三平台 workflow 的 `FILE_INDEX_OS/ARCH` env + `go -C native/file-index test ./...`。
+- 测试：`tests/fileIndexService.test.mjs`（宿主协议生命周期）+ `tests/fileSearchContentChain.test.mjs`（IPC 三处同步/降级/渲染层接线源码契约）+ Go 侧 `native/file-index/*_test.go`（名字排序/模糊匹配/内容扫描/预算截断/片段）。
+
+## 技能商店安装链路（net.fetch 搜索 + spawn 进度 + 代理 env 注入）
 - **主进程联网一律走注入的 `fetchImpl`（= Electron `net.fetch`）**：裸全局 `fetch` 是 undici，既不读系统代理也不读 Electron 桌面 session 代理，代理环境下境外 API 挂到超时且只抛含糊 `AbortError`。`storeIpc.ts` 四个商店 handler（`skillHubSearch` / `skillStoreSearch` / `promptStoreSearch` / `promptStoreGet`）全部经 `deps.fetchImpl`；测试用 `createStoreIpc({ fetchImpl })` 注桩，未注入时才回退全局 fetch（测试沙箱无 fetch，故必须惰性取值）。
 - **安装用 `spawn` + 流式解析，不用 `execFile`**：`execFile` 要等进程结束才有输出、且旧实现丢掉了 stdout——`npx skills add` 冷启动实测 30.25s 期间 UI 零反馈，失败时用户只看到 npm warn（CLI 的真报错在 stdout，带 ANSI 的 spinner 也在 stdout）。现在 `runSkillHubInstall` 逐块喂 `createInstallProgressParser`，阶段 `preparing → downloading → installing`、百分比同阶段单调不倒退，节流 `INSTALL_PROGRESS_MIN_INTERVAL_MS=200` 经 `skillHub:install-progress` 推送；preload `skillHub.onInstallProgress` 返回退订函数，`previewApi` 走 no-op 订阅。
 - **渲染层**：`SkillHubStorePanel` 用进度帧替换纯 spinner（阶段文案 + 百分比条）；错误文案取 `cleanInstallOutput` 清洗后的 stdout 尾部（`isNetworkFailure` 命中时给网络提示），i18n 键 `config.skillHub*`（renderer 三词典）与 `mainProcessCopy*` 同步。
