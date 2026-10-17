@@ -180,19 +180,52 @@ function findTitleTextBlocks(text: string): TitleTextBlock[] {
  * 从落盘的首条 user 消息里提取标题用文本。
  * blockOnly=true 表示消息里只有引用块（如只插了 /模板），此时 text 是块标签（`/模板名`）。
  */
+/** 视觉桥标记（与 shared/visionBridgeText 同规则；扩展被 pi 用 -e 独立加载，不能 import shared，只能内联一份）。 */
+const VISION_SUCCESS_MARK_RE = /\[图片 #(\d+)（视觉桥已查看[^）]*）\]/g;
+const VISION_FAILED_MARK_RE = /\[图片 #(\d+)\s+视觉桥转换失败：[\s\S]*?。请检查视觉桥设置[\s\S]*?此图片内容不可见\]/g;
+const VISION_SKIPPED_MARK_RE = /\[图片 #(\d+)\s+未发送给模型：[\s\S]*?\]/g;
+
+/**
+ * 标题专用：剥离视觉桥块（标记行 + 视觉模型描述都不是用户手写的话）。
+ * 只发图不写字的消息剥完为空——调用方回退到 assistant 首条文本，与主进程 textForSessionTitle 同语义
+ *（2026-10 现场：只发图的消息把会话自动命名为「[图片 #1（视觉桥已查看…）]」）。
+ * 成功块的描述延伸到下一个标记（或文本末尾），与渲染层解析同边界。
+ */
+function stripVisionBridgeBlocksForTitle(text: string): string {
+	if (!text.includes("[图片 #")) return text;
+	type Range = [start: number, end: number | -1];
+	const ranges: Range[] = [];
+	for (const re of [VISION_FAILED_MARK_RE, VISION_SKIPPED_MARK_RE]) {
+		for (const match of text.matchAll(re)) ranges.push([match.index, match.index + match[0].length]);
+	}
+	for (const match of text.matchAll(VISION_SUCCESS_MARK_RE)) ranges.push([match.index, -1]);
+	if (ranges.length === 0) return text;
+	ranges.sort((a, b) => a[0] - b[0]);
+	let cleaned = "";
+	let cursor = 0;
+	for (let i = 0; i < ranges.length; i++) {
+		if (ranges[i][0] > cursor) cleaned += text.slice(cursor, ranges[i][0]);
+		// -1 = 成功块：描述吃到下一个标记起点，没有下一个则吃到文末。
+		cursor = ranges[i][1] === -1 ? (i + 1 < ranges.length ? ranges[i + 1][0] : text.length) : ranges[i][1];
+	}
+	if (cursor < text.length) cleaned += text.slice(cursor);
+	return cleaned.replace(/\n{3,}/g, "\n\n").trim();
+}
+
 export function titleTextFromUserInput(text: string): { text: string; blockOnly: boolean } {
-	if (!text.includes("<")) return { text, blockOnly: false };
-	const blocks = findTitleTextBlocks(text);
-	if (blocks.length === 0) return { text, blockOnly: false };
+	const stripped = stripVisionBridgeBlocksForTitle(text);
+	if (!stripped.includes("<")) return { text: stripped, blockOnly: false };
+	const blocks = findTitleTextBlocks(stripped);
+	if (blocks.length === 0) return { text: stripped, blockOnly: false };
 	const outside: string[] = [];
 	const labels: string[] = [];
 	let cursor = 0;
 	for (const block of blocks) {
-		if (block.start > cursor) outside.push(text.slice(cursor, block.start));
+		if (block.start > cursor) outside.push(stripped.slice(cursor, block.start));
 		labels.push(block.label);
 		cursor = block.end;
 	}
-	if (cursor < text.length) outside.push(text.slice(cursor));
+	if (cursor < stripped.length) outside.push(stripped.slice(cursor));
 	const outsideText = outside.join(" ").replace(/\s+/g, " ").trim();
 	if (outsideText) return { text: outsideText, blockOnly: false };
 	return { text: labels.join(" "), blockOnly: true };

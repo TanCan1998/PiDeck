@@ -6,6 +6,10 @@
  *   <referenced_session name="…">…</referenced_session>
  *   <skill name="…">…</skill>                    （pi 展开 /skill:名称）
  *   <prompt_template name="…">…</prompt_template>（PiDeck 展开 /模板名）
+ * 另有一族方括号视觉桥块（pi-deck-vision 扩展在 input 阶段把图片转文字后写入）：
+ *   [图片 #N（视觉桥已查看…）]＋描述 / [图片 #N 视觉桥转换失败…] / [图片 #N 未发送给模型…]
+ * 标题派生同样必须剥它们（extractVisionBridgeBlocks，本模块自包含、零 import：
+ * tests/sessionScannerTitleBackfill 的手写加载器按 tests/ 目录解析相对 import，新增依赖会整片 MODULE_NOT_FOUND）。
  *
  * 任何面向人的纯文本出口（侧栏会话 preview、Web 端消息、子代理转录、会话定位轴标题、
  * 复制/队列预览）都必须先折叠成 `❝label` / `&名称` / `/名称`，不能漏出 XML 原文。
@@ -16,7 +20,61 @@
 
 /** XML 属性转义（label / name / messageId 可能含引号、尖括号）。 */
 export function escapeXmlAttribute(value: string): string {
-	return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+	return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, ">&").replace(/"/g, "&quot;");
+}
+
+// 视觉桥块解析在独立模块（块结构与本模块的四类 XML 块无关，避免正则/类型交叉）。
+// 视觉桥块的内联解析（原先独立在 shared/visionBridgeText，但本模块必须零 import：
+// tests/sessionScannerTitleBackfill 的手写加载器把相对 import 按 tests/ 目录解析，新增依赖会整片 MODULE_NOT_FOUND）。
+export type VisionBridgeBlock =
+	| { kind: "success"; index: number; description: string }
+	| { kind: "failed"; index: number; reason: string }
+	/** 图片未进入转换流程（桥没开/没选模型）：中性提示卡，不是错误 */
+	| { kind: "skipped"; index: number; reason: string };
+
+/** 成功标记：兼容「（视觉桥已查看）」与「（视觉桥已查看，以下为图片实际内容）」两种后缀。 */
+const VISION_SUCCESS_MARK_RE = /\[图片 #(\d+)（视觉桥已查看[^）]*）\]/g;
+/** 失败标记：整块自包含（原因 + 修复指引 + 收尾句）。 */
+const VISION_FAILED_MARK_RE = /\[图片 #(\d+)\s+视觉桥转换失败：([\s\S]*?)。请检查视觉桥设置[\s\S]*?此图片内容不可见\]/g;
+/** 未发送标记：`[图片 #N 未发送给模型：<原因>]`，原因里不应出现 `]`。 */
+const VISION_SKIPPED_MARK_RE = /\[图片 #(\d+)\s+未发送给模型：([\s\S]*?)\]/g;
+/** 历史遗留：旧版把「视觉桥没开」也写成失败标记，原因固定以「视觉桥未配置」开头，按未发送归一化。 */
+const VISION_LEGACY_NOT_CONFIGURED_RE = /^视觉桥未配置/;
+
+/** 剥离三类视觉桥标记块：返回结构化块（渲染层卡片用）与剥除后的剩余正文。 */
+export function extractVisionBridgeBlocks(text: string): {
+	blocks: VisionBridgeBlock[];
+	text: string;
+} {
+	type Mark = { start: number; end: number; block: VisionBridgeBlock };
+	const marks: Mark[] = [];
+	for (const m of text.matchAll(VISION_FAILED_MARK_RE)) {
+		const reason = m[2].trim();
+		marks.push({ start: m.index, end: m.index + m[0].length, block: VISION_LEGACY_NOT_CONFIGURED_RE.test(reason) ? { kind: "skipped", index: Number(m[1]), reason } : { kind: "failed", index: Number(m[1]), reason } });
+	}
+	for (const m of text.matchAll(VISION_SKIPPED_MARK_RE)) {
+		marks.push({ start: m.index, end: m.index + m[0].length, block: { kind: "skipped", index: Number(m[1]), reason: m[2].trim() } });
+	}
+	for (const m of text.matchAll(VISION_SUCCESS_MARK_RE)) {
+		// 描述文本在第二轮按「下一个标记」边界补齐
+		marks.push({ start: m.index, end: m.index + m[0].length, block: { kind: "success", index: Number(m[1]), description: "" } });
+	}
+	marks.sort((a, b) => a.start - b.start);
+	if (marks.length === 0) return { blocks: [], text };
+	// 成功块的完整区间延伸到下一个标记（或文本末尾），中间即描述。真实链路里描述总被追加在正文后，
+	// 该边界对标题剥离安全；描述里出现「[图片 #N」字样会被误当新块，展示层容错，可接受。
+	for (let i = 0; i < marks.length; i++) {
+		if (marks[i].block.kind !== "success") continue;
+		const nextStart = i + 1 < marks.length ? marks[i + 1].start : text.length;
+		const block = marks[i].block as Extract<VisionBridgeBlock, { kind: "success" }>;
+		block.description = text.slice(marks[i].end, nextStart).replace(/^\n+/, "").trim();
+		marks[i].end = nextStart;
+	}
+	let cleaned = text;
+	for (let i = marks.length - 1; i >= 0; i--) {
+		cleaned = cleaned.slice(0, marks[i].start) + cleaned.slice(marks[i].end);
+	}
+	return { blocks: marks.map((m) => m.block), text: cleaned.replace(/\n{3,}/g, "\n\n").trim() };
 }
 
 /** XML 属性反转义（仅处理本模块生成的四种实体）。 */
@@ -240,18 +298,22 @@ export function replaceExpandedRefBlocksWithLabels(text: string): string {
  * 块外没有任何文字（只插了 /模板 就发送）时回退到块标签（`/模板名`），保证标题不落空。
  */
 export function textForSessionTitle(text: string): string {
-	if (!text.includes("<")) return text;
-	const blocks = parseExpandedRefBlocks(text);
-	if (blocks.length === 0) return text;
+	// 视觉桥块先剥：图片在 input 阶段被转成「[图片 #N…]＋视觉模型描述」追加在正文后，
+	// 标记行与描述都不是用户手写的话；只发图不写字时剥完为空，调用方回退到 assistant 首条文本
+	//（2026-10 现场：只发图的消息把会话自动命名为「[图片 #1（视觉桥已查看…）]」）。
+	const stripped = extractVisionBridgeBlocks(text).text;
+	if (!stripped.includes("<")) return stripped;
+	const blocks = parseExpandedRefBlocks(stripped);
+	if (blocks.length === 0) return stripped;
 	const outside: string[] = [];
 	const labels: string[] = [];
 	let cursor = 0;
 	for (const block of blocks) {
-		if (block.start > cursor) outside.push(text.slice(cursor, block.start));
+		if (block.start > cursor) outside.push(stripped.slice(cursor, block.start));
 		labels.push(expandedRefBlockLabel(block));
 		cursor = block.end;
 	}
-	if (cursor < text.length) outside.push(text.slice(cursor));
+	if (cursor < stripped.length) outside.push(stripped.slice(cursor));
 	// 块之间的分隔换行只用于排版，标题里合并成一个空格（存储层仍不截断）。
 	const outsideText = outside.join(" ").replace(/\s+/g, " ").trim();
 	return outsideText || labels.join(" ");
@@ -265,6 +327,10 @@ export function textForSessionTitle(text: string): string {
  *（2026-10 现场：总结失败时 XML 标题永久留在侧栏）。
  */
 export function looksLikeExpandedRefBlockTitle(title: string | undefined): boolean {
+	// 视觉桥脏标题：只发图的消息把占位标记写成了标题（同上 2026-10 现场），没有信息价值，必须当占位名允许自动重命名修复。
+	// 三类标记都以「[图片 #N」开头且用户手写标题不会以它开头（标记总是被追加在正文后），前缀即强信号，
+	// 不用短语包含判定：避免把「视觉桥转换失败怎么办」这类真实提问的标题误当成脏标题。
+	if (typeof title === "string" && /^\[图片 #\d+/.test(title.trim())) return true;
 	if (!title?.includes("<")) return false;
 	// 完整块（带闭合标签）一定能解析出来，块不在开头（`帮我看看 <quoted_context …>`）也命中。
 	if (parseExpandedRefBlocks(title).length > 0) return true;

@@ -108,3 +108,28 @@ test("session title surfaces strip reference block bodies", () => {
 		assert.match(source, pattern, `${label} must strip expanded reference blocks before deriving a title (${file})`);
 	}
 });
+
+test("textForSessionTitle strips vision bridge blocks (marker + description are not user words)", () => {
+	// 2026-10 现场：只发图不写字的消息，正文整段是「[图片 #1（视觉桥已查看…）]＋视觉模型描述」，
+	// 旧实现把首行占位标记写成了会话标题。图+文消息里描述同样不能进标题。
+	// 组成顺序与真实链路一致：input 钩子总是「用户正文在前、描述追加在后」。
+	const success = "[图片 #1（视觉桥已查看，以下为图片实际内容）]\n这是一张截图，展示供应商列表管理界面。";
+	assert.equal(textForSessionTitle(`帮我看下这个界面\n\n${success}`), "帮我看下这个界面");
+	// 只发图：剥完为空，调用方回退到 assistant 首条文本（agentUtils/SessionScanner 的既有语义）。
+	assert.equal(textForSessionTitle(success), "");
+	assert.equal(textForSessionTitle("[图片 #1 未发送给模型：视觉桥未配置]"), "");
+	assert.equal(textForSessionTitle("[图片 #1 视觉桥转换失败：接口超时。请检查视觉桥设置（模型/接口地址/API Key）后重试，此图片内容不可见]"), "");
+	// 引用块在前、视觉桥块在尾的混排：两者都剥，只留用户手写正文。
+	assert.equal(textForSessionTitle(`<quoted_context label="引用A" message_id="m1">\nA 全文\n</quoted_context>\n照着改\n\n${success}`), "照着改");
+});
+
+test("looksLikeExpandedRefBlockTitle flags vision bridge marker titles (image-only sessions)", () => {
+	// 只发图的消息被写成的占位标题没有信息价值，必须判成占位名，自动命名才有机会重写它（存量脏标题自愈）。
+	assert.equal(looksLikeExpandedRefBlockTitle("[图片 #1（视觉桥已查看，以下为图片实际内容）]"), true);
+	assert.equal(looksLikeExpandedRefBlockTitle("[图片 #1 未发送给模型：视觉桥未配置]"), true);
+	assert.equal(looksLikeExpandedRefBlockTitle("[图片 #1 视觉桥转换失败：接口超时。请检查视觉桥设置（模型/接口地址/API Key）后重试，此图片内容不可见]"), true);
+	// 用户真实提问里出现「视觉桥/图片」字样不能误判：三类标记总是被追加在正文后，
+	// 真实标题不会以「[图片 #N」开头。
+	assert.equal(looksLikeExpandedRefBlockTitle("视觉桥转换失败怎么办"), false);
+	assert.equal(looksLikeExpandedRefBlockTitle("看看 [图片 #1 这个写法"), false);
+});

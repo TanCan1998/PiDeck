@@ -527,6 +527,12 @@ test("扩展自带的块清洗与 shared 解析层逐条一致", () => {
 		`${formatPromptTemplateBlock("a", "A")}\n${formatPromptTemplateBlock("b", "B")}`,
 		"普通消息，没有块",
 		"<skill> 是什么意思",
+		// 视觉桥块（2026-10 现场：只发图不写字的消息把标记行写成了标题）——两侧都必须剥掉标记与描述。
+		// 组成顺序与真实链路一致：input 钩子总是「用户正文（含引用块）在前、描述追加在后」。
+		"帮我看下这个界面\n\n[图片 #1（视觉桥已查看，以下为图片实际内容）]\n这是一张截图，展示供应商列表管理界面。",
+		"[图片 #1（视觉桥已查看，以下为图片实际内容）]\n这是一张截图，展示供应商列表管理界面。",
+		"[图片 #1 未发送给模型：视觉桥未配置]",
+		"[图片 #1 视觉桥转换失败：接口超时。请检查视觉桥设置（模型/接口地址/API Key）后重试，此图片内容不可见]",
 	];
 	for (const sample of samples) {
 		assert.equal(titleTextFromUserInput(sample).text, textForSessionTitle(sample), `diverged on: ${sample.slice(0, 48)}`);
