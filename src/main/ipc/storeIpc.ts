@@ -5,7 +5,7 @@
 
 import { ipcMain } from "electron";
 import { ipcChannels } from "../../shared/ipc";
-import type { CreatePiPromptTemplateInput, PiPromptTemplateSummary, PromptStoreItem, PromptStoreRawItem, PromptStoreSearchResponse, PromptStoreSearchResult, SkillHubInstallProgress } from "../../shared/types";
+import type { CreatePiPromptTemplateInput, PiPromptTemplateSummary, PromptStoreItem, PromptStoreRawItem, PromptStoreSearchResponse, PromptStoreSearchResult, SkillHubInstallProgress, SkillHubSearchOptions } from "../../shared/types";
 import type { AppLogger } from "../logging/AppLogger";
 import type { PromptManager } from "../prompts/PromptManager";
 import type { SkillManager } from "../skills/SkillManager";
@@ -428,7 +428,9 @@ export function registerStoreIpc({ promptManager, skillManager, xuePromptManager
 	});
 
 	// ── Skills.sh ─────────────────────────
-	ipcMain.handle(ipcChannels.skillHubSearch, async (_event, opts: { query: string; limit?: number }) => {
+	// 入参形状与 preload 共用 SkillHubSearchOptions（只读 query/limit）；旧 page/pageSize/sortBy/order 是
+	// api.skillhub.cn 时代的遗留参数，主进程从未读取——preload 删除后，面板传的第二个参数才真正落到 limit。
+	ipcMain.handle(ipcChannels.skillHubSearch, async (_event, opts: SkillHubSearchOptions) => {
 		const { query, limit = 50 } = opts;
 		try {
 			const response = await fetchImpl(`https://www.skills.sh/api/search?q=${encodeURIComponent(query)}&limit=${limit}`, { signal: AbortSignal.timeout(15_000) });

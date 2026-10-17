@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { ipcChannels } from "../shared/ipc";
 import type { TokendanceAuthMode, TokendancePaymentSessionResult } from "../shared/tokendance";
+import type { SkillHubSearchOptions } from "../shared/types/skills";
 import type { AcpToolConfig, AcpToolInput, AcpToolValidation } from "../shared/types/acp";
 import type { AnnouncementState } from "../shared/types/announcement";
 import type { HostPluginContext, HostPluginDesktopApi } from "../shared/types/hostPlugin";
@@ -1144,7 +1145,9 @@ const api = {
 		import: (item: PromptStoreItem, locationId?: string, projectId?: string) => ipcRenderer.invoke(ipcChannels.skillStoreImport, item, locationId, projectId) as Promise<PiSkillSummary>,
 	},
 	skillHub: {
-		search: (query: string, page?: number, pageSize?: number, sortBy?: string, order?: string) => ipcRenderer.invoke(ipcChannels.skillHubSearch, { query, page, pageSize, sortBy, order }) as Promise<import("../shared/types").SkillHubSearchResult>,
+		// 与主进程 handler 共用 SkillHubSearchOptions（query/limit）；旧 page/pageSize/sortBy/order 是
+		// api.skillhub.cn 时代遗留参数，主进程从未读取——继续透传会让第二个参数被静默丢弃。
+		search: (query: string, limit?: number) => ipcRenderer.invoke(ipcChannels.skillHubSearch, { query, limit } satisfies SkillHubSearchOptions) as Promise<import("../shared/types").SkillHubSearchResult>,
 		detail: (slug: string) => ipcRenderer.invoke(ipcChannels.skillHubDetail, slug) as Promise<import("../shared/types").SkillHubDetail | null>,
 		install: (slug: string, projectId?: string) => ipcRenderer.invoke(ipcChannels.skillHubInstall, slug, projectId) as Promise<import("../shared/types").SkillHubInstallResult>,
 		// 安装进度：主进程节流推送，返回退订函数（渲染层卸载必须退订）
