@@ -863,7 +863,7 @@ function projectHandlers(options = {}) {
 					async search(hostId, path, query) {
 						calls.search.push({ hostId, path, query, portHasRequest: typeof port.request === "function" });
 						if (options.searchFails !== undefined) throw new Error(options.searchFails);
-						return { entries: [{ path: "src/app.ts", name: "app.ts", kind: "file", bytes: 10 }], scanned: 3, truncated: options.searchTruncated === true };
+						return { entries: options.searchEntries ?? [{ path: "src/app.ts", name: "app.ts", kind: "file", bytes: 10 }], scanned: 3, truncated: options.searchTruncated === true };
 					},
 				}),
 			},
@@ -873,7 +873,7 @@ function projectHandlers(options = {}) {
 						calls.list.push({ hostId, path, portHasRequest: typeof port.request === "function" });
 						if (options.listFails) throw new Error("REMOTE_WORKSPACE_LIST_TOO_LARGE");
 						return {
-							entries: [
+							entries: options.listEntries ?? [
 								{ name: "src", kind: "directory" },
 								{ name: "readme.md", kind: "file", bytes: 12 },
 							],
@@ -1053,6 +1053,55 @@ test("per-project reads resolve the locator, switch the root and read relative t
 
 	const read = await harness.handlers.get("remote:project-read")({}, "project-remote-1", "readme.md");
 	assert.deepEqual(JSON.parse(JSON.stringify(read)), { ok: true, contentBase64: Buffer.from("hello").toString("base64"), bytes: 5, mtimeMs: 1 });
+});
+
+test("the project trash directory is hidden from the root listing but not from a user subdirectory", async () => {
+	const harness = projectHandlers({
+		projects: { "project-remote-1": { kind: "ssh", hostId: HOST_ID, remotePath: "/srv/app" } },
+		listEntries: [
+			{ name: ".pideck-trash", kind: "directory" },
+			{ name: "src", kind: "directory" },
+		],
+	});
+	const root = await harness.handlers.get("remote:project-list")({}, "project-remote-1", "");
+	assert.deepEqual(JSON.parse(JSON.stringify(root)), { ok: true, entries: [{ name: "src", kind: "directory" }] }, "the reserved trash namespace is not a user-visible root entry");
+	const nested = await harness.handlers.get("remote:project-list")({}, "project-remote-1", "src");
+	assert.deepEqual(
+		JSON.parse(JSON.stringify(nested)),
+		{
+			ok: true,
+			entries: [
+				{ name: ".pideck-trash", kind: "directory" },
+				{ name: "src", kind: "directory" },
+			],
+		},
+		"a same-named entry inside a subdirectory is user data and stays visible",
+	);
+});
+
+test("recursive search does not return entries inside the project trash", async () => {
+	const harness = projectHandlers({
+		projects: { "project-remote-1": { kind: "ssh", hostId: HOST_ID, remotePath: "/srv/app" } },
+		searchEntries: [
+			{ path: ".pideck-trash/20261017-abcd1234/entry.json", name: "entry.json", kind: "file", bytes: 10 },
+			{ path: ".pideck-trashish/app.ts", name: "app.ts", kind: "file", bytes: 10 },
+			{ path: "src/app.ts", name: "app.ts", kind: "file", bytes: 10 },
+		],
+	});
+	const found = await harness.handlers.get("remote:project-search")({}, "project-remote-1", "", "app");
+	assert.deepEqual(
+		JSON.parse(JSON.stringify(found)),
+		{
+			ok: true,
+			entries: [
+				{ path: ".pideck-trashish/app.ts", name: "app.ts", kind: "file", bytes: 10 },
+				{ path: "src/app.ts", name: "app.ts", kind: "file", bytes: 10 },
+			],
+			scanned: 3,
+			truncated: false,
+		},
+		"only the reserved first segment is filtered; a lookalike user path stays searchable",
+	);
 });
 
 test("a second read of the same project does not reconfigure the session", async () => {

@@ -56,6 +56,8 @@ const {
 	REMOTE_GIT_REPO_READ_METHODS,
 	REMOTE_GIT_REPO_WRITE_METHODS,
 	REMOTE_GIT_SYNC_TIMEOUT_MS,
+	REMOTE_TERMINAL_TICKET_TTL_MS,
+	REMOTE_TERMINAL_TICKET_CLAIM_PATTERN,
 } = loadTsCommonJs("src/main/remote/RemoteHelperContract.ts");
 const { REMOTE_HELPER_ARTIFACTS, REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_HELPER_ENTRY_SHA256, REMOTE_HELPER_ENTRY_VERSION, REMOTE_HELPER_GIT_READ_SHA256, REMOTE_HELPER_GIT_SYNC_SHA256, REMOTE_HELPER_GIT_WRITE_SHA256, REMOTE_HELPER_INLINE_SOURCE } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
 const { REMOTE_TERMINAL_RUNNER_ENTRY_SHA256 } = loadTsCommonJs("src/main/remote/RemoteTerminalRunnerEntry.ts");
@@ -68,7 +70,7 @@ const HOST_ID = "01234567-89ab-4def-8123-456789abcdef";
 /** The helper never resolves HOME into a path, so a POSIX literal is the honest fixture on any platform. */
 const HELPER_HOME = "/home/pideck-helper";
 /** Frozen digest, pinned here as well as in the module: editing the source means editing both. */
-const FROZEN_SHA256 = "ff5d7de6d412df04c42e7901de8863d46df62cd599e94b05caa72225911289e4";
+const FROZEN_SHA256 = "e1cae34d73e118239264691d23067a409a89f4dd4ae152f4b14528c5171f9cda";
 const MAX_TEXT = 4096;
 const TEST_TIMEOUT_MS = 30_000;
 const GUARD_TIMEOUT_MS = 10_000;
@@ -379,6 +381,20 @@ function startHelper(t, options = {}) {
 	};
 }
 
+test("the terminal ticket lifetime is 60 s everywhere and cannot drift from the frozen helper", () => {
+	// R2-2: the frozen plan allows an unconsumed ticket at most 60 s. Main's constant and the helper's literal
+	// are two separate sources of truth, so equality is asserted instead of assumed.
+	assert.equal(REMOTE_TERMINAL_TICKET_TTL_MS, 60_000);
+	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes("TERMINAL_TICKET_TTL = 60000"), "the frozen helper literal must be 60 s");
+	assert.equal(REMOTE_HELPER_INLINE_SOURCE.includes("TERMINAL_TICKET_TTL = 120000"), false, "the pre-R2-2 120 s literal must be gone");
+	assert.equal(REMOTE_TERMINAL_TICKET_TTL_MS, Number(REMOTE_HELPER_INLINE_SOURCE.match(/TERMINAL_TICKET_TTL = (\d+)/)[1]), "main TTL and the helper literal must stay equal");
+	// The bounded sweep must know both temp shapes; the runner's claim name stays in the runner artifact.
+	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes("claim-[0-9a-f]{32}-[1-9][0-9]{0,9}"), "the helper sweep matches .claim-<ref>-<pid>");
+	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes("sweepTerminalTicketsAtStartup();"), "the helper sweeps at startup as well as on mint");
+	assert.ok(REMOTE_TERMINAL_TICKET_CLAIM_PATTERN.test(".claim-" + "a".repeat(32) + "-4242"));
+	assert.equal(REMOTE_TERMINAL_TICKET_CLAIM_PATTERN.test(".claim-" + "a".repeat(31) + "-4242"), false);
+});
+
 helperTest("every frozen bundle artifact is one byte-frozen ASCII line with its own pin", () => {
 	// The deploy bundle ships several reviewed files - the protocol entry, the Git worker it imports and the write
 	// programs that worker imports - and each one is content-addressed and pinned on its own. A change is only
@@ -474,7 +490,7 @@ helperTest("every frozen bundle artifact is one byte-frozen ASCII line with its 
 helperTest("the exported entry identity matches the frozen source", () => {
 	assert.equal(REMOTE_HELPER_ENTRY_FILE_NAME, "helper.mjs");
 	assert.match(REMOTE_HELPER_ENTRY_VERSION, /^\d+\.\d+\.\d+$/);
-	assert.equal(REMOTE_HELPER_ENTRY_VERSION, "1.20.1", "the ConPTY frame-termination follow-up is helper 1.20.1");
+	assert.equal(REMOTE_HELPER_ENTRY_VERSION, "1.20.2", "the ticket lifecycle follow-up is helper 1.20.2");
 	// The frozen source cannot import the contract, so its literals are checked against it here.
 	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes(`"${REMOTE_HELPER_ENTRY_VERSION}"`), "hello must report REMOTE_HELPER_ENTRY_VERSION");
 	for (const token of [REMOTE_HELPER_METHOD_HELLO, REMOTE_HELPER_METHOD_ECHO, REMOTE_HELPER_METHOD_CANCEL, REMOTE_HELPER_METHOD_FS_STAT, REMOTE_HELPER_METHOD_FS_LIST, REMOTE_HELPER_METHOD_FS_READ]) {

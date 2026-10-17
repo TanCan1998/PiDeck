@@ -467,7 +467,10 @@ export type RemoteHelperReadResult = { chunk: string; bytes: number; eof: boolea
  */
 export const REMOTE_HELPER_METHOD_TERMINAL_PREPARE = "terminal.prepare";
 /** A launch ticket lives long enough for one immediate launch and no longer. */
-export const REMOTE_TERMINAL_TICKET_TTL_MS = 120_000;
+export const REMOTE_TERMINAL_TICKET_TTL_MS = 60_000;
+/** Claim temp names the frozen runner creates during atomic consumption; the helper sweep must match this shape. */
+export const REMOTE_TERMINAL_TICKET_CLAIM_PREFIX = ".claim-";
+export const REMOTE_TERMINAL_TICKET_CLAIM_PATTERN = /^\.claim-[0-9a-f]{32}-[1-9][0-9]{0,9}$/;
 export const REMOTE_TERMINAL_TICKET_REF_LENGTH = 32;
 export const REMOTE_TERMINAL_TICKET_MAX_BYTES = 4096;
 /** Directory under the deploy root; 0700 owner-only, deliberately outside the immutable bundle. */

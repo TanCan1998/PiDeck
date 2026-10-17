@@ -259,7 +259,11 @@ export function registerRemoteProjectIpc(input: {
 				return reader.list(target.hostId, readerPath(relative));
 			});
 			if (!outcome.ok) return { ok: false, code: outcome.code };
-			return { ok: true, entries: outcome.value.entries.map((entry) => ({ name: entry.name, kind: entry.kind, ...(entry.bytes === undefined ? {} : { bytes: entry.bytes }) })) };
+			// 回收站是项目根的保留命名空间（读通道也拒绝它）；只隐藏根目录下这一项，子目录里同名条目属于用户数据。
+			return {
+				ok: true,
+				entries: outcome.value.entries.filter((entry) => relative !== "" || entry.name !== REMOTE_PROJECT_TRASH_DIR).map((entry) => ({ name: entry.name, kind: entry.kind, ...(entry.bytes === undefined ? {} : { bytes: entry.bytes }) })),
+			};
 		} catch (error) {
 			return { ok: false, code: codeOf(error, "REMOTE_PROJECT_READ_FAILED") };
 		}
@@ -315,9 +319,10 @@ export function registerRemoteProjectIpc(input: {
 			if (!outcome.ok) return { ok: false, code: outcome.code };
 			const result = outcome.value;
 			// 只把界面要用的字段接过去；远端多余字段在 reader 里已被拒，这里再显式重建一次。
+			// 递归搜索会命中回收站里的归档条目，但它们不是用户可搜索的文件：按首段过滤整棵 .pideck-trash。
 			return {
 				ok: true,
-				entries: result.entries.map((entry) => ({ path: entry.path, name: entry.name, kind: entry.kind, ...(entry.bytes === undefined ? {} : { bytes: entry.bytes }) })),
+				entries: result.entries.filter((entry) => entry.path.split("/")[0] !== REMOTE_PROJECT_TRASH_DIR).map((entry) => ({ path: entry.path, name: entry.name, kind: entry.kind, ...(entry.bytes === undefined ? {} : { bytes: entry.bytes }) })),
 				scanned: result.scanned,
 				truncated: result.truncated,
 			};

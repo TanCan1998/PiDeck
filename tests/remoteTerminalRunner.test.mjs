@@ -47,6 +47,7 @@ test("the frozen runner body is one printable ASCII line with its own pin and bu
 		"TERMINAL_INPUT_TIMEOUT",
 		"TERMINAL_SHELL_UNAVAILABLE",
 		"TERMINAL_INTERNAL",
+		".claim-",
 	]) {
 		assert.ok(REMOTE_TERMINAL_RUNNER_INLINE_SOURCE.includes(literal), "the frozen body must carry: " + literal);
 	}
