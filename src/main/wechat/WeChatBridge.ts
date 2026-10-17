@@ -29,7 +29,7 @@ import type { SessionRuntimeBindingGateway } from "../sessions/sessionRuntimeBin
 import type { SessionRunOutcome } from "../sessions/sessionRunWaiter";
 import { getAccount, getBinding, getDecryptedBotToken, getCursor, getPublicAccount, getSettings, isAllowedUser, loadBindings, markNeedsRelogin, normalizeModelChain, removeBinding, removeBindingsBySessionId, setCursor, updateSettings, upsertBinding } from "./WeChatConfig";
 import { normalizeWeChatLocale, weChatLanguage, wechatT, type WeChatLocale, type WeChatTranslationKey } from "./WeChatI18n";
-import { pickLatestAssistantText, prepareOutgoingText, splitForWeChat } from "./weChatText";
+import { pickLatestAssistantText, pickLatestFailureText, prepareOutgoingText, splitForWeChat } from "./weChatText";
 
 export type WeChatBridgeDeps = {
 	/** 返回当前可用项目；未配置时桥接拒绝建会话并提示用户。 */
@@ -55,6 +55,13 @@ const DEDUP_MAX = 200;
 const RUN_TIMEOUT_MS = 300_000;
 /** 回合收口后等落盘/尾部 text_delta 收尾，避免回信缺最后一段（飞书同样 800ms）。 */
 const RESULT_SETTLE_MS = 800;
+/**
+ * 「收口了但什么都没读到」时再等一拍的时长。
+ *
+ * DSH 的失败是 turn/end 才追加 role=error 消息，可能晚于 idle 快照到达；不补这一拍
+ * 就会把「后端报错」错报成「任务已完成但没有文本」。只有空手路径付这个等待。
+ */
+const EMPTY_RESULT_RETRY_MS = 600;
 /** 分片发送之间的间隔，避免一串长回复被服务端当刷屏。 */
 const MULTI_CHUNK_GAP_MS = 400;
 /** 迟到的收口超过这个时间就不再尝试回信（context_token 大概率已失效）。 */
@@ -307,7 +314,8 @@ export class WeChatBridge {
 				// /stop 或桥接停止会推进代际：中断后的顺延必须立刻停，不能换个模型把用户已经停掉的活接着跑。
 				if (this.runGeneration !== generation || this.stopping) return;
 				if (entry && !(await this.applyRunModel(binding.sessionId, entry))) {
-					lastFailure = `${entry.provider}/${entry.modelId}`;
+					// 模型切不过去（已删/供应商下线）没有可回的错误原文：不要覆盖上一轮已经拿到的
+					// 错误文本，也不要把它拼进回复（「处理失败：p1/fast」只会误导），交给最后的兜底文案。
 					continue;
 				}
 				if (index > 0 && entry) this.deps.logger?.("warn", "微信模型失败，顺延到下一条", `${entry.provider}/${entry.modelId}`);
@@ -337,12 +345,14 @@ export class WeChatBridge {
 					await this.deliverResult({ sessionId: binding.sessionId, chatId, contextToken, runId }, outcome.sinceIndex);
 					return;
 				}
-				lastFailure = outcome.message ?? (entry ? `${entry.provider}/${entry.modelId}` : undefined);
+				lastFailure = outcome.message;
 			}
 
 			// 链上的模型全失败（或全部已不可用）：必须回最后一条错误，不能静默。
+			// 连错误原文都没有时别发半句话（「处理失败：」），明说要去看日志比留白有用。
 			this.activeRun = null;
-			this.sendSafe(chatId, contextToken, this.t("run.failed", { message: lastFailure ?? "" }), runId);
+			const failureMessage = lastFailure?.trim();
+			this.sendSafe(chatId, contextToken, failureMessage ? this.t("run.failed", { message: failureMessage }) : this.t("run.failedNoDetail"), runId);
 		} finally {
 			if (typingStarted) void this.signalTyping(chatId, contextToken, 2);
 		}
@@ -501,16 +511,35 @@ export class WeChatBridge {
 		}
 	}
 
-	/** 读最近一条助手消息并回信。超时补发与正常投递共用这一条路径。 */
+	/**
+	 * 读最近一条助手消息并回信。超时补发与正常投递共用这一条路径。
+	 *
+	 * 没有正文时必须再找后端错误：回合「正常收口」不等于成功。供应商欠费/鉴权失败在
+	 * 很多后端上就表现为「跑完了但没有正文」，DSH 更是把错误留在 turn/end 的 role=error
+	 * 消息里（可能晚于 idle 快照到达）。只回一句「任务已完成但没有文本」会让用户以为成功——
+	 * 错误原文才是他要的信息。
+	 */
 	private async deliverResult(target: { sessionId: string; chatId: string; contextToken: string; runId?: string }, sinceIndex = 0): Promise<void> {
 		// sinceIndex：顺延重试时只认本轮新产生的消息，否则会把上一次失败留下的错误文本当成结果回信。
-		const messages = this.deps.runtimeBindings.getRuntimeMessages(target.sessionId).slice(sinceIndex);
-		const raw = pickLatestAssistantText(messages);
-		if (!raw) {
-			this.sendSafe(target.chatId, target.contextToken, this.t("run.noText"), target.runId);
+		const readTurnMessages = () => this.deps.runtimeBindings.getRuntimeMessages(target.sessionId).slice(sinceIndex);
+		let messages = readTurnMessages();
+		let raw = pickLatestAssistantText(messages);
+		if (!raw && !pickLatestFailureText(messages)) {
+			// 空手收口：多等一拍再读一次，等后到的错误消息落进时间线。
+			await sleep(EMPTY_RESULT_RETRY_MS);
+			messages = readTurnMessages();
+			raw = pickLatestAssistantText(messages);
+		}
+		if (raw) {
+			await this.sendSafe(target.chatId, target.contextToken, raw, target.runId);
 			return;
 		}
-		await this.sendSafe(target.chatId, target.contextToken, raw, target.runId);
+		const failure = pickLatestFailureText(messages);
+		if (failure) {
+			await this.sendSafe(target.chatId, target.contextToken, this.t("run.failed", { message: failure }), target.runId);
+			return;
+		}
+		this.sendSafe(target.chatId, target.contextToken, this.t("run.noText"), target.runId);
 	}
 
 	// ===== 命令 =====

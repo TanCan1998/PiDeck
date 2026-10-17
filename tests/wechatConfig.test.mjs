@@ -106,6 +106,23 @@ test("重新扫码同一 Bot 保留自定义名字，换 Bot 用默认名", asyn
 	}
 });
 
+test("重新扫码换成另一个微信号：通道只剩新号能对话，旧绑定仍保留", async () => {
+	const { mod, tempDir } = await loadConfigModule();
+	try {
+		mod.saveAccount(LOGIN);
+		mod.upsertBinding({ chatId: LOGIN.ilinkUserId, userId: LOGIN.ilinkUserId, sessionId: "sess-1", workspaceId: "ws-1", createdAt: 1 });
+		assert.equal(mod.isAllowedUser(LOGIN.ilinkUserId), true);
+
+		// 已登录状态下重新扫码，扫的是另一个微信号：白名单整体换成新号。
+		mod.saveAccount({ ilinkBotId: "other-bot@im.bot", ilinkUserId: "other@im.wechat", botToken: "t2" });
+		assert.equal(mod.isAllowedUser(LOGIN.ilinkUserId), false, "旧号不能再驱动这个 Bot（单账号约束就是这条）");
+		assert.equal(mod.isAllowedUser("other@im.wechat"), true);
+		assert.equal(plain(mod.loadBindings()).length, 1, "绑定不随换号消失：换回来还能接回原会话");
+	} finally {
+		await rm(tempDir, { recursive: true, force: true });
+	}
+});
+
 test("重新扫码清空游标（换 token 就是新会话，旧游标位置已作废）", async () => {
 	const { mod, tempDir } = await loadConfigModule();
 	try {
