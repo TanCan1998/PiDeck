@@ -1106,12 +1106,30 @@ export class AgentManager {
 	/**
 	 * 判断指定项目是否仍有运行中的 Agent（pi 子进程未退出）。
 	 * 用于删除项目前拦截，避免删除后 pi 进程悬挂后台继续占用资源。
+	 * 只看进程是否真的存活：进程退出后 runtime 仍留在 agents 里供 UI 重连（tab.status = closed），
+	 * 不按存活判断会让它一直挡住项目删除（issue #360）。
+	 * 预热进程（standby）对 UI 不可见且自带 TTL 回收，不算「会话 Agent」，不参与拦截。
 	 */
 	hasAgentForProject(projectId: string): boolean {
 		for (const runtime of this.agents.values()) {
-			if (runtime.tab.projectId === projectId) return true;
+			if (runtime.tab.standby) continue;
+			if (runtime.tab.projectId === projectId && runtime.process.isRunning()) return true;
 		}
 		return false;
+	}
+
+	/**
+	 * 删除项目后丢弃该项目的「进程已退出」runtime，避免内存里残留指向已删项目的幽灵会话。
+	 * 存活 runtime 不动：删除前的 hasAgentForProject 已把它们拦下。
+	 */
+	discardStoppedAgentsForProject(projectId: string): number {
+		let discarded = 0;
+		for (const [agentId, runtime] of [...this.agents]) {
+			if (runtime.tab.projectId !== projectId || runtime.process.isRunning()) continue;
+			void this.stop(agentId);
+			discarded += 1;
+		}
+		return discarded;
 	}
 
 	getMessages(agentId: string) {
