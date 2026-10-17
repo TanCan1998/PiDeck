@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: 80fdbcb4e1a14718129755118d30c2cdc33a04d3357cdd55b319ae39b20ad3d2（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: b772e288b0360ce874556667b290fd41aa4cb4a71a4ada8420acdede38b3ffec（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -1878,7 +1878,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"config.dsh.overviewHint": "Provider 路由與模型配置在「模型」tab 中管理（llm-deepseek / llm-pi-ai）。",
 	"config.dsh.modelsHint": "各提供方一行收起即見金鑰狀態（綠=已配置、紅=缺失）；點選展開可填金鑰、改自定義設定與模型目錄。",
 	// DSH 页顺序与 Pi 模型页独立（AppSettings.dshProviderOrder），所以提示文案不引用「模型/认证」两页。
-	"config.dsh.providerOrderHint": "拖動行首手柄調整供應商順序（聚焦手柄後也可用 ↑/↓ 鍵移動）。順序只儲存在 PiDeck 本地設定，不會寫回 DSH 配置；DSH 會話的模型選擇列表也按這個順序排列。",
+	"config.dsh.providerOrderHint": "拖動手柄排序（聚焦後 ↑/↓ 也可微調）；順序為本地偏好，DSH 會話的模型選擇列表共用。",
 	"config.dsh.providersCount": "{count} 個 provider",
 	"config.dsh.providerKeyPlaceholder": "provider 名稱（如 my-gateway）",
 	"config.dsh.addProvider": "新增 provider",
@@ -2969,9 +2969,9 @@ export const zhTW: Record<TranslationKey, string> = {
 	"config.selectModel": "選擇模型 {model}",
 	"config.deleteProvider": "刪除供應商",
 	"config.duplicateProvider": "複製供應商",
-	"config.dragProvider": "拖動排序（按住手柄拖動；聚焦手柄後也可用 ↑/↓ 鍵移動）",
+	"config.dragProvider": "拖動排序；聚焦手柄後可用 ↑/↓ 微調",
 	// 排序说明：Pi 侧（模型/认证）与 DSH 侧各一份顺序，提示文案分两套 key。上移/下移按钮已删，键盘微调文案随拖拽提示走。
-	"config.providerOrderHint": "拖動行首手柄調整供應商順序（聚焦手柄後也可用 ↑/↓ 鍵移動）。順序是 PiDeck 本地偏好，不會寫入配置檔案；「模型」與「認證」兩頁共用同一份順序，模型選擇列表也按這個順序排列。",
+	"config.providerOrderHint": "拖動手柄排序（聚焦後 ↑/↓ 也可微調）；順序為本地偏好，「模型」「認證」兩頁與模型選擇列表共用。",
 	"config.providerOrderReset": "恢復預設順序",
 	"config.migrate.toDsh": "一鍵遷移到 DSH",
 	"config.migrate.toPi": "一鍵遷移到 Pi",
@@ -5149,7 +5149,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"settings.quickMessagesConfigure": "配置更多…",
 	"settings.quickMessagesPreviewEmpty": "暫無條目",
 	"settings.quickMessagesDone": "完成",
-	"settings.quickMessagesDesc": "拖動左側把柄或用上下移按鈕排序，常用的放前面；最多 {max} 條，空行不會寫入配置檔案。",
+	"settings.quickMessagesDesc": "拖動左側把柄排序（聚焦後 ↑/↓ 也可微調），常用的放前面；最多 {max} 條，空行不會寫入配置檔案。",
 	"settings.quickMessagesConfigHint": "當前使用個人清單 quick-messages.json；內建清單來自 resources/quick-messages.default.json，更新後不會自動合併。「補充內建條目」只在末尾追加缺項，保留個人內容和順序；「恢復預設」會整體替換。",
 	"settings.quickMessagesEmpty": "還沒有快捷訊息：點「新增」新增，或「補充內建條目」加入內建清單。",
 	"settings.quickMessagesPlaceholder": "例如：繼續",
@@ -5168,9 +5168,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"settings.quickMessagesFileHint": "個人配置檔案：{path}",
 	"settings.quickMessagesDefaultsUnavailable": "內建清單不可用：隨包資原始檔缺失",
 	"settings.quickMessagesLimit": "已達上限 {max} 條（更長的內容建議做成提示詞模板）",
-	"settings.quickMessagesDragHandle": "拖動排序（也可用上下移按鈕）",
-	"settings.quickMessagesMoveUp": "上移",
-	"settings.quickMessagesMoveDown": "下移",
+	"settings.quickMessagesDragHandle": "拖動排序；聚焦手柄後可用 ↑/↓ 微調",
 	"settings.quickMessagesRemove": "刪除",
 	"settings.replyActionsSection": "回覆快捷操作",
 	"settings.replyActionsSectionDesc": "最新回覆末尾的快捷按鈕；觸發條件與文案來自個人規則檔案，開箱即用，也可按專案定製。",
@@ -5198,9 +5196,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"settings.replyActionsOpenFile": "開啟規則檔案",
 	"settings.replyActionsFileHint": "個人規則檔案：{path}",
 	"settings.replyActionsLimit": "已達上限 {max} 條",
-	"settings.replyActionsDragHandle": "拖動排序（也可用上下移按鈕）",
-	"settings.replyActionsMoveUp": "上移",
-	"settings.replyActionsMoveDown": "下移",
+	"settings.replyActionsDragHandle": "拖動排序；聚焦手柄後可用 ↑/↓ 微調",
 	"settings.replyActionsRemove": "刪除",
 	"settings.replyActionsTrigger.onStop": "回覆成功時",
 	"settings.replyActionsTrigger.onFailure": "回覆失敗時",

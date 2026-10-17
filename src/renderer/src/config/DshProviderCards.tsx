@@ -8,7 +8,7 @@
  */
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, ChevronRight, Copy, Eye, EyeOff, GripVertical, Plus, Trash2 } from "lucide-react";
+import { ArrowUpDown, ChevronDown, ChevronRight, Copy, Eye, EyeOff, GripVertical, Plus, Trash2 } from "lucide-react";
 import { t } from "../i18n";
 import { desktopApi } from "../desktopApi";
 import { showNotice } from "../utils/notice";
@@ -62,12 +62,13 @@ function ProviderRowHead(props: {
 	removeDisabled?: boolean;
 	removeTitle?: string;
 	extraActions?: ReactNode;
-	/** 行头左侧插槽（供应商排序的拖拽手柄与上移/下移按钮）。 */
+	/** 行头左侧插槽（供应商排序的拖拽手柄）。 */
 	leading?: ReactNode;
 }) {
 	return (
-		// group：上移/下移按钮靠 group-hover 浮现，避免行头常驻一排图标
-		<div data-provider-head="" className="group flex items-center gap-2 px-3 py-2">
+		// data-provider-head：拖拽落点按标题行中线判定（展开态卡片很高，拿整张卡中线会偏到折叠区），
+		// 也是拖拽影像克隆的根（拖起来拿着的是整条卡头）
+		<div data-provider-head="" className="flex items-center gap-2 px-3 py-2">
 			{props.leading}
 			<button type="button" className="flex min-w-0 flex-1 items-center gap-1.5 text-left" onClick={props.onToggle}>
 				{props.isOpen ? <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" /> : <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />}
@@ -568,37 +569,15 @@ export function PiAiProvidersCard(props: {
 					// 生效模型数：自定义 models 非空取自定义数，否则取内置目录数（dsh-web 同语义）
 					const modelCount = models.length > 0 ? models.length : (providerCatalog?.length ?? 0);
 					return (
-						<div key={entry.key} ref={(element) => providerReorder.registerCard(entry.key, element)} className={`relative rounded-md border border-border-subtle bg-bg-panel${providerReorder.draggingName === entry.key ? " opacity-50" : ""}`} {...providerReorder.cardProps(entry.key)}>
-							{/* 拖拽插入指示线：贴卡片内缘 */}
-							{providerReorder.dropTarget?.name === entry.key && <span className={`absolute ${providerReorder.dropTarget.position === "before" ? "top-0" : "bottom-0"} right-0 left-0 z-10 h-0.5 bg-[color:var(--color-accent)]`} />}
+						<div key={entry.key} ref={(element) => providerReorder.registerCard(entry.key, element)} className={`relative rounded-md border border-border-subtle bg-bg-panel${providerReorder.draggingName === entry.key ? " opacity-40 border-dashed" : ""}`} {...providerReorder.cardProps(entry.key)}>
+							{/* 拖拽插入指示线：贴卡片内缘；加粗 + 发光，落点一眼可见 */}
+							{providerReorder.dropTarget?.name === entry.key && <span className={`absolute ${providerReorder.dropTarget.position === "before" ? "top-0" : "bottom-0"} right-0 left-0 z-10 h-[3px] rounded-full bg-[color:var(--color-accent)] shadow-[0_0_8px_color-mix(in_srgb,var(--color-accent)_55%,transparent)]`} />}
 							<ProviderRowHead
 								leading={
 									<>
-										{/* 拖拽手柄：只有按住手柄才能拖动，避免与行内点击折叠抢手势；上移/下移悬停浮现，键盘聚焦也可见 */}
+										{/* 拖拽手柄：只有按住手柄才能拖动，避免与行内点击折叠抢手势；聚焦手柄后 ↑/↓ 也可微调（键盘接线在 hook 的 gripProps 里） */}
 										<Button type="button" variant="ghost" size="icon-sm" className="size-6 shrink-0 cursor-grab text-muted-foreground active:cursor-grabbing" title={t("config.dragProvider")} {...providerReorder.gripProps(entry.key)}>
 											<GripVertical className="size-3.5" aria-hidden="true" />
-										</Button>
-										<Button
-											type="button"
-											variant="ghost"
-											size="icon-sm"
-											className="size-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 disabled:opacity-30"
-											disabled={!providerReorder.canMove(entry.key, -1)}
-											title={t("config.moveProviderUp")}
-											onClick={() => providerReorder.moveBy(entry.key, -1)}
-										>
-											<ArrowUp className="size-3" aria-hidden="true" />
-										</Button>
-										<Button
-											type="button"
-											variant="ghost"
-											size="icon-sm"
-											className="size-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 disabled:opacity-30"
-											disabled={!providerReorder.canMove(entry.key, 1)}
-											title={t("config.moveProviderDown")}
-											onClick={() => providerReorder.moveBy(entry.key, 1)}
-										>
-											<ArrowDown className="size-3" aria-hidden="true" />
 										</Button>
 									</>
 								}

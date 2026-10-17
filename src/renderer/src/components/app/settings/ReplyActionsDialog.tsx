@@ -1,8 +1,9 @@
-import { ArrowDown, ArrowUp, FileJson, GripVertical, ListPlus, Plus, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
-import { type DragEvent, useCallback, useEffect, useRef, useState } from "react";
+import { FileJson, GripVertical, ListPlus, Plus, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
+import { type DragEvent, type KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 import { MAX_REPLY_ACTION_RULES } from "../../../../../shared/replyActions";
 import type { ReplyActionRule, ReplyActionTrigger } from "../../../../../shared/types/replyActions";
 import { useReplyActionEditor } from "../../../hooks/useReplyActionEditor";
+import { createDragGhost } from "../../../utils/dragGhost";
 import { t } from "../../../i18n";
 import { Button } from "../../ui-shadcn/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../../ui-shadcn/dialog";
@@ -27,11 +28,15 @@ export function ReplyActionsDialog(props: { open: boolean; onOpenChange: (open: 
 	const latestRef = useRef({ rules, open: props.open, reorderRules: editor.reorderRules });
 	latestRef.current = { rules, open: props.open, reorderRules: editor.reorderRules };
 	const dragRef = useRef<{ index: number; rules: ReplyActionRule[] } | null>(null);
+	// 拖拽影像节点：dragstart 时挂到 body，dragend/关闭/卸载时移除（Chromium 拖动全程引用它截图）。
+	const ghostRef = useRef<HTMLDivElement | null>(null);
 	const [dropTarget, setDropTarget] = useState<number | null>(null);
 
 	const clearDrag = useCallback(() => {
 		dragRef.current = null;
 		setDropTarget(null);
+		ghostRef.current?.remove();
+		ghostRef.current = null;
 	}, []);
 
 	useEffect(() => {
@@ -40,6 +45,8 @@ export function ReplyActionsDialog(props: { open: boolean; onOpenChange: (open: 
 		if (!props.open) setPendingRule(null);
 		return () => {
 			dragRef.current = null;
+			ghostRef.current?.remove();
+			ghostRef.current = null;
 		};
 	}, [rules, props.open, clearDrag]);
 
@@ -53,6 +60,15 @@ export function ReplyActionsDialog(props: { open: boolean; onOpenChange: (open: 
 		dragRef.current = { index, rules: current.rules };
 		event.dataTransfer.effectAllowed = "move";
 		event.dataTransfer.setData("application/x-pideck-reply-action", "move");
+		// 拖拽影像：克隆整行当影像（默认影像只是十几像素的手柄图标），clearDrag 负责移除。
+		// currentTarget 可选链：测试沙箱无 DOM，模拟事件没有 currentTarget 时跳过影像，不影响排序本身。
+		const row = event.currentTarget?.closest<HTMLElement>("[data-reply-action-row]");
+		if (row) {
+			ghostRef.current?.remove();
+			const ghost = createDragGhost(row);
+			ghostRef.current = ghost.node;
+			event.dataTransfer.setDragImage(ghost.node, ghost.x, ghost.y);
+		}
 	}, []);
 
 	const canDrop = useCallback((target: number) => {
@@ -129,7 +145,7 @@ export function ReplyActionsDialog(props: { open: boolean; onOpenChange: (open: 
 											</TableCell>
 										</TableRow>
 									) : (
-										rules.map((rule, index) => <RuleRow key={index} rule={rule} index={index} rowCount={rules.length} dropTargetActive={dropTarget === index} editor={editor} startDrag={startDrag} dragOver={dragOver} drop={drop} dragLeave={() => setDropTarget(null)} clearDrag={clearDrag} />)
+										rules.map((rule, index) => <RuleRow key={index} rule={rule} index={index} dropTargetActive={dropTarget === index} editor={editor} startDrag={startDrag} dragOver={dragOver} drop={drop} dragLeave={() => setDropTarget(null)} clearDrag={clearDrag} />)
 									)}
 									{pendingRule ? (
 										<PendingRuleRow
@@ -195,7 +211,6 @@ type TriggerMode = "onStop" | "onFailure" | "always" | "textMatch";
 function RuleRow(props: {
 	rule: ReplyActionRule;
 	index: number;
-	rowCount: number;
 	dropTargetActive: boolean;
 	editor: ReturnType<typeof useReplyActionEditor>;
 	startDrag: (event: DragEvent<HTMLButtonElement>, index: number) => void;
@@ -204,7 +219,7 @@ function RuleRow(props: {
 	dragLeave: () => void;
 	clearDrag: () => void;
 }) {
-	const { rule, index, rowCount } = props;
+	const { rule, index } = props;
 	const matchTrigger = rule.triggers.find((trigger) => trigger.kind === "textMatch");
 	// 关键词输入是受控的中间态：还没写出第一个关键词前只留在本地（draft 非 null），
 	// 不下发空的 textMatch——主进程会按「无 patterns」丢掉这个 trigger，整条规则跟着消失。
@@ -237,18 +252,24 @@ function RuleRow(props: {
 	};
 
 	return (
-		<TableRow onDragOver={(event) => props.dragOver(event, index)} onDragLeave={props.dragLeave} onDrop={(event) => props.drop(event, index)} data-state={props.dropTargetActive ? "selected" : undefined}>
+		<TableRow data-reply-action-row="" onDragOver={(event) => props.dragOver(event, index)} onDragLeave={props.dragLeave} onDrop={(event) => props.drop(event, index)} data-state={props.dropTargetActive ? "selected" : undefined}>
 			<TableCell className="w-10 px-2">
 				<Button
 					type="button"
 					variant="ghost"
 					size="icon-sm"
-					tabIndex={-1}
 					draggable
 					title={t("settings.replyActionsDragHandle")}
 					aria-label={t("settings.replyActionsDragHandle")}
 					onDragStart={(event) => props.startDrag(event, index)}
 					onDragEnd={props.clearDrag}
+					onKeyDown={(event) => {
+						// 手柄聚焦后的键盘微调：↑/↓ 移动一位（越界由 moveRule 内部忽略），上移/下移按钮的无障碍替代。
+						if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+						event.preventDefault();
+						event.stopPropagation();
+						props.editor.moveRule(index, event.key === "ArrowUp" ? -1 : 1);
+					}}
 					className="cursor-grab text-muted-foreground active:cursor-grabbing"
 				>
 					<GripVertical data-icon="inline-start" aria-hidden="true" />
@@ -282,12 +303,6 @@ function RuleRow(props: {
 			</TableCell>
 			<TableCell className="text-right">
 				<div className="flex justify-end gap-0.5">
-					<Button type="button" variant="ghost" size="icon-sm" title={t("settings.replyActionsMoveUp")} aria-label={t("settings.replyActionsMoveUp")} disabled={index === 0} onClick={() => props.editor.moveRule(index, -1)}>
-						<ArrowUp data-icon="inline-start" aria-hidden="true" />
-					</Button>
-					<Button type="button" variant="ghost" size="icon-sm" title={t("settings.replyActionsMoveDown")} aria-label={t("settings.replyActionsMoveDown")} disabled={index === rowCount - 1} onClick={() => props.editor.moveRule(index, 1)}>
-						<ArrowDown data-icon="inline-start" aria-hidden="true" />
-					</Button>
 					<Button type="button" variant="ghost" size="icon-sm" title={t("settings.replyActionsRemove")} aria-label={t("settings.replyActionsRemove")} onClick={() => props.editor.removeRule(index)}>
 						<Trash2 data-icon="inline-start" aria-hidden="true" />
 					</Button>

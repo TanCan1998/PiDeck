@@ -1,6 +1,6 @@
 import { Button } from "../components/ui-shadcn/button";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, ChevronRight, Copy, Eye, EyeOff, ExternalLink, GripVertical, SquarePen, Trash2, X } from "lucide-react";
+import { ArrowUpDown, ChevronDown, ChevronRight, Copy, Eye, EyeOff, ExternalLink, GripVertical, SquarePen, Trash2, X } from "lucide-react";
 import { t } from "../i18n";
 import { desktopApi } from "../desktopApi";
 import type { ModelItem, ModelsFile, ProviderConfig } from "./configTypes";
@@ -74,7 +74,7 @@ export function ModelsTab(props: {
 	providerOrder?: string[];
 	/** 排序作用域：与认证页共享的并集顺序（由父级用 models.json + auth.json 算出）。 */
 	providerOrderScope?: string[];
-	/** 卡片重排回调：拖拽/上移下移算出新的完整顺序后交给父级持久化。 */
+	/** 卡片重排回调：拖拽/手柄方向键算出新的完整顺序后交给父级持久化。 */
 	onReorderProviders?: (nextOrder: string[]) => void;
 	/** 清空自定义顺序（列表上方的「恢复默认顺序」）。 */
 	onResetProviders?: () => void;
@@ -146,7 +146,7 @@ export function ModelsTab(props: {
 	const availableThinkingLevels = useAvailableThinkingLevels();
 	const providerNames = Object.keys(data.providers);
 	// 隐藏开关：主列表只显示未隐藏项，隐藏项进页面底部「已隐藏」折叠区（设置页隐藏开关）
-	// 自定义排序只作用于展示：先按用户拖拽/上移下移结果重排完整列表，再切分可见/隐藏。
+	// 自定义排序只作用于展示：先按用户拖拽/方向键结果重排完整列表，再切分可见/隐藏。
 	// 用完整列表而非仅可见列表：隐藏区也遵循同一顺序，恢复显示时不会突然跳到列表最前。
 	const orderedProviderNames = applyProviderOrder(providerNames, props.providerOrder);
 	const { visible: visibleProviderNames, hidden: hiddenProviderNames } = splitVisibleAndHiddenProviders(orderedProviderNames, props.hiddenProviders ?? []);
@@ -235,7 +235,7 @@ export function ModelsTab(props: {
 	const providerCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
 	/**
-	 * 拖拽/上移下移的统一出口：算出新的完整顺序交给父级持久化。
+	 * 拖拽/手柄方向键的统一出口：算出新的完整顺序交给父级持久化。
 	 * 顺序无变化时（拖回原位）也照常上报，由主进程 SettingsStore 的「值未变则剔除」拦下写盘，
 	 * 避免这里再维护一份比较逻辑。
 	 */
@@ -246,7 +246,7 @@ export function ModelsTab(props: {
 		[props.onReorderProviders],
 	);
 
-	// 拖动与上移/下移的状态机（落点判定、拖动中半透明、插入指示线、边界禁用）内聚在共享 hook，
+	// 拖动排序的状态机（落点判定、拖动中视觉、插入指示线、FLIP 落位动画、手柄方向键）内聚在共享 hook，
 	// DSH 模型页的供应商卡片复用同一份，避免两页规则漂移。
 	// 拖拽的作用域是「模型 + 认证」两页的并集（providerOrderScope）：认证页独有的供应商也要参与
 	// 同一份顺序，否则在认证页排一次会在并集里丢掉它们，模型页的顺序跟着回到默认。
@@ -447,13 +447,13 @@ export function ModelsTab(props: {
 										providerCardRefs.current[name] = element;
 										providerReorder.registerCard(name, element);
 									}}
-									className={`config-provider-card relative overflow-hidden rounded-lg border border-border-subtle bg-bg-panel transition-[border-color,box-shadow,background-color,opacity] duration-150${providerReorder.draggingName === name ? " opacity-50" : ""}${isExpanded ? " border-[color-mix(in_srgb,var(--color-accent)_32%,var(--color-border-subtle))] shadow-[var(--shadow-border)] overflow-visible" : ""}${highlightProvider === name ? " ring-2 ring-[color:var(--color-accent)]" : ""}`}
+									className={`config-provider-card relative overflow-hidden rounded-lg border border-border-subtle bg-bg-panel transition-[border-color,box-shadow,background-color,opacity] duration-150${providerReorder.draggingName === name ? " opacity-40 border-dashed" : ""}${isExpanded ? " border-[color-mix(in_srgb,var(--color-accent)_32%,var(--color-border-subtle))] shadow-[var(--shadow-border)] overflow-visible" : ""}${highlightProvider === name ? " ring-2 ring-[color:var(--color-accent)]" : ""}`}
 									{...providerReorder.cardProps(name)}
 								>
-									{/* 拖拽插入指示线：贴卡片内缘（卡片是 overflow-hidden，放到卡片外会被剪掉） */}
-									{providerReorder.dropTarget?.name === name && <span className={`absolute ${providerReorder.dropTarget.position === "before" ? "top-0" : "bottom-0"} right-0 left-0 z-10 h-0.5 bg-[color:var(--color-accent)]`} />}
+									{/* 拖拽插入指示线：贴卡片内缘（卡片是 overflow-hidden，放到卡片外会被剪掉）；加粗 + 发光，落点一眼可见 */}
+									{providerReorder.dropTarget?.name === name && <span className={`absolute ${providerReorder.dropTarget.position === "before" ? "top-0" : "bottom-0"} right-0 left-0 z-10 h-[3px] rounded-full bg-[color:var(--color-accent)] shadow-[0_0_8px_color-mix(in_srgb,var(--color-accent)_55%,transparent)]`} />}
 									{/* 整行点击展开/收起；右侧操作区 stopPropagation，避免点复制/删除/用量配置时误折叠。 */}
-									<div data-provider-head="" className="group flex cursor-pointer items-center justify-between px-3.5 py-2 transition-colors duration-150 hover:bg-bg-hover" onClick={() => props.onToggleProvider(name)}>
+									<div data-provider-head="" className="flex cursor-pointer items-center justify-between px-3.5 py-2 transition-colors duration-150 hover:bg-bg-hover" onClick={() => props.onToggleProvider(name)}>
 										{batchMode && (
 											<Label className="mr-2.5 inline-flex size-4 shrink-0 items-center justify-center" onClick={(e) => e.stopPropagation()}>
 												<Checkbox
@@ -471,39 +471,11 @@ export function ModelsTab(props: {
 											</Label>
 										)}
 										<div className="flex min-w-0 flex-1 items-center gap-2.5">
-											{/* 拖拽手柄：draggable 落在按钮上（Button 直接透传原生属性），只有按住手柄才能拖动，避免整行点击展开被拖拽抢掉 */}
+											{/* 拖拽手柄：draggable 落在按钮上（Button 直接透传原生属性），只有按住手柄才能拖动，避免整行点击展开被拖拽抢掉；
+											    聚焦手柄后 ↑/↓ 也可微调（上移/下移按钮的无障碍替代，键盘接线在 hook 的 gripProps 里） */}
 											<Button variant="ghost" size="icon-sm" className="size-6 shrink-0 cursor-grab text-muted-foreground active:cursor-grabbing" title={t("config.dragProvider")} {...providerReorder.gripProps(name)} onClick={(event) => event.stopPropagation()}>
 												<GripVertical size={14} />
 											</Button>
-											{/* 上移/下移：悬停浮现（键盘聚焦也可见），到顶/到底禁用；disabled 带 pointer-events-none，不会抢整行点击 */}
-											<div className="flex shrink-0 items-center">
-												<Button
-													variant="ghost"
-													size="icon-sm"
-													className="size-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-													disabled={!providerReorder.canMove(name, -1)}
-													title={t("config.moveProviderUp")}
-													onClick={(event) => {
-														event.stopPropagation();
-														providerReorder.moveBy(name, -1);
-													}}
-												>
-													<ArrowUp size={13} />
-												</Button>
-												<Button
-													variant="ghost"
-													size="icon-sm"
-													className="size-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-													disabled={!providerReorder.canMove(name, 1)}
-													title={t("config.moveProviderDown")}
-													onClick={(event) => {
-														event.stopPropagation();
-														providerReorder.moveBy(name, 1);
-													}}
-												>
-													<ArrowDown size={13} />
-												</Button>
-											</div>
 											<span className="min-w-0 truncate text-control font-semibold text-text-primary">{name}</span>
 											{/* 折叠态把「N 模型」和用量收进标题行，避免底部再占一条 h-9 空行。用量拦截点击，避免点刷新时误折叠卡片。 */}
 											<span className="shrink-0 rounded-full border border-border-subtle px-1.5 py-px font-mono text-micro tabular-nums text-muted-foreground">{t("config.count.models", { count: provider.models.length })}</span>
