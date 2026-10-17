@@ -48,6 +48,29 @@ test("普通用户消息不被动（只有真正带通道签名才剥）", () =>
 	assert.equal(extractMessageText("微信只支持纯文本吗？"), "微信只支持纯文本吗？");
 });
 
+test("桌面历史投影保留首行缩进代码，不能让正文标签退化成思考块", () => {
+	const text = "    <thinking>代码示例\n\n正常结论不能丢失";
+	assert.equal(extractMessageText(text), text);
+	assert.equal(
+		extractMessageText([
+			{ type: "text", text: "    " },
+			{ type: "text", text: text.slice(4) },
+		]),
+		text,
+	);
+	const { cleanAnswerText } = sandbox("src/renderer/src/components/session/timeline/answerText.ts");
+	assert.equal(cleanAnswerText(extractMessageText(text)), text);
+});
+
+test("桌面剥离宿主指令和飞书提示后仍保留用户代码缩进", () => {
+	const text = "    <thinking>代码示例\n\n正常结论不能丢失";
+	assert.equal(extractMessageText(wrapHostInstruction("内部指令", text)), text);
+	assert.equal(extractMessageText(`${text}\n\n[PiDeck 飞书能力]\n内部提示`), text);
+	// 飞书/微信发送、标题等旧调用保留既有 trim 语义，本次只修桌面投影。
+	assert.equal(stripHostInstruction(`  正文  `), "正文");
+	assert.equal(stripHostInstruction("前文\n[PIDECK_HOST_INSTRUCTION]内部指令[/PIDECK_HOST_INSTRUCTION]\n\n    后文"), "前文\n后文");
+});
+
 test("自动标题里的宿主指令同样被剥掉（侧栏不能出现整段提示词）", () => {
 	const { sanitizeAutomaticTitle } = sandbox("src/main/sessions/sessionTitleSanitize.ts");
 	assert.equal(sanitizeAutomaticTitle(`${WECHAT_INSTRUCTION}\n\n1`), "1");

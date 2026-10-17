@@ -6,6 +6,7 @@ import { createRequire } from "node:module";
 import test from "node:test";
 import ts from "typescript";
 import vm from "node:vm";
+import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
 const require = createRequire(import.meta.url);
 
@@ -43,21 +44,7 @@ function loadCodexMetaModule() {
 }
 
 function loadMessageContentModule() {
-	const compilerOptions = {
-		module: ts.ModuleKind.CommonJS,
-		target: ts.ScriptTarget.ES2022,
-	};
-	const docActions = { exports: {} };
-	vm.runInNewContext(ts.transpileModule(readFileSync("src/main/feishu/docActions.ts", "utf8"), { compilerOptions }).outputText, docActions, { filename: "docActions.ts" });
-	const messageContent = {
-		exports: {},
-		require: (id) => {
-			if (id === "../feishu/docActions") return docActions.exports;
-			throw new Error(`Unexpected messageContent import: ${id}`);
-		},
-	};
-	vm.runInNewContext(ts.transpileModule(readFileSync("src/main/pi/messageContent.ts", "utf8"), { compilerOptions }).outputText, messageContent, { filename: "messageContent.ts" });
-	return messageContent.exports;
+	return loadTsCommonJs("src/main/pi/messageContent.ts");
 }
 
 function loadWslPathsModule() {

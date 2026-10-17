@@ -1,11 +1,21 @@
+import { trimMarkdownWhitespace } from "../../shared/markdownWhitespace.ts";
+
 export const FEISHU_DOC_ACTION_HINT = ["\n\n[PiDeck 飞书能力]", "当前会话已连接飞书，PiDeck 主进程已配置可用凭证。需要创建飞书文档时，直接产出正文和动作标记。", "请先给出要写入文档的完整正文，最后单独输出一行 [CREATE_DOC:文档标题]。", "不要自己调用飞书 API，不要要求用户提供飞书凭证。"].join("\n");
 
 export function withFeishuDocActionHint(message: string): string {
 	return `${message}${FEISHU_DOC_ACTION_HINT}`;
 }
 
-export function stripFeishuDocActionHint(text: string): string {
-	return text.replace(/\n{0,2}\[PiDeck 飞书能力\][\s\S]*$/, "").trim();
+/** 桌面历史/气泡保留 Markdown 首行缩进；发送与标题调用默认仍按旧语义 trim。 */
+type VisibleTextOptions = { preserveMarkdownIndent?: boolean };
+
+/** 发送/标题保留旧行为，桌面展示复用同一空白规则。 */
+function trimVisibleText(text: string, options: VisibleTextOptions): string {
+	return options.preserveMarkdownIndent ? trimMarkdownWhitespace(text) : text.trim();
+}
+
+export function stripFeishuDocActionHint(text: string, options: VisibleTextOptions = {}): string {
+	return trimVisibleText(text.replace(/\n{0,2}\[PiDeck 飞书能力\][\s\S]*$/, ""), options);
 }
 
 export function stripFeishuActionMarkers(text: string): string {
@@ -38,12 +48,14 @@ export function wrapHostInstruction(instruction: string, userMessage: string): s
  * 剥离宿主注入的内部指令，只保留用户可见输入。
  * 兼容历史会话：未加标记时，按已知通道指令前缀/特征行剥离（飞书、微信）。
  */
-export function stripHostInstruction(text: string): string {
+export function stripHostInstruction(text: string, options: VisibleTextOptions = {}): string {
 	if (!text) return "";
 	let next = text.replace(/\r\n/g, "\n");
 
-	// 新格式：明确边界标记
-	next = next.replace(/\[PIDECK_HOST_INSTRUCTION\][\s\S]*?\[\/PIDECK_HOST_INSTRUCTION\]\s*/g, "");
+	// 桌面投影只消费宿主块后的分隔空行，不能把用户首行代码缩进也吃掉；
+	// 发送/标题等旧调用保留原有空白消费语义，避免扩大到通道行为变更。
+	const hostBlock = options.preserveMarkdownIndent ? /\[PIDECK_HOST_INSTRUCTION\][\s\S]*?\[\/PIDECK_HOST_INSTRUCTION\](?:[ \t]*\n)*/g : /\[PIDECK_HOST_INSTRUCTION\][\s\S]*?\[\/PIDECK_HOST_INSTRUCTION\]\s*/g;
+	next = next.replace(hostBlock, "");
 
 	// 历史格式：指令直接拼在用户消息前。
 	// 旧实现用 join("\n") 拼多行指令，再 "\n\n" + 用户原文；
@@ -100,7 +112,7 @@ export function stripHostInstruction(text: string): string {
 	// 飞书来源尾部宿主说明
 	next = next.replace(/\n{0,2}\[这是飞书群聊消息。请直接回复用户。\]\s*$/g, "").replace(/\n{0,2}\[飞书群聊消息。请直接回复用户。\]\s*$/g, "");
 
-	return next.replace(/\n{3,}/g, "\n\n").trim();
+	return trimVisibleText(next.replace(/\n{3,}/g, "\n\n"), options);
 }
 
 export function sanitizeFeishuUserVisibleText(text: string): string {

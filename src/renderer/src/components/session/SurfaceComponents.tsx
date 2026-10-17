@@ -1,5 +1,6 @@
 import { Fragment, isValidElement, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject, type WheelEvent as ReactWheelEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { messageEntryId } from "../../utils/sessionCommands";
+import { cleanAnswerText } from "./timeline/answerText.ts";
 import { toBlob } from "html-to-image";
 import { writeClipboard, writeClipboardImage } from "../../utils/clipboard";
 import { MarkdownStream } from "./MarkdownStream";
@@ -585,7 +586,7 @@ export const AssistantText = memo(
 		settle?: boolean;
 	}) {
 		// 清理 ANSI 转义码与 <thinking> 标签，thinking 由调用方通过 ThinkingBlock 渲染
-		const cleanText = stripThinkingTags(stripAnsi(props.text));
+		const cleanText = cleanAnswerText(props.text);
 		// 统一 Streamdown 引擎（迁移后唯一 markdown 管线）：流式由引擎按 block memo、
 		// 半截 markdown 由 remend 容错补全，不再需要旧管线的流式/静态双路径切换。
 		return (
@@ -1176,11 +1177,6 @@ export function ImagePreviewModal(props: { image: ImageContent; onClose: () => v
 			</div>
 		</div>
 	);
-}
-
-// ANSI 转义码正则:匹配 \x1b[...m 等终端颜色/样式序列
-function stripThinkingTags(text: string): string {
-	return text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, "").trim();
 }
 
 /** 将 Markdown 语法转换为纯文本，保留可读的文字内容 */

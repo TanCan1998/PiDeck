@@ -1,22 +1,10 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import ts from "typescript";
-import vm from "node:vm";
+import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
+/** 使用真实依赖图，纯函数新增共享 import 不应使测试加载器失效。 */
 function loadDocActionsModule() {
-	const source = readFileSync("src/main/feishu/docActions.ts", "utf8");
-	const { outputText } = ts.transpileModule(source, {
-		compilerOptions: {
-			module: ts.ModuleKind.CommonJS,
-			target: ts.ScriptTarget.ES2022,
-		},
-	});
-	const sandbox = { exports: {} };
-	vm.runInNewContext(outputText, sandbox, {
-		filename: "docActions.ts",
-	});
-	return sandbox.exports;
+	return loadTsCommonJs("src/main/feishu/docActions.ts");
 }
 
 test("detects Feishu doc intent from user message", () => {

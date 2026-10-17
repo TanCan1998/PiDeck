@@ -14,6 +14,7 @@ import { writeClipboardImage } from "../../utils/clipboard";
 import { useTimelineSelection } from "../../hooks/useTimelineSelection";
 import { SelectionToolbar } from "./timeline/SelectionToolbar";
 import { deriveTimelineRunActivity } from "./timeline/timelineRunActivity";
+import { plainTextCopySource } from "./timeline/messageCopyText.ts";
 import { BridgeWorkingLine } from "../bridge/BridgeSlot";
 import { canLoadSessionTimelineMore, deriveSessionSurfaceRuntime, type SessionTimelineController } from "../../hooks/useSessionTimelineController";
 import { t } from "../../i18n";
@@ -661,19 +662,7 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 		if (!selected.length) return;
 
 		const separator = "\n\n---\n\n";
-		const content =
-			kind === "text"
-				? selected
-						.map((message) => {
-							// 多选复制也走与气泡/单条复制相同的展示折叠，不能让模型上下文 XML 漏出。
-							let text = replaceExpandedRefBlocksWithLabels(message.text);
-							text = text.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, "");
-							text = text.replace(/<thinking>[\s\S]*?<\/thinking>/g, "");
-							text = text.replace(/<skill\s+name="[^"]*"[^>]*>[\s\S]*?<\/skill>/gi, "");
-							return stripMarkdown(text);
-						})
-						.join(separator)
-				: selected.map((message) => replaceExpandedRefBlocksWithLabels(message.text)).join(separator);
+		const content = kind === "text" ? selected.map((message) => stripMarkdown(plainTextCopySource(message))).join(separator) : selected.map((message) => replaceExpandedRefBlocksWithLabels(message.text)).join(separator);
 
 		await navigator.clipboard.writeText(content);
 		props.onToast(kind === "text" ? t("copy.asTextCopied") : t("copy.asMarkdownCopied"));
