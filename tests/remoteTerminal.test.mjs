@@ -13,7 +13,7 @@ function setup(overrides = {}) {
 	const manager = new RemoteTerminalSessionManager({
 		locator: (id) => projects.get(id),
 		emit: (sender, channel, payload) => events.push({ sender, channel, ...payload }),
-		start: async (target, nonce, signal, callbacks) => {
+		start: async (target, signal, callbacks) => {
 			const resource = { target, callbacks, writes: [], sizes: [], killed: 0, paused: 0, resumed: 0, current: true };
 			resource.pty = { write: (data) => resource.writes.push(data), resize: (cols, rows) => resource.sizes.push([cols, rows]), pause: () => resource.paused++, resume: () => resource.resumed++ };
 			resource.dispose = () => resource.killed++;
@@ -21,12 +21,12 @@ function setup(overrides = {}) {
 				if (!resource.current) throw new Error("SSH_HOST_NOT_READY");
 			};
 			resources.push(resource);
-			if (!overrides.noReady)
-				setImmediate(() => {
-					callbacks.data("\x1ePIDECK_TERM_" + nonce.slice(0, 8));
-					callbacks.data(nonce.slice(8) + "\x1f$ ");
-				});
+			if (!overrides.noReady) {
+				// The launcher resolves only after the runner confirmed the login shell; the first prompt is queued output.
+				callbacks.data("$ ");
+			}
 			if (overrides.start) await overrides.start(resource, signal);
+			if (overrides.noReady) return new Promise(() => undefined);
 			return resource;
 		},
 		startupTimeoutMs: 100,
@@ -138,25 +138,20 @@ test("disconnect and destroyed sender cancel pending starts and never recreate o
 	assert.equal(events.length, 0);
 });
 
-test("startup without the private marker times out and releases its SSH resource", async (t) => {
+test("startup that never confirms the login shell times out and releases its SSH resource", async (t) => {
 	const { manager, resources } = setup({ noReady: true });
 	t.after(() => manager.closeAll());
 	await assert.rejects(manager.ensure(1, "p1"), /REMOTE_TERMINAL_START_TIMEOUT/);
-	assert.equal(resources[0].killed, 1);
+	assert.equal(resources[0].killed, 0, "a provider that never returned a resource has nothing to kill");
 	assert.equal(manager.list(1, "p1").length, 0);
 });
 
 test("startup timeout settles even when an earlier provider has not returned its resource", async (t) => {
-	let release;
-	const gate = new Promise((resolve) => {
-		release = resolve;
-	});
-	const { manager, resources } = setup({ noReady: true, start: async () => gate });
+	const { manager, resources } = setup({ noReady: true });
 	t.after(() => manager.closeAll());
 	await assert.rejects(manager.ensure(1, "p1"), /REMOTE_TERMINAL_START_TIMEOUT/);
-	release();
 	await new Promise((resolve) => setImmediate(resolve));
-	assert.equal(resources[0].killed, 1);
+	assert.equal(resources[0].killed, 0, "a provider that never confirmed the shell has nothing to release");
 	assert.equal(manager.list(1, "p1").length, 0);
 });
 

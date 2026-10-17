@@ -95,8 +95,22 @@ const execFileAsync = promisify(execFile);
  * BatchMode：绝不允许交互式密码提示把 e2e 挂住；超时由调用方给。
  */
 export async function runRemoteCommand(credentials: RemoteAcceptanceCredentials, command: string, timeoutMs: number): Promise<{ stdout: string; stderr: string }> {
-	const { stdout, stderr } = await execFileAsync("ssh", ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=8", "-p", String(credentials.port), credentials.user + "@" + credentials.host, command], { timeout: timeoutMs, windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
-	return { stdout, stderr };
+	const args = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=8", "-p", String(credentials.port), credentials.user + "@" + credentials.host, command];
+	const run = () => execFileAsync("ssh", args, { timeout: timeoutMs, windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
+	try {
+		const { stdout, stderr } = await run();
+		return { stdout, stderr };
+	} catch (error) {
+		// Direct SSH oracles are test infrastructure, not the product path: a single dropped connection must not
+		// turn into a fake product failure. Retry exactly once on connection-level errors (ssh exits 255); a
+		// remote command failure that carried real output is rethrown unchanged.
+		const failure = error as { code?: unknown; stderr?: unknown };
+		const stderr = typeof failure.stderr === "string" ? failure.stderr : "";
+		if (failure.code !== 255 && !/Connection reset|Connection closed|Connection timed out|Operation timed out|Broken pipe|kex_exchange|Timeout, server|banner exchange/i.test(stderr)) throw error;
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		const { stdout, stderr: retried } = await run();
+		return { stdout, stderr: retried };
+	}
 }
 
 const repoRoot = resolve(__dirname, "..");

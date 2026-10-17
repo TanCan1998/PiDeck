@@ -84,6 +84,11 @@ export type RemoteProjectSession = {
 	readonly hostId: string;
 	/** 已验证且与本次会话同代的Node/主机版本，仅供main受控文件命令使用。 */
 	readonly nodePath: string;
+	/** The confirmed content address of the active bundle: the ticket and the runner path both name it. */
+	readonly deployRoot: string;
+	readonly bundleSha256: string;
+	/** The pin-confirmed route digest of this host revision; the ticket binds it, main never guesses it. */
+	readonly hostRouteDigest: string;
 	readonly hostRevision: number;
 	runCommand(remoteCommand: string): Promise<{ exitCode: number; stdout: string }>;
 	/** Build and consume an interactive invocation under the host lock; no escaped stale spawn plan. */
@@ -263,6 +268,16 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 	/** Read the current store revision, so a held bootstrap can be tied to the profile it came from. */
 	async function readRevision(): Promise<number> {
 		return (await RemoteHostStore.open(options.userDataDir)).getSnapshot().revision;
+	}
+
+	/** The revision and the pin-confirmed route digest of one host, read together so they cannot disagree. */
+	async function readVerifiedRoute(hostId: string): Promise<{ revision: number; routeDigest: string } | null> {
+		const snapshot = (await RemoteHostStore.open(options.userDataDir)).getSnapshot();
+		if (snapshot.status !== "ready") return null;
+		const profile = snapshot.profiles.find((item) => item.id === hostId);
+		const endpoint = profile && profile.disabledAt === undefined ? profile.verifiedEndpoint : undefined;
+		if (!endpoint || typeof endpoint.routeDigest !== "string" || !/^[0-9a-f]{64}$/.test(endpoint.routeDigest)) return null;
+		return { revision: snapshot.revision, routeDigest: endpoint.routeDigest };
 	}
 
 	function entryFor(hostId: string): HostEntry {
@@ -475,11 +490,19 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 		const bound = manager;
 		const held = entry.held;
 		if (!held) return { ok: false, code: "SSH_HOST_NOT_READY" };
+		// The launch ticket binds a host revision and its pin-confirmed route. A stale revision still fails closed, but a
+		// store that cannot name the route must not disable ordinary reads: `hostRouteDigest: ""` makes the terminal
+		// launcher refuse to mint (it requires 64 hex) while reads stay independent of the ticket surface.
+		const route = await readVerifiedRoute(hostId);
+		if (route !== null && route.revision !== held.revision) return { ok: false, code: "SSH_HOST_NOT_READY" };
 		return {
 			ok: true,
 			session: {
 				hostId,
 				nodePath: held.session.nodePath,
+				deployRoot: held.session.deployRoot,
+				bundleSha256: held.session.bundleSha256,
+				hostRouteDigest: route?.routeDigest ?? "",
 				hostRevision: held.revision,
 				async runCommand(remoteCommand) {
 					// 每块重新校验pin和host store代数；不能拿旧Node路径向重绑后的主机发写命令。

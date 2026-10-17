@@ -7,6 +7,7 @@ import { buildBundleManifest, withPrivateBundleUploadPlan, type BundleUploadInpu
 import { REMOTE_HELPER_ARTIFACTS, REMOTE_HELPER_ENTRY_FILE_NAME } from "./RemoteHelperEntry";
 import { isRemoteRunnerAbsolutePath, REMOTE_RUNNER_CODE_INPUT_INVALID } from "./RemoteRunnerContract";
 import { REMOTE_RUNNER_ENTRY_FILE_NAME, REMOTE_RUNNER_ENTRY_SHA256, REMOTE_RUNNER_INLINE_SOURCE } from "./RemoteRunnerEntry";
+import { REMOTE_TERMINAL_RUNNER_ENTRY_FILE_NAME } from "./RemoteTerminalRunnerEntry";
 import type { SshProcessExit, SshProcessLauncher } from "./RemoteHostConnectionTypes";
 
 /** One ready staging entry and one freshly preflighted scp invocation. The caller owns the entry session. */
@@ -74,6 +75,17 @@ export function deployedRunnerPath(result: PreparedBundleResult): string {
 	if (active === null || active[1] !== result.bundleSha256) throw new Error(REMOTE_RUNNER_CODE_INPUT_INVALID);
 	if (!isRemoteRunnerAbsolutePath(result.deployRoot)) throw new Error(REMOTE_RUNNER_CODE_INPUT_INVALID);
 	return `${result.deployRoot}/${REMOTE_BOOTSTRAP_BUNDLE_DIR_NAME}/${active[1]}/${REMOTE_RUNNER_ENTRY_FILE_NAME}`;
+}
+
+/**
+ * Absolute remote path of the frozen terminal runner inside one confirmed activation. Same re-checks as
+ * `deployedRunnerPath` (the deployed words for the root and the content address, not caller text), because this
+ * path is started with `ssh -tt`: a wrong one would run a program instead of failing.
+ */
+export function deployedTerminalRunnerPath(input: { deployRoot: string; bundleSha256: string }): string {
+	if (typeof input !== "object" || input === null) throw new Error(REMOTE_RUNNER_CODE_INPUT_INVALID);
+	if (typeof input.bundleSha256 !== "string" || !/^[0-9a-f]{64}$/.test(input.bundleSha256) || !isRemoteRunnerAbsolutePath(input.deployRoot)) throw new Error(REMOTE_RUNNER_CODE_INPUT_INVALID);
+	return `${input.deployRoot}/${REMOTE_BOOTSTRAP_BUNDLE_DIR_NAME}/${input.bundleSha256}/${REMOTE_TERMINAL_RUNNER_ENTRY_FILE_NAME}`;
 }
 
 /** Subscribe before observing process exit; the production launcher replays an already-settled exit. */

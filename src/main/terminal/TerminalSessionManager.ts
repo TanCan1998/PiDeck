@@ -1,13 +1,13 @@
-import * as pty from "node-pty";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import type { IPty } from "node-pty";
 import { ipcChannels } from "../../shared/ipc";
 import { terminalOwnerKeyFor } from "../../shared/types/terminal";
 import type { TerminalShell, TerminalTab, TerminalTarget } from "../../shared/types";
 import { isLocalProject } from "../../shared/projectLocation";
 import type { ProjectStore } from "../projects/ProjectStore";
-import { toWindowsHostPath, toWslLinuxPath } from "../wsl/WslPaths";
-import { getWslExe } from "../wsl/wslExe";
+import { LocalTerminalSessionLauncher, getTerminalShellCandidates, type TerminalWslSettings } from "./TerminalSessionLauncher";
+
+export { getTerminalShellCandidates };
 
 // 简单日志，不依赖 appLogger 以避免循环引用
 const log = (msg: string) => {
@@ -16,97 +16,29 @@ const log = (msg: string) => {
 
 type TerminalRuntime = {
 	tab: TerminalTab;
-	pty: pty.IPty;
+	pty: IPty;
 	buffer: string;
 };
 
 type Emit = (channel: string, payload: unknown) => void;
 const MAX_TERMINAL_REPLAY_BUFFER = 200_000;
-type TerminalShellCandidate = {
-	shell: TerminalShell;
-	command: string;
-	args: string[];
-};
-
-type TerminalWslSettings = {
-	wslEnabled?: boolean;
-	wslDistro?: string;
-	wslUser?: string;
-};
-
 export function isAgentOwnerKey(ownerKey: string): boolean {
 	return ownerKey.startsWith("agent:");
 }
 
-export function getTerminalShellCandidates(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): TerminalShellCandidate[] {
-	if (platform === "win32") {
-		const candidates: TerminalShellCandidate[] = [
-			{ shell: "pwsh", command: "pwsh.exe", args: [] },
-			{ shell: "powershell", command: "powershell.exe", args: [] },
-			{ shell: "cmd", command: "cmd.exe", args: [] },
-		];
-		// 检测 Git Bash（常见安装路径）
-		const gitBashPaths = ["C:\\Program Files\\Git\\bin\\bash.exe", "C:\\Program Files (x86)\\Git\\bin\\bash.exe"];
-		for (const p of gitBashPaths) {
-			if (existsSync(p)) {
-				candidates.push({ shell: "git-bash", command: p, args: ["--login", "-i"] });
-				break;
-			}
-		}
-		// 检测 WSL：getWslExe 只做 existsSync / PATH 回退，禁止同步 `where wsl.exe`（最多卡 3 秒）。
-		const wslExe = getWslExe();
-		if (wslExe.command === "wsl" || existsSync(wslExe.command)) {
-			candidates.push({ shell: "wsl", command: wslExe.command, args: [] });
-		}
-		return dedupeShellCandidates(candidates);
-	}
-
-	if (platform === "darwin") {
-		const userShell = normalizePosixShell(env.SHELL);
-		const candidates: TerminalShellCandidate[] = [];
-		if (userShell) candidates.push(userShell);
-		// macOS GUI 应用拿到的进程环境通常不是用户登录 shell 环境；
-		// 用登录 shell 启动可以让 zsh/bash 初始化 TTY 与用户 PATH，行为更接近 Terminal.app。
-		candidates.push({ shell: "zsh", command: "/bin/zsh", args: ["-l"] }, { shell: "bash", command: "/bin/bash", args: ["-l"] }, { shell: "sh", command: "/bin/sh", args: [] });
-		return dedupeShellCandidates(candidates);
-	}
-
-	const userShell = normalizePosixShell(env.SHELL);
-	const candidates: TerminalShellCandidate[] = [];
-	if (userShell) candidates.push(userShell);
-	candidates.push({ shell: "bash", command: "bash", args: [] }, { shell: "sh", command: "sh", args: [] });
-	return dedupeShellCandidates(candidates);
-}
-
-function normalizePosixShell(shellPath: string | undefined): TerminalShellCandidate | null {
-	if (!shellPath) return null;
-	const name = shellPath.split(/[\\/]/).pop();
-	if (name === "zsh") return { shell: "zsh", command: shellPath, args: ["-l"] };
-	if (name === "bash") return { shell: "bash", command: shellPath, args: ["-l"] };
-	if (name === "fish") return { shell: "fish", command: shellPath, args: ["-l"] };
-	if (name === "sh") return { shell: "sh", command: shellPath, args: [] };
-	return { shell: "sh", command: shellPath, args: [] };
-}
-
-function dedupeShellCandidates(candidates: TerminalShellCandidate[]) {
-	const seen = new Set<string>();
-	return candidates.filter((candidate) => {
-		const key = `${candidate.command}\0${candidate.args.join("\0")}`;
-		if (seen.has(key)) return false;
-		seen.add(key);
-		return true;
-	});
-}
-
 export class TerminalSessionManager {
 	private readonly runtimes = new Map<string, Map<string, TerminalRuntime>>();
+
+	private readonly launcher: LocalTerminalSessionLauncher;
 
 	constructor(
 		private readonly getAgentCwd: (agentId: string) => string,
 		private readonly emit: Emit,
 		private readonly projectStore: Pick<ProjectStore, "get">,
 		private readonly getSettings: () => TerminalWslSettings = () => ({}),
-	) {}
+	) {
+		this.launcher = new LocalTerminalSessionLauncher(getSettings, log);
+	}
 
 	/** Targets are resolved from trusted runtime/project stores, never from renderer paths. */
 	private cwdFor(target: TerminalTarget): string {
@@ -128,7 +60,7 @@ export class TerminalSessionManager {
 	 * 返回前检测每个候选是否可 spawn，不可用的标记为 available: false。
 	 */
 	listShells(): { shell: TerminalShell; label: string; available: boolean }[] {
-		return this.shellCandidates().map((c) => ({
+		return this.launcher.candidates().map((c) => ({
 			shell: c.shell,
 			label: this.displayShell(c.shell),
 			available: true,
@@ -149,7 +81,7 @@ export class TerminalSessionManager {
 		const runtimes = this.ensureOwner(ownerKey);
 		const index = runtimes.size + 1;
 		const id = randomUUID();
-		const spawned = this.spawnShell(resolvedCwd, shell);
+		const spawned = this.launcher.spawn({ cwd: resolvedCwd, preferredShell: shell });
 		const tab: TerminalTab = {
 			id,
 			agentId: target.kind === "agent" ? target.agentId : "",
@@ -261,65 +193,6 @@ export class TerminalSessionManager {
 		if (runtime.buffer.length > MAX_TERMINAL_REPLAY_BUFFER) {
 			runtime.buffer = runtime.buffer.slice(-MAX_TERMINAL_REPLAY_BUFFER);
 		}
-	}
-
-	private spawnShell(cwd: string, preferredShell?: TerminalShell): { shell: TerminalShell; pty: pty.IPty } {
-		const candidates = this.shellCandidates();
-		// 如果有首选 shell，先在候选列表中查找匹配项
-		const ordered = preferredShell ? [...candidates.filter((c) => c.shell === preferredShell), ...candidates.filter((c) => c.shell !== preferredShell)] : candidates;
-		log(`spawnShell: preferred=${preferredShell}, ordered=${ordered.map((c) => c.shell).join(", ")}`);
-		let lastError: unknown;
-		for (const candidate of ordered) {
-			try {
-				// macOS GUI 应用（Electron）不继承登录 shell 的环境变量，
-				// LANG/LC_CTYPE 可能为空或 C，导致 shell 内 UTF-8 输出乱码。
-				// 显式注入 UTF-8 locale，让 shell 知道应以 UTF-8 解释字节流。
-				const env = { ...process.env };
-				if (!env.LANG) env.LANG = "en_US.UTF-8";
-				if (!env.LC_ALL) env.LC_ALL = "en_US.UTF-8";
-				const wsl = candidate.shell === "wsl" ? this.getSettings() : undefined;
-				let args = candidate.args;
-				let spawnCwd = cwd;
-				// WSL 终端：--cd 用 Linux 路径，PTY 的 cwd 仍必须是 Windows 主机路径。
-				if (wsl?.wslEnabled && wsl.wslDistro && wsl.wslUser) {
-					try {
-						args = [...args, "--cd", toWslLinuxPath(cwd, { distro: wsl.wslDistro })];
-						spawnCwd = toWindowsHostPath(cwd, { distro: wsl.wslDistro });
-					} catch (error) {
-						log(`Failed to convert WSL terminal cwd: ${error instanceof Error ? error.message : String(error)}`);
-					}
-				}
-				const terminal = pty.spawn(candidate.command, args, {
-					name: "xterm-256color",
-					cols: 80,
-					rows: 24,
-					cwd: spawnCwd,
-					env,
-				});
-				return { shell: candidate.shell, pty: terminal };
-			} catch (error) {
-				lastError = error;
-				log(`Failed to spawn ${candidate.shell} (${candidate.command}): ${error instanceof Error ? error.message : String(error)}`);
-			}
-		}
-		throw lastError instanceof Error ? lastError : new Error("No supported shell found");
-	}
-
-	private shellCandidates(): TerminalShellCandidate[] {
-		const candidates = getTerminalShellCandidates(process.platform, process.env);
-		const settings = this.getSettings();
-		if (process.platform !== "win32" || !settings.wslEnabled || !settings.wslDistro || !settings.wslUser) {
-			return candidates;
-		}
-		const wslExe = getWslExe();
-		return [
-			{
-				shell: "wsl" as const,
-				command: wslExe.command,
-				args: ["-d", settings.wslDistro, "-u", settings.wslUser],
-			},
-			...candidates.filter((candidate) => candidate.shell !== "wsl"),
-		];
 	}
 
 	private displayShell(shell: TerminalShell) {

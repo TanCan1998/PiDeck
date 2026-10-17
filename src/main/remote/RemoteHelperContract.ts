@@ -105,6 +105,9 @@ export const REMOTE_HELPER_ERROR_CODES = [
 	"GIT_PUSH_REJECTED",
 	"GIT_PUSH_REMOTE_REFUSED",
 	"GIT_SYNC_FAILED",
+	/* F3 terminal launch ticket: the helper could not mint one (input) or could not publish it (deploy root). */
+	"TERMINAL_TICKET_INVALID",
+	"TERMINAL_TICKET_UNAVAILABLE",
 ] as const;
 export type RemoteHelperErrorCode = (typeof REMOTE_HELPER_ERROR_CODES)[number];
 
@@ -327,6 +330,7 @@ export const REMOTE_HELPER_CAPABILITIES = [
 	"git.pull",
 	"git.init",
 	"git.repos",
+	"terminal.prepare",
 ] as const;
 export type RemoteHelperCapability = (typeof REMOTE_HELPER_CAPABILITIES)[number];
 /**
@@ -452,6 +456,104 @@ export type RemoteHelperReadParams = { path: string; offset: number; bytes: numb
  * trusting a total from an earlier `fs.stat`, because the file may change between the two calls.
  */
 export type RemoteHelperReadResult = { chunk: string; bytes: number; eof: boolean };
+
+// ── F3: one-shot terminal launch ticket and the fixed terminal runner ─────────────────────────────
+
+/**
+ * Terminal launch ticket (security review F3, plan §6.5.2): main asks the helper for one opaque, single-use
+ * reference, launches the fixed `terminal-runner.mjs` with `ssh -tt`, and hands the reference to the runner over
+ * one bounded init frame. The renderer never supplies cwd/shell/argv/ticket; the helper mints the ticket for its
+ * own verified root and the binding facts main already proved (live locator host id, route digest, project id).
+ */
+export const REMOTE_HELPER_METHOD_TERMINAL_PREPARE = "terminal.prepare";
+/** A launch ticket lives long enough for one immediate launch and no longer. */
+export const REMOTE_TERMINAL_TICKET_TTL_MS = 120_000;
+export const REMOTE_TERMINAL_TICKET_REF_LENGTH = 32;
+export const REMOTE_TERMINAL_TICKET_MAX_BYTES = 4096;
+/** Directory under the deploy root; 0700 owner-only, deliberately outside the immutable bundle. */
+export const REMOTE_TERMINAL_TICKETS_DIRECTORY = "terminal-tickets";
+/** Bounded sweep: at most this many directory entries are inspected per mint, and only our own entries are pruned. */
+export const REMOTE_TERMINAL_TICKET_SWEEP_LIMIT = 256;
+export const REMOTE_TERMINAL_TICKET_VERSION = 1;
+/** The only launch kind this batch mints: only project roots may be initialized this way. */
+export type RemoteTerminalPrepareParams = { kind: "project"; projectId: string; hostId: string; routeDigest: string };
+/** The only thing the helper answers: an opaque ref; the cwd lives in the ticket file, not in a frame. */
+export type RemoteTerminalPrepareResult = { ticketRef: string };
+/** Ticket content; every field is re-checked by the runner, never trusted as a launch plan. */
+export type RemoteTerminalTicket = { v: 1; kind: "project"; projectId: string; hostId: string; routeDigest: string; cwd: string; bundleSha256: string; ticketRef: string; expiresAt: number };
+export const REMOTE_TERMINAL_PROJECT_ID_MAX_LENGTH = 256;
+export const REMOTE_TERMINAL_HOST_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+export const REMOTE_TERMINAL_ROUTE_DIGEST_PATTERN = /^[0-9a-f]{64}$/;
+export const REMOTE_TERMINAL_TICKET_REF_PATTERN = /^[0-9a-f]{32}$/;
+export const REMOTE_TERMINAL_BUNDLE_SHA256_PATTERN = /^[0-9a-f]{64}$/;
+
+/**
+ * Runner handshake frames. The frozen runner writes an RS/US-wrapped ASCII marker terminated by CRLF; Windows
+ * node-pty ConPTY strips the C0 wrapper bytes (RS 0x1e / US 0x1f) but keeps CRLF, so main matches the plain
+ * marker and consumes through the CRLF. RS and a trailing US are tolerated when present (Linux PTY), never
+ * required: a frame that depends on a stripped byte would deadlock the handshake exactly like the real e2e did.
+ */
+export const REMOTE_TERMINAL_FRAME_RS = "\u001e";
+export const REMOTE_TERMINAL_FRAME_US = "\u001f";
+export const REMOTE_TERMINAL_FRAME_TERMINATOR = "\r\n";
+export const REMOTE_TERMINAL_READY_MARKER = "PIDECK_TERMINAL/1 READY";
+/** START carries the selected login shell (base64url of its absolute path) and is stripped before terminal bytes. */
+export const REMOTE_TERMINAL_START_MARKER = "PIDECK_TERMINAL/1 START ";
+export const REMOTE_TERMINAL_ERROR_MARKER = "PIDECK_TERMINAL/1 ERROR ";
+/** Exact wire frames the frozen runner writes; the parser accepts these with RS/US missing (ConPTY). */
+export const REMOTE_TERMINAL_READY_FRAME = REMOTE_TERMINAL_FRAME_RS + REMOTE_TERMINAL_READY_MARKER + REMOTE_TERMINAL_FRAME_US + REMOTE_TERMINAL_FRAME_TERMINATOR;
+export const REMOTE_TERMINAL_START_FRAME_PREFIX = REMOTE_TERMINAL_FRAME_RS + REMOTE_TERMINAL_START_MARKER;
+export const REMOTE_TERMINAL_ERROR_FRAME_PREFIX = REMOTE_TERMINAL_FRAME_RS + REMOTE_TERMINAL_ERROR_MARKER;
+export const REMOTE_TERMINAL_FRAME_SUFFIX = REMOTE_TERMINAL_FRAME_US;
+export const REMOTE_TERMINAL_INIT_FRAME_MAX_BYTES = 1024;
+export const REMOTE_TERMINAL_PRE_START_MAX_BYTES = 32 * 1024;
+export const REMOTE_TERMINAL_HANDSHAKE_TIMEOUT_MS = 30_000;
+export const REMOTE_TERMINAL_SHELL_PATH_MAX_BYTES = 4096;
+/** Closed vocabulary the frozen runner may answer in one ERROR frame; anything else is TERMINAL_INTERNAL. */
+export const REMOTE_TERMINAL_RUNNER_ERROR_CODES = [
+	"TERMINAL_TICKET_ALREADY_CONSUMED",
+	"TERMINAL_TICKET_EXPIRED",
+	"TERMINAL_TICKET_INVALID",
+	"TERMINAL_CWD_CHANGED",
+	"TERMINAL_BUNDLE_MISMATCH",
+	"TERMINAL_TERMIOS_FAILED",
+	"TERMINAL_INPUT_INVALID",
+	"TERMINAL_INPUT_TIMEOUT",
+	"TERMINAL_SHELL_UNAVAILABLE",
+	"TERMINAL_INTERNAL",
+] as const;
+export type RemoteTerminalRunnerErrorCode = (typeof REMOTE_TERMINAL_RUNNER_ERROR_CODES)[number];
+
+/**
+ * Encode the one line main writes after READY: base64url JSON, newline-terminated, bounded and control-free.
+ * The runner repeats this frame shape, its bounds and the ref pattern as literals under test.
+ */
+export function buildRemoteTerminalInitFrame(ticketRef: unknown): string {
+	if (typeof ticketRef !== "string" || REMOTE_TERMINAL_TICKET_REF_PATTERN.test(ticketRef) === false) throw new Error("REMOTE_TERMINAL_OPTIONS_INVALID");
+	const line = Buffer.from(JSON.stringify({ v: REMOTE_TERMINAL_TICKET_VERSION, ticketRef }), "utf8").toString("base64url");
+	if (line.length > REMOTE_TERMINAL_INIT_FRAME_MAX_BYTES) throw new Error("REMOTE_TERMINAL_OPTIONS_INVALID");
+	return line + "\n";
+}
+
+/**
+ * Decode one START frame's shell token. Accepts the bare base64url token the parser extracts as well as the
+ * whole wire frame, and tolerates a trailing US and/or CR/LF (ConPTY keeps CRLF, Linux PTY may add CR).
+ */
+export function decodeRemoteTerminalStartFrame(value: unknown): { shell: string } | null {
+	if (typeof value !== "string" || value.length === 0 || value.length > 2 * REMOTE_TERMINAL_SHELL_PATH_MAX_BYTES) return null;
+	let token = value;
+	if (token.startsWith(REMOTE_TERMINAL_START_FRAME_PREFIX)) token = token.slice(REMOTE_TERMINAL_START_FRAME_PREFIX.length);
+	else if (token.startsWith(REMOTE_TERMINAL_START_MARKER)) token = token.slice(REMOTE_TERMINAL_START_MARKER.length);
+	for (;;) {
+		const last = token.charAt(token.length - 1);
+		if (last === "\r" || last === "\n" || last === REMOTE_TERMINAL_FRAME_US) token = token.slice(0, -1);
+		else break;
+	}
+	if (token.length === 0 || token.length > 8192 || /^[A-Za-z0-9_-]+$/.test(token) === false) return null;
+	const shell = Buffer.from(token, "base64url").toString("utf8");
+	if (shell.length === 0 || shell.length > REMOTE_TERMINAL_SHELL_PATH_MAX_BYTES || shell.charAt(0) !== "/" || /[\u0000-\u001f\u007f]/.test(shell)) return null;
+	return { shell };
+}
 
 /** Staged-connection phases a bootstrap run walks through (plan §11.1 test-connection stages). */
 export type RemoteHelperHandshake = {

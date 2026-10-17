@@ -1,36 +1,25 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, symlinkSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import test from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
-test("terminal command pins actual cwd, quotes paths as data and only adjusts its own environment", (t) => {
-	const { buildRemoteTerminalCommand } = loadTsCommonJs("src/main/remote/RemoteTerminalCommand.ts");
-	const root = mkdtempSync(join(tmpdir(), "remote-terminal-command-"));
-	t.after(() => rmSync(root, { recursive: true, force: true }));
-	const directory = join(root, "space ' $ ; directory");
-	mkdirSync(directory);
-	const nonce = "1".repeat(32);
-	const command = buildRemoteTerminalCommand({ root: directory, nodePath: process.execPath, nonce });
-	const result = spawnSync("/bin/sh", ["-c", command], { input: "printf 'CWD=%s\n' \"$PWD\"; node -p 'process.version'; exit\n", encoding: "utf8", timeout: 5000 });
-	assert.equal(result.status, 0, result.stderr);
-	assert.ok(result.stdout.includes("\x1ePIDECK_TERM_" + nonce + "\x1f"));
-	assert.ok(result.stdout.includes("CWD=" + directory));
-	assert.ok(result.stdout.includes(process.version));
-	assert.ok(command.length <= 8192);
-	const alias = join(root, "alias");
-	symlinkSync(directory, alias);
-	const drift = spawnSync("/bin/sh", ["-c", buildRemoteTerminalCommand({ root: alias, nodePath: process.execPath, nonce })], { encoding: "utf8", timeout: 5000 });
-	assert.notEqual(drift.status, 0);
-	assert.ok(!drift.stdout.includes("PIDECK_TERM_"));
+const { buildRemoteTerminalRunnerCommand } = loadTsCommonJs("src/main/remote/RemoteTerminalCommand.ts");
+const BUNDLE = "a".repeat(64);
+const RUNNER = "/home/dev/.pideck/remote-host/bundles/" + BUNDLE + "/terminal-runner.mjs";
+const NODE = "/usr/local/bin/node";
+
+test("the remote terminal command is only the trusted node plus the active bundle terminal runner", () => {
+	assert.equal(buildRemoteTerminalRunnerCommand({ runnerPath: RUNNER, nodePath: NODE }), "'" + NODE + "' '" + RUNNER + "'");
+	const command = buildRemoteTerminalRunnerCommand({ runnerPath: "/home/my user/.pideck/remote-host/bundles/" + BUNDLE + "/terminal-runner.mjs", nodePath: "/opt/my node/bin/node" });
+	assert.ok(command.includes("/opt/my node/bin/node"));
+	assert.ok(command.includes("my user"));
+	// No cwd, shell, ticket, user text or option-looking token can travel in this command.
+	for (const value of ["/workspace/project", "bash", "ticketRef", "--root"]) assert.equal(command.includes(value), false);
 });
 
-test("terminal command rejects noncanonical roots, control bytes, invalid nonces and Node paths", () => {
-	const { buildRemoteTerminalCommand } = loadTsCommonJs("src/main/remote/RemoteTerminalCommand.ts");
-	const valid = { root: "/workspace/one", nodePath: "/node/bin/node", nonce: "a".repeat(32) };
-	for (const root of ["/", "relative", "/a/../b", "/a/", "/a\n"]) assert.throws(() => buildRemoteTerminalCommand({ ...valid, root }));
-	for (const nonce of ["", "a".repeat(33), "not-a-command"]) assert.throws(() => buildRemoteTerminalCommand({ ...valid, nonce }));
-	assert.throws(() => buildRemoteTerminalCommand({ ...valid, nodePath: "node" }));
+test("only a terminal runner inside an active content-addressed bundle is accepted", () => {
+	for (const runnerPath of ["terminal-runner.mjs", "relative/terminal-runner.mjs", "/home/dev/terminal-runner.mjs", "/home/dev/.pideck/remote-host/bundles/" + BUNDLE + "/runner.mjs", "/home/dev/.pideck/remote-host/bundles/zzz/terminal-runner.mjs"]) {
+		assert.throws(() => buildRemoteTerminalRunnerCommand({ runnerPath, nodePath: NODE }), /REMOTE_TERMINAL_OPTIONS_INVALID/, String(runnerPath));
+	}
+	for (const nodePath of ["node", ""]) assert.throws(() => buildRemoteTerminalRunnerCommand({ runnerPath: RUNNER, nodePath }), /REMOTE_TERMINAL_OPTIONS_INVALID/);
+	assert.ok(buildRemoteTerminalRunnerCommand({ runnerPath: RUNNER, nodePath: "/opt/my node/bin/node" }).includes("/opt/my node/bin/node"));
 });

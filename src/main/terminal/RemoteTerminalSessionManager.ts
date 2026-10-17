@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { IPty } from "node-pty";
 import { ipcChannels } from "../../shared/ipc";
 import type { TerminalTab, TerminalShell } from "../../shared/types/terminal";
@@ -8,10 +8,16 @@ export type RemoteTerminalResource = {
 	pty: Pick<IPty, "write" | "resize" | "pause" | "resume">;
 	assertCurrent(): Promise<void>;
 	dispose(): void;
+	/** The login shell the frozen runner selected, as reported by its START frame (main-side record only). */
+	shell?: string;
 };
 export type RemoteTerminalOptions = {
 	locator(projectId: string): { hostId: string; remotePath: string } | undefined;
-	start(target: RemoteTerminalTarget, nonce: string, signal: AbortSignal, callbacks: { data(data: string): void; exit(code: number): void }): Promise<RemoteTerminalResource>;
+	/**
+	 * The SSH adapter owns ticket minting and the runner handshake; this resolves only after the runner confirmed
+	 * the login shell, so a tab is published on the same evidence as before (never on a guessed prompt).
+	 */
+	start(target: RemoteTerminalTarget, signal: AbortSignal, callbacks: { data(data: string): void; exit(code: number): void }): Promise<RemoteTerminalResource>;
 	emit(senderId: number, channel: string, payload: unknown): void;
 	startupTimeoutMs?: number;
 };
@@ -19,16 +25,10 @@ type Runtime = {
 	tab: TerminalTab;
 	senderId: number;
 	target: RemoteTerminalTarget;
-	nonce: string;
 	controller: AbortController;
 	resource?: RemoteTerminalResource;
 	closed: boolean;
 	published: boolean;
-	ready: boolean;
-	handshake: string;
-	readyPromise: Promise<void>;
-	resolveReady(): void;
-	rejectReady(error: Error): void;
 	timer?: ReturnType<typeof setTimeout>;
 	error?: Error;
 	exitEmitted?: boolean;
@@ -49,7 +49,7 @@ const PACKET_LIMIT = 32 * 1024;
 /** Keep unexpected native errors, executable paths and SSH connection details out of IPC errors. */
 function stableError(error: unknown): Error {
 	const code = typeof error === "object" && error !== null && "message" in error && typeof error.message === "string" ? error.message : "";
-	return new Error(/^(?:SSH_|REMOTE_|PROJECT_)[A-Z0-9_]{1,100}$/.test(code) ? code : "REMOTE_TERMINAL_START_FAILED");
+	return new Error(/^(?:SSH_|REMOTE_|PROJECT_|TERMINAL_)[A-Z0-9_]{1,100}$/.test(code) ? code : "REMOTE_TERMINAL_START_FAILED");
 }
 
 /** Project/window-owned interactive SSH sessions; native terminal routing remains a separate domain. */
@@ -95,7 +95,7 @@ export class RemoteTerminalSessionManager {
 		return task;
 	}
 
-	/** Publish only after the private startup marker proves the remote entry reached its cwd checks. */
+	/** Publish only after the launcher confirmed the runner consumed its ticket and reached the login shell. */
 	async create(senderId: number, projectId: string, shell?: TerminalShell): Promise<TerminalTab> {
 		if (this.disposed) throw new Error("REMOTE_TERMINAL_CLOSED");
 		if (!Number.isSafeInteger(senderId) || senderId < 1) throw new Error("REMOTE_TERMINAL_OWNER_MISMATCH");
@@ -104,27 +104,13 @@ export class RemoteTerminalSessionManager {
 		if (!locator) throw new Error("PROJECT_NOT_FOUND");
 		const owned = [...this.runtimes.values()].filter((r) => r.senderId === senderId);
 		if (this.runtimes.size >= 32 || owned.length >= 16 || owned.filter((r) => r.target.projectId === projectId).length >= 4) throw new Error("REMOTE_TERMINAL_LIMIT");
-		let resolveReady: () => void = () => {};
-		let rejectReady: (error: Error) => void = () => {};
-		const readyPromise = new Promise<void>((resolve, reject) => {
-			resolveReady = resolve;
-			rejectReady = reject;
-		});
-		// Launch failure may occur before create reaches await readyPromise.
-		void readyPromise.catch(() => undefined);
 		const r: Runtime = {
 			tab: { id: randomUUID(), agentId: "", ownerKey: `project:${projectId}`, title: `SSH ${owned.filter((r) => r.target.projectId === projectId).length + 1}`, shell: "sh", location: "ssh", createdAt: Date.now() },
 			senderId,
 			target: { projectId, hostId: locator.hostId, remotePath: locator.remotePath },
-			nonce: randomBytes(16).toString("hex"),
 			controller: new AbortController(),
 			closed: false,
 			published: false,
-			ready: false,
-			handshake: "",
-			readyPromise,
-			resolveReady,
-			rejectReady,
 			queue: "",
 			queueBytes: 0,
 			paused: false,
@@ -139,7 +125,7 @@ export class RemoteTerminalSessionManager {
 		r.timer = setTimeout(() => this.finish(r, "REMOTE_TERMINAL_START_TIMEOUT"), this.options.startupTimeoutMs ?? 30_000);
 		try {
 			const cancelled = new Promise<never>((_resolve, reject) => r.controller.signal.addEventListener("abort", () => reject(r.error ?? new Error("REMOTE_TERMINAL_CLOSED")), { once: true }));
-			const starting = this.options.start(r.target, r.nonce, r.controller.signal, { data: (data) => this.receive(r, data), exit: (code) => this.finish(r, r.ready ? undefined : "REMOTE_TERMINAL_START_FAILED", code) }).then((resource) => {
+			const starting = this.options.start(r.target, r.controller.signal, { data: (data) => this.receive(r, data), exit: (code) => this.finish(r, r.published ? undefined : "REMOTE_TERMINAL_START_FAILED", code) }).then((resource) => {
 				// A timed-out bootstrap may finish later: observe it and release, never publish a late PTY.
 				if (r.closed) resource.dispose();
 				return resource;
@@ -149,7 +135,6 @@ export class RemoteTerminalSessionManager {
 				r.resource.dispose();
 				throw r.error ?? new Error("REMOTE_TERMINAL_CLOSED");
 			}
-			await r.readyPromise;
 			await this.guard(r);
 			if (r.timer) clearTimeout(r.timer);
 			r.published = true;
@@ -229,20 +214,6 @@ export class RemoteTerminalSessionManager {
 
 	private receive(r: Runtime, data: string): void {
 		if (r.closed) return;
-		if (!r.ready) {
-			r.handshake += data;
-			if (Buffer.byteLength(r.handshake) > PACKET_LIMIT) {
-				this.finish(r, "REMOTE_TERMINAL_START_FAILED");
-				return;
-			}
-			const marker = `\x1ePIDECK_TERM_${r.nonce}\x1f`;
-			const at = r.handshake.indexOf(marker);
-			if (at < 0) return;
-			data = r.handshake.slice(0, at) + r.handshake.slice(at + marker.length);
-			r.handshake = "";
-			r.ready = true;
-			r.resolveReady();
-		}
 		r.queue += data;
 		r.queueBytes += Buffer.byteLength(data);
 		if (r.queueBytes > QUEUE_LIMIT) {
@@ -287,7 +258,6 @@ export class RemoteTerminalSessionManager {
 		r.error = reason ? new Error(reason) : undefined;
 		r.controller.abort();
 		if (r.timer) clearTimeout(r.timer);
-		r.rejectReady(r.error ?? new Error("REMOTE_TERMINAL_CLOSED"));
 		r.tab = { ...r.tab, exited: true, exitCode, exitReason: reason };
 		if (reason) {
 			r.queue = "";

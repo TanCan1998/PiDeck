@@ -16,7 +16,7 @@ function loadTranspiledModule(filePath, customRequire = require) {
 			esModuleInterop: true,
 		},
 	});
-	const sandbox = { exports: {}, require: customRequire };
+	const sandbox = { exports: {}, require: customRequire, process };
 	vm.runInNewContext(outputText, sandbox, { filename: filePath });
 	return sandbox.exports;
 }
@@ -58,6 +58,15 @@ function loadTerminalSessionManagerModule() {
 			if (name === "../wsl/wslExe") {
 				return { getWslExe: () => ({ command: "wsl.exe", shell: false }) };
 			}
+			if (name === "./TerminalSessionLauncher")
+				return loadTranspiledModule("src/main/terminal/TerminalSessionLauncher.ts", (inner) => {
+					if (inner === "node-pty") return {};
+					if (inner === "../../shared/types/terminal") return loadTranspiledModule("src/shared/types/terminal.ts");
+					if (inner === "../wsl/WslPaths") return loadTranspiledModule("src/main/wsl/WslPaths.ts");
+					if (inner === "../wsl/wslExe") return { getWslExe: () => ({ command: "wsl.exe", shell: false }) };
+					if (inner === "node:fs") return { existsSync: () => false };
+					return require(inner);
+				});
 			return require(name);
 		},
 	};
@@ -141,6 +150,15 @@ function loadWithPty() {
 			if (name === "../wsl/wslExe") {
 				return { getWslExe: () => ({ command: "wsl.exe", shell: false }) };
 			}
+			if (name === "./TerminalSessionLauncher")
+				return loadTranspiledModule("src/main/terminal/TerminalSessionLauncher.ts", (inner) => {
+					if (inner === "node-pty") return ptyStub;
+					if (inner === "../../shared/types/terminal") return loadTranspiledModule("src/shared/types/terminal.ts");
+					if (inner === "../wsl/WslPaths") return loadTranspiledModule("src/main/wsl/WslPaths.ts");
+					if (inner === "../wsl/wslExe") return { getWslExe: () => ({ command: "wsl.exe", shell: false }) };
+					if (inner === "node:fs") return { existsSync: () => false };
+					return require(inner);
+				});
 			return require(name);
 		},
 	};

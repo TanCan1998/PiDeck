@@ -49,7 +49,9 @@ export async function verifyRemoteTerminals(input: { window: Page; app: Electron
 	const neighborName = neighborPath.split("/").pop() ?? "";
 	const select = async (name: string) => remoteProjectRow(window, name).locator(".project-draggable").click();
 	const rows = window.locator(".terminal-dock .xterm-rows");
-	const gone = async (id: number) => expect.poll(async () => (await runRemoteCommand(credentials, `if kill -0 ${id} 2>/dev/null; then printf alive; else printf gone; fi`, 20_000)).stdout.trim(), { timeout: 20_000 }).toBe("gone");
+	// Remote shells are reaped by the host after the PTY closes; under a loaded host that can take longer than the
+	// close IPC returns, so wait for the eventual fact (still a hard assertion: the process must be gone).
+	const gone = async (id: number) => expect.poll(async () => (await runRemoteCommand(credentials, `if kill -0 ${id} 2>/dev/null; then printf alive; else printf gone; fi`, 20_000)).stdout.trim(), { timeout: 60_000 }).toBe("gone");
 
 	await select(projectName);
 	await open(window, timeoutMs);

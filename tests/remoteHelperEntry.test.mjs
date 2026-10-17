@@ -58,6 +58,7 @@ const {
 	REMOTE_GIT_SYNC_TIMEOUT_MS,
 } = loadTsCommonJs("src/main/remote/RemoteHelperContract.ts");
 const { REMOTE_HELPER_ARTIFACTS, REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_HELPER_ENTRY_SHA256, REMOTE_HELPER_ENTRY_VERSION, REMOTE_HELPER_GIT_READ_SHA256, REMOTE_HELPER_GIT_SYNC_SHA256, REMOTE_HELPER_GIT_WRITE_SHA256, REMOTE_HELPER_INLINE_SOURCE } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
+const { REMOTE_TERMINAL_RUNNER_ENTRY_SHA256 } = loadTsCommonJs("src/main/remote/RemoteTerminalRunnerEntry.ts");
 const { REMOTE_GIT_READ_SOURCE } = loadTsCommonJs("src/main/remote/RemoteGitReadSource.ts");
 const { materializeRemoteHelperArtifacts } = await import("./helpers/remoteHelperArtifacts.mjs");
 const { REMOTE_FRAME_DIAGNOSTIC_CODES, createRemoteControlClient } = loadTsCommonJs("src/main/remote/RemoteControlClient.ts");
@@ -67,7 +68,7 @@ const HOST_ID = "01234567-89ab-4def-8123-456789abcdef";
 /** The helper never resolves HOME into a path, so a POSIX literal is the honest fixture on any platform. */
 const HELPER_HOME = "/home/pideck-helper";
 /** Frozen digest, pinned here as well as in the module: editing the source means editing both. */
-const FROZEN_SHA256 = "7a77c38ec0b6b7b1a1be60c5cfcbbb9184bec09d3522886e2a8de9acd59d514a";
+const FROZEN_SHA256 = "ff5d7de6d412df04c42e7901de8863d46df62cd599e94b05caa72225911289e4";
 const MAX_TEXT = 4096;
 const TEST_TIMEOUT_MS = 30_000;
 const GUARD_TIMEOUT_MS = 10_000;
@@ -383,10 +384,11 @@ helperTest("every frozen bundle artifact is one byte-frozen ASCII line with its 
 	// programs that worker imports - and each one is content-addressed and pinned on its own. A change is only
 	// legitimate together with a deliberate update of that file's digest.
 	const expected = new Map([
-		["helper.mjs", { sha256: FROZEN_SHA256, builtins: ["node:fs", "node:path"], imports: ["git-read.mjs"] }],
+		["helper.mjs", { sha256: FROZEN_SHA256, builtins: ["node:fs", "node:path", "node:crypto"], imports: ["git-read.mjs"] }],
 		["git-read.mjs", { sha256: REMOTE_HELPER_GIT_READ_SHA256, builtins: ["node:child_process", "node:crypto"], imports: ["git-write.mjs", "git-sync.mjs"] }],
 		["git-write.mjs", { sha256: REMOTE_HELPER_GIT_WRITE_SHA256, builtins: [], imports: [] }],
 		["git-sync.mjs", { sha256: REMOTE_HELPER_GIT_SYNC_SHA256, builtins: [], imports: [] }],
+		["terminal-runner.mjs", { sha256: REMOTE_TERMINAL_RUNNER_ENTRY_SHA256, builtins: ["node:fs", "node:path", "node:child_process"], imports: [] }],
 	]);
 	assert.deepEqual(
 		Array.from(REMOTE_HELPER_ARTIFACTS, (artifact) => artifact.name),
@@ -425,6 +427,8 @@ helperTest("every frozen bundle artifact is one byte-frozen ASCII line with its 
 		const mentions = REMOTE_HELPER_INLINE_SOURCE.split(`"${capability}"`).length - 1;
 		assert.ok(mentions >= 2, `${capability} must appear in CAPABILITIES and in the dispatch`);
 	}
+	// The terminal launch-ticket capability likewise has exactly one declaration and one dispatch arm.
+	assert.equal(REMOTE_HELPER_INLINE_SOURCE.split('"terminal.prepare"').length - 1, 2, "terminal.prepare appears exactly once in CAPABILITIES and once in the dispatch");
 	// G5c: the init capability has no other literal occurrence, so "one declaration + one dispatch arm" is exact.
 	assert.equal(REMOTE_HELPER_INLINE_SOURCE.split('"git.init"').length - 1, 2, "git.init appears exactly once in CAPABILITIES and once in the dispatch");
 	// G5d: discovery is advertised and dispatched exactly once, and the entry validates the optional repo scope itself.
@@ -470,7 +474,7 @@ helperTest("every frozen bundle artifact is one byte-frozen ASCII line with its 
 helperTest("the exported entry identity matches the frozen source", () => {
 	assert.equal(REMOTE_HELPER_ENTRY_FILE_NAME, "helper.mjs");
 	assert.match(REMOTE_HELPER_ENTRY_VERSION, /^\d+\.\d+\.\d+$/);
-	assert.equal(REMOTE_HELPER_ENTRY_VERSION, "1.19.0", "the nested-write batch is helper 1.19.0");
+	assert.equal(REMOTE_HELPER_ENTRY_VERSION, "1.20.1", "the ConPTY frame-termination follow-up is helper 1.20.1");
 	// The frozen source cannot import the contract, so its literals are checked against it here.
 	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes(`"${REMOTE_HELPER_ENTRY_VERSION}"`), "hello must report REMOTE_HELPER_ENTRY_VERSION");
 	for (const token of [REMOTE_HELPER_METHOD_HELLO, REMOTE_HELPER_METHOD_ECHO, REMOTE_HELPER_METHOD_CANCEL, REMOTE_HELPER_METHOD_FS_STAT, REMOTE_HELPER_METHOD_FS_LIST, REMOTE_HELPER_METHOD_FS_READ]) {
