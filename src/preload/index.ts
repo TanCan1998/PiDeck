@@ -302,6 +302,12 @@ const api = {
 	 *（返回的条目类型里结构上就没有这些字段，见 `shared/types/remoteTrust.ts`）。
 	 * 决策只影响**下一次 spawn** 传给远端 pi 的参数（`--approve/--no-approve`）。
 	 */
+	/**
+	 * 远端 Pi 模型目录（Phase 5 row 819 的“在目标主机执行模型拉取”）：只传 hostId，main 自己解析该主机的
+	 * 远端项目并找一台存活的远端 runtime；返回的是脱敏 allowlist，不含 apiKey/baseUrl/agentId。
+	 * 功能未启用或探测服务未装配时返回稳定码。
+	 */
+	probeRemoteModels: (hostId: string) => ipcRenderer.invoke(ipcChannels.remotePiModels, hostId) as Promise<import("../shared/types/remoteModel").RemoteModelProbeResult>,
 	remoteTrust: {
 		/** 只读：列出已记录决策（含因 endpoint 变更已作废的条目）。功能未启用时返回稳定码。 */
 		list: () => ipcRenderer.invoke(ipcChannels.remoteTrustList) as Promise<import("../shared/types/remoteTrust").RemoteProjectTrustListResult>,

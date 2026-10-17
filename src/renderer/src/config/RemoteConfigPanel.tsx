@@ -6,6 +6,7 @@ import { Button } from "../components/ui-shadcn/button";
 import { t, type TranslationKey } from "../i18n";
 import { formatConfigDocument, parseMergePatchText, remoteConfigErrorKey, shortConfigDigest } from "./remoteConfigModel";
 import { RemoteConfigDeferredOperations, RemoteConfigUnsupportedNotice } from "./RemoteConfigUnsupportedNotice";
+import { RemoteModelCatalogSection } from "./RemoteModelCatalogSection";
 import { useRemotePiConfigPanel } from "./useRemotePiConfigPanel";
 
 /**
@@ -186,7 +187,7 @@ export function RemoteConfigPanel(props: { file: PiConfigFileKey; hostId: string
 						</div>
 					</div>
 
-					<RemoteConfigDeferredOperations />
+					{props.file === "models" ? <RemoteModelCatalogSection hostId={props.hostId} /> : <RemoteConfigDeferredOperations />}
 				</>
 			) : null}
 		</div>

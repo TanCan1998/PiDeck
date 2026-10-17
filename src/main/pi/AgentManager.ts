@@ -1020,6 +1020,26 @@ export class AgentManager {
 		return false;
 	}
 
+	/**
+	 * 远端模型目录探测（Phase 5 row 819）的窄接口：只回答「这些远端项目里是否已有一台存活的远端 runtime」，
+	 * 命中时只给 agentId。
+	 *
+	 * 为什么不直接把 runtime 暴露给探测服务：agentId 是本次进程内 RPC 的唯一句柄，探测服务只需要把它交给
+	 * 已有 getAvailableModels；项目集合由 main 从 ProjectStore 解析，渲染层没有任何输入能选择 runtime。
+	 * 判据与进程监控一致（process.isRunning），并且必须仍是远端项目，避免把本机 runtime 当成远端答案。
+	 */
+	findLiveRemoteAgentId(projectIds: readonly string[]): string | undefined {
+		if (projectIds.length === 0) return undefined;
+		const candidates = new Set(projectIds);
+		for (const [agentId, runtime] of this.agents) {
+			if (!candidates.has(runtime.tab.projectId)) continue;
+			if (!runtime.process.isRunning()) continue;
+			if (!this.isRemoteRuntime(runtime.tab.projectId)) continue;
+			return agentId;
+		}
+		return undefined;
+	}
+
 	getMessages(agentId: string) {
 		return this.messages.get(agentId) ?? [];
 	}

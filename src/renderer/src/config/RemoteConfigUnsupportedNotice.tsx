@@ -7,8 +7,8 @@ import { t, type TranslationKey } from "../i18n";
  * the shared closed vocabulary so tests can pin copy to protocol instead of prose.
  */
 export const REMOTE_CONFIG_DEFERRED_PROVIDER_ENTRIES: ReadonlyArray<{ labelKey: TranslationKey; code: string }> = [
-	{ labelKey: "remoteConfig.disabled.providerTest", code: REMOTE_CONFIG_CODES.providerOperationUnsupported },
-	{ labelKey: "remoteConfig.disabled.fetchModels", code: REMOTE_CONFIG_CODES.providerOperationUnsupported },
+	// Provider test/model fetch are replaced for models by the live-runtime catalog probe; usage query stays
+	// v1-disabled (arbitrary probe templates cannot be allowlisted/redacted yet).
 	{ labelKey: "remoteConfig.disabled.usage", code: REMOTE_CONFIG_CODES.providerOperationUnsupported },
 ];
 

@@ -96,8 +96,8 @@ test("the remote panel renders only sanitized snapshot metadata, never secret va
 	assert.match(panel, /data-testid="remote-config-patch"/);
 	assert.match(panel, /data-testid="remote-config-save"/);
 	assert.doesNotMatch(panel, /expectedVersion.*CodeMirror|CodeMirror.*expectedVersion/);
-	// Deferred provider operations show stable-code copy inside the panel.
-	assert.match(panel, /<RemoteConfigDeferredOperations \/>/);
+	// The models file gets the real live-runtime catalog action; settings keeps the usage-disabled note.
+	assert.match(panel, /props\.file === "models" \? <RemoteModelCatalogSection hostId=\{props\.hostId\} \/> : <RemoteConfigDeferredOperations \/>/);
 });
 
 test("the hook is fail-closed until the security A-fix wires preload, and never guesses a version", () => {
@@ -127,7 +127,10 @@ test("reserved keys are refused in the renderer before any IPC call (A1 early gu
 test("disabled provider operations and unsupported pages carry the shared closed codes", () => {
 	const shared = loadTsCommonJs("src/shared/piConfig.ts");
 	const noticeModule = loadTsCommonJs(NOTICE);
-	assert.equal(noticeModule.REMOTE_CONFIG_DEFERRED_PROVIDER_ENTRIES.length, 3);
+	// Provider test/model fetch are now the real live-runtime catalog action (models panel only); only the usage
+	// query remains in the disabled list.
+	assert.equal(noticeModule.REMOTE_CONFIG_DEFERRED_PROVIDER_ENTRIES.length, 1);
+	assert.equal(noticeModule.REMOTE_CONFIG_DEFERRED_PROVIDER_ENTRIES[0].labelKey, "remoteConfig.disabled.usage");
 	for (const entry of noticeModule.REMOTE_CONFIG_DEFERRED_PROVIDER_ENTRIES) assert.equal(entry.code, shared.REMOTE_CONFIG_CODES.providerOperationUnsupported);
 	for (const tab of ["auth", "trust", "mcp", "raw"]) assert.equal(noticeModule.REMOTE_CONFIG_UNSUPPORTED_TAB_COPY[tab].code, shared.REMOTE_CONFIG_CODES.unsupported);
 	// Stable code is rendered, not only in a title attribute.

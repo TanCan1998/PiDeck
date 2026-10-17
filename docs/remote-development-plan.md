@@ -464,6 +464,7 @@ Phase 5 helper method 与 preload/UI capability 必须从这张表生成同一�
 - `RemotePiConfigBackend` 通过 helper 的 config scope 访问 allowlist 中的 `models.json`、`settings.json` 和受支持的配置项，复用与本地相同的 schema/fixture，并使用 `expectedVersion` + 原子写；禁止退化成任意 `~/.pi/agent` 文件读写。
 - 远端配置 DTO 不返回已有 secret 明文，只返回 `missing | configured`；保存使用 patch 语义，未填写 replacement 时在远端保留原值。`auth.json` 不通过 helper 读取或写入，远端登录首版只走远端终端 `/login`。
 - provider 连接测试与模型目录拉取必须在凭据和 provider 实际所在的远端执行，只回传脱敏结果。远端 v1 明确不支持「用量查询」：现有 provider-specific 与 `usage-probes.json` 模板都可能携带任意 URL/header/body，在定义远端 allowlist request schema 与 secret redaction 前，remote target 下入口禁用并解释；绝不能误用本地网络或本地 key。
+> v1 更新（task-18）：**模型目录拉取**已由上述 host 级 live runtime 探测实现（`remote:pi-models`，不经 helper）；本条 DEFERRED 继续适用于**逐供应商合成连接探测**与**用量查询**。
 - 远端 Raw Files、MCP 和可能含未知 secret 的配置在完成字段级脱敏与保留写入前保持禁用；不能为了功能对齐把完整文件拉回本机。
 - 项目级 prompts/skills/extensions 由 project location backend 读取；远端 user scope 默认使用远端既有资源。跨 host 复制/同步仍属于 Phase 6，必须显式选择且永不包含 `auth.json`。
 
@@ -870,6 +871,8 @@ Phase 1 是全计划风险最高的契约迁移（全库 path-bearing contract �
 | 浏览器服务 | 本地 | 可后续 | 需端口转发设计 |
 
 > **状态（2026-10-18，file-mgmt 赛道）**：Phase 5 远端会话数据删除已交付，范围是**已归档**远端会话（id-only 请求 → main PendingConfirmationBroker 一次性确认 → 有界 Node rm + canonical containment → 归档索引/墓碑清理；回执丢失=RESULT_UNCONFIRMED 不重试、不自动刷新掉）。活动/未归档远端会话的远端文件删除仍 fail-closed（必须先归档，才有显式永久删除入口；本机归档与 DSH 行保持回收站删除不变）。证据：tests/remoteSessionDelete.test.mjs（POSIX 真实脚本 + 真实 SessionCatalog/sessionIpc + 假 SSH exec）、tests/remoteSessionDeleteUi.test.mjs；真机 e2e 已作者化（remoteSessionAcceptance 归档步骤），未由本赛道执行。
+
+> **状态（2026-10-18，task-18 远端 provider 模型目录 v1）**：host 级 `remote:pi-models` 已交付——渲染层只传 `hostId`，main 从 ProjectStore 解析该主机的远端项目、经窄 `AgentManager.findLiveRemoteAgentId(projectIds)` 找到**存活**远端 runtime，再用既有 `getAvailableModels(agentId)` 做**单次 60s 有界**探测；返回 allowlist `{id,name?,provider,contextWindow?,maxTokens?,reasoning?,input?,images?}`，按 provider+id 去重、上限 1000、provider 排序，不含 apiKey/baseUrl/raw runtime/agentId。闭集码 `REMOTE_MODEL_PROBE_TARGET_INVALID/NO_PROJECT/NO_RUNTIME/UNAVAILABLE/FAILED/EMPTY`；`NO_RUNTIME` 文案要求“请先打开该主机的远端会话”。renderer 只在远端 models 面板提供“拉取远端模型目录（测试连接）”（loading / provider 分组+计数 / EMPTY / 稳定码错误），auth/trust/mcp/raw 与用量查询仍禁用；**逐供应商合成 HTTP 探测不在 v1**，UI 文案已声明。证据：tests/remotePiModelProbe.test.mjs、tests/remotePiModelWiring.test.mjs、tests/remoteModelCatalogModel.test.mjs；e2e 已作者化到产品路（settings→models→ssh target→fetch，未由本赛道执行）。
 
 > **状态（2026-10-18，task-14 Batch A）**：helper **1.21.0** config scope（新冻结点 `config.mjs` + 六个 artifact 重签）、shared `PiConfigTarget`/闭集码、main `RemotePiConfigBackend` 与四个 config IPC 的 target 路由（local 默认逐字不变、ssh 走 ready/pinned host、回复逐字段重验、无本地回落）已交付；provider test/模型拉取/usage 在 ssh target 下统一回 `REMOTE_CONFIG_PROVIDER_OPERATION_UNSUPPORTED`（零网络/零 helper 请求）。renderer 选择器/远端面板与 e2e 是 Batch B（task-15）。证据：tests/remoteHelperConfig.test.mjs（WSL 真实 helper 子进程）、tests/remoteConfigContract.test.mjs、tests/remotePiConfigBackend.test.mjs、tests/remotePiConfigRouting.test.mjs。
 

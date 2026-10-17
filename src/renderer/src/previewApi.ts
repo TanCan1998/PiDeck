@@ -391,6 +391,8 @@ export function createPreviewApi(): PiDesktopApi {
 			set: async () => ({ ok: false as const, code: "REMOTE_FEATURE_DISABLED" }),
 			clear: async () => ({ ok: false as const, code: "REMOTE_FEATURE_DISABLED" }),
 		},
+		// 预览模式没有主进程/远端 runtime：目录探测只报稳定码，不伪造模型列表。
+		probeRemoteModels: async () => ({ ok: false as const, code: "REMOTE_MODEL_PROBE_UNAVAILABLE" }),
 		projects: {
 			list: async () => projects,
 			add: async () => projects[0],

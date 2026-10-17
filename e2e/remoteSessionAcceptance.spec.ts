@@ -6,6 +6,7 @@ import { encodePiSessionDirectory } from "../src/main/remote/remoteSessionProjec
 import { initializeRemoteCodeFixture, verifyRemoteCodeEditing, verifyRemoteCodeIsolation, verifyRemoteCodeDisconnect, assertRemoteNodeTestExecuted } from "./remote-file-editing";
 import { createEmptyRemoteProjectInSidebar, verifyRemoteFileManagement } from "./remote-file-management";
 import { verifyRemoteConfig } from "./remote-config";
+import { verifyRemoteModelCatalog } from "./remote-model-catalog";
 import { verifyRemoteTerminals } from "./remote-terminal";
 import { createLocalGitReadControl, initializeRemoteGitFixture, verifyRemoteGitRead } from "./remote-git";
 import { verifyRemoteGitSoak } from "./remote-git-soak";
@@ -335,6 +336,11 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 				await expect.poll(async () => (await assistant.allInnerTexts()).join(" ").trim().length, { timeout: timeouts.helperMs, message: "assistant 正文不能是空串" }).toBeGreaterThan(0);
 				// 回合结束（发送钮回归）再进「停止会话」：这一条验的是会话停止，不是流式中途中断。
 				await expect(window.locator(".composer-send-primary")).toHaveAttribute("aria-label", "发送", { timeout: timeouts.helperMs });
+			});
+			await test.step("远端模型目录：设置 → 模型 → ssh 目标 → 拉取实时目录（非空 provider 列表）", async () => {
+				// 该步骤刻意放在 runtime 还活着的时候：v1 的“测试连接”= 目标主机上运行中的远端 pi 返回目录，
+				// 逐供应商合成 HTTP 探测与用量查询仍按 v1 契约禁用（轮询的 helper 不参与）。
+				await verifyRemoteModelCatalog({ window, credentials: creds, timeoutMs: timeouts.helperMs });
 			});
 			await test.step("运行中的远端会话拒绝归档，记录保留并显示先停 Agent 的提示", async () => {
 				const dialog = await openRemoteSessionManager(window, paths.projectName);

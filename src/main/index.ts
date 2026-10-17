@@ -273,6 +273,8 @@ import { registerRemoteProjectFileIpc } from "./ipc/remoteProjectFileIpc";
 import { registerRemoteProjectEntryIpc } from "./ipc/remoteProjectEntryIpc";
 import { registerRemoteProjectTrustIpc } from "./ipc/remoteProjectTrustIpc";
 import { registerRemoteSessionIpc } from "./ipc/remoteSessionIpc";
+import { registerRemotePiModelIpc } from "./ipc/remotePiModelIpc";
+import { createRemotePiModelProbe } from "./pi/RemotePiModelProbe";
 import { createRemoteHostConnectionService, type RemoteHostConnectionService } from "./remote/RemoteHostConnectionService";
 import { createSshClientRuntime, resolvePosixSshClient, type SshClientRuntime } from "./remote/SshClientRuntime";
 import { buildPinnedSshInvocation } from "./remote/SshVerifiedConnection";
@@ -2505,6 +2507,14 @@ function registerIpc() {
 			),
 		channels: { scan: ipcChannels.remoteSessionScan, register: ipcChannels.remoteSessionRegister, title: ipcChannels.remoteSessionTitle },
 	});
+	// 远端 Pi 模型目录（Phase 5 row 819）：host → ProjectStore 远端项目 → 窄 AgentManager 查找 live remote
+	// agentId → 已有 getAvailableModels RPC 一次有界请求。渲染层只能传 hostId；门禁与其它 remote 域同源。
+	const remotePiModelProbe = createRemotePiModelProbe({
+		projectIdsForHost: (hostId) => projectStore.list().flatMap((project) => (isRemoteProject(project) && project.locator.hostId === hostId ? [project.id] : [])),
+		findLiveAgentId: (projectIds) => agentManager?.findLiveRemoteAgentId(projectIds),
+		getAvailableModels: (agentId) => agentManager.getAvailableModels(agentId),
+	});
+	registerRemotePiModelIpc({ enabled: remoteExperimentEnabled, probe: remotePiModelProbe });
 	// 用量统计：业务在 UsageStatsService，handler 薄层只校验/适配
 	registerUsageStatsIpc(ipcMain, usageStatsService);
 	// 供应商认证（/login）：同样只做校验/适配，进程与协议在 PiAuthService

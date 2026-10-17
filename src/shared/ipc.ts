@@ -73,6 +73,8 @@ export const ipcChannels = {
 	remoteTrustSet: "remote:trust-set",
 	/** 远端项目 trust：撤销某 (hostId, 规范项目根) 的决策（含已作废的那条）。 */
 	remoteTrustClear: "remote:trust-clear",
+	// 远端 Pi 运行时的模型目录（host 级只读探测；渲染层只传 hostId，main 自己找 live agent）。
+	remotePiModels: "remote:pi-models",
 	projectsList: "projects:list",
 	projectsAdd: "projects:add",
 	// 文件夹右键菜单直达：按路径添加项目（渲染层确认后调用；projectsAdd 走系统目录选择框）

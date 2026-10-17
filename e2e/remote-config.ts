@@ -57,8 +57,11 @@ export async function verifyRemoteConfig(input: { window: Page; credentials: Rem
 		for (const badge of await panel.getByTestId("remote-config-secret-badge").all()) {
 			expect(["configured", "missing"]).toContain(await badge.getAttribute("data-status"));
 		}
-		// Deferred provider operations are visibly disabled with the shared stable code.
-		await expect(panel.getByTestId("remote-config-deferred-ops")).toContainText("REMOTE_CONFIG_PROVIDER_OPERATION_UNSUPPORTED");
+		// Model catalog action is real now; the per-provider synthetic probe / usage query stay visibly deferred.
+		const catalog = panel.getByTestId("remote-model-catalog");
+		await expect(catalog).toBeVisible({ timeout: timeoutMs });
+		await expect(catalog.getByTestId("remote-model-probe")).toBeVisible();
+		await expect(catalog.getByTestId("remote-model-deferred")).toBeVisible();
 
 		// One explicit non-secret merge patch through the UI editor (only adds a unique marker key).
 		await panel.getByTestId("remote-config-patch").locator(".cm-content").click();
