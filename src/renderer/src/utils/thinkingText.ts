@@ -35,6 +35,9 @@ export function stripThinkingTags(text: string): string {
 
 	/** 必须命中完整 HTMLTag，而非仅靠排除少数代码节点；保留 pre 等原生 HTML 区域。 */
 	function isOpeningTag(at: number): boolean {
+		// 文档首字符不可能落在代码围栏/缩进代码/HTML 注释与属性里（这些都要前置字符），
+		// 完整语法树在同一位形同样命中 HTMLTag[0,10]（父节点是 Paragraph，不是 HTMLBlock），
+		// 所以直接放行等价于走完校验，只省一次解析（tests/thinkingTextFallback 据此断言“首字符开始的思考零解析”）。
 		if (at === 0) return true;
 		tagTree ??= parseVisible();
 		if (!tagTree) return false;

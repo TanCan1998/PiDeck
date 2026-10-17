@@ -23,6 +23,17 @@ test("removes Feishu action markers before writing document body", () => {
 	assert.equal(stripFeishuActionMarkers("正文\n[CREATE_DOC:今日新闻]\n[SEND_FILE:/tmp/a.md]"), "正文");
 });
 
+test("未闭合 thinking 在飞书最终消息里从标记处丢弃", () => {
+	const { sanitizeFeishuUserVisibleText } = loadDocActionsModule();
+
+	assert.equal(sanitizeFeishuUserVisibleText("<thinking>内部推理</thinking>公开结论"), "公开结论");
+	// 未闭合：标记之后无法区分推理与正文，整段丢弃，不能把推理发进飞书
+	assert.equal(sanitizeFeishuUserVisibleText("正常回答\n\n<thinking>**Checking**\n内部推理还没收尾"), "正常回答");
+	assert.equal(sanitizeFeishuUserVisibleText("<thinking>只有推理"), "");
+	// 只有残留闭合标签时仅去标签，不丢正文
+	assert.equal(sanitizeFeishuUserVisibleText("残留片段</thinking>正文"), "残留片段正文");
+});
+
 test("builds Feishu text children from assistant body", () => {
 	const { buildFeishuTextChildren } = loadDocActionsModule();
 	const children = buildFeishuTextChildren("第一段\n\n第二段\n[CREATE_DOC:测试]");

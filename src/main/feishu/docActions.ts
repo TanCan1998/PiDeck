@@ -120,7 +120,10 @@ export function sanitizeFeishuUserVisibleText(text: string): string {
 	let next = text.replace(/\r\n/g, "\n");
 	// 思考过程不应出现在飞书最终消息里
 	next = next.replace(/<thinking>[\s\S]*?<\/thinking>/gi, "");
-	// 兼容模型直接输出未闭合标签的情况
+	// 兼容模型直接输出未闭合标签的情况：未闭合标记之后无法区分推理与正文，
+	// 与微信纯文本通道（weChatText.stripThinkingBlocks）同口径，从标记处整段丢弃。
+	const unclosedThinking = next.search(/<thinking>/i);
+	if (unclosedThinking >= 0) next = next.slice(0, unclosedThinking);
 	next = next.replace(/<\/?thinking>/gi, "");
 	next = stripHostInstruction(next);
 	next = stripFeishuDocActionHint(next);

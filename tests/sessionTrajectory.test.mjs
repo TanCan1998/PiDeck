@@ -1,39 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import ts from "typescript";
-import vm from "node:vm";
+import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
+/** 使用真实依赖图：buildTrajectory 经 answerText 复用 thinkingText 的可见正文口径，加载器不能写死依赖列表。 */
 function loadModule() {
-	const source = readFileSync("src/renderer/src/components/session/trajectory/buildTrajectory.ts", "utf8");
-	const { outputText } = ts.transpileModule(source, {
-		compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-	});
-	const sandbox = { exports: {}, module: { exports: {} }, require: loadTrajectoryDep };
-	sandbox.module.exports = sandbox.exports;
-	vm.runInNewContext(outputText, sandbox, { filename: "buildTrajectory.ts" });
-	return sandbox.exports;
-}
-
-/** buildTrajectory 依赖的 dsh 工具视图助手（独立纯模块，vm 内编译加载）。 */
-function loadTrajectoryDep(specifier) {
-	const file = specifier === "./dshToolView" ? "src/renderer/src/components/session/trajectory/dshToolView.ts" : specifier === "./trajectoryOrder" ? "src/renderer/src/components/session/trajectory/trajectoryOrder.ts" : undefined;
-	if (!file) throw new Error(`unexpected require: ${specifier}`);
-	const source = readFileSync(file, "utf8");
-	const { outputText } = ts.transpileModule(source, {
-		compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-	});
-	const sandbox = {
-		exports: {},
-		module: { exports: {} },
-		require: (inner) => {
-			if (inner === "./buildTrajectory") return {};
-			throw new Error(`unexpected nested require: ${inner}`);
-		},
-	};
-	sandbox.module.exports = sandbox.exports;
-	vm.runInNewContext(outputText, sandbox, { filename: file });
-	return sandbox.exports;
+	return loadTsCommonJs("src/renderer/src/components/session/trajectory/buildTrajectory.ts");
 }
 
 function msg(partial) {
@@ -89,6 +61,26 @@ test("user message opens a turn; assistant/tool/thinking belong to it", () => {
 	assert.equal(model.records.find((r) => r.kind === "thinking")?.durationMs, 300);
 	assert.equal(model.records.find((r) => r.kind === "assistant")?.durationMs, 100);
 	assert.equal(model.turns[0].durationMs, 800);
+});
+
+test("只藏推理、正文为空的未闭合 thinking 消息不生成 model 记录", () => {
+	const { buildTrajectory } = loadModule();
+	const model = buildTrajectory([
+		msg({ id: "u1", role: "user", text: "fix the bug", timestamp: 1000 }),
+		msg({
+			id: "a1",
+			role: "assistant",
+			text: "<thinking>只输出推理，没写闭合标签也没正文",
+			thinking: "只输出推理，没写闭合标签也没正文",
+			thinkingStartedAt: 1100,
+			thinkingEndedAt: 1400,
+			timestamp: 1500,
+			stopReason: "stop",
+		}),
+	]);
+	assert.equal(model.records.map((r) => r.kind).join(","), "user,thinking");
+	assert.ok(!model.records.some((r) => r.id === "a1"));
+	assert.equal(model.records.find((r) => r.kind === "thinking")?.id, "a1:thinking");
 });
 
 test("history assistant without thinking span uses previous message as start", () => {

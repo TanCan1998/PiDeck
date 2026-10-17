@@ -20,6 +20,7 @@
 
 import type { ChatMessage } from "../../../../../shared/types";
 import type { SessionProcessEvent } from "../../../../../shared/types/trajectory";
+import { cleanAnswerText } from "../timeline/answerText";
 import { toolViewDetail, toolViewInput, toolViewOutput, toolViewTitle, type DshToolViewEnvelope } from "./dshToolView";
 import { compareTrajectoryRecords, seqOfMessage, sortTurnRecords, wallTime } from "./trajectoryOrder";
 
@@ -140,8 +141,12 @@ function laneOf(kind: TrajectoryRecordKind): TrajectoryLane {
 	return "model";
 }
 
+/**
+ * 与主界面 groupToolMessages 的 isThinkingOnly 同口径：投影层把 thinking 块内联成 <thinking> 标签混进 text，
+ * 只藏推理、正文为空（含未闭合标记）的消息在轨迹里只应出现 thinking 记录，不能当成有正文的 model 记录。
+ */
 function isThinkingOnly(message: ChatMessage): boolean {
-	return message.role === "assistant" && Boolean(message.thinking?.trim()) && !message.text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, "").trim();
+	return message.role === "assistant" && Boolean(message.thinking?.trim()) && !cleanAnswerText(message.text);
 }
 
 function isInFlightTool(message: ChatMessage): boolean {

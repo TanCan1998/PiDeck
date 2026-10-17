@@ -23,6 +23,8 @@
 - 不修改 pi 的模型调用、工具行为、JSONL 原文、模型上下文或会话存储格式。
 - 不新增 IPC、全局状态、通信通道、编辑器或 Markdown 渲染引擎。
 - 用户原话不按思考清理；多选原始 Markdown 导出维持既有行为。助手纯文本复制与可见正文一致。
+- 飞书最终消息与微信纯文本通道同口径：成对块整段删除，未闭合标记之后整段丢弃（宁可不发，也不把推理发出去）。
+- 轨迹面板的 thinking-only 判定复用同一清理入口，未闭合 thinking 的消息不再被当成有正文的 model 记录。
 - 这是**展示兼容兜底，不是安全/隐私过滤器**。极端畸形文本耗尽预算时保留无法确认的内容，优先避免误删正常正文。
 - `3N` 限制累计送入解析器的字符量，不是严格 CPU 耗时或跨设备帧率保证。
 
@@ -37,10 +39,11 @@
 | `src/renderer/src/utils/thinkingText.ts` | 语法标记确认、源坐标隐藏区间、解析预算 |
 | `src/shared/markdownWhitespace.ts` | 主/渲染共用的保留代码缩进空白规则 |
 | `src/main/pi/messageContent.ts` | 桌面正文投影收口 |
-| `src/main/feishu/docActions.ts` | 兼容选项，非桌面调用保留旧默认行为 |
+| `src/main/feishu/docActions.ts` | 飞书最终消息同口径：未闭合标记之后整段丢弃 |
 | `src/renderer/src/components/session/timeline/answerText.ts` | 正文展示统一入口 |
 | `src/renderer/src/components/session/timeline/editableAnswerTarget.ts` | 编辑初值不再重复 trim |
 | `src/renderer/src/components/session/timeline/messageCopyText.ts` | 按角色处理多选纯文本复制源 |
+| `src/renderer/src/components/session/trajectory/buildTrajectory.ts` | 轨迹面板的 thinking-only 判定复用同一口径 |
 | `SurfaceComponents.tsx` / `WebAssistantText.tsx` / `SessionMessageTimeline.tsx` | 窄接口接线，不新增独立清理规则 |
 
 ## Checklist
