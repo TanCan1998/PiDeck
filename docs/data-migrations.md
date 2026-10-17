@@ -70,7 +70,8 @@
 | ID | 对象与 owner | PiDeck 责任及验收 |
 | --- | --- | --- |
 | UP-001 | DSH 0.1.5-rc.1 → 0.2.0-rc.2；会话 V3 → V4 由 DSH runtime 负责 | PiDeck 做 RPC/配置/投影适配及真实 runtime 隔离验收。只读时内存转换，写租约后发布独立 V4、保留 V3；不能只降 npm 版本回退，V4 新消息不会回填 V3。owner、验证证据与各平台未验收项统一见 [DSH 0.2.0 升级对照](dsh-0.2.0-migration.md) |
-| UP-002 | pi 自身会话格式、认证存储及 MCP 凭据迁移由 pi 负责 | PiDeck 保持 stdio RPC/既有认证边界；升级 pi 时验证会话恢复、读写及已有凭据可用，不另外实现 pi 存储迁移器 |
+| UP-002 | DSH 0.2.0-rc.2 → 0.2.1-rc.1；会话格式不变，仍由 DSH runtime 负责 V3/V4 | PiDeck 适配依赖布局、PeerScope 必填、wire 描述符与预设变化，并显式声明过去靠 hoist 出现在顶层的 profile 插件包；回退边界同 UP-001。验证证据与未验收项见 [DSH 0.2.1 升级对照](dsh-0.2.1-migration.md) |
+| UP-003 | pi 自身会话格式、认证存储及 MCP 凭据迁移由 pi 负责 | PiDeck 保持 stdio RPC/既有认证边界；升级 pi 时验证会话恢复、读写及已有凭据可用，不另外实现 pi 存储迁移器 |
 
 ## 用户主动导入与复制
 
