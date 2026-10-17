@@ -279,6 +279,7 @@ import { buildPinnedSshInvocation } from "./remote/SshVerifiedConnection";
 import { createRemoteSessionHistoryReader } from "./remote/RemoteSessionHistoryReader";
 import { createRemoteSessionArchive } from "./remote/RemoteSessionArchive";
 import { createRemoteSessionDelete } from "./remote/RemoteSessionDelete";
+import { createRemotePiConfigBackend } from "./config/RemotePiConfigBackend";
 import { createRemoteSessionHistoryWriter, type RemoteSessionMessageMutationPort } from "./remote/RemoteSessionHistoryWriter";
 import { exportRemoteSessionHtml, REMOTE_SESSION_EXPORT_LIMITS } from "./remote/RemoteSessionHtmlExport";
 import { createRemoteSessionScanner } from "./sessions/RemoteSessionScanner";
@@ -3204,10 +3205,28 @@ function registerIpc() {
 		getCachePath: () => join(app.getPath("userData"), "tokendance-models.json"),
 		log: (message, detail) => void appLogger.info("tokendance", message, detail),
 	});
+	/**
+	 * Phase 5 remote config scope (Batch A): every ssh target is one ready host's helper request. The host is
+	 * resolved through the same service the rest of the remote surface uses, so a disconnected/replaced host
+	 * fails closed with HOST_NOT_READY instead of reading anything local. Batch B adds the renderer selector; this
+	 * batch only routes and validates.
+	 */
+	const remotePiConfig = remoteExperimentEnabled
+		? createRemotePiConfigBackend({
+				request: async (hostId, method, params) => {
+					const pending = remoteHostServiceIfEnabled();
+					if (pending === undefined) throw new Error("REMOTE_CONFIG_UNAVAILABLE");
+					const service = await pending;
+					return service.request(hostId, method, params, { timeoutMs: 15_000 });
+				},
+			})
+		: undefined;
+
 	registerSystemIpc({
 		piLocator,
 		settingsStore,
 		configManager,
+		remotePiConfig,
 		projectResourceManager,
 		agentManager,
 		skillManager,

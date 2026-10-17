@@ -26,6 +26,8 @@ import type { AppInfo, AppLogLevel, AppLogQuery, AppSettings, AvailableModel, Ch
 import type { PiLocator } from "../pi/PiLocator";
 import type { SettingsStore } from "../settings/SettingsStore";
 import type { ConfigManager } from "../config/ConfigManager";
+import type { RemotePiConfigBackend } from "../config/RemotePiConfigBackend";
+import { createPiConfigRouter, rejectRemotePiConfigTarget } from "../config/PiConfigRouter";
 import type { AgentManager } from "../pi/AgentManager";
 import type { AppLogger } from "../logging/AppLogger";
 import type { RpcLogger } from "../logging/RpcLogger";
@@ -114,6 +116,8 @@ export type SystemIpcDeps = {
 	piLocator: PiLocator;
 	settingsStore: SettingsStore;
 	configManager: ConfigManager;
+	/** Phase 5 remote config scope (Batch A): absent when the remote experiment switch is off => ssh targets fail closed. */
+	remotePiConfig?: RemotePiConfigBackend;
 	projectResourceManager: ProjectResourceManager;
 	agentManager: AgentManager;
 	skillManager: SkillManager;
@@ -316,6 +320,7 @@ export function registerSystemIpc(deps: SystemIpcDeps): void {
 		piLocator,
 		settingsStore,
 		configManager,
+		remotePiConfig,
 		projectResourceManager,
 		agentManager,
 		skillManager,
@@ -372,6 +377,21 @@ export function registerSystemIpc(deps: SystemIpcDeps): void {
 		environmentDoctor,
 		logBundleExporter,
 	} = deps;
+
+	/**
+	 * Phase 5 remote config routing (Batch A): the local target keeps ConfigManager exactly as before; an ssh target
+	 * goes only to the injected RemotePiConfigBackend. Provider test/fetch/usage are local-only and refuse an ssh
+	 * target with REMOTE_CONFIG_PROVIDER_OPERATION_UNSUPPORTED before any network or helper request.
+	 */
+	const piConfigRouter = createPiConfigRouter({
+		local: {
+			getModelsConfig: () => configManager.getModelsConfig(),
+			getSettingsConfig: () => configManager.getSettingsConfig(),
+			saveModelsConfig: (data) => configManager.saveModelsConfig(data),
+			saveSettingsConfig: (settings) => configManager.saveSettingsConfig(settings),
+		},
+		remote: remotePiConfig,
+	});
 
 	/**
 	 * Models/auth 的任何写入都必须同时失效 CLI fallback 与 Pi-authoritative
@@ -1598,7 +1618,10 @@ export function registerSystemIpc(deps: SystemIpcDeps): void {
 
 	// ── 配置管理 ─────────────────────────────────────────────────────
 
-	ipcMain.handle(ipcChannels.configGetModels, () => configManager.getModelsConfig());
+	ipcMain.handle(ipcChannels.configGetModels, async (_event, options?: unknown) => {
+		const routed = await piConfigRouter.readModels(options);
+		return routed.kind === "local" ? routed.value : routed;
+	});
 	// 预览/执行单供应商互迁：方向必须是枚举，供应商名在服务层再校验。
 	ipcMain.handle(ipcChannels.configPreviewProviderMigration, async (_event, direction: unknown) => {
 		if (direction !== "pi-to-dsh" && direction !== "dsh-to-pi") {
@@ -1630,7 +1653,10 @@ export function registerSystemIpc(deps: SystemIpcDeps): void {
 		return result;
 	});
 	ipcMain.handle(ipcChannels.configGetAuth, () => configManager.getAuthConfig());
-	ipcMain.handle(ipcChannels.configGetSettings, () => configManager.getSettingsConfig());
+	ipcMain.handle(ipcChannels.configGetSettings, async (_event, options?: unknown) => {
+		const routed = await piConfigRouter.readSettings(options);
+		return routed.kind === "local" ? routed.value : routed;
+	});
 	ipcMain.handle(ipcChannels.configGetTrust, () => configManager.getTrustConfig());
 	// MCP project layers are selected by a stable registered project id; renderer paths are never trusted.
 	ipcMain.handle(ipcChannels.configGetMcp, (_event, projectId?: unknown) => {
@@ -1660,8 +1686,14 @@ export function registerSystemIpc(deps: SystemIpcDeps): void {
 	// 只读：pi 全局配置目录，供源文件编辑页标注实际路径（渲染层不感知配置位置）。
 	ipcMain.handle(ipcChannels.configGetDir, () => configManager.getConfigDir());
 	ipcMain.handle(ipcChannels.projectsTrustResponse, (_event, requestId: string, choice: "trust-remember" | "trust-session" | "deny") => agentManager.respondTrustRequest(requestId, choice));
-	ipcMain.handle(ipcChannels.configSaveModels, async (_event, data) => {
-		const result = await configManager.saveModelsConfig(data);
+	ipcMain.handle(ipcChannels.configSaveModels, async (_event, data, options?: unknown) => {
+		const routed = await piConfigRouter.saveModels(data, options);
+		if (routed.kind === "remote") {
+			// 远端 patch 成功：不触碰本机模型缓存/后台 fork（本机 models.json 没变），只回传供下一次 patch 的 version。
+			void appLogger.info("config", "Remote models config patched", { hostId: routed.hostId, version: routed.version });
+			return { valid: true, remote: { hostId: routed.hostId, file: routed.file, version: routed.version, sha256: routed.sha256 } };
+		}
+		const result = routed.value;
 		if (!result.valid) return result;
 		invalidateModelListCache();
 		// 即时验证：直接解析刚写入的配置（modelsFromPiConfig 纯函数，0 fork），保存按钮立即返回。
@@ -1689,8 +1721,13 @@ export function registerSystemIpc(deps: SystemIpcDeps): void {
 		void appLogger.info("config", "Auth config saved", { authCount: Object.keys(data ?? {}).length });
 		return result;
 	});
-	ipcMain.handle(ipcChannels.configSaveSettings, async (_event, settings) => {
-		const result = await configManager.saveSettingsConfig(settings);
+	ipcMain.handle(ipcChannels.configSaveSettings, async (_event, settings, options?: unknown) => {
+		const routed = await piConfigRouter.saveSettings(settings, options);
+		if (routed.kind === "remote") {
+			void appLogger.info("config", "Remote settings config patched", { hostId: routed.hostId, version: routed.version });
+			return { valid: true, remote: { hostId: routed.hostId, file: routed.file, version: routed.version, sha256: routed.sha256 } };
+		}
+		const result = routed.value;
 		void appLogger.info("config", "Pi settings config saved", { keys: Object.keys(settings ?? {}) });
 		return result;
 	});
@@ -1713,7 +1750,9 @@ export function registerSystemIpc(deps: SystemIpcDeps): void {
 		void appLogger.info("config", "Config imported", { bytes: Buffer.byteLength(packageJson, "utf8"), valid: result.valid });
 		return result;
 	});
-	ipcMain.handle(ipcChannels.configFetchModels, async (_event, payload: { baseUrl: string; apiKey: string; apiType?: string; headers?: Record<string, string>; proxyMode?: string }) => {
+	ipcMain.handle(ipcChannels.configFetchModels, async (_event, payload: { baseUrl: string; apiKey: string; apiType?: string; headers?: Record<string, string>; proxyMode?: string; target?: unknown }) => {
+		// remote target is explicitly deferred: the provider network call and its key must stay local-only.
+		rejectRemotePiConfigTarget(payload?.target);
 		// proxyMode 白名单收窄（渲染层不可信），再解析成主进程代理策略。
 		const proxyTarget = resolveConfigProxyTarget(settingsStore.get(), asConfigProxyMode(payload?.proxyMode));
 		const result = await configManager.fetchProviderModels(payload.baseUrl, payload.apiKey, payload.apiType, payload.headers, proxyTarget);
@@ -1827,6 +1866,8 @@ export function registerSystemIpc(deps: SystemIpcDeps): void {
 		}
 	});
 	ipcMain.handle(ipcChannels.configTestProvider, async (_event, payload: unknown) => {
+		// remote target is explicitly deferred: no local key/network may be used for another host.
+		rejectRemotePiConfigTarget(payload && typeof payload === "object" && !Array.isArray(payload) ? (payload as { target?: unknown }).target : undefined);
 		// 1) 边界校验：provider/model 名必须是有限的非空字符串；provider 必须是普通对象；
 		//    key 只写临时目录且不落日志，但仍限制长度防滥用。
 		const raw =
@@ -1876,7 +1917,9 @@ export function registerSystemIpc(deps: SystemIpcDeps): void {
 			await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
 		}
 	});
-	ipcMain.handle(ipcChannels.configFetchUsage, async (_event, payload: { provider: string; backend?: "pi" | "dsh" }) => {
+	ipcMain.handle(ipcChannels.configFetchUsage, async (_event, payload: { provider: string; backend?: "pi" | "dsh"; target?: unknown }) => {
+		// usage query stays v1-disabled for remote targets (arbitrary probe templates are not redacted yet).
+		rejectRemotePiConfigTarget(payload?.target);
 		// 1) 边界校验：provider 名必须是有限的非空字符串，避免把任意 IPC 载荷当路径/URL 用。
 		const provider = payload?.provider?.trim() ?? "";
 		if (!provider || provider.length > 128) {
@@ -1932,6 +1975,8 @@ export function registerSystemIpc(deps: SystemIpcDeps): void {
 	});
 	// 单条模板测试（弹窗「测试」按钮）：按模板 id + 覆盖字段构建候选，主进程解析端点与密钥。
 	ipcMain.handle(ipcChannels.configTestUsageProbe, async (_event, payload: unknown) => {
+		// usage query stays v1-disabled for remote targets.
+		rejectRemotePiConfigTarget(payload && typeof payload === "object" && !Array.isArray(payload) ? (payload as { target?: unknown }).target : undefined);
 		const input = payload && typeof payload === "object" && !Array.isArray(payload) ? (payload as UsageProbeTestInput) : ({} as UsageProbeTestInput);
 		const provider = typeof input.provider === "string" ? input.provider.trim() : "";
 		if (!provider || provider.length > 128) {

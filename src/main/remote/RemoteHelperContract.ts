@@ -108,6 +108,14 @@ export const REMOTE_HELPER_ERROR_CODES = [
 	/* F3 terminal launch ticket: the helper could not mint one (input) or could not publish it (deploy root). */
 	"TERMINAL_TICKET_INVALID",
 	"TERMINAL_TICKET_UNAVAILABLE",
+	/* Phase 5 config scope: target file invalid/oversized, stale expectedVersion, unusable path/dir, or a write whose
+	 * readback could not be confirmed. A helper without the config methods answers METHOD_NOT_FOUND instead. */
+	"CONFIG_FILE_INVALID",
+	"CONFIG_FILE_TOO_LARGE",
+	"CONFIG_VERSION_CONFLICT",
+	"CONFIG_PATH_UNSUPPORTED",
+	"CONFIG_RESULT_UNCONFIRMED",
+	"CONFIG_UNAVAILABLE",
 ] as const;
 export type RemoteHelperErrorCode = (typeof REMOTE_HELPER_ERROR_CODES)[number];
 
@@ -331,6 +339,8 @@ export const REMOTE_HELPER_CAPABILITIES = [
 	"git.init",
 	"git.repos",
 	"terminal.prepare",
+	"config.read",
+	"config.patch",
 ] as const;
 export type RemoteHelperCapability = (typeof REMOTE_HELPER_CAPABILITIES)[number];
 /**
@@ -456,6 +466,40 @@ export type RemoteHelperReadParams = { path: string; offset: number; bytes: numb
  * trusting a total from an earlier `fs.stat`, because the file may change between the two calls.
  */
 export type RemoteHelperReadResult = { chunk: string; bytes: number; eof: boolean };
+
+// ── Phase 5: remote Pi config scope (models.json / settings.json only) ─────────────────────────
+
+/**
+ * The config scope is deliberately tiny: two allowlisted files under the remote Pi agent directory, no path
+ * parameter, no auth.json. Read answers are sanitized (secret values become configured/missing); writes are
+ * RFC 7396 merge patches guarded by expectedVersion and an atomic temp+rename+fsync. The frozen config.mjs
+ * repeats these literals under test, exactly like the Git worker.
+ */
+export const REMOTE_HELPER_METHOD_CONFIG_READ = "config.read";
+export const REMOTE_HELPER_METHOD_CONFIG_PATCH = "config.patch";
+export type RemoteConfigFileKey = "models" | "settings";
+/** Upper bound for either agent file (raw bytes) and for the serialized patched result. */
+export const REMOTE_CONFIG_MAX_FILE_BYTES = 1024 * 1024;
+/** Bounded patch/merge walk: an answer that would need more than this is refused, never truncated. */
+export const REMOTE_CONFIG_MAX_NODES = 20_000;
+export const REMOTE_CONFIG_MAX_DEPTH = 32;
+/**
+ * Secret key names the sanitizer redacts recursively (case-insensitive). This is the ONE pattern main and the
+ * frozen config.mjs share; the frozen body repeats the literal and a test asserts the repetition.
+ */
+export const REMOTE_CONFIG_SECRET_KEY_PATTERN = /(?:api[-_]?key|access[-_]?token|refresh[-_]?token|token|secret|password|passwd|authorization|cookie|credential|private[-_]?key)/i;
+/** configured and missing are the only values a secret position may carry in a remote DTO. */
+export type RemoteConfigSecretStatus = "configured" | "missing";
+export type RemoteConfigSecretEntry = { path: string; status: RemoteConfigSecretStatus };
+export type RemoteConfigReadParams = { file: RemoteConfigFileKey };
+/** Sanitized snapshot: data keeps the file shape; secret positions hold only the status string. */
+export type RemoteConfigSnapshot = {
+	version: string;
+	sha256: string;
+	data: Record<string, unknown>;
+	secrets: readonly RemoteConfigSecretEntry[];
+};
+export type RemoteConfigPatchParams = { file: RemoteConfigFileKey; expectedVersion: string; patch: Record<string, unknown> };
 
 // ── F3: one-shot terminal launch ticket and the fixed terminal runner ─────────────────────────────
 

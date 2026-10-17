@@ -871,6 +871,8 @@ Phase 1 是全计划风险最高的契约迁移（全库 path-bearing contract �
 
 > **状态（2026-10-18，file-mgmt 赛道）**：Phase 5 远端会话数据删除已交付，范围是**已归档**远端会话（id-only 请求 → main PendingConfirmationBroker 一次性确认 → 有界 Node rm + canonical containment → 归档索引/墓碑清理；回执丢失=RESULT_UNCONFIRMED 不重试、不自动刷新掉）。活动/未归档远端会话的远端文件删除仍 fail-closed（必须先归档，才有显式永久删除入口；本机归档与 DSH 行保持回收站删除不变）。证据：tests/remoteSessionDelete.test.mjs（POSIX 真实脚本 + 真实 SessionCatalog/sessionIpc + 假 SSH exec）、tests/remoteSessionDeleteUi.test.mjs；真机 e2e 已作者化（remoteSessionAcceptance 归档步骤），未由本赛道执行。
 
+> **状态（2026-10-18，task-14 Batch A）**：helper **1.21.0** config scope（新冻结点 `config.mjs` + 六个 artifact 重签）、shared `PiConfigTarget`/闭集码、main `RemotePiConfigBackend` 与四个 config IPC 的 target 路由（local 默认逐字不变、ssh 走 ready/pinned host、回复逐字段重验、无本地回落）已交付；provider test/模型拉取/usage 在 ssh target 下统一回 `REMOTE_CONFIG_PROVIDER_OPERATION_UNSUPPORTED`（零网络/零 helper 请求）。renderer 选择器/远端面板与 e2e 是 Batch B（task-15）。证据：tests/remoteHelperConfig.test.mjs（WSL 真实 helper 子进程）、tests/remoteConfigContract.test.mjs、tests/remotePiConfigBackend.test.mjs、tests/remotePiConfigRouting.test.mjs。
+
 Remote v1 发布条件：完成 Phase 5；表中「必须」项和 6.3 Git 支持清单全部通过；任何“v1 禁用”都必须由 capability 驱动禁用并有 i18n 解释，不能隐藏失败、静默 no-op 或调用本地实现。
 
 ## 14. 测试策略

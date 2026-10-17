@@ -59,7 +59,8 @@ const {
 	REMOTE_TERMINAL_TICKET_TTL_MS,
 	REMOTE_TERMINAL_TICKET_CLAIM_PATTERN,
 } = loadTsCommonJs("src/main/remote/RemoteHelperContract.ts");
-const { REMOTE_HELPER_ARTIFACTS, REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_HELPER_ENTRY_SHA256, REMOTE_HELPER_ENTRY_VERSION, REMOTE_HELPER_GIT_READ_SHA256, REMOTE_HELPER_GIT_SYNC_SHA256, REMOTE_HELPER_GIT_WRITE_SHA256, REMOTE_HELPER_INLINE_SOURCE } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
+const { REMOTE_HELPER_ARTIFACTS, REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_HELPER_ENTRY_SHA256, REMOTE_HELPER_ENTRY_VERSION, REMOTE_HELPER_CONFIG_SHA256, REMOTE_HELPER_GIT_READ_SHA256, REMOTE_HELPER_GIT_SYNC_SHA256, REMOTE_HELPER_GIT_WRITE_SHA256, REMOTE_HELPER_INLINE_SOURCE } =
+	loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
 const { REMOTE_TERMINAL_RUNNER_ENTRY_SHA256 } = loadTsCommonJs("src/main/remote/RemoteTerminalRunnerEntry.ts");
 const { REMOTE_GIT_READ_SOURCE } = loadTsCommonJs("src/main/remote/RemoteGitReadSource.ts");
 const { materializeRemoteHelperArtifacts } = await import("./helpers/remoteHelperArtifacts.mjs");
@@ -70,7 +71,7 @@ const HOST_ID = "01234567-89ab-4def-8123-456789abcdef";
 /** The helper never resolves HOME into a path, so a POSIX literal is the honest fixture on any platform. */
 const HELPER_HOME = "/home/pideck-helper";
 /** Frozen digest, pinned here as well as in the module: editing the source means editing both. */
-const FROZEN_SHA256 = "e1cae34d73e118239264691d23067a409a89f4dd4ae152f4b14528c5171f9cda";
+const FROZEN_SHA256 = "ec91d53c3532e0a4978e585cb706d4eef44589575d320ff2cbde40185a46e205";
 const MAX_TEXT = 4096;
 const TEST_TIMEOUT_MS = 30_000;
 const GUARD_TIMEOUT_MS = 10_000;
@@ -400,10 +401,11 @@ helperTest("every frozen bundle artifact is one byte-frozen ASCII line with its 
 	// programs that worker imports - and each one is content-addressed and pinned on its own. A change is only
 	// legitimate together with a deliberate update of that file's digest.
 	const expected = new Map([
-		["helper.mjs", { sha256: FROZEN_SHA256, builtins: ["node:fs", "node:path", "node:crypto"], imports: ["git-read.mjs"] }],
+		["helper.mjs", { sha256: FROZEN_SHA256, builtins: ["node:fs", "node:path", "node:crypto"], imports: ["git-read.mjs", "config.mjs"] }],
 		["git-read.mjs", { sha256: REMOTE_HELPER_GIT_READ_SHA256, builtins: ["node:child_process", "node:crypto"], imports: ["git-write.mjs", "git-sync.mjs"] }],
 		["git-write.mjs", { sha256: REMOTE_HELPER_GIT_WRITE_SHA256, builtins: [], imports: [] }],
 		["git-sync.mjs", { sha256: REMOTE_HELPER_GIT_SYNC_SHA256, builtins: [], imports: [] }],
+		["config.mjs", { sha256: REMOTE_HELPER_CONFIG_SHA256, builtins: [], imports: [] }],
 		["terminal-runner.mjs", { sha256: REMOTE_TERMINAL_RUNNER_ENTRY_SHA256, builtins: ["node:fs", "node:path", "node:child_process"], imports: [] }],
 	]);
 	assert.deepEqual(
@@ -490,7 +492,7 @@ helperTest("every frozen bundle artifact is one byte-frozen ASCII line with its 
 helperTest("the exported entry identity matches the frozen source", () => {
 	assert.equal(REMOTE_HELPER_ENTRY_FILE_NAME, "helper.mjs");
 	assert.match(REMOTE_HELPER_ENTRY_VERSION, /^\d+\.\d+\.\d+$/);
-	assert.equal(REMOTE_HELPER_ENTRY_VERSION, "1.20.2", "the ticket lifecycle follow-up is helper 1.20.2");
+	assert.equal(REMOTE_HELPER_ENTRY_VERSION, "1.21.0", "the remote config scope is helper 1.21.0");
 	// The frozen source cannot import the contract, so its literals are checked against it here.
 	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes(`"${REMOTE_HELPER_ENTRY_VERSION}"`), "hello must report REMOTE_HELPER_ENTRY_VERSION");
 	for (const token of [REMOTE_HELPER_METHOD_HELLO, REMOTE_HELPER_METHOD_ECHO, REMOTE_HELPER_METHOD_CANCEL, REMOTE_HELPER_METHOD_FS_STAT, REMOTE_HELPER_METHOD_FS_LIST, REMOTE_HELPER_METHOD_FS_READ]) {
