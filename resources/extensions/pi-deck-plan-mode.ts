@@ -21,6 +21,18 @@ const NORMAL_MODE_TOOLS = ["read", "bash", "edit", "write", "ask_question"];
 const PLAN_MODE_DISABLED_TOOLS = new Set<string>(["edit", "write"]);
 const PLAN_MANAGED_TOOLS = new Set<string>([...PLAN_MODE_TOOLS, ...NORMAL_MODE_TOOLS]);
 
+// 静态模式规则：pi 1.x 走系统提示 section，旧宿主仍作为 before_agent_start 消息注入。
+const PLAN_MODE_CONTEXT_TEXT = `[PLAN MODE ACTIVE]\nYou are in PiDeck Plan Mode.\n\nRules:\n- Only inspect and reason. Do not edit or write files.\n- Bash is restricted to read-only commands.\n- Ask the user with ask_question when a requirement is ambiguous.\n- Keep plan steps concise: one short sentence per step; avoid long clauses, parentheticals, or run-on requirements.\n- Put each step on its own numbered line (\"1. ...\", \"2. ...\"). Never nest or merge steps — the UI renders and tracks them line by line.\n- End your response with a numbered plan under an exact \"Plan:\" heading.\n\nPlan:\n1. First concrete step\n2. Second concrete step`;
+
+/**
+ * pi 1.x 的 before_agent_start 事件带可变 systemPromptOptions.sections；旧宿主没有该字段。
+ * 扩展必须自包含，所以这里与 security-gate/goal-mode 各自保留一份（不跨文件 import）。
+ */
+function readSystemPromptSections(event: { systemPromptOptions?: { sections?: Record<string, string> } }): Record<string, string> | undefined {
+	const sections = event.systemPromptOptions?.sections;
+	return sections && typeof sections === "object" ? sections : undefined;
+}
+
 interface TodoItem {
 	step: number;
 	text: string;
@@ -340,12 +352,20 @@ export default function piDeckPlanModeExtension(pi: ExtensionAPI): void {
 		};
 	});
 
-	pi.on("before_agent_start", async () => {
+	pi.on("before_agent_start", async (event) => {
 		if (planModeEnabled) {
+			// 静态规则进系统提示 section 而不是每轮 message：后者会把同一段文字在会话历史里
+			// 复制一份又一份（实测单会话 22 条），既占 token 又污染历史（issue #365-09）。
+			// 旧宿主无 sections 时保留原路径。
+			const sections = readSystemPromptSections(event);
+			if (sections) {
+				sections["pi_deck_plan_mode"] = PLAN_MODE_CONTEXT_TEXT;
+				return undefined;
+			}
 			return {
 				message: {
 					customType: "pi-deck-plan-mode-context",
-					content: `[PLAN MODE ACTIVE]\nYou are in PiDeck Plan Mode.\n\nRules:\n- Only inspect and reason. Do not edit or write files.\n- Bash is restricted to read-only commands.\n- Ask the user with ask_question when a requirement is ambiguous.\n- Keep plan steps concise: one short sentence per step; avoid long clauses, parentheticals, or run-on requirements.\n- Put each step on its own numbered line (\"1. ...\", \"2. ...\"). Never nest or merge steps — the UI renders and tracks them line by line.\n- End your response with a numbered plan under an exact \"Plan:\" heading.\n\nPlan:\n1. First concrete step\n2. Second concrete step`,
+					content: PLAN_MODE_CONTEXT_TEXT,
 					display: false,
 				},
 			};

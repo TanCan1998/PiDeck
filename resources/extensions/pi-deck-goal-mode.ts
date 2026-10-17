@@ -20,6 +20,24 @@ const GOAL_ENTRY_TYPE = "pi-deck-goal-mode";
 const GOAL_CONTEXT_TYPE = "pi-deck-goal-context";
 const DEFAULT_MAX_ROUNDS = 32;
 
+// 静态规则：pi 1.x 走系统提示 section，旧宿主仍随 before_agent_start 消息注入。
+const GOAL_MODE_RULES = [
+	"Rules:",
+	"- Work toward the objective. Prefer concrete tool use over asking the user.",
+	"- If the objective is fully achieved, end with the exact token GOAL_COMPLETE.",
+	"- If you are blocked (missing info, failed approach, or need a user decision), end with GOAL_BLOCKED: <short reason>.",
+	"- Do not wait for extra confirmation once the next step is clear.",
+].join("\n");
+
+/**
+ * pi 1.x 的 before_agent_start 事件带可变 systemPromptOptions.sections；旧宿主没有该字段。
+ * 扩展必须自包含，所以这里与 security-gate/plan-mode 各自保留一份（不跨文件 import）。
+ */
+function readSystemPromptSections(event: { systemPromptOptions?: { sections?: Record<string, string> } }): Record<string, string> | undefined {
+	const sections = event.systemPromptOptions?.sections;
+	return sections && typeof sections === "object" ? sections : undefined;
+}
+
 type GoalPhase = "active" | "paused" | "blocked" | "complete";
 
 interface GoalModeState {
@@ -216,22 +234,30 @@ export default function piDeckGoalModeExtension(pi: ExtensionAPI): void {
 		};
 	});
 
-	pi.on("before_agent_start", async () => {
+	pi.on("before_agent_start", async (event) => {
 		if (!state.enabled || state.phase !== "active" || !state.objective) return;
+		const headline = [
+			"[GOAL MODE ACTIVE]",
+			`Objective: ${state.objective}`,
+			`Round: ${state.roundsStarted + 1}/${state.maxGoalRounds}`,
+		].join("\n");
+		// 静态规则进系统提示 section：每轮 message 会把整块规则写进会话历史（issue #365-10）。
+		// Objective/Round 每轮都在变，留在尾部消息里。旧宿主无 sections 时保留整块旧文案。
+		const sections = readSystemPromptSections(event);
+		if (sections) {
+			sections["pi_deck_goal_mode"] = GOAL_MODE_RULES;
+			return {
+				message: {
+					customType: GOAL_CONTEXT_TYPE,
+					content: headline,
+					display: false,
+				},
+			};
+		}
 		return {
 			message: {
 				customType: GOAL_CONTEXT_TYPE,
-				content: [
-					"[GOAL MODE ACTIVE]",
-					`Objective: ${state.objective}`,
-					`Round: ${state.roundsStarted + 1}/${state.maxGoalRounds}`,
-					"",
-					"Rules:",
-					"- Work toward the objective. Prefer concrete tool use over asking the user.",
-					"- If the objective is fully achieved, end with the exact token GOAL_COMPLETE.",
-					"- If you are blocked (missing info, failed approach, or need a user decision), end with GOAL_BLOCKED: <short reason>.",
-					"- Do not wait for extra confirmation once the next step is clear.",
-				].join("\n"),
+				content: [headline, GOAL_MODE_RULES].join("\n\n"),
 				display: false,
 			},
 		};

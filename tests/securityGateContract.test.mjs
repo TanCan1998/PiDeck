@@ -213,6 +213,24 @@ test("before_agent_start: 有基准时追加安全提示（不丢原文）", () 
 	}
 });
 
+test("before_agent_start: 写系统提示 section，而不是 force 整块替换（issue #365-08）", () => {
+	const dir = mkdtempSync(join(tmpdir(), "security-gate-prompt-"));
+	try {
+		const handler = loadSecurityGateHarness(writeSnapshotFile(dir), "sess-1");
+		const sections = { pi_deck_earlier: "keep me" };
+		const result = handler({ systemPromptOptions: { sections } }, { getSystemPrompt: () => "BASE PROMPT" });
+
+		// 返回 systemPrompt 是 force 语义：会把本轮提示定死成整块字符串，
+		// 后续扩展对 sections 的写入全部丢弃。
+		assert.equal(result, undefined);
+		assert.match(sections.pi_deck_security, /当前会话启用了桌面端安全管理（等级: 标准）/);
+		assert.match(sections.pi_deck_security, /rm -rf/);
+		assert.equal(sections.pi_deck_earlier, "keep me", "前序扩展写入的 section 必须保留");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 test("before_agent_start: 拿不到非空基准时放弃注入（不能用空串覆盖系统提示）", () => {
 	const dir = mkdtempSync(join(tmpdir(), "security-gate-prompt-"));
 	try {

@@ -125,8 +125,8 @@ function createHarness() {
 		async runInput(text) {
 			return handlers.get("input")({ text }, context);
 		},
-		async runBeforeAgentStart() {
-			return handlers.get("before_agent_start")({}, context);
+		async runBeforeAgentStart(event = {}) {
+			return handlers.get("before_agent_start")(event, context);
 		},
 		async runToolCall(toolName, input) {
 			return handlers.get("tool_call")({ toolName, input }, context);
@@ -166,6 +166,24 @@ test("/plan command keeps plan mode active for the next normal message", async (
 	// before_agent_start 注入只读计划上下文，模型才知道要产出 Plan:。
 	const contextResult = await harness.runBeforeAgentStart();
 	assert.ok(contextResult?.message?.content?.includes("[PLAN MODE ACTIVE]"));
+});
+
+test("before_agent_start 写系统提示 section，不再每轮复制模式文本（issue #365-09）", async () => {
+	const harness = createHarness();
+	await harness.runCommand("plan", "");
+
+	const sections = { pi_deck_earlier: "keep me" };
+	const result = await harness.runBeforeAgentStart({ systemPromptOptions: { sections } });
+
+	// 有 sections 通道时不得返回每轮 message：旧写法会把同一段 Plan 文本写进历史一遍又一遍。
+	assert.equal(result, undefined);
+	assert.match(sections.pi_deck_plan_mode, /^\[PLAN MODE ACTIVE\]/);
+	assert.ok(sections.pi_deck_plan_mode.includes("Plan:\n1. First concrete step"));
+	assert.equal(sections.pi_deck_earlier, "keep me", "前序扩展写入的 section 必须保留");
+
+	// 旧宿主（无 systemPromptOptions）仍走 message 回退，行为不变。
+	const legacy = await harness.runBeforeAgentStart();
+	assert.ok(legacy?.message?.content?.includes("[PLAN MODE ACTIVE]"));
 });
 
 test("/plan command still blocks non-read-only bash while active", async () => {
