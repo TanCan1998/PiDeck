@@ -1,10 +1,12 @@
 import { touchRecentSessionAtom, forgetRecentSessionAtom } from "./recent-session-atoms";
+import { advanceSessionActivityAnchorAtom, forgetSessionActivityAnchorAtom } from "./sessionActivityAtoms";
 import { sessionSendStateByIdAtom, setSessionSendStateAtom } from "./composer-atoms";
 import { atom } from "jotai";
 import type { Getter, Setter } from "jotai";
 import { atomFamily, selectAtom } from "jotai/utils";
 import type { AgentBackend, AgentRuntimeState, AgentStatus, AgentUiBatchQuestion, AgentUiRequest, ChatMessage, SessionHistoryUnavailableReason, SessionMessagePage, SessionRecord, SessionRuntimeEvent, SessionRuntimeInfo } from "../../../shared/types";
 import { mergeAgentRuntimeState } from "../utils/agentRuntimeState";
+import { isSessionTurnRunning } from "../utils/sessionActivityClock";
 import { findLastUserMessageIndex, shouldRefreshOutlineForRuntimeUpsert } from "./outlineRevision";
 import { releaseSessionOutlineProjection } from "./outlineProjectionCache";
 import { sameProjectSessionList } from "../utils/sessionRecordIdentity";
@@ -1524,6 +1526,16 @@ export const applySessionRuntimeEventAtom = atom(null, (get, set, event: Session
 		}
 	}
 
+	// 侧栏计时点：只认「本轮开始（用户输入落地）/ 本轮结束（turn 结束）」两个边沿。
+	// 流式 token、工具调用、标题回写、catalog 刷新都不推进——否则计时器会被无限重置
+	// （文件 mtime 版就是这样，永远显示「刚刚」）。规则见 utils/sessionActivityClock.ts。
+	set(advanceSessionActivityAnchorAtom, {
+		sessionId: event.sessionId,
+		// 换绑（新 agent 接管旧会话）时上一代的运行态不代表本轮，按「未知=空闲」处理：
+		// 新绑定若已在跑，会在下一跳改成 true 并推进计时点。
+		previousRunning: bindingChanged ? false : isSessionTurnRunning(currentRuntime.state, currentRuntime.status),
+		running: isSessionTurnRunning(nextRuntime.state, nextRuntime.status),
+	});
 	const terminalEnvelope = !bindingChanged && currentRuntime.status === "closed";
 	const nextUi = payload && !(terminalEnvelope && event.sourceChannel === "agents:ui-request") ? applySessionRuntimeUiEvent(get(sessionRuntimeUiByIdAtom)[event.sessionId], event, payload, bindingChanged) : undefined;
 	if (nextUi) {
@@ -1673,6 +1685,7 @@ export const bindSessionRuntimeAtom = atom(
 
 export const removeSessionStateAtom = atom(null, (get, set, sessionId: string) => {
 	set(forgetRecentSessionAtom, sessionId);
+	set(forgetSessionActivityAnchorAtom, sessionId);
 	const records = { ...get(sessionRecordsAtom) };
 	const session = records[sessionId];
 	delete records[sessionId];

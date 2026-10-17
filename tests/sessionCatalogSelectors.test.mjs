@@ -37,6 +37,11 @@ function loadAtoms() {
 	// session-atoms ⇄ composer-atoms 是模块级循环：双方都只在惰性 action 体内用对方导出。
 	// 先给 session-atoms 一个可后填的桥对象，两模块都编译完后再回填真实导出。
 	const composerExports = {};
+	// 侧栏计时点：session-atoms 在回合边界推进它（见 utils/sessionActivityClock.ts）。
+	const sessionActivityClock = compileModule("src/renderer/src/utils/sessionActivityClock.ts");
+	const sessionActivityAtoms = compileModule("src/renderer/src/atoms/sessionActivityAtoms.ts", {
+		"../utils/sessionActivityClock": sessionActivityClock,
+	});
 	const sessions = compileModule("src/renderer/src/atoms/session-atoms.ts", {
 		"./recent-session-atoms": compileModule("src/renderer/src/atoms/recent-session-atoms.ts"),
 		"./composer-atoms": composerExports,
@@ -45,6 +50,8 @@ function loadAtoms() {
 		"../utils/liveTextHandoff": compileModule("src/renderer/src/utils/liveTextHandoff.ts"),
 		"./outlineRevision": compileModule("src/renderer/src/atoms/outlineRevision.ts"),
 		"./outlineProjectionCache": compileModule("src/renderer/src/atoms/outlineProjectionCache.ts"),
+		"./sessionActivityAtoms": sessionActivityAtoms,
+		"../utils/sessionActivityClock": sessionActivityClock,
 	});
 	const composer = compileModule("src/renderer/src/atoms/composer-atoms.ts", {
 		"./session-atoms": sessions,

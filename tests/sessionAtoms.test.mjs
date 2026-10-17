@@ -42,6 +42,11 @@ function loadAtoms() {
 	const liveTextHandoff = compileModule("src/renderer/src/utils/liveTextHandoff.ts");
 	const outlineRevision = compileModule("src/renderer/src/atoms/outlineRevision.ts");
 	const outlineProjectionCache = compileModule("src/renderer/src/atoms/outlineProjectionCache.ts");
+	// 侧栏计时点：session-atoms 在回合边界推进它（见 utils/sessionActivityClock.ts）。
+	const sessionActivityClock = compileModule("src/renderer/src/utils/sessionActivityClock.ts");
+	const sessionActivityAtoms = compileModule("src/renderer/src/atoms/sessionActivityAtoms.ts", {
+		"../utils/sessionActivityClock": sessionActivityClock,
+	});
 	// session-atoms ⇄ composer-atoms 是模块级循环：双方都只在惰性 action 体内用对方导出。
 	// 先给 session-atoms 一个可后填的桥对象，两模块都编译完后再回填真实导出。
 	const composerExports = {};
@@ -53,12 +58,14 @@ function loadAtoms() {
 		"../utils/liveTextHandoff": liveTextHandoff,
 		"./outlineRevision": outlineRevision,
 		"./outlineProjectionCache": outlineProjectionCache,
+		"./sessionActivityAtoms": sessionActivityAtoms,
+		"../utils/sessionActivityClock": sessionActivityClock,
 	});
 	const composer = compileModule("src/renderer/src/atoms/composer-atoms.ts", {
 		"./session-atoms": sessions,
 	});
 	Object.assign(composerExports, composer);
-	return { ...sessions, ...composer, outlineProjectionCache };
+	return { ...sessions, ...composer, outlineProjectionCache, ...sessionActivityAtoms };
 }
 
 function session(id, projectId = "project-1", overrides = {}) {
@@ -409,6 +416,53 @@ test("routes runtime payloads into session-keyed messages and state", () => {
 	assert.equal(runtime.agentId, "agent-a");
 	assert.equal(runtime.status, "running");
 	assert.equal(store.get(atoms.sessionMessagesCacheAtom)["session-a"].messages[0].text, "hello");
+});
+
+/** 等一个毫秒边界：计时点用 Date.now()，相邻断言隔开才能看出「有没有被推进」。 */
+function tick(ms = 5) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+test("sidebar timing point advances only on turn start and turn end", async () => {
+	const atoms = loadAtoms();
+	const store = createStore();
+	const send = (sourceChannel, payload) =>
+		store.set(atoms.applySessionRuntimeEventAtom, {
+			sessionId: "session-a",
+			agentId: "agent-a",
+			runtimeGeneration: 1,
+			sourceChannel,
+			payload,
+		});
+	const anchor = () => store.get(atoms.sessionActivityAnchorByIdAtom)["session-a"];
+
+	// 首次观测到空闲：没有边界发生，不得写计时点（否则历史行全变成「刚刚」）。
+	send("agents:state", { id: "agent-a", status: "idle" });
+	assert.equal(anchor(), undefined);
+
+	// 用户发消息 → 本轮开始：计时点推进到现在。
+	await tick();
+	send("agents:state", { id: "agent-a", status: "running" });
+	const turnStart = anchor();
+	assert.equal(typeof turnStart, "number");
+
+	// 流式/工具调用等中间态不推进计时点（否则读不出「这轮跑了多久」）。
+	await tick();
+	send("agents:runtime-state", { agentId: "agent-a", state: { isStreaming: true, isExecutingTool: true, executingToolName: "bash" } });
+	assert.equal(anchor(), turnStart);
+
+	// turn 结束（agent_end 边沿）：新计时点。
+	await tick();
+	send("agents:runtime-state", { agentId: "agent-a", state: { isTurnActive: true } });
+	send("agents:runtime-state", { agentId: "agent-a", state: { isStreaming: false, isExecutingTool: false } });
+	assert.equal(anchor(), turnStart);
+	await tick();
+	send("agents:runtime-state", { agentId: "agent-a", state: { isTurnActive: false } });
+	assert.ok(anchor() > turnStart);
+
+	// 会话删除：计时点与其它 per-session 状态一起清掉。
+	store.set(atoms.removeSessionStateAtom, "session-a");
+	assert.equal(anchor(), undefined);
 });
 
 test("ignores late events from an older runtime generation", () => {

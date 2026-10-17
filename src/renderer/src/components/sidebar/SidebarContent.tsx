@@ -33,6 +33,7 @@ import { displayProjectDirectoryName, isChatProject } from "../../rendererUtils"
 import { formatAccelerator } from "../../../../shared/shortcuts";
 import { desktopApi } from "../../desktopApi";
 import { useShortcutBindings } from "../../hooks/useShortcutBindings";
+import { useRelativeTimeTicker } from "../../hooks/sidebar/useSessionActivityClock";
 
 export type SidebarActions = {
 	projects: {
@@ -153,6 +154,9 @@ export type SidebarContentProps = {
 
 export function SidebarContent(props: SidebarContentProps) {
 	const { controller, actions } = props;
+	// 侧栏相对时间刷新节拍：会话静置时没有别的渲染源，「n分钟」也得自己往前走。
+	// 只在本组件挂一次，行组件订阅同一个 atom。
+	useRelativeTimeTicker();
 	const menu = controller.menu;
 	// 三个更新源 atom 必须无条件读取：不能用短路合并，否则任一更新源从 false 变 true
 	// 时会跳过后续 Hook，破坏 Hook 调用顺序。快照本体供角标 tooltip 清单取版本号。

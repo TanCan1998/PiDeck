@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: 156b49fc495845a675c340abc2faa6038ccba11e7f35ebefb76963d92d2495ad（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: 80fdbcb4e1a14718129755118d30c2cdc33a04d3357cdd55b319ae39b20ad3d2（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -706,15 +706,14 @@ export const zhTW: Record<TranslationKey, string> = {
 	"git.relativeDays": "{count} 天前",
 	"git.relativeMonths": "{count} 個月前",
 	"git.relativeYears": "{count} 年前",
-	"session.relativeSeconds": "{count} 秒前",
+	"session.relativeJustNow": "剛剛",
 	"session.leakedToolCall.title": "模型輸出異常：疑似未解析的工具呼叫原文（工具已正常執行）",
 	"session.leakedToolCall.expand": "展開原文",
 	"session.leakedToolCall.collapse": "收起原文",
-	"session.relativeMinutes": "{count} 分鐘前",
-	"session.relativeHours": "{count} 小時前",
-	"session.relativeDays": "{count} 天前",
-	"session.relativeMonths": "{count} 個月前",
-	"session.relativeYears": "{count} 年前",
+	"session.relativeMinutes": "{count}分鐘",
+	"session.relativeHours": "{count}小時",
+	"session.relativeDays": "{count}天",
+	"session.relativeMonths": "{count}個月",
 	"git.cherryPick": "挑選此提交",
 	"git.cherryPickSuccess": "已挑選提交 {hash}",
 	"git.revert": "撤銷此提交",
@@ -1879,7 +1878,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"config.dsh.overviewHint": "Provider 路由與模型配置在「模型」tab 中管理（llm-deepseek / llm-pi-ai）。",
 	"config.dsh.modelsHint": "各提供方一行收起即見金鑰狀態（綠=已配置、紅=缺失）；點選展開可填金鑰、改自定義設定與模型目錄。",
 	// DSH 页顺序与 Pi 模型页独立（AppSettings.dshProviderOrder），所以提示文案不引用「模型/认证」两页。
-	"config.dsh.providerOrderHint": "拖動行首手柄調整供應商順序。順序只儲存在 PiDeck 本地設定，不會寫回 DSH 配置；DSH 會話的模型選擇列表也按這個順序排列。",
+	"config.dsh.providerOrderHint": "拖動行首手柄調整供應商順序（聚焦手柄後也可用 ↑/↓ 鍵移動）。順序只儲存在 PiDeck 本地設定，不會寫回 DSH 配置；DSH 會話的模型選擇列表也按這個順序排列。",
 	"config.dsh.providersCount": "{count} 個 provider",
 	"config.dsh.providerKeyPlaceholder": "provider 名稱（如 my-gateway）",
 	"config.dsh.addProvider": "新增 provider",
@@ -2970,11 +2969,9 @@ export const zhTW: Record<TranslationKey, string> = {
 	"config.selectModel": "選擇模型 {model}",
 	"config.deleteProvider": "刪除供應商",
 	"config.duplicateProvider": "複製供應商",
-	"config.dragProvider": "拖動排序（按住手柄拖動）",
-	"config.moveProviderUp": "上移",
-	"config.moveProviderDown": "下移",
-	// 排序说明：Pi 侧（模型/认证）与 DSH 侧各一份顺序，提示文案分两套 key。
-	"config.providerOrderHint": "拖動行首手柄調整供應商順序。順序是 PiDeck 本地偏好，不會寫入配置檔案；「模型」與「認證」兩頁共用同一份順序，模型選擇列表也按這個順序排列。",
+	"config.dragProvider": "拖動排序（按住手柄拖動；聚焦手柄後也可用 ↑/↓ 鍵移動）",
+	// 排序说明：Pi 侧（模型/认证）与 DSH 侧各一份顺序，提示文案分两套 key。上移/下移按钮已删，键盘微调文案随拖拽提示走。
+	"config.providerOrderHint": "拖動行首手柄調整供應商順序（聚焦手柄後也可用 ↑/↓ 鍵移動）。順序是 PiDeck 本地偏好，不會寫入配置檔案；「模型」與「認證」兩頁共用同一份順序，模型選擇列表也按這個順序排列。",
 	"config.providerOrderReset": "恢復預設順序",
 	"config.migrate.toDsh": "一鍵遷移到 DSH",
 	"config.migrate.toPi": "一鍵遷移到 Pi",

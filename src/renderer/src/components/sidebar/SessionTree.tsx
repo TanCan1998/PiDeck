@@ -22,6 +22,7 @@ import { TitleScrollText } from "./TitleScrollText";
 import { resolveBoundSession } from "./activitySessionsModel";
 import { cn } from "../../lib/utils";
 import { SESSION_TAB_DRAG_MIME } from "../../utils/sessionSplitEdge";
+import { useSessionActivityAt } from "../../hooks/sidebar/useSessionActivityClock";
 
 /** 与 ProjectTree.treeRowClass 同尺寸同圆角：分层后 utility 生效，必须「新学旧」对齐项目行，
  * 不能再用 min-h-11/rounded-xl（会明显高于/圆于项目行）。 */
@@ -82,6 +83,8 @@ export function SessionTree(props: { project: Project; sessions: readonly Sessio
 	// 待确认 ask 以**会话**为粒度展示：同一项目下可能多个会话各自在等回答，
 	// 只挂项目/标题栏徽章会分不清是哪一个会话（用户反馈）。
 	const sessionRuntimeUiById = useAtomValue(sessionRuntimeUiByIdAtom);
+	// 相对时间的基准：live 计时点（本轮开始/上一轮结束）优先，历史会话回落会话更新时间。
+	const activityAt = useSessionActivityAt();
 	const allSummaries = props.sessions.flatMap((session) => {
 		const summary = sessionRecordToSummary(session);
 		return summary ? [summary] : [];
@@ -359,20 +362,22 @@ export function SessionTree(props: { project: Project; sessions: readonly Sessio
 									{child.session.channel && <SessionChannelMark channel={child.session.channel} />}
 									{child.session.sideTask && <SideTaskMark />}
 									{renderToggle(groupKey, childCount)}
-									{/* 相对时间常显：会话更新于多久前一目了然；hover 行时让位给右侧「⋯」按钮。
+									{/* 相对时间常显：多久前用过一目了然；hover 行时让位给右侧「⋯」按钮。
+                  基准是「计时点」而不是文件 mtime（见 hooks/sidebar/useSessionActivityClock）：
+                  本轮开始（用户输入）与 turn 结束各算一次，流式期间不会一直被重置成「刚刚」。
                   窄侧栏时间可能被截断，title 提示完整相对时间。
                   hover 用「宽度收拢」而不是 display:none：时间瞬时消失会让左侧胶囊一步跳到行尾
                   （那一刻正好压在「⋯」上，150ms 后才被 padding 带回左边），改成与 padding 同步
                   （同为 150ms 默认时长）收拢后胶囊是缓慢滑过去，任何一帧都不会越过「⋯」左缘。
-                  w-max 保证非 hover 态宽度与 auto 完全一致（不写魔法宽度，「3 天前」这类文案不会被截）；
+                  w-max 保证非 hover 态宽度与 auto 完全一致（不写魔法宽度，「3天」这类文案不会被截）；
                   interpolate-size 让 max-content→0 可插值（Electron 43 / Chromium 142 支持）。
                   不支持该属性的旧浏览器退化为瞬时收拢，胶囊在该帧会短暂压到「⋯」左缘——仅降级路径，
                   比时间直接 display:none 时「整颗胶囊跳到行尾」轻得多，故不额外加延迟。 */}
 									<span
-										className="w-max shrink-0 overflow-hidden whitespace-nowrap text-caption tabular-nums text-muted-foreground transition-[width,opacity] [interpolate-size:allow-keywords] group-hover/row:w-0 group-hover/row:opacity-0 group-focus-within/row:w-0 group-focus-within/row:opacity-0"
-										title={formatRelativeTime(child.session.updatedAt)}
+										className="w-max shrink-0 overflow-hidden whitespace-nowrap text-micro tabular-nums text-muted-foreground transition-[width,opacity] [interpolate-size:allow-keywords] group-hover/row:w-0 group-hover/row:opacity-0 group-focus-within/row:w-0 group-focus-within/row:opacity-0"
+										title={formatRelativeTime(activityAt(child.session.id, child.session.updatedAt))}
 									>
-										{formatRelativeTime(child.session.updatedAt)}
+										{formatRelativeTime(activityAt(child.session.id, child.session.updatedAt))}
 									</span>
 								</div>
 							</div>
