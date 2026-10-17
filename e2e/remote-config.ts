@@ -41,7 +41,8 @@ export async function verifyRemoteConfig(input: { window: Page; credentials: Rem
 		const selector = layout.getByTestId("config-target-selector");
 		await expect(selector).toBeVisible({ timeout: timeoutMs });
 		await selector.click();
-		const hostOption = window.getByRole("option", { name: new RegExp(credentials.user + "@" + credentials.host.replace(/\./g, "\\.")) });
+		// The list item accessible name is "<host label> <ssh host>"; the label is user-chosen, so anchor on the address.
+		const hostOption = window.getByRole("option").filter({ hasText: new RegExp(credentials.host.replace(/\./g, "\\.")) });
 		await expect(hostOption.first(), "目标选择器必须列出已连接的主机").toBeVisible({ timeout: 30_000 });
 		await hostOption.first().click();
 

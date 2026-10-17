@@ -110,7 +110,7 @@ function homeWith(files = {}) {
 	return { home, agent };
 }
 
-configTest("hello advertises the config scope and the frozen helper reports build 1.21.1", async (t) => {
+configTest("hello advertises the config scope and the frozen helper reports build 1.21.2", async (t) => {
 	const { home } = homeWith();
 	const session = startHelper(t, home);
 	const hello = plain(await guard(session.client.request("hello"), "hello"));
@@ -273,17 +273,19 @@ configTest("reserved keys in a patch are refused before any merge", async (t) =>
 });
 
 configTest("real model fields are not secrets and numeric patches apply", async (t) => {
-	const { home, agent } = homeWith({ "models.json": JSON.stringify({ providers: { p: { maxTokens: 32000, max_tokens: 10, tokenizer: "x", provider_token: "t" } } }) });
+	const { home, agent } = homeWith({ "models.json": JSON.stringify({ providers: { p: { maxTokens: 32000, max_tokens: 10, tokenizer: "x", provider_token: "t", clientSecret: "cs-live", openaiApiKey: "sk-live2" } } }) });
 	const session = startHelper(t, home);
 	const read = plain(await guard(session.client.request("config.read", { file: "models" }), "read models"));
 	assert.equal(read.data.providers.p.maxTokens, 32000);
 	assert.equal(read.data.providers.p.max_tokens, 10);
 	assert.equal(read.data.providers.p.tokenizer, "x");
 	assert.equal(read.data.providers.p.provider_token, "configured");
+	assert.equal(read.data.providers.p.clientSecret, "configured", "camelCase compound secret names are redacted");
+	assert.equal(read.data.providers.p.openaiApiKey, "configured", "camelCase compound apiKey names are redacted");
 	assert.deepEqual(
 		read.secrets.map((entry) => entry.path),
-		["providers.p.provider_token"],
-		"only the real secret name is redacted",
+		["providers.p.clientSecret", "providers.p.openaiApiKey", "providers.p.provider_token"],
+		"only the real secret names are redacted",
 	);
 	const patched = plain(await guard(session.client.request("config.patch", { file: "models", expectedVersion: read.version, patch: { providers: { p: { maxTokens: 8192 } } } }), "patch maxTokens"));
 	assert.equal(patched.data.providers.p.maxTokens, 8192);

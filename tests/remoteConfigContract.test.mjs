@@ -49,7 +49,7 @@ test("the secret-key pattern and the public bounds are one source of truth", () 
 	assert.ok(source.includes('new TextDecoder("utf-8", { fatal: true })'), "frozen config.mjs decodes UTF-8 strictly");
 	// Real model fields must not be classified as secrets by the shared pattern.
 	const secret = new RegExp(contract.REMOTE_CONFIG_SECRET_KEY_PATTERN.source, "i");
-	for (const positive of ["apiKey", "OPENAI_API_KEY", "accessToken", "password", "provider_token"]) assert.ok(secret.test(positive), positive + " must be a secret name");
+	for (const positive of ["apiKey", "OPENAI_API_KEY", "accessToken", "password", "provider_token", "clientSecret", "openaiApiKey", "dbPassword"]) assert.ok(secret.test(positive), positive + " must be a secret name");
 	for (const negative of ["maxTokens", "max_tokens", "tokenizer", "tokens", "theme"]) assert.ok(!secret.test(negative), negative + " must not be a secret name");
 });
 
@@ -66,9 +66,9 @@ test("the packed config artifact is one byte-frozen ASCII line with its own pin"
 	assert.ok(source.length > 1024 && source.length < 96 * 1024, "unexpected artifact size " + source.length);
 });
 
-test("the entry re-pins the new artifact and reports helper 1.21.1", () => {
-	assert.equal(entry.REMOTE_HELPER_ENTRY_VERSION, "1.21.1");
-	assert.ok(entry.REMOTE_HELPER_INLINE_SOURCE.includes('"1.21.1"'), "hello must report the new build");
+test("the entry re-pins the new artifact and reports helper 1.21.2", () => {
+	assert.equal(entry.REMOTE_HELPER_ENTRY_VERSION, "1.21.2");
+	assert.ok(entry.REMOTE_HELPER_INLINE_SOURCE.includes('"1.21.2"'), "hello must report the new build");
 	const artifacts = Array.from(entry.REMOTE_HELPER_ARTIFACTS, (artifact) => artifact.name);
 	assert.deepEqual(artifacts, ["helper.mjs", "git-read.mjs", "git-write.mjs", "git-sync.mjs", "config.mjs", "terminal-runner.mjs"]);
 	const packed = entry.REMOTE_HELPER_ARTIFACTS.find((artifact) => artifact.name === "config.mjs");

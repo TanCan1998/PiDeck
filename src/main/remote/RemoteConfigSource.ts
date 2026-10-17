@@ -27,8 +27,8 @@ export function createConfigScope(home, fs, path, crypto) {
 	const FILES = { models: "models.json", settings: "settings.json" };
 	const DEFAULTS = { models: "{\"providers\":{}}", settings: "{}" };
 	const MAX_BYTES = 1048576, MAX_NODES = 20000, MAX_DEPTH = 32;
-	/* Whole-name matching: maxTokens/tokenizer must NOT be treated as secrets (they are real, patchable model fields). */
-	const SECRET_KEY = /^(?:[a-z0-9]+[-_])*(?:api[-_]?key|access[-_]?token|refresh[-_]?token|auth[-_]?token|token|secret|password|passwd|authorization|cookie|credential|private[-_]?key)$/i;
+	/* Whole-name matching: maxTokens/tokenizer must NOT be treated as secrets (they are real, patchable model fields), while camelCase compound names (clientSecret/openaiApiKey) still match. */
+	const SECRET_KEY = /^(?:[a-z0-9]+[-_])*(?:[a-z0-9]+)?(?:api[-_]?key|access[-_]?token|refresh[-_]?token|auth[-_]?token|token|secret|password|passwd|authorization|cookie|credential|private[-_]?key)$/i;
 	const RESERVED = /^(?:__proto__|constructor|prototype)$/;
 	const CONTROL = /[\u0000-\u001f\u007f]/;
 	function failure(code) { return new Error(code); }
@@ -240,4 +240,4 @@ export function createConfigScope(home, fs, path, crypto) {
 `.replace(/\r?\n[\t ]*/g, "");
 
 /** sha256 of REMOTE_CONFIG_SOURCE as UTF-8 bytes; pinned here and re-checked by the helper contract tests. */
-export const REMOTE_HELPER_CONFIG_SHA256 = "95bee7d28e2a0cd94a540d2ef51abacf108d75596733b12baca409555eac42b7";
+export const REMOTE_HELPER_CONFIG_SHA256 = "0006235d9cdef7211c9e33f0734b2c50462511e96983fbf88cb6858e6a7d13f9";

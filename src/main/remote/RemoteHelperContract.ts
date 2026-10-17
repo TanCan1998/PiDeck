@@ -490,7 +490,7 @@ export const REMOTE_CONFIG_MAX_DEPTH = 32;
  * literal and a test asserts the repetition. Reserved keys (__proto__/constructor/prototype) are refused by the
  * helper and main before any merge; patch values for a secret must be strings.
  */
-export const REMOTE_CONFIG_SECRET_KEY_PATTERN = /^(?:[a-z0-9]+[-_])*(?:api[-_]?key|access[-_]?token|refresh[-_]?token|auth[-_]?token|token|secret|password|passwd|authorization|cookie|credential|private[-_]?key)$/i;
+export const REMOTE_CONFIG_SECRET_KEY_PATTERN = /^(?:[a-z0-9]+[-_])*(?:[a-z0-9]+)?(?:api[-_]?key|access[-_]?token|refresh[-_]?token|auth[-_]?token|token|secret|password|passwd|authorization|cookie|credential|private[-_]?key)$/i;
 /** configured and missing are the only values a secret position may carry in a remote DTO. */
 export type RemoteConfigSecretStatus = "configured" | "missing";
 export type RemoteConfigSecretEntry = { path: string; status: RemoteConfigSecretStatus };
