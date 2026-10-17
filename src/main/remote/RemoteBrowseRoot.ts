@@ -53,7 +53,7 @@ export function buildResolveBrowseRootCommand(userPath: string): string {
 }
 
 /** Reject anything that must not reach the remote shell, before it is quoted into a command. */
-function assertProbePath(value: unknown): asserts value is string {
+export function assertProbePath(value: unknown): asserts value is string {
 	if (typeof value !== "string" || value.length === 0 || value.length > MAX_REMOTE_PATH) throw new Error(REMOTE_BROWSE_ROOT_CODES.invalidPath);
 	if (CONTROL_CHARS.test(value)) throw new Error(REMOTE_BROWSE_ROOT_CODES.invalidPath);
 	if (!value.startsWith("/")) throw new Error(REMOTE_BROWSE_ROOT_CODES.notAbsolute);

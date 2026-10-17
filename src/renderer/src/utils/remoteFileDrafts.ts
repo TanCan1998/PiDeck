@@ -10,6 +10,8 @@ export type RemoteFileDraft = {
 	errorCode?: string;
 	blocked?: boolean;
 	rejectedEdits?: number;
+	/** 该路径（或其所在目录）已被 rename/delete：脏草稿保留并标记，干净草稿已回收。 */
+	stale?: boolean;
 };
 export const REMOTE_FILE_DRAFT_LIMIT = 5;
 export const remoteFileDraftKey = (projectId: string, path: string) => JSON.stringify([projectId, path]);
@@ -50,4 +52,18 @@ export function updateRemoteFileDraft(current: ReadonlyMap<string, RemoteFileDra
 /** 成功保存只推进基准，不把请求发出时的正文盖回编辑器（用户可能仍在输入）。 */
 export function completeRemoteFileSave(draft: RemoteFileDraft, sentContent: string, version: string): RemoteFileDraft {
 	return { ...draft, savedContent: sentContent, version, phase: "ready", blocked: false, errorCode: undefined };
+}
+/**
+ * rename/delete 成功后的草稿回收（§5.7）：只回收**干净**草稿；脏草稿一律保留并标记 stale。
+ * 目录子树内已打开的草稿也算受影响（path 前缀匹配），不允许自动丢弃用户输入。
+ */
+export function applyRemoteFileMutation(drafts: ReadonlyMap<string, RemoteFileDraft>, projectId: string, path: string): Map<string, RemoteFileDraft> {
+	const next = new Map(drafts);
+	for (const [key, draft] of next) {
+		if (draft.projectId !== projectId) continue;
+		if (draft.path !== path && !draft.path.startsWith(path + "/")) continue;
+		if (remoteFileDraftDirty(draft)) next.set(key, { ...draft, stale: true });
+		else next.delete(key);
+	}
+	return next;
 }

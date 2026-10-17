@@ -176,11 +176,13 @@ export type RemoteTrashPruneResult = { ok: true; removed: string[]; kept: Array<
 
 | 脚本常量 | 操作 | 关键步骤（顺序即契约） | 压平预算 |
 | --- | --- | --- | --- |
-| `ENTRY_SCRIPT` | `stat` / `create-file` / `create-dir` / `rename` | `bind()` → 按 op：stat=lstat+身份 JSON；create-file=锚定父目录 + `O_WRONLY\|O_CREAT\|O_EXCL\|O_NOFOLLOW` + 校验 size=0/普通文件；create-dir=`mkdirSync(anchor/name,{mode})`；rename=文件 `linkSync(srcAnchor/a, dstAnchor/b)` + 校验目标身份 + `unlinkSync(srcAnchor/a)`；目录 `renameSync` + 校验目标身份 + 源消失 → `recheck(bound)` | ≤5,120 字符（squash 后） |
-| `TRASH_PUT_SCRIPT` | `delete` | `bind()` → 复核源身份 → 确保 `.pideck-trash`（mkdir 0700；存在则 no-follow 打开并校验）→ `mkdir(<trash>/<id>,0700)` → 写 `entry.json`（0600、≤8 KiB、fsync）→ 源 `rename` 到 `<trash>/<id>/payload` → 校验 payload 身份 == 源 revision（失配则回滚 rename 回原路径并报 `REMOTE_FILE_CHANGED`）→ `recheck(bound)` | ≤5,120 字符 |
-| `TRASH_ADMIN_SCRIPT` | `list` / `restore` / `prune` | `list`：打开回收站（缺失=空表；非目录/软链 ⇒ `REMOTE_FILE_TRASH_UNAVAILABLE`）→ 枚举子项（≤256，超出 `truncated`）→ 每个读 `entry.json`（≤8 KiB、严格 schema）→ lstat payload 校验身份 → 输出（不含正文）。`restore`：读 manifest→校验 id/路径/kind/身份→目标必须 ENOENT 且父链非链接→文件 `link`+校验+`unlink(payload)`；目录 `rename`；清理条目目录（失败只标记，不回滚已还原）。`prune`：逐个 id 校验→`intact/payload-missing/payload-changed` 才允许→有界 walk 校验（≤20,000 项/≤32 层，超限该条 `REMOTE_FILE_ENTRY_LIMIT` 不删）→ 删除 payload（文件 unlink／目录 rmSync 递归）→ 删 manifest→rmdir→逐条回报 | ≤5,120 字符 |
+| `REMOTE_PROJECT_ENTRY_SCRIPT`（ENTRY_SCRIPT） | `stat` / `create-file` / `create-dir` / `rename` | 锚定父目录（`openAnchor`）→ 按 op：stat=lstat+身份 JSON；create-file=父目录 anchor + `O_WRONLY\|O_CREAT\|O_EXCL\|O_NOFOLLOW` + 校验 size=0/普通文件；create-dir=`mkdirSync(anchor/name,{mode})`；rename=文件 `linkSync(srcAnchor/a, dstAnchor/b)` + 校验目标身份 + `unlinkSync(srcAnchor/a)`；目录 `renameSync` + 校验目标身份 + 源消失 → `recheck(bound)` | ≤5,120；**实测 5,054** |
+| `REMOTE_PROJECT_TRASH_PUT_SCRIPT`（TRASH_PUT_SCRIPT） | `delete` | 锚定源父目录 → 复核源身份 → 确保 `.pideck-trash`（mkdir 0700；存在则 no-follow 打开并校验）→ `mkdir(<trash>/<id>,0700)` → 写 `entry.json`（0600、≤8 KiB、fsync）→ 源 `rename` 到 `<trash>/<id>/payload` → 校验 payload 身份 == 源 revision（失配则回滚 rename 回原路径并报 `REMOTE_FILE_CHANGED`）→ `recheck(bound)` | ≤5,120；**实测 4,463** |
+| `REMOTE_PROJECT_TRASH_LIST_SCRIPT`（TRASH_ADMIN_SCRIPT 的 list 部分） | `list` | 打开回收站（缺失=空表；非目录/软链 ⇒ `REMOTE_FILE_TRASH_UNAVAILABLE`）→ 枚举 id 子项（≤256，超出 `truncated`）→ 每个 no-follow 打开条目目录、读 `entry.json`（≤8 KiB、可解析、id 匹配）并回传**原始对象**；payload 身份校验在脚本、严格 schema 重验在 main（§6.7 的「invalid」判定不变）| ≤5,120；**实测 4,363** |
+| `REMOTE_PROJECT_TRASH_RESTORE_SCRIPT`（TRASH_ADMIN_SCRIPT 的 restore 部分） | `restore` | 读 manifest→严格 schema/id/路径/kind/身份→目标必须 ENOENT 且父链非链接→文件 `link`+校验+`unlink(payload)`；目录 `rename`；清理条目目录（失败只标记，不回滚已还原）| ≤6,100（例外）；**实测 6,018** |
+| `REMOTE_PROJECT_TRASH_PRUNE_SCRIPT`（TRASH_ADMIN_SCRIPT 的 prune 部分） | `prune` | 逐个 id 校验→`intact/payload-missing/payload-changed` 才允许→有界 walk 校验（≤20,000 项/≤32 层，超限该条 `REMOTE_FILE_ENTRY_LIMIT` 不删）→ 删除 payload（文件 unlink／目录 rmSync 递归）→ 删 manifest→rmdir→逐条回报 | ≤6,100（例外）；**实测 5,995** |
 
-命令构造与预算：沿用 `buildRemoteProjectFileCommand` 的形态——`[nodePath, "-e", script, action, marker, root, relative?, jsonArgs]` 全部 `quotePosixArgument` 后拼接（RemoteProjectFileCommands.ts:123-124），再断言 `command.length <= REMOTE_HELPER_MAX_REMOTE_COMMAND_LENGTH`（:125，常量 8192 见 RemoteHelperContract.ts:25）。**HEAD 实测**（对现有脚本压平后）：BOUNDARY 1,259 字符、CONTROL 5,219、UPLOAD 2,148；因此新脚本压平后必须 ≤5,120，给 Node 绝对路径 + root + 1~2 个相对路径 + JSON 参数留下 ≥3,072 字符。增加测试不变量：①每个新脚本 squash 后 ≤5,120；②任一正常请求拼出的命令 ≤8,192；③越界路径/名字在**构造命令前**拒绝（`REMOTE_FILE_INPUT_INVALID`），不靠远端拒绝。
+命令构造与预算：沿用 `buildRemoteProjectFileCommand` 的形态——`[nodePath, "-e", script, action, marker, root, relative?, jsonArgs]` 全部 `quotePosixArgument` 后拼接（RemoteProjectFileCommands.ts），再断言 `command.length <= REMOTE_HELPER_MAX_REMOTE_COMMAND_LENGTH`（常量 8192 见 RemoteHelperContract.ts）。**实现后实测（squash）**：BOUNDARY 1,086（为 rename/restore 的源/目标两个 anchor 扩展为多锚点版，并压短标识符；文本保存脚本只同步改名、行为不变）、ENTRY 5,054、TRASH_PUT 4,463、TRASH_LIST 4,363 均 ≤5,120；**TRASH_RESTORE 6,018、TRASH_PRUNE 5,995 超出 5,120**——这两条必须携带完整的严格 manifest schema 重验（字段集合/路径规则/payload 身份/有界 walk）与回收站、条目两只 fd 锚定，继续压缩只能放松校验或牺牲可审阅性。经 Lead 批准：**只对 restore/prune 采用单脚本 ≤6,100 的预算例外**，其余脚本仍 ≤5,120；构造器仍以 8192 硬上限拒绝超长命令。测试同时钉住：①每个脚本 ≤各自预算；②任一正常请求命令 ≤8,192；③越界路径/名字/trashId 在**构造命令前**拒绝，不靠远端拒绝；④每个操作的命令数不变。实现期另有一处结构性拆分：`TRASH_ADMIN_SCRIPT` 拆为 list/restore/prune 三个脚本常量（操作、命令数与安全语义不变）以满足「按脚本」预算。
 
 边界脚本复用：从 `RemoteProjectFileCommands.ts:18-40` 导出（或原样搬运）同一份 `BOUNDARY_SCRIPT`；**只允许一处实现**。新增的额外检查：
 
@@ -204,7 +206,7 @@ export type RemoteTrashPruneResult = { ok: true; removed: string[]; kept: Array<
 ### 3.6 与现有文本保存通道的关系
 
 - 文本保存的行为**零改动**：令牌、上限、草稿、错误码全部保持；回归测试 tests/remoteProjectFileService.test.mjs（262 行）与 tests/remoteProjectFileIpc.test.mjs（75 行）必须原样全绿。
-- 两个服务各自持有令牌表（text / entry），互不驱逐；`webContents.destroyed` 时两个服务的 `releaseSender` 都必须被调用（同一个 IPC 模块里注册一个 destroyed 监听，调用两个服务，避免同一窗口挂两个监听——实现细节，冻结语义是「窗口销毁后两类令牌都不可再用」）。
+- 两个服务各自持有令牌表（text / entry），互不驱逐；`webContents.destroyed` 时两个服务的 `releaseSender` 都必须被调用（冻结语义是「窗口销毁后两类令牌都不可再用」）。**实现结果（Lead 已批准）**：文本保存 IPC 与文件管理 IPC 是两个模块、各自注册一个 destroyed 监听并撤销自己的令牌表；语义由测试钉住——`tests/remoteProjectEntryIpc.test.mjs` 同时注册两个真实 handler，销毁同一 sender 后断言两类 `releaseSender` 都被调用。
 - 新建文件后用户点开它，走**现有** open 通道即可（空文件是合法 UTF-8 文本：snapshot size=0、无分块读取、`text()` 返回空串，RemoteProjectFileService.ts:87-105）。
 - 若「新建文件」时要允许直接进入编辑器：本计划**不**新增 create-with-content 通道；UI 创建成功后自动打开该文件（复用 open），内容由用户显式保存。
 
@@ -571,7 +573,7 @@ export type RemoteEntryRevision = {
 | 项目相对路径 | ≤4096 字符；无控制/反斜杠/空段/`.`/`..` | main validator（复用 RemoteProjectFileCommands.ts:11-14） |
 | 单段 name | ≤255 UTF-8 字节；非 `.`/`..`、不含 `/`、控制字节；非保留名/后缀 | main validator |
 | 单条远端命令 | ≤8192 字符 | 命令构造（RemoteProjectFileCommands.ts:125 同款 gate） |
-| 固定脚本（squash 后） | ≤5120 字符/个 | 新测试不变量（HEAD 实测 CONTROL 5,219，见 §3.4） |
+| 固定脚本（squash 后） | entry/put/list ≤5120；**restore/prune ≤6100（Lead 批准的预算例外，见 §3.4）** | 新测试不变量；两条 admin 脚本实测 6,018/5,995 |
 | 单条 SSH 命令 deadline | ≤30 s | SshClientRuntime.ts:33、:144 |
 | 一次操作命令数 | stat 1；create 1；rename 1；delete 1；list 1；restore 1；prune 1；create-project 3（父探针+叶探针+mkdir，复核可复用探针） | 设计（§3.4、§7.3） |
 | entry 令牌 | 30 分钟；最多 128（独立表） | 服务（镜像 RemoteProjectFileService.ts:9-10） |
@@ -914,3 +916,12 @@ enroll 新建模式复用现有无障碍选择器（`#remote-enroll-host`／`#re
 | e2e 夹具/门禁/清理先例 | e2e/remote-fixtures.ts:22-30,97-100,106-152；e2e/remoteSessionAcceptance.spec.ts:59-61,134-165,200-219,244-270；e2e/remote-file-editing.ts:11-20,31-87 |
 | i18n/测试/文件体量/IPC 规则 | AGENTS.md:29,124,127,156,176-178,204-206,369 |
 | 冻结契约写法参照 | docs/remote-git-plan.md:277-291（G3a §5.10）、:332-351（G4a §5.13）、:377-389（G4b §5.15）、:401-419（G5a §5.16） |
+
+## 17. 实施状态（2026-10-18，file-mgmt 赛道交付）
+
+- **状态：dev-mode implemented（开发态实现完成；真机 e2e 已编写，未由本赛道执行）。** 不是 Remote v1 发布声明：真机 Playwright、全量回归、打包/跨平台验收由 Lead 执行。
+- **能力**：远端项目面板（无会话空态 + 会话文件抽屉）里的新建 0 字节文件 / 新建单层目录 / 项目内改名与跨目录移动 / 删除到项目内 `.pideck-trash`（manifest + payload，可列出/还原/显式清空）；侧栏「+ → 远端（SSH）→ 新建空目录」（mkdir + 复核 canonical + 登记，不 clone/不联网/不 git init）。
+- **落点**：`src/main/remote/RemoteProjectEntryCommands.ts`（脚本/校验/预算）、`RemoteProjectEntryService.ts`（令牌/单飞/回执语义/码闭集）、`RemoteFileMutationTokens.ts`、`RemoteProjectCreateCommands.ts`；`src/main/ipc/remoteProjectEntryIpc.ts`、`remoteProjectCreateIpc.ts`；`src/main/ipc/remoteProjectIpc.ts`（mode 分支 + create 通道 + 回收站过滤/读拒绝）、`remoteProjectFileIpc.ts`（文本面拒绝 .pideck-trash）；shared/preload/previewApi 同步；renderer：`RemoteProjectPanel` / `RemoteProjectEntryDialogs` / `RemoteTrashPanel` / `useRemoteProjectEntries` / `remoteFileManagementState` / 草稿 stale 回收 / 登记弹框 create 模式；e2e：`e2e/remote-file-management.ts` + `e2e/remoteSessionAcceptance.spec.ts` 新增用例（仅作者态）。
+- **验证（本赛道已跑）**：新增 35 项——POSIX 生产命令真实执行（WSL 临时目录）11/11（含脚本预算/命令形态/create/stat/rename/delete/list/restore/prune/权限/未知结果）；服务层 9/9（令牌绑定/单飞/CHANGED 零副作用/未知结果不重试/字段重验/**每操作命令数固定**）；Windows 非 POSIX 15/15（IPC 边界 + 双令牌销毁 + 状态机/草稿 + create-project 流程/命令形态）。既有回归：文本保存与项目 IPC（WSL 7 套件 65/65；Windows 8 套件 50 通过/1 skip，含 remoteProjectIpc/remoteProjectEnrollHook/spec guards）；`npm run typecheck` 0；`npm run build:fast` 0；`npx playwright test --list` 136 tests/56 files（`remoteSessionAcceptance.spec.ts` 16 tests，新增本批一项）；Biome 触达文件格式检查 0；未运行真机 e2e / 全量 `npm test`（由 Lead 执行）。
+- **偏离（均经 Lead 批准或已报告）**：① restore/prune 单脚本预算 5,120→6,100（§3.4 实测与理由）；② `TRASH_ADMIN_SCRIPT` 拆为 list/restore/prune 三个常量（操作与命令数不变）；③ 两个 destroyed 监听模块各自撤自己令牌表（§3.6，测试证明两类令牌都被撤销）；④ list 的严格 manifest schema 重验放在 main（脚本只回传原始对象并做 ≤8KiB/id/payload 身份检查），restore/prune 仍在脚本内严格重验；⑤ BOUNDARY 扩为多锚点版并压短标识符；⑥ create-project 的确认流程抽到 `remoteProjectCreateIpc.ts` 以满足 400 行体量红线（方法表/通道名不变）；⑦ `MOVE_INTO_SELF` 由 main 依据 entry 令牌携带的 kind 判定（permission-only mode 无法携带文件类型位）。
+- **未验证/不外推**：真机 Electron+SSH e2e（作者态，未运行）；`npm test` 全量；打包版/Windows/macOS 客户端；真实大小写不敏感远端文件系统；非协作进程在 check→rename 之间的替换（与既有写面同一边界）；`.pideck-trash` 的 Git 可见性（不自动写 .gitignore）按设计呈现。

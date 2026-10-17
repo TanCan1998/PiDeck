@@ -114,9 +114,10 @@ test("侧栏「+」提供本地与远端两个真实入口，登记弹框全应�
 	assert.equal([...app.matchAll(/<RemoteProjectEnrollDialog/g)].length, 1);
 	// 登记成功后必须显式刷新项目清单再选中返回的 projectId，且不创建本地会话。
 	assert.match(app, /onEnrolled=\{\(projectId\) => \{[\s\S]{0,240}?refreshProjects\(\)[\s\S]{0,120}?selectProjectCommand\(projectId\)/);
-	// 确认推送必须订阅且退订（窗口销毁后不得继续回答确认）。
+	// 确认推送必须订阅且退订（窗口销毁后不得继续回答确认）；登记与新建两种确认各有独立通道。
 	assert.match(hook, /desktopApi\.remoteHosts\.onProjectEnrollConfirm/);
-	assert.match(hook, /return unsubscribe;/);
+	assert.match(hook, /desktopApi\.remoteHosts\.onProjectCreateConfirm/);
+	assert.match(hook, /return \(\) => \{[\s\S]{0,120}?unsubscribeEnroll\(\);[\s\S]{0,120}?unsubscribeCreate\(\);/);
 });
 
 test("远端登记入口的每个 i18n key 都在两份词典里存在", () => {

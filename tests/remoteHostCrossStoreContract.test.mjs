@@ -61,6 +61,8 @@ const COVERED_HOST_ID_FIELDS = new Map([
 	// 真正持久化的引用写在 ProjectStore 的 ssh locator（由 projects 源扫描）。
 	["src/shared/types/remoteHost.ts:RemoteProjectEnrollRequest", "runtime"],
 	["src/shared/types/remoteHost.ts:RemoteProjectEnrollResult", "runtime"],
+	// 新建空目录确认请求：hostId 只是回显「在哪台主机上创建」，不落盘；真正持久化的引用仍是 ProjectStore 的 ssh locator。
+	["src/shared/types/remoteHost.ts:RemoteProjectCreateRequest", "runtime"],
 	// 远端项目 trust 决策（P4.4b）：这两个结构真的落盘（桌面 settings.json 的 remoteProjectTrust 段，
 	// 随配置备份一起走），但归 host-profiles 而不是新开一个源，理由就是它们的生命周期完全绑在主机档案上：
 	//   - hostId 之外，每条记录还绑了 pin 密码学事实的摘要（endpointDigest）与规范项目根 ⇒ 换了 endpoint

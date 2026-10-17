@@ -4,6 +4,7 @@ import type { RemoteTextOpenResult, RemoteTextSaveResult } from "../../shared/ty
 import type { RemoteHostConnectionService } from "../remote/RemoteHostConnectionService";
 import { createRemoteProjectFileService } from "../remote/RemoteProjectFileService";
 import { validateRemoteProjectTextPath, REMOTE_PROJECT_TEXT_MAX_BYTES } from "../remote/RemoteProjectFileCommands";
+import { isRemoteProjectTrashPath } from "../remote/RemoteProjectEntryCommands";
 
 /** 编辑IPC独立于只读项目handler；locator只从main读取，整次I/O受既有单主机操作锁保护。 */
 export function registerRemoteProjectFileIpc(input: { enabled: boolean; service: () => RemoteHostConnectionService | undefined | Promise<RemoteHostConnectionService | undefined>; locator: (projectId: string) => { kind: "ssh"; hostId: string; remotePath: string } | undefined }): void {
@@ -21,6 +22,8 @@ export function registerRemoteProjectFileIpc(input: { enabled: boolean; service:
 	function validate(sender: Electron.WebContents, projectId: unknown, relative: unknown): { senderId: number; projectId: string; relative: string } {
 		if (!Number.isSafeInteger(sender.id) || sender.id < 1 || sender.isDestroyed() || typeof projectId !== "string" || !projectId.trim() || projectId.length > 256) throw new Error("REMOTE_FILE_INPUT_INVALID");
 		const path = validateRemoteProjectTextPath(relative);
+		// 回收站是文件面的保留命名空间：文本读/写对第一段 .pideck-trash 一律拒绝（§4.3）。
+		if (isRemoteProjectTrashPath(path)) throw new Error("REMOTE_FILE_PROTECTED_PATH");
 		if (!senders.has(sender.id)) {
 			senders.add(sender.id);
 			sender.once("destroyed", () => {

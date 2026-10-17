@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { encodePiSessionDirectory } from "../src/main/remote/remoteSessionProjectMatch";
 import { initializeRemoteCodeFixture, verifyRemoteCodeEditing, verifyRemoteCodeIsolation, verifyRemoteCodeDisconnect, assertRemoteNodeTestExecuted } from "./remote-file-editing";
+import { createEmptyRemoteProjectInSidebar, verifyRemoteFileManagement } from "./remote-file-management";
 import { verifyRemoteTerminals } from "./remote-terminal";
 import { createLocalGitReadControl, initializeRemoteGitFixture, verifyRemoteGitRead } from "./remote-git";
 import { verifyRemoteGitSoak } from "./remote-git-soak";
@@ -867,6 +868,37 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 		} finally {
 			preserveAppLogs(remoteUserDataRoot, paths.runId);
 			await localControl.dispose();
+			await cleanupRemoteRun(creds, paths, "");
+		}
+	});
+
+	test("远端文件管理 v1：新建空项目 → 新建/改名/移动/删除+回收站还原/清空 → 同名再建", async ({ remoteWindow, remoteUserDataRoot }, testInfo) => {
+		test.setTimeout(600_000);
+		const creds = credentials;
+		if (!creds) {
+			test.skip(true, HELP_TEXT);
+			return;
+		}
+		const paths = await createRemoteRunPaths(creds);
+		// 新建空项目的目标必须是本次 runId 的唯一 e2eRoot：create-only 语义要求它此刻不存在。
+		const createPath = paths.e2eRoot;
+		const consoleErrors: string[] = [];
+		remoteWindow.on("console", (message) => {
+			if (message.type() === "error" && consoleErrors.length < 20) consoleErrors.push(message.text());
+		});
+		try {
+			await dismissOnboarding(remoteWindow, 8_000);
+			await addVerifiedRemoteHostAndConnect(remoteWindow, creds, timeouts);
+			await createEmptyRemoteProjectInSidebar(remoteWindow, createPath, timeouts);
+			// 产品之外的第一方佐证：目录存在、为空，且不是用 -p 递归造出来的父链。
+			const created = await runRemoteCommand(creds, "test -d '" + createPath + "' && [ -z \"$(ls -A '" + createPath + "')\" ] && echo CREATED_EMPTY", 60_000);
+			expect(created.stdout.trim(), "新建空项目必须真的创建一个空目录").toBe("CREATED_EMPTY");
+			await verifyRemoteFileManagement({ window: remoteWindow, credentials: creds, projectPath: createPath, testInfo, timeoutMs: timeouts.helperMs });
+			expect(consoleErrors, "文件管理链路不应出现渲染层 console error").toEqual([]);
+			await runRemoteCommand(creds, "rm -rf " + createPath + "; test ! -e " + createPath + " && echo CLEANUP_OK", 60_000);
+			await runRemoteCommand(creds, "test ! -e " + paths.e2eRoot + " && echo CLEANUP_OK", 30_000);
+		} finally {
+			preserveAppLogs(remoteUserDataRoot, paths.runId);
 			await cleanupRemoteRun(creds, paths, "");
 		}
 	});

@@ -168,11 +168,29 @@ export type RemoteWorkspaceEntry = { name: string; kind: RemoteWorkspacePathKind
  */
 export type RemoteProjectEnrollRequest = { requestId: string; expiresAt: number; hostId: string; label: string; requestedPath: string; canonicalPath: string };
 
-/** 发起登记的结果：`pending` 表示已推送确认、等用户回答。 */
-export type RemoteProjectEnrollResult = { ok: true; status: "pending"; hostId: string; canonicalPath: string } | { ok: false; code: string };
+/**
+ * 登记模式（Phase 5 文件面）：`existing` 是缺省且行为不变的「使用已有目录」；
+ * `create` 才走「新建空目录」——目标此刻尚不存在，因此 create 模式的 pending 结果没有 canonicalPath。
+ */
+export type RemoteProjectEnrollMode = "existing" | "create";
+
+/** 发起登记的结果：`pending` 表示已推送确认、等用户回答。create 模式的目标尚不存在，故不回显 canonicalPath。 */
+export type RemoteProjectEnrollResult = { ok: true; status: "pending"; hostId: string; canonicalPath?: string } | { ok: false; code: string };
 
 /** 回答登记确认的结果；批准时回显新项目的 stable id。 */
 export type RemoteProjectEnrollAnswerResult = { ok: true; enrolled: boolean; projectId?: string } | { ok: false; code: string };
+
+/**
+ * 「新建空远端项目」确认请求（独立于既有目录的登记确认：动作、broker 表与推送通道都分开）。
+ *
+ * main 只做字符串层 parent/leaf 拆分并把两者绑进 stateDigest；确认框展示父目录与叶名两行，
+ * 用户确认的就是「将创建哪个绝对路径」。路径仍以绝对形态出现在**请求**里（enroll 的既有例外），
+ * 创建命令的全部校验/规范化由 main 在已 pin 的连接上完成。
+ */
+export type RemoteProjectCreateRequest = { requestId: string; expiresAt: number; hostId: string; requestedPath: string; parentPath: string; leaf: string };
+
+/** 回答 create 确认的结果；批准并成功登记时回显新项目的 stable id。 */
+export type RemoteProjectCreateAnswerResult = { ok: true; enrolled: boolean; projectId?: string } | { ok: false; code: string };
 
 /**
  * 按 projectId 的只读远端浏览（Phase 3 第二段）。

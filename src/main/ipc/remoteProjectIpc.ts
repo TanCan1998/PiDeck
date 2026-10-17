@@ -15,9 +15,11 @@
 import { createHash } from "node:crypto";
 import { ipcMain, type WebContents } from "electron";
 import { ipcChannels } from "../../shared/ipc";
-import type { RemoteProjectEnrollAnswerResult, RemoteProjectEnrollRequest, RemoteProjectEnrollResult, RemoteProjectListResult, RemoteProjectReadResult, RemoteProjectRootStatusResult, RemoteProjectSearchResult } from "../../shared/types/remoteHost";
+import type { RemoteProjectEnrollAnswerResult, RemoteProjectEnrollMode, RemoteProjectEnrollRequest, RemoteProjectEnrollResult, RemoteProjectListResult, RemoteProjectReadResult, RemoteProjectRootStatusResult, RemoteProjectSearchResult } from "../../shared/types/remoteHost";
+import { registerRemoteProjectCreateFlow } from "./remoteProjectCreateIpc";
 import type { RemoteHostConnectionService, RemoteProjectSession } from "../remote/RemoteHostConnectionService";
 import { REMOTE_HELPER_MAX_SEARCH_QUERY_LENGTH } from "../remote/RemoteHelperContract";
+import { REMOTE_PROJECT_TRASH_DIR } from "../remote/RemoteProjectEntryCommands";
 import { resolveRemoteBrowseRoot } from "../remote/RemoteBrowseRoot";
 import { createRemoteSearchReader, REMOTE_SEARCH_READER_CODES } from "../remote/RemoteSearchReader";
 import { createRemoteWorkspaceReader, type RemoteWorkspacePort } from "../remote/RemoteWorkspaceReader";
@@ -126,18 +128,39 @@ export function registerRemoteProjectIpc(input: {
 	});
 	const enrollOffers = new Map<string, { subjectId: string; digest: string }>();
 	const enrollAction = "remote:project-enroll";
+	/**
+	 * 「新建空远端项目」确认：与「使用已有目录」是两个不同的用户决定。独立 broker/pending/推送通道
+	 * 都在 remoteProjectCreateIpc 中，两者可同时挂起互不串扰。
+	 */
+	const createProjectFlow = registerRemoteProjectCreateFlow({
+		enabled: input.enabled,
+		userDataDir: input.userDataDir,
+		projects: input.projects,
+		resolveService: async () => {
+			const service = await resolveService();
+			return "code" in service ? { code: service.code } : { client: service.service.client };
+		},
+	});
 	const enrollDigest = (hostId: string, canonicalPath: string): string =>
 		createHash("sha256")
 			.update(JSON.stringify(["pideck-project-enroll-v1", hostId, canonicalPath]), "utf8")
 			.digest("hex");
 
-	ipcMain.handle(ipcChannels.remoteProjectEnroll, async (event, hostIdValue: unknown, pathValue: unknown): Promise<RemoteProjectEnrollResult> => {
+	ipcMain.handle(ipcChannels.remoteProjectEnroll, async (event, hostIdValue: unknown, pathValue: unknown, modeValue: unknown): Promise<RemoteProjectEnrollResult> => {
 		if (!input.enabled) return { ok: false, code: "REMOTE_FEATURE_DISABLED" };
 		if (input.projects === undefined) return { ok: false, code: "REMOTE_PROJECT_ENROLL_UNAVAILABLE" };
 		if (typeof hostIdValue !== "string" || !HOST_ID.test(hostIdValue)) return { ok: false, code: "REMOTE_PROJECT_TARGET_INVALID" };
 		const senderId = senderIdOf(event.sender);
 		if (senderId === undefined) return { ok: false, code: "REMOTE_PROJECT_TARGET_INVALID" };
 		if (typeof pathValue !== "string") return { ok: false, code: "REMOTE_BROWSE_ROOT_INVALID" };
+		if (modeValue !== undefined && modeValue !== "existing" && modeValue !== "create") return { ok: false, code: "REMOTE_PROJECT_TARGET_INVALID" };
+		const mode: RemoteProjectEnrollMode = modeValue === "create" ? "create" : "existing";
+		// 「新建空目录」不是登记：它会在项目根之外执行一次写命令，因此必须先探针、再走独立确认 broker。
+		if (mode === "create") {
+			const createService = await resolveService();
+			if ("code" in createService) return { ok: false, code: createService.code };
+			return createProjectFlow.begin(event.sender, createService.service, hostIdValue, pathValue);
+		}
 		const resolvedService = await resolveService();
 		if ("code" in resolvedService) return { ok: false, code: resolvedService.code };
 		try {
@@ -247,6 +270,8 @@ export function registerRemoteProjectIpc(input: {
 		// The read of the root itself is not a file; an empty path is a valid listing target but never a read.
 		const relative = readRelativePath(pathValue);
 		if (relative === undefined || relative === "") return { ok: false, code: "REMOTE_PROJECT_PATH_INVALID" };
+		// 回收站不是用户可读的项目文件：读通道在这里拒绝（只读列表隐藏、回收站三通道单独授权）。
+		if (relative === REMOTE_PROJECT_TRASH_DIR || relative.startsWith(REMOTE_PROJECT_TRASH_DIR + "/")) return { ok: false, code: "REMOTE_FILE_PROTECTED_PATH" };
 		const target = await projectReadTarget(projectIdValue);
 		if ("code" in target) return { ok: false, code: target.code };
 		try {

@@ -15,28 +15,27 @@ export function validateRemoteProjectTextPath(value: unknown): string {
 
 // Linux /proc fd 锚定父目录：检查后父目录被换成 symlink，也不能把后续 open/rename 导向项目外。
 // 每条命令重新验证 canonical root/逐级非链接目录/目录fd的真实位置，不依赖 UI 或旧 helper 的检查。
-const BOUNDARY_SCRIPT = `
-const fs = require("node:fs"), p = require("node:path").posix;
-const [action, marker, root, relative, raw] = process.argv.slice(1);
-const args = JSON.parse(raw);
-function fail(code) { throw new Error(code); }
-let dir;
-function checkRoot() { if (fs.realpathSync(root) !== root || !fs.lstatSync(root).isDirectory()) fail("REMOTE_FILE_PATH_INVALID"); }
-function bind() {
-  if (process.platform !== "linux" || !Number.isInteger(fs.constants.O_NOFOLLOW)) fail("REMOTE_FILE_PLATFORM_UNSUPPORTED");
-  checkRoot();
-  const parent = p.dirname(root + "/" + relative);
-  let current = root;
-  for (const segment of p.relative(root, parent).split("/").filter(Boolean)) {
-    current += "/" + segment;
-    if (!fs.lstatSync(current).isDirectory() || fs.lstatSync(current).isSymbolicLink()) fail("REMOTE_FILE_PATH_INVALID");
-  }
-  dir = fs.openSync(parent, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
-  const anchor = "/proc/self/fd/" + dir;
-  if (fs.realpathSync(anchor) !== parent) fail("REMOTE_FILE_PATH_INVALID");
-  return { anchor, parent, file: anchor + "/" + p.basename(relative) };
-}
-function recheck(bound) { checkRoot(); if (fs.realpathSync(bound.anchor) !== bound.parent || fs.realpathSync(bound.parent) !== bound.parent) fail("REMOTE_FILE_PATH_INVALID"); }
+//
+// 这里是**文件管理（entry/trash）命令与文本命令共用的唯一一份边界实现**：
+// - 标识符刻意压短：这段内容会被 squash 后计入每条远程命令的 8192 字符预算与新增脚本的 5120 预算；
+// - A(rel) 可多次调用（rename/restore 需要源与目标两个锚点），所有 fd 由 Q() 统一关闭；
+// - B()/C() 保留给既有文本命令，语义与旧实现逐字一致（B() 的第一个 fd 即旧 dir）。
+export const BOUNDARY_SCRIPT = `
+const fs=require("node:fs"),p=require("node:path").posix,O=fs.constants;
+const [action,marker,root,relative,raw]=process.argv.slice(1);
+const args=JSON.parse(raw),D=[];
+function T(c){throw Error(c)}
+function R(){if(fs.realpathSync(root)!==root||!fs.lstatSync(root).isDirectory())T("REMOTE_FILE_PATH_INVALID")}
+function Q(){for(const d of D){try{fs.closeSync(d)}catch{}}}
+function A(rel){
+if(process.platform!=="linux"||!Number.isInteger(O.O_NOFOLLOW))T("REMOTE_FILE_PLATFORM_UNSUPPORTED");
+R();const q=rel?p.dirname(root+"/"+rel):root;let c=root;
+for(const s of p.relative(root,q).split("/").filter(Boolean)){c+="/"+s;if(!fs.lstatSync(c).isDirectory()||fs.lstatSync(c).isSymbolicLink())T("REMOTE_FILE_PATH_INVALID")}
+const h=fs.openSync(q,O.O_RDONLY|O.O_DIRECTORY|O.O_NOFOLLOW);D.push(h);const a="/proc/self/fd/"+h;
+if(fs.realpathSync(a)!==q)T("REMOTE_FILE_PATH_INVALID");
+return{anchor:a,parent:q,file:a+"/"+p.basename(rel)}}
+function B(){return A(relative)}
+function C(b){R();if(fs.realpathSync(b.anchor)!==b.parent||fs.realpathSync(b.parent)!==b.parent)T("REMOTE_FILE_PATH_INVALID")}
 `;
 // 已rename后的读回异常只能报结果未确认，不能用提交前冲突码谎称「已拒绝覆盖」。
 const CONTROL_SCRIPT =
@@ -45,46 +44,46 @@ const CONTROL_SCRIPT =
 const crypto = require("node:crypto");
 function identity(s) { return { mode: Number(s.mode & 4095n), size: Number(s.size), dev: String(s.dev), ino: String(s.ino), uid: String(s.uid), gid: String(s.gid), mtimeNs: String(s.mtimeNs), ctimeNs: String(s.ctimeNs) }; }
 function read(file) {
-  if (!fs.lstatSync(file).isFile() || fs.lstatSync(file).isSymbolicLink()) fail("REMOTE_FILE_PATH_INVALID");
-  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  if (!fs.lstatSync(file).isFile() || fs.lstatSync(file).isSymbolicLink()) T("REMOTE_FILE_PATH_INVALID");
+  const fd = fs.openSync(file, O.O_RDONLY | O.O_NOFOLLOW);
   try {
     const first = fs.fstatSync(fd, { bigint: true }), before = identity(first);
-    if (!first.isFile()) fail("REMOTE_FILE_PATH_INVALID");
-    if (before.size > 262144) fail("REMOTE_FILE_TOO_LARGE");
+    if (!first.isFile()) T("REMOTE_FILE_PATH_INVALID");
+    if (before.size > 262144) T("REMOTE_FILE_TOO_LARGE");
     const chunks = [], buffer = Buffer.alloc(32768), hash = crypto.createHash("sha256"); let total = 0;
-    for (;;) { const n = fs.readSync(fd, buffer, 0, Math.min(32768, 262145 - total), null); if (!n) break; total += n; if (total > 262144) fail("REMOTE_FILE_CHANGED"); const chunk = Buffer.from(buffer.subarray(0, n)); hash.update(chunk); chunks.push(chunk); }
-    if (total !== before.size || JSON.stringify(identity(fs.fstatSync(fd, { bigint: true }))) !== JSON.stringify(before) || JSON.stringify(identity(fs.lstatSync(file, { bigint: true }))) !== JSON.stringify(before)) fail("REMOTE_FILE_CHANGED");
+    for (;;) { const n = fs.readSync(fd, buffer, 0, Math.min(32768, 262145 - total), null); if (!n) break; total += n; if (total > 262144) T("REMOTE_FILE_CHANGED"); const chunk = Buffer.from(buffer.subarray(0, n)); hash.update(chunk); chunks.push(chunk); }
+    if (total !== before.size || JSON.stringify(identity(fs.fstatSync(fd, { bigint: true }))) !== JSON.stringify(before) || JSON.stringify(identity(fs.lstatSync(file, { bigint: true }))) !== JSON.stringify(before)) T("REMOTE_FILE_CHANGED");
     return { revision: { ...before, digest: hash.digest("hex") }, content: Buffer.concat(chunks) };
   } finally { fs.closeSync(fd); }
 }
 let result, replacementMade = false;
 try {
-  const bound = bind();
+  const bound = B();
   if (action === "snapshot" || action === "read") {
-    const file = read(bound.file); recheck(bound);
-    if (args.source && JSON.stringify(file.revision) !== JSON.stringify(args.source)) fail("REMOTE_FILE_CHANGED");
+    const file = read(bound.file); C(bound);
+    if (args.source && JSON.stringify(file.revision) !== JSON.stringify(args.source)) T("REMOTE_FILE_CHANGED");
     result = { ok: true, revision: file.revision, ...(action === "read" ? { data: file.content.subarray(args.offset, args.offset + args.count).toString("base64") } : {}) };
   } else if (action === "commit") {
     const temporary = bound.anchor + "/" + args.temporary;
     const upload = read(temporary);
-    if (upload.revision.mode !== 384 || upload.revision.size !== args.size || upload.revision.digest !== args.digest) fail("REMOTE_FILE_TRANSFER_INVALID");
-    if (upload.revision.uid !== args.source.uid || upload.revision.gid !== args.source.gid) fail("REMOTE_FILE_PERMISSION_DENIED");
-    let source; try { source = read(bound.file); } catch (e) { if (e.code === "ENOENT") fail("REMOTE_FILE_CHANGED"); throw e; }
-    if (JSON.stringify(source.revision) !== JSON.stringify(args.source)) fail("REMOTE_FILE_CHANGED");
-    recheck(bound);
-    const fd = fs.openSync(temporary, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); let committed = false;
+    if (upload.revision.mode !== 384 || upload.revision.size !== args.size || upload.revision.digest !== args.digest) T("REMOTE_FILE_TRANSFER_INVALID");
+    if (upload.revision.uid !== args.source.uid || upload.revision.gid !== args.source.gid) T("REMOTE_FILE_PERMISSION_DENIED");
+    let source; try { source = read(bound.file); } catch (e) { if (e.code === "ENOENT") T("REMOTE_FILE_CHANGED"); throw e; }
+    if (JSON.stringify(source.revision) !== JSON.stringify(args.source)) T("REMOTE_FILE_CHANGED");
+    C(bound);
+    const fd = fs.openSync(temporary, O.O_RDONLY | O.O_NOFOLLOW); let committed = false;
     try {
-      if (JSON.stringify(identity(fs.fstatSync(fd, { bigint: true }))) !== JSON.stringify(identity(fs.lstatSync(temporary, { bigint: true })))) fail("REMOTE_FILE_TRANSFER_INVALID");
-      fs.fchmodSync(fd, args.source.mode); fs.fsyncSync(fd); recheck(bound);
-      if (String(fs.lstatSync(temporary, { bigint: true }).ino) !== upload.revision.ino) fail("REMOTE_FILE_TRANSFER_INVALID");
+      if (JSON.stringify(identity(fs.fstatSync(fd, { bigint: true }))) !== JSON.stringify(identity(fs.lstatSync(temporary, { bigint: true })))) T("REMOTE_FILE_TRANSFER_INVALID");
+      fs.fchmodSync(fd, args.source.mode); fs.fsyncSync(fd); C(bound);
+      if (String(fs.lstatSync(temporary, { bigint: true }).ino) !== upload.revision.ino) T("REMOTE_FILE_TRANSFER_INVALID");
       fs.renameSync(temporary, bound.file); committed = true; replacementMade = true;
-      const after = read(bound.file); recheck(bound);
-      if (after.revision.digest !== args.digest || after.revision.size !== args.size || after.revision.mode !== args.source.mode || after.revision.ino !== upload.revision.ino || after.revision.uid !== args.source.uid || after.revision.gid !== args.source.gid) fail("REMOTE_FILE_CHANGED");
+      const after = read(bound.file); C(bound);
+      if (after.revision.digest !== args.digest || after.revision.size !== args.size || after.revision.mode !== args.source.mode || after.revision.ino !== upload.revision.ino || after.revision.uid !== args.source.uid || after.revision.gid !== args.source.gid) T("REMOTE_FILE_CHANGED");
       result = { ok: true, revision: after.revision };
     } finally { try { if (!committed) fs.fchmodSync(fd, 384); } finally { fs.closeSync(fd); } }
-  } else fail("REMOTE_FILE_INPUT_INVALID");
+  } else T("REMOTE_FILE_INPUT_INVALID");
 } catch (e) { result = { ok: false, code: replacementMade ? "REMOTE_FILE_COMMAND_FAILED" : /^REMOTE_FILE_[A-Z_]+$/.test(e.message) ? e.message : e.code === "ENOENT" ? "REMOTE_FILE_NOT_FOUND" : e.code === "EACCES" || e.code === "EPERM" ? "REMOTE_FILE_PERMISSION_DENIED" : "REMOTE_FILE_COMMAND_FAILED" }; }
-finally { if (dir !== undefined) fs.closeSync(dir); }
+finally { Q(); }
 process.stdout.write(marker + JSON.stringify(result));
 `;
 const UPLOAD_SCRIPT =
@@ -92,16 +91,16 @@ const UPLOAD_SCRIPT =
 	`
 let result;
 try {
-  const bound = bind(), file = bound.anchor + "/" + args.temporary;
-  recheck(bound);
-  const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW | (args.first ? fs.constants.O_CREAT | fs.constants.O_EXCL : fs.constants.O_APPEND), 384);
+  const bound = B(), file = bound.anchor + "/" + args.temporary;
+  C(bound);
+  const fd = fs.openSync(file, O.O_WRONLY | O.O_NOFOLLOW | (args.first ? O.O_CREAT | O.O_EXCL : O.O_APPEND), 384);
   try {
     const s = fs.fstatSync(fd);
-    if (!s.isFile() || (s.mode & 4095) !== 384 || s.size + Buffer.from(args.data, "base64").length > 262144) fail("REMOTE_FILE_TRANSFER_INVALID");
-    recheck(bound); fs.writeFileSync(fd, Buffer.from(args.data, "base64")); result = { ok: true };
+    if (!s.isFile() || (s.mode & 4095) !== 384 || s.size + Buffer.from(args.data, "base64").length > 262144) T("REMOTE_FILE_TRANSFER_INVALID");
+    C(bound); fs.writeFileSync(fd, Buffer.from(args.data, "base64")); result = { ok: true };
   } finally { fs.closeSync(fd); }
 } catch (e) { result = { ok: false, code: /^REMOTE_FILE_[A-Z_]+$/.test(e.message) ? e.message : e.code === "EACCES" || e.code === "EPERM" ? "REMOTE_FILE_PERMISSION_DENIED" : "REMOTE_FILE_COMMAND_FAILED" }; }
-finally { if (dir !== undefined) fs.closeSync(dir); }
+finally { Q(); }
 process.stdout.write(marker + JSON.stringify(result));
 `;
 

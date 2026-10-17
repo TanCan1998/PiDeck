@@ -68,6 +68,8 @@ export function RemoteFileEditor(props: { projectId: string; path: string }) {
 				</Button>
 			</div>
 			<p className="text-label text-muted-foreground">{t("remoteFile.explicitSave")}</p>
+			{/* 脏草稿在 rename/delete 后保留并标 stale（§5.7）：保存会失败，但绝不自动丢弃用户输入。 */}
+			{draft?.stale ? <p className="text-label text-muted-foreground">{t("remoteFileEntry.staleDraft")}</p> : null}
 			{errorText ? (
 				<p role="alert" className="text-label text-destructive">
 					{errorText}

@@ -270,6 +270,7 @@ import { registerProjectsIpc } from "./ipc/projectsIpc";
 import { registerRemoteHostIpc } from "./ipc/remoteHostIpc";
 import { registerRemoteProjectIpc } from "./ipc/remoteProjectIpc";
 import { registerRemoteProjectFileIpc } from "./ipc/remoteProjectFileIpc";
+import { registerRemoteProjectEntryIpc } from "./ipc/remoteProjectEntryIpc";
 import { registerRemoteProjectTrustIpc } from "./ipc/remoteProjectTrustIpc";
 import { registerRemoteSessionIpc } from "./ipc/remoteSessionIpc";
 import { createRemoteHostConnectionService, type RemoteHostConnectionService } from "./remote/RemoteHostConnectionService";
@@ -2472,6 +2473,17 @@ function registerIpc() {
 			return project && isRemoteProject(project) ? project.locator : undefined;
 		},
 	});
+	// 文件管理（Phase 5 文件面）：8 条 new/rename/delete/trash 通道 + 独立 entry 令牌表 + sender 写单飞。
+	// 与文本保存 IPC 各自持有令牌表；窗口销毁时两个模块各自撤销自己的表（冻结语义：两类令牌都不可再用）。
+	const remoteProjectEntries = registerRemoteProjectEntryIpc({
+		enabled: remoteExperimentEnabled,
+		service: remoteHostServiceIfEnabled,
+		locator: (projectId) => {
+			const project = projectStore.get(projectId);
+			return project && isRemoteProject(project) ? project.locator : undefined;
+		},
+	});
+	quitCleanup.register("remote-project-entries", remoteProjectEntries.dispose);
 	// 远端 Session 只读发现与登记（Phase 3 第三段）。通道名由装配注入（与 contentStoreIpc 的 ChannelGroup 同一先例）。
 	registerRemoteSessionIpc({
 		enabled: remoteExperimentEnabled,

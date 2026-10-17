@@ -51,6 +51,10 @@ function enrollHarness() {
 								if (index >= 0) confirmHandlers.splice(index, 1);
 							};
 						},
+						// 文件管理新增的 create 模式确认通道：本套件只测既有目录登记，但 hook 会同时订阅两条推送，
+						// 因此 harness 必须给出形状完整的 no-op（不改变任何既有断言）。
+						answerProjectCreate: async () => ({ ok: true, enrolled: false }),
+						onProjectCreateConfirm: () => () => undefined,
 					},
 				},
 			},
