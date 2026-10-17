@@ -792,5 +792,22 @@ P4.5b 的单会话归档/恢复已完成真实 Electron＋SSH 验证，不能据
 - 新发现 2 low + 3 info：**R2-1** `.pideck-trash` 未从 `remote:project-list`/`search` 过滤（与冻结计划/台账矛盾，内容读取仍被拒）→ **本批已修**：根 list 过滤该保留名、递归 search 按首段过滤整棵 trash、子目录同名用户数据与 `.pideck-trashish` 类路径保留；新增 2 组测试，`remoteHostIpc` 75/75。**R2-2** ticket TTL 120s vs 计划 ≤60s、sweep 只在 mint 时跑、崩溃遗留 `.claim-*` 未清理、main TTL 常量未使用 → 车道修复中（helper 1.20.2：60s、启动时 sweep、claim orphan sweep、常量互钉）。O1（runner 不复核 hostId/routeDigest，主进程同 session mint+spawn 保证，未发现跨 host 路径）、O2（runner 选中的 shell 未回填 tab label，cosmetic）、O3（root-drift 码折叠到 FILE_COMMAND_FAILED，fail-closed）为 info。
 - 复审验证：493 targeted / 411 pass / 0 fail / 82 POSIX skip（分五批）；未跑 e2e/真机/pack/全量。
 
+## 远端配置后端 Batch A/B（2026-10-18；provider 测试/模型目录仍 deferred）
+
+- **Batch A（helper + main，已提交 0a0cc53b8）**：helper 1.21.0 新增独立冻结 artifact `config.mjs`——只允许 `$HOME/.pi/agent/{models,settings}.json`（无任意路径参数、auth.json 结构上不可达、no-follow 普通文件、≤1 MiB、坏 JSON 不覆盖、递归 secret 脱敏、RFC 7396 merge-patch + expectedVersion + 0600 temp/fsync/rename/目录 fsync + 读回校验、回执丢失 ⇒ `CONFIG_RESULT_UNCONFIRMED`）。shared `PiConfigTarget` / 闭集码；main `piConfigTarget` 严格校验、`RemotePiConfigBackend` 只按 hostId 经 ready/pinned host 请求并逐字段重验（含 secret 列表重算与明文拒绝）、`PiConfigRouter` local 逐字不变且 ssh 无本地回落；四个既有 config IPC 接受可选 target；provider test/fetch/usage 对 ssh 在发任何请求前返回 `REMOTE_CONFIG_PROVIDER_OPERATION_UNSUPPORTED`。
+- **独立复审与 A-fix（已提交 dafe725f，helper 1.21.x；A2 复审残余 camelCase 复合名在 1.21.2 补齐）**：复审 addendum [remote-security-review-config-addendum.md](remote-security-review-config-addendum.md) 报 2 medium + 2 low。已修：A1 保留键（`__proto__`/`constructor`/`prototype`）在 read/patch 任何层级拒绝（helper 全量校验 + null-proto/defineProperty 合并，main 同样拒绝，渲染层 patch 解析器同规则），阻断原型污染；A2 secret 匹配改为整名 + 可选 `_`/`-` 前缀段，`maxTokens`/`max_tokens`/`tokenizer` 不再误判且可 patch，secret 非字符串值改为 `CONFIG_FILE_INVALID` 不再静默成功；A4 改为 fatal TextDecoder，非法 UTF-8 → `CONFIG_FILE_INVALID` 且不覆盖；A3（配置请求走一次性 transport + expectedVersion CAS，未加 host 操作锁/revision fence）作为显式偏差记录在计划 §6.4.1。helper 1.21.2 再补 A2 复审残余：secret 正则支持 camelCase 复合名（`clientSecret`/`openaiApiKey`/`dbPassword` 会被脱敏），同时继续排除 `maxTokens`/`max_tokens`/`tokenizer`/`tokens`；helper.mjs 40,844 chars `957cb034…`、config.mjs 9,639 chars `0006235d…`，六 artifact 与 entry 全部重钉，Windows 56/56 + WSL 8/8。
+- **Batch B（已提交）**：preload 只给四个既有 config 方法加可选 options（无新通道）；systemIpc 远端返回 local-compatible DTO + 脱敏 remote 快照；渲染层 target selector、远端 panel（secret 只显示 configured/missing、显式 merge-patch、VERSION_CONFLICT 保留草稿、RESULT_UNCONFIRMED 阻止重试、deferred provider 操作说明、auth/trust/mcp/raw 禁用页）、ConfigModal 最小集成 + 远端草稿丢弃确认、zh/en ~52 key；A1 渲染层保留键守卫。作者态 e2e `remote-config.ts` 挂在文件管理验收用例内（备份远端 models.json → UI 读 → 唯一非密钥 marker patch → SSH 落盘核验 → finally 字节还原），用例数不变（16/136）。
+- **验证**：Windows Batch A/B targeted 累计 112 项（104 pass/8 skip/0 fail，最终聚焦 99/99）、WSL 真实 helper 配置套件 8/8 + 定向 16/16；typecheck/format/build:fast 0；e2e `--list` 136/56（acceptance 16）。真机门禁见本节下方「最终门禁」。
+- **仍未做**：provider 连接测试 / 模型目录拉取（第 819 行 must；deferred，入口保持禁用）；用量查询 remote 禁用；renderer 未做 DOM 级测试（纯 reducer + 源码契约，仓库无 DOM harness）。
 
 
+
+
+
+## 最终门禁（2026-10-18 夜，13 项真机 + 全量回归 + 打包）
+
+- **十三项真机门禁 13 passed（12.4m，`CLEANUP_OK`）**：G1–G5e 十项 + 文件管理 v1（含新增远端配置 e2e：host target → secret 徽标读取 → 非密钥 merge-patch → SSH 落盘核验 → finally 字节还原，59s）+ 终端（1.7–1.8m）+ 远端会话产品路（含归档/恢复/永久删除；曾因删除步骤早于 fork 导致 oracle 失败，已把删除步骤移到历史变更步骤之后并单独复跑通过）。
+- **全量回归零新增**：工作树 **8479 项 / 8177 通过 / 30 败 / 272 skip**，与干净 HEAD `567bf2d8a` 的失败集合**完全一致**；30 条为本机既有环境/基线红。
+- **打包**：`npm run pack` 0；`release/win-unpacked/resources` 含 pi-auth-host/extensions(manifest)/prompts/skills/pets/xueprompts.db/pi-ai-catalog；app.asar 命中 `config.read`/`config.patch`/`CONFIG_RESULT_UNCONFIRMED`/`REMOTE_CONFIG_PROVIDER_OPERATION_UNSUPPORTED` 及新增的保留键/secret 逻辑与既有终端/Git 冻结标记。**packaged 仍被 `!app.isPackaged && PIDECK_REMOTE_EXPERIMENTAL=1` 挡住（需产品决定是否放开）。**
+- **已知测试基础设施抖动（非产品失败）**：主机高负载时 G2a/终端 oracle 的 SSH 瞬时断连各出现过 1 次，均单独复跑通过；已加 oracle 单次重连重试与收敛等待。最终干净门禁一次通过。
+- **仍需人工**：打包版真实 SSH 点按 smoke、macOS 客户端、Linux 客户端长稳 soak、独立人工安全 reviewer 签字；provider 连接测试/模型目录仍 deferred。

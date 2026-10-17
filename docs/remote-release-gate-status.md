@@ -1,7 +1,7 @@
 # 远端 v1 发布门禁台账（Remote v1 release-gate ledger）
 
 > 状态：**进行中**（2026-10-17 深夜批次）。本文件是发布前唯一门禁台账：把 [远端开发计划](remote-development-plan.md) §12/§13、[Git 计划](remote-git-plan.md) §6.3、[独立安全审查](remote-security-review.md) 的条目压成一张可核对表。
-> 基线：branch `feat/remote-development`，HEAD `1606fc042`（G5e）；G1–G5e 已交付并真机验收，之后的本批工作见 §3。
+> 基线：branch `feat/remote-development`，HEAD `567bf2d8a`（配置后端 Batch B）；G1–G5e 与全部 Phase 5 功能（文件管理/会话删除/配置后端/终端）已交付，最终门禁见 §3。
 > 判据：只有本文件标 ✅ 的条目才算门禁通过；**未经用户本机/真机人工 smoke 的条目仅在证据栏注明「自动证据」**，不冒充人工验收。
 
 ## 1. Phase 5 安全门禁（计划 §12 Phase 5；审查 §6）
@@ -14,8 +14,8 @@
 | 4 | 终端 prepare ticket 一次性/防重放/跨项目 | 🟢 已实现并真机通过 | helper 1.20.1 `terminal.prepare` 一次性 ticket + 固定 `terminal-runner.mjs`；真机终端 e2e 1.8m 通过（Windows 客户端→Linux 主机，ConPTY 帧分隔符缺陷已修）。agent-target 变体仍未做（project-only kind）。 |
 | 5 | 终端握手/输出/resize/close 与前台 shell 收敛 | 🟢 真机通过 | Windows 客户端→Linux 主机终端 e2e：项目隔离/保存代码/resize/关闭/断开/退出清理全通过；关闭后远端 shell 收敛在负载下最坏约 20–60s（测试等待已放宽到 60s，硬断言仍要求 gone）。 |
 | 6 | Git 输出尺寸与超时上限 | ✅ | 1 MiB/256 KiB/16 MiB 预算 + 同步 600s 预算（F1 修复，§5.16.2）。 |
-| 7 | Phase 0–5 全能力对照表通过 | 🟡 进行中 | 文件管理/create-project/终端 ticket/会话真删（已归档远端会话）均已交付；**仅剩远端配置后端**（models/settings + provider 测试/模型目录）。 |
-| 8 | 独立安全审查完成 | 🟡 进行中 | round 1：0 critical/0 high/1 medium(F1 修复)/5 low/4 info；F2/F4/F5/F6 已修；round 2（[report](remote-security-review-round2.md)）：0 critical/high/medium，F1–F6 关闭，F3 project 终端已实现，新 2 low（R2-1 已修、R2-2 修复中）+3 info。**独立第三方/人工 reviewer 仍缺**（现为 AI lane + Lead 复核）。 |
+| 7 | Phase 0–5 全能力对照表通过 | 🟡 进行中 | 文件管理/create-project/终端 ticket/会话真删/远端配置后端 Batch A+B 均已交付；**仅剩 provider 连接测试与模型目录拉取**（明确 deferred，入口对 ssh 返回稳定 unsupported，见 §3）。 |
+| 8 | 独立安全审查完成 | 🟡 进行中 | round 1：0 critical/0 high/1 medium(F1 修复)/5 low/4 info；F2/F4/F5/F6 已修；round 2（[report](remote-security-review-round2.md)）：0 critical/high/medium，F1–F6 关闭，F3 project 终端已实现，新 2 low（R2-1/R2-2 均已修）+3 info；配置后端复审（[addendum](remote-security-review-config-addendum.md)）：2 medium（A1 原型污染、A2 secret 误判）+2 low，A1/A2/A4 已修、A3 显式偏差，helper 1.21.1 复验通过（任务 17：无 FAIL），1.21.2 补齐 A2 残余 camelCase 复合名。**独立第三方/人工 reviewer 仍缺**（现为 AI lane + Lead 复核）。 |
 | 9 | Windows/macOS 本机 → Linux 远端 smoke | 🟡 部分 | Windows 客户端→Linux 真机：G1–G5e 真机门禁（Git/同步/初始化/嵌套仓库）+ 文件编辑链路已有自动证据；终端切片与 macOS 客户端无证据。 |
 | 10 | `npm run pack` 资源检查 | 🟡 自动部分通过 | `npm run pack` 0（2026-10-18，release/win-unpacked）；`resources/` 含 `pi-auth-host.mjs`、`extensions/`（含 manifest）、`prompts/`、`skills/`、`pets/`、`xueprompts.db`、`pi-ai-catalog.json`；app.asar 内逐串命中冻结 helper 源码标记（`PIDECK_TERMINAL/1 READY`、`terminal-runner.mjs`、`terminal.prepare`、`createGitInitProgram`、`.pideck-trash`、F5 文案 key）。**packaged 构建仍被 `!app.isPackaged && PIDECK_REMOTE_EXPERIMENTAL=1` 挡住；发布前需产品决定是否放开 + 打包版人工 smoke（§4）。** |
 | 11 | helper 升级/降级 + 断电半写恢复 | 🟡 部分 | 版本/capability 不匹配拒绝、激活复核、abort/EOF 清理已测；F2 host 侧 bundle sweep/TTL 本批修；真实断电半写与显式降级矩阵仍缺。 |
@@ -44,10 +44,13 @@
 | terminal ticket (F3) | `terminal.prepare` 一次性 ticket + 固定 terminal-runner 握手 | ✅ 真机通过（1.8m；含 ConPTY 修复 helper 1.20.1） |
 | 夜间总门禁 | 十二项真机门禁 + 全量回归 | ✅ 12 passed (9.8m)；回归零新增失败（8413 vs 8329，30 vs 31 败） |
 | remote session delete | 已归档远端会话行内永久删除（独立确认、pinned SSH 固定脚本、UNCONFIRMED 不重试） | ✅ 已实现（targeted 17/17 + 回归 143/1 skip；真机门禁待跑） |
-| 安全复审 round 2 | 独立只读复审 + R2-1/R2-2 修复 | 🟡 R2-1 已修（host IPC 75/75）；R2-2 修复中（helper 1.20.2） |
-| remote config backend | provider 测试/模型目录在目标 host 执行，脱敏返回 | ⬜ 待排 |
-| remote session delete | 远端会话数据真删（显式二次确认，写面 `rm`） | ⬜ 待排 |
-| release evidence | `npm run pack` 资源检查、packaged/开发态门禁口径、长稳+真实慢链路、独立复核 | 🟡 pack 0 且资源/冻结源码检查通过；长稳（Linux 客户端）与独立复核待排 |
+| 安全复审 round 2 | 独立只读复审 + R2-1/R2-2 修复 | ✅ R2-1 已修（host IPC 75/75）；R2-2 已修（helper 1.20.2：60s TTL/启动 sweep/claim 清理/常量互钉） |
+| remote config backend Batch A | helper 1.21.x `config.mjs`（models/settings 白名单、secret 状态、merge-patch + expectedVersion 原子写）+ main target 路由/重验/无本地回落 | ✅ 已交付（0a0cc53b8；复审 2 medium 后 hardening 提交 dafe725f，helper 1.21.2 含 camelCase 复合 secret 名） |
+| remote config backend Batch B | 设置页 target selector + 远端 models/settings 面板（secret 徽标、显式 patch、冲突/未确认状态、禁用项文案） | ✅ 已交付（作者态 e2e 挂在文件管理用例，真机门禁见下） |
+| release evidence | `npm run pack` 资源检查、packaged/开发态门禁口径、长稳+真实慢链路、独立复核 | 🟡 pack 0 且资源/冻结源码检查通过；长稳（Linux 客户端）与人工独立复核待排 |
+| 最终门禁（13 项真机） | G1–G5e + 文件管理（含远端配置 e2e）+ 终端 + 远端会话产品路（含归档/永久删除） | ✅ **13 passed（12.4m）**，`CLEANUP_OK`；配置 e2e：host target → 脱敏读取 → 非密钥 patch → SSH 落盘核验 → 还原 |
+| 最终全量回归 | 工作树 vs 干净 HEAD `567bf2d8a` | ✅ 8479 项 / 8177 通过 / 30 败 / 272 skip，**失败集合完全一致（零新增）** |
+| 最终打包 | `npm run pack` + 产物冻结源码标记检查（含 config.mjs/1.21.2） | ✅ pack 0；app.asar 命中 `config.read`/`config.patch`/`CONFIG_RESULT_UNCONFIRMED`/`REMOTE_CONFIG_PROVIDER_OPERATION_UNSUPPORTED`/新增 marker 与既有终端/Git 标记 |
 
 ## 4. 需要用户/人工确认的项（不能被自动证据替代）
 
