@@ -17,6 +17,7 @@ import type {
 	RemoteGitRefFileDiffResult,
 	RemoteGitRefsResult,
 	RemoteGitFetchOutcomeResult,
+	RemoteGitInitResult,
 	RemoteGitPullOutcomeResult,
 	RemoteGitPushOutcomeResult,
 	RemoteGitSyncFactsResult,
@@ -263,6 +264,20 @@ export function registerRemoteGitReadIpc(input: { enabled: boolean; locator(proj
 	ipcMain.handle(ipcChannels.gitRemoteCompare, async (event, projectId: unknown, base: unknown, head: unknown): Promise<RemoteGitCompareResult> => {
 		try {
 			return { ok: true, compare: await read(event, projectId, undefined, (id, signal) => git.compare(id, base, head, signal)) };
+		} catch (error) {
+			return { ok: false, code: remoteGitFailureCode(error) };
+		}
+	});
+	/*
+	 * G5c explicit init: the one write channel with no token, because there is no confirmed repository state a
+	 * renderer could bind a grant to - the absence of .git is the precondition. It still runs through the same
+	 * read() boundary (enabled / sender / project identity / trust / pressure) and is marked as a write, so a
+	 * reply lost after dispatch becomes GIT_WRITE_RESULT_UNCONFIRMED instead of being replayed.
+	 */
+	ipcMain.handle(ipcChannels.gitRemoteInit, async (event, projectId: unknown): Promise<RemoteGitInitResult> => {
+		try {
+			const created = await read(event, projectId, undefined, (id, signal) => git.init(id, signal), true);
+			return { ok: true, branch: created.branch };
 		} catch (error) {
 			return { ok: false, code: remoteGitFailureCode(error) };
 		}

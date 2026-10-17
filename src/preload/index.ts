@@ -813,6 +813,8 @@ const api = {
 		remoteRefFileDiff: (projectId: string, base: string | null, head: string, target: ProjectFileTarget) => ipcRenderer.invoke(ipcChannels.gitRemoteRefFileDiff, projectId, base, head, target) as Promise<import("../shared/types").RemoteGitRefFileDiffResult>,
 		// G5b：两个全名本地引用之间的只读树对比（无 token）；逐文件两侧内容仍走 remoteRefFileDiff
 		remoteCompare: (projectId: string, base: string, head: string) => ipcRenderer.invoke(ipcChannels.gitRemoteCompare, projectId, base, head) as Promise<import("../shared/types").RemoteGitCompareResult>,
+		// G5c：显式初始化项目根仓库（无 token；属于写操作，结果未知时不重放）
+		initRemote: (projectId: string) => ipcRenderer.invoke(ipcChannels.gitRemoteInit, projectId) as Promise<import("../shared/types").RemoteGitInitResult>,
 		status: (projectId: string, repoPath?: ProjectFileTarget) => ipcRenderer.invoke(ipcChannels.gitStatus, projectId, repoPath) as Promise<import("../shared/types").GitResourceGroups>,
 		// Git Changes 中单个文件的两侧快照（按点击惰性读取）
 		workspaceFileDiff: (projectId: string, group: GitWorkspaceDiffGroup, fileTarget: ProjectFileTarget, repoPath?: ProjectFileTarget) => ipcRenderer.invoke(ipcChannels.gitWorkspaceFileDiff, projectId, group, fileTarget, repoPath) as Promise<GitWorkspaceFileDiff | null>,

@@ -158,6 +158,11 @@ export type RemoteGitCompareSide = { ref: string; oid: string };
 export type RemoteGitCompareFile = { status: string; path: string; oldPath?: string };
 export type RemoteGitCompare = { base: RemoteGitCompareSide; head: RemoteGitCompareSide; files: RemoteGitCompareFile[] };
 export type RemoteGitCompareResult = { ok: true; compare: RemoteGitCompare } | { ok: false; code: string };
+/**
+ * G5c explicit init: creates .git at the project root and reports the default branch of the new repository.
+ * The renderer only sends projectId; main and the helper decide whether the root may be initialized at all.
+ */
+export type RemoteGitInitResult = { ok: true; branch: string | null } | { ok: false; code: string };
 /** G3b branch write face: creating and switching both move a ref the user explicitly asked for. */
 export type RemoteGitBranchMutationResult = { ok: true } | { ok: false; code: string };
 /** G4a recoverable discard: the snapshot ref (null when the discarded change was a deletion) goes back to the panel. */

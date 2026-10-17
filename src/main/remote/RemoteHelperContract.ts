@@ -77,6 +77,7 @@ export const REMOTE_HELPER_ERROR_CODES = [
 	"GIT_NOT_FOUND",
 	"GIT_VERSION_UNSUPPORTED",
 	"GIT_NOT_REPOSITORY",
+	"GIT_REPO_EXISTS",
 	"GIT_UNSUPPORTED_REPOSITORY",
 	"GIT_PLATFORM_UNSUPPORTED",
 	"GIT_CONFIG_UNSUPPORTED",
@@ -124,6 +125,15 @@ export const REMOTE_HELPER_METHOD_FS_SEARCH_NAMES = "fs.searchNames";
 /** Optional read-only Git methods; they share the helper concurrency/cancellation lifecycle. */
 export const REMOTE_HELPER_METHOD_GIT_STATUS = "git.status";
 export const REMOTE_HELPER_METHOD_GIT_WORKSPACE_DIFF = "git.workspaceDiff";
+/**
+ * The one write that runs before a repository exists. It has no parameters on purpose: the verified root is the
+ * whole input, and a root that already contains (in any form) or is governed by a repository is refused with
+ * GIT_REPO_EXISTS instead of being initialized into a nested one.
+ */
+export const REMOTE_HELPER_METHOD_GIT_INIT = "git.init";
+export type RemoteGitInitParams = Record<string, never>;
+/** `branch` is the default branch the freshly created repository reports; null is reported as read. */
+export type RemoteGitInitResult = { branch: string | null };
 export const REMOTE_GIT_STATUS_MAX_BYTES = 1024 * 1024;
 export const REMOTE_GIT_MAX_RESOURCES = 4096;
 export const REMOTE_GIT_TEXT_MAX_BYTES = 256 * 1024;
@@ -293,6 +303,7 @@ export const REMOTE_HELPER_CAPABILITIES = [
 	"git.fetch",
 	"git.push",
 	"git.pull",
+	"git.init",
 ] as const;
 export type RemoteHelperCapability = (typeof REMOTE_HELPER_CAPABILITIES)[number];
 /**

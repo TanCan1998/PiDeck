@@ -55,6 +55,7 @@ const {
 	REMOTE_GIT_SYNC_TIMEOUT_MS,
 } = loadTsCommonJs("src/main/remote/RemoteHelperContract.ts");
 const { REMOTE_HELPER_ARTIFACTS, REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_HELPER_ENTRY_SHA256, REMOTE_HELPER_ENTRY_VERSION, REMOTE_HELPER_GIT_READ_SHA256, REMOTE_HELPER_GIT_SYNC_SHA256, REMOTE_HELPER_GIT_WRITE_SHA256, REMOTE_HELPER_INLINE_SOURCE } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
+const { REMOTE_GIT_READ_SOURCE } = loadTsCommonJs("src/main/remote/RemoteGitReadSource.ts");
 const { materializeRemoteHelperArtifacts } = await import("./helpers/remoteHelperArtifacts.mjs");
 const { REMOTE_FRAME_DIAGNOSTIC_CODES, createRemoteControlClient } = loadTsCommonJs("src/main/remote/RemoteControlClient.ts");
 
@@ -63,7 +64,7 @@ const HOST_ID = "01234567-89ab-4def-8123-456789abcdef";
 /** The helper never resolves HOME into a path, so a POSIX literal is the honest fixture on any platform. */
 const HELPER_HOME = "/home/pideck-helper";
 /** Frozen digest, pinned here as well as in the module: editing the source means editing both. */
-const FROZEN_SHA256 = "d8ad6e5c9a2b54ab8dd77f8ef5f5091c7295ad82fd4b852ee70fe747944461fa";
+const FROZEN_SHA256 = "e513bcfaf0ef06d1bb6610f58eb56eb5b4b96abe57a3f0cd144b51b8dda6709a";
 const MAX_TEXT = 4096;
 const TEST_TIMEOUT_MS = 30_000;
 const GUARD_TIMEOUT_MS = 10_000;
@@ -421,6 +422,13 @@ helperTest("every frozen bundle artifact is one byte-frozen ASCII line with its 
 		const mentions = REMOTE_HELPER_INLINE_SOURCE.split(`"${capability}"`).length - 1;
 		assert.ok(mentions >= 2, `${capability} must appear in CAPABILITIES and in the dispatch`);
 	}
+	// G5c: the init capability has no other literal occurrence, so "one declaration + one dispatch arm" is exact.
+	assert.equal(REMOTE_HELPER_INLINE_SOURCE.split('"git.init"').length - 1, 2, "git.init appears exactly once in CAPABILITIES and once in the dispatch");
+	// A stable code must be registered inside the frozen worker itself, or the helper's own mapping collapses it to IO_ERROR.
+	const stableSet = /const stable = new Set\(\[([^\]]*)\]\)/.exec(REMOTE_GIT_READ_SOURCE);
+	assert.ok(stableSet, "the frozen Git worker must keep its literal stable-code set");
+	assert.ok(stableSet[1].includes('"GIT_REPO_EXISTS"'), "GIT_REPO_EXISTS must be a stable code of the frozen worker");
+	assert.ok(REMOTE_HELPER_ERROR_CODES.includes("GIT_REPO_EXISTS"), "GIT_REPO_EXISTS must be in the contract's closed error vocabulary");
 	// The multi-file bundle replaced the single-artifact `node -e <source>` shape: the entry imports a sibling it
 	// needs to run, so a command line carrying only the entry cannot work at all. That is deliberate - the single
 	// artifact had already outgrown the Windows command line budget and had no room left for the next batch - and
@@ -431,6 +439,7 @@ helperTest("every frozen bundle artifact is one byte-frozen ASCII line with its 
 helperTest("the exported entry identity matches the frozen source", () => {
 	assert.equal(REMOTE_HELPER_ENTRY_FILE_NAME, "helper.mjs");
 	assert.match(REMOTE_HELPER_ENTRY_VERSION, /^\d+\.\d+\.\d+$/);
+	assert.equal(REMOTE_HELPER_ENTRY_VERSION, "1.17.0", "the explicit-init batch is helper 1.17.0");
 	// The frozen source cannot import the contract, so its literals are checked against it here.
 	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes(`"${REMOTE_HELPER_ENTRY_VERSION}"`), "hello must report REMOTE_HELPER_ENTRY_VERSION");
 	for (const token of [REMOTE_HELPER_METHOD_HELLO, REMOTE_HELPER_METHOD_ECHO, REMOTE_HELPER_METHOD_CANCEL, REMOTE_HELPER_METHOD_FS_STAT, REMOTE_HELPER_METHOD_FS_LIST, REMOTE_HELPER_METHOD_FS_READ]) {

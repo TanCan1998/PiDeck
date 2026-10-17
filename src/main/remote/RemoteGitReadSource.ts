@@ -25,15 +25,19 @@
  *   `refs/tags/*`) because those are exactly what `git.refs` returns and because a full name can never be
  *   mistaken for an option; the frozen `readRef` re-implements the check-ref-format rules and additionally
  *   refuses the shapes Git itself accepts but this protocol does not use (a component starting with `-`, an
- *   `@` component, and `{}` which would collide with the `^{commit}` argument that follows the name).
+ *   `@` component, and `{}` which would collide with the `^{commit}` argument that follows the name);
+ * - `git.init` is dispatched before the repository checks because it is the one write whose precondition is the
+ *   absence of `.git`: any existing repository - including a parent repository that governs the root - is a
+ *   GIT_REPO_EXISTS refusal with no disk change, and a repository the dispatch cannot fully confirm is reported
+ *   as GIT_WRITE_RESULT_UNCONFIRMED instead of guessed at.
  */
-export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,createGitCommitProgram,createGitBranchProgram,createGitDiscardProgram,createGitRecoveryProgram}from"./git-write.mjs";import{createGitSyncProgram}from"./git-sync.mjs";export function createGitReadProgram(root, fs, path) {
+export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,createGitCommitProgram,createGitBranchProgram,createGitDiscardProgram,createGitRecoveryProgram,createGitInitProgram}from"./git-write.mjs";import{createGitSyncProgram}from"./git-sync.mjs";export function createGitReadProgram(root, fs, path) {
 	const cp = process.getBuiltinModule("node:child_process");
 	const crypto = process.getBuiltinModule("node:crypto");
 	const MAX_STATUS = 1048576, MAX_RESOURCES = 4096, MAX_TEXT = 262144, MAX_STDERR = 65536;
 	const MAX_INDEX = 16777216, MAX_METADATA = 20000, MAX_DEPTH = 32, MAX_PATH = 4096;
 	const scopes = new Set();
-	const stable = new Set(["PATH_OUTSIDE_ROOT", "PATH_NOT_FOUND", "NOT_A_FILE", "PERMISSION_DENIED", "IO_ERROR", "RESULT_TOO_LARGE", "REQUEST_TIMEOUT", "REQUEST_CANCELLED", "REMOTE_CONNECTION_LOST", "GIT_NOT_FOUND", "GIT_VERSION_UNSUPPORTED", "GIT_NOT_REPOSITORY", "GIT_UNSUPPORTED_REPOSITORY", "GIT_PLATFORM_UNSUPPORTED", "GIT_CONFIG_UNSUPPORTED", "GIT_COMMAND_FAILED", "GIT_RESULT_INVALID", "GIT_RESOURCE_CHANGED", "GIT_NOT_TEXT", "GIT_INDEX_LOCKED", "GIT_WRITE_UNSUPPORTED", "GIT_WRITE_RESULT_UNCONFIRMED", "GIT_COMMIT_NOTHING_STAGED", "GIT_COMMIT_MESSAGE_EMPTY", "GIT_COMMIT_IDENTITY_REQUIRED", "GIT_COMMIT_HEAD_CHANGED", "GIT_OBJECT_NOT_FOUND", "GIT_REF_EXISTS", "GIT_REF_NOT_FOUND", "GIT_SWITCH_CONFLICT", "GIT_RESTORE_CONFLICT", "GIT_RECOVERY_ENTRY_NOT_FOUND", "GIT_SYNC_REMOTE_UNKNOWN", "GIT_SYNC_DIRTY", "GIT_PULL_STRATEGY_REQUIRED", "GIT_PULL_CONFLICTS", "GIT_PUSH_REJECTED", "GIT_PUSH_REMOTE_REFUSED", "GIT_SYNC_FAILED", "GIT_WRITE_RESULT_UNCONFIRMED"]);
+	const stable = new Set(["PATH_OUTSIDE_ROOT", "PATH_NOT_FOUND", "NOT_A_FILE", "PERMISSION_DENIED", "IO_ERROR", "RESULT_TOO_LARGE", "REQUEST_TIMEOUT", "REQUEST_CANCELLED", "REMOTE_CONNECTION_LOST", "GIT_NOT_FOUND", "GIT_VERSION_UNSUPPORTED", "GIT_NOT_REPOSITORY", "GIT_REPO_EXISTS", "GIT_UNSUPPORTED_REPOSITORY", "GIT_PLATFORM_UNSUPPORTED", "GIT_CONFIG_UNSUPPORTED", "GIT_COMMAND_FAILED", "GIT_RESULT_INVALID", "GIT_RESOURCE_CHANGED", "GIT_NOT_TEXT", "GIT_INDEX_LOCKED", "GIT_WRITE_UNSUPPORTED", "GIT_WRITE_RESULT_UNCONFIRMED", "GIT_COMMIT_NOTHING_STAGED", "GIT_COMMIT_MESSAGE_EMPTY", "GIT_COMMIT_IDENTITY_REQUIRED", "GIT_COMMIT_HEAD_CHANGED", "GIT_OBJECT_NOT_FOUND", "GIT_REF_EXISTS", "GIT_REF_NOT_FOUND", "GIT_SWITCH_CONFLICT", "GIT_RESTORE_CONFLICT", "GIT_RECOVERY_ENTRY_NOT_FOUND", "GIT_SYNC_REMOTE_UNKNOWN", "GIT_SYNC_DIRTY", "GIT_PULL_STRATEGY_REQUIRED", "GIT_PULL_CONFLICTS", "GIT_PUSH_REJECTED", "GIT_PUSH_REMOTE_REFUSED", "GIT_SYNC_FAILED", "GIT_WRITE_RESULT_UNCONFIRMED"]);
 	const control = /[\x00-\x1f\x7f]/;
 	function failure(code) { return new Error(code); }
 	function code(error) {
@@ -402,6 +406,7 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,cr
 	const discarder = createGitDiscardProgram(fs, { failure: failure, crypto: crypto, execute: execute, rawStatus: rawStatus, snapshot: snapshot, head: head, entries: writer.entries, readFile: readFile, belongs: belongs, fingerprint: writer.fingerprint, reaped: writer.reaped }, writer.gates, { name: "PiDeck recovery", email: "pideck-recovery@localhost" });
 	const recovery = createGitRecoveryProgram(fs, { failure: failure, crypto: crypto, execute: execute, rawStatus: rawStatus, head: head, readFile: readFile, relative: relative, fingerprint: writer.fingerprint, reaped: writer.reaped }, writer.gates);
 	const sync = createGitSyncProgram(fs, { failure: failure, execute: execute, rawStatus: rawStatus, head: head, snapshot: snapshot, fingerprint: writer.fingerprint, reaped: writer.reaped }, writer.gates);
+	const inits = createGitInitProgram(fs, root, { failure: failure, execute: execute, head: head });
 	async function run(ctx, params) {
 		ctx.check();
 		if (process.platform !== "linux") throw failure("GIT_PLATFORM_UNSUPPORTED");
@@ -413,6 +418,8 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,cr
 		ctx.rootIdentity = [rootStats.dev, rootStats.ino].map(String).join(":");
 		const openedRoot = fs.fstatSync(ctx.fd, { bigint: true });
 		if ([openedRoot.dev, openedRoot.ino].map(String).join(":") !== ctx.rootIdentity) throw failure("GIT_RESOURCE_CHANGED");
+		/* The one write that runs before a repository exists: it verifies its own preconditions instead of the .git checks below. */
+		if (params.method === "git.init") { ctx.executable = executable(); ctx.env = environment(); return inits.run(ctx); }
 		let gitStats;
 		try { gitStats = fs.lstatSync(ctx.cwd + "/.git", { bigint: true }); } catch (error) { if (error.code === "ENOENT") throw failure("GIT_NOT_REPOSITORY"); throw error; }
 		if (!gitStats.isDirectory() || gitStats.isSymbolicLink()) throw failure("GIT_UNSUPPORTED_REPOSITORY");
@@ -451,7 +458,7 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,cr
 		if (params === undefined) params = {};
 		if (params === null || typeof params !== "object" || Array.isArray(params)) throw failure("GIT_RESULT_INVALID");
 		const keys = Object.keys(params);
-		if (method === "git.status") { if (keys.length) throw failure("GIT_RESULT_INVALID"); return { method: method }; }
+		if (method === "git.init" || method === "git.status") { if (keys.length) throw failure("GIT_RESULT_INVALID"); return { method: method }; }
 		if (method === "git.log") {
 			if (keys.some(function (key) { return key !== "maxCount" && key !== "skip"; })) throw failure("GIT_RESULT_INVALID");
 			const maxCount = params.maxCount === undefined ? LOG_DEFAULT : params.maxCount, skip = params.skip === undefined ? 0 : params.skip;

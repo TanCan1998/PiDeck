@@ -11,6 +11,7 @@ import type {
 	RemoteGitCompareResult,
 	RemoteGitDiscardResult,
 	RemoteGitFetchOutcome,
+	RemoteGitInitResult,
 	RemoteGitPullOutcome,
 	RemoteGitPushOutcome,
 	RemoteGitSyncFactsView,
@@ -32,7 +33,11 @@ export type RemoteGitViewState = {
 	errorCode?: string;
 	mutating?: boolean;
 	/** Which action is in flight; the panel says “writing the index”, “committing”, or which branch action runs. */
-	mutatingKind?: "index" | "commit" | "branch" | "switch" | "discard" | "restore" | "drop" | "fetch" | "push" | "pull";
+	mutatingKind?: "index" | "commit" | "branch" | "switch" | "discard" | "restore" | "drop" | "fetch" | "push" | "pull" | "init";
+	/** Explicit repository creation is its own single-flight state: it starts from “not a repository”, not from facts. */
+	initializing?: boolean;
+	/** The branch the newly created repository reported; the panel shows it on the init outcome line. */
+	initNotice?: { branch: string | null };
 	/** Where the last discarded content went; null means the discarded change was a deletion (nothing to keep). */
 	discardRecovery?: { ref: string | null; path: string };
 	/* Recovery store (G4b): a manually loaded listing plus the outcome of the last restore or drop. */
@@ -81,6 +86,7 @@ export type RemoteGitViewApi = {
 	remoteRefs(projectId: string): Promise<RemoteGitRefsResult>;
 	remoteRefFileDiff(projectId: string, base: string | null, head: string, target: ProjectFileTarget): Promise<RemoteGitRefFileDiffResult>;
 	remoteCompare(projectId: string, base: string, head: string): Promise<RemoteGitCompareResult>;
+	initRemote(projectId: string): Promise<RemoteGitInitResult>;
 	createRemoteBranch(projectId: string, name: string, token: string): Promise<RemoteGitBranchMutationResult>;
 	switchRemoteBranch(projectId: string, name: string, token: string): Promise<RemoteGitBranchMutationResult>;
 	discardRemote(projectId: string, group: "workingTree" | "untracked", target: ProjectFileTarget, token: string): Promise<RemoteGitDiscardResult>;
@@ -153,7 +159,8 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 		const carried = sticky === undefined || next.confirmedCommits !== undefined ? next : { ...next, confirmedCommits: sticky };
 		const withDiscard = next.discardRecovery === undefined && state.discardRecovery !== undefined ? { ...carried, discardRecovery: state.discardRecovery } : carried;
 		const withNotice = next.recoveryNotice === undefined && state.recoveryNotice !== undefined ? { ...withDiscard, recoveryNotice: state.recoveryNotice } : withDiscard;
-		state = next.syncNotice === undefined && state.syncNotice !== undefined ? { ...withNotice, syncNotice: state.syncNotice } : withNotice;
+		const withSyncNotice = next.syncNotice === undefined && state.syncNotice !== undefined ? { ...withNotice, syncNotice: state.syncNotice } : withNotice;
+		state = next.initNotice === undefined && state.initNotice !== undefined ? { ...withSyncNotice, initNotice: state.initNotice } : withSyncNotice;
 		if (active) publish(state);
 	}
 	const controller = {
@@ -590,6 +597,40 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			} catch {
 				// The checkout may have happened; never replay it, and keep saying the result is unknown.
 				if (active && generation === epoch) update({ projectKey, loading: false, diffLoading: false, errorCode: "GIT_WRITE_RESULT_UNCONFIRMED" });
+			}
+		},
+		/**
+		 * Explicit repository creation at the project root. It is a write with no token (there is no confirmed
+		 * repository state to bind one to), so it gets everything else a write gets: single-flight, a generation
+		 * fence that retires a slow answer after a project switch, connection loss or refresh, and a refreshed
+		 * snapshot as its only success report. A refusal drops the stale facts; an unknown result - the reply was
+		 * lost after the helper may have created .git - keeps the uncertainty warning and is never replayed or
+		 * auto-refreshed: only a successful explicit refresh can clear it.
+		 */
+		async initRepository(): Promise<void> {
+			if (!active || state.loading || state.diffLoading || state.mutating || state.initializing) return;
+			// Only a confirmed non-repository offers this action; anything else is a main/helper decision, not a guess.
+			if (state.errorCode !== "GIT_NOT_REPOSITORY") return;
+			const generation = ++epoch;
+			diffEpoch += 1;
+			historyEpoch += 1;
+			detailEpoch += 1;
+			refsEpoch += 1;
+			compareEpoch += 1;
+			recoveryEpoch += 1;
+			update({ ...state, initializing: true, mutating: true, mutatingKind: "init", initNotice: undefined, errorCode: undefined, diff: undefined, diffErrorCode: undefined });
+			try {
+				const result = await api.initRemote(projectId);
+				if (!active || generation !== epoch) return;
+				if (!result.ok) {
+					update({ projectKey, loading: false, diffLoading: false, initializing: false, errorCode: result.code });
+					return;
+				}
+				update({ projectKey, loading: false, diffLoading: false, initializing: false, initNotice: { branch: result.branch } });
+				await controller.refresh();
+			} catch {
+				// The helper may have created .git before the reply was lost: say so and never retry or auto-refresh.
+				if (active && generation === epoch) update({ projectKey, loading: false, diffLoading: false, initializing: false, errorCode: "GIT_WRITE_RESULT_UNCONFIRMED" });
 			}
 		},
 		/** Connection transitions invalidate facts without automatically reconnecting or refreshing. */

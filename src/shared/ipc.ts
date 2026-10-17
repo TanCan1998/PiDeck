@@ -466,6 +466,8 @@ export const ipcChannels = {
 	gitRemoteRefs: "git:remote-refs",
 	gitRemoteRefFileDiff: "git:remote-ref-file-diff",
 	gitRemoteCompare: "git:remote-compare",
+	/** Explicit init at the project root; no token because there is no confirmed repository state to bind. */
+	gitRemoteInit: "git:remote-init",
 	gitRemoteCreateBranch: "git:remote-create-branch",
 	gitRemoteSwitchBranch: "git:remote-switch-branch",
 	gitRemoteDiscard: "git:remote-discard",

@@ -77,6 +77,9 @@ export function useRemoteGitView(project: RemoteProject) {
 	const createBranch = useCallback((name: string) => {
 		void controller.current?.createBranch(name);
 	}, []);
+	const initRepository = useCallback(() => {
+		void controller.current?.initRepository();
+	}, []);
 	const switchBranch = useCallback((name: string) => {
 		void controller.current?.switchBranch(name);
 	}, []);
@@ -104,6 +107,7 @@ export function useRemoteGitView(project: RemoteProject) {
 		loadRefs,
 		openHistoryFileDiff,
 		createBranch,
+		initRepository,
 		switchBranch,
 		discard,
 		loadRecovery,

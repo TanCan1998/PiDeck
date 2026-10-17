@@ -80,6 +80,7 @@ const ERRORS = new Set([
 	"GIT_NOT_FOUND",
 	"GIT_VERSION_UNSUPPORTED",
 	"GIT_NOT_REPOSITORY",
+	"GIT_REPO_EXISTS",
 	"GIT_UNSUPPORTED_REPOSITORY",
 	"GIT_PLATFORM_UNSUPPORTED",
 	"GIT_CONFIG_UNSUPPORTED",
@@ -395,6 +396,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 			| "git.refs"
 			| "git.refFileDiff"
 			| "git.compare"
+			| "git.init"
 			| "git.createBranch"
 			| "git.switchBranch"
 			| "git.discard"
@@ -430,7 +432,20 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 						if (signal?.aborted) throw new Error("REQUEST_CANCELLED");
 						assertCurrent(projectId, locator);
 						try {
-							if (name === "git.stage" || name === "git.unstage" || name === "git.commit" || name === "git.createBranch" || name === "git.switchBranch" || name === "git.discard" || name === "git.recoveryRestore" || name === "git.recoveryDrop" || name === "git.fetch" || name === "git.push" || name === "git.pull")
+							if (
+								name === "git.init" ||
+								name === "git.stage" ||
+								name === "git.unstage" ||
+								name === "git.commit" ||
+								name === "git.createBranch" ||
+								name === "git.switchBranch" ||
+								name === "git.discard" ||
+								name === "git.recoveryRestore" ||
+								name === "git.recoveryDrop" ||
+								name === "git.fetch" ||
+								name === "git.push" ||
+								name === "git.pull"
+							)
 								dispatchedWrite = true;
 							// Network verbs own the long budget (G5a follow-up, plan section 5.16.2); every other Git
 							// method keeps the read deadline. The client's request cap and the helper's per-method clamp
@@ -565,6 +580,19 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 			const baseRef = validateRemoteGitRefFullName(base);
 			const headRef = validateRemoteGitRefFullName(head);
 			return run(projectId, "git.compare", { base: baseRef, head: headRef }, signal, (value) => readRemoteGitCompare(value, baseRef, headRef));
+		},
+		/**
+		 * The explicit write that creates the repository at the project root. There is no main-owned token because there
+		 * is no prior confirmed repository state to bind - the absence of .git is the whole precondition - but it still
+		 * runs through the same trust/locator/host-ready boundary and is accounted as a write, so a reply lost after
+		 * dispatch is reported as unconfirmed instead of retried.
+		 */
+		init(projectId: string, signal?: AbortSignal): Promise<{ branch: string | null }> {
+			return run(projectId, "git.init", {}, signal, (value) => {
+				if (!record(value) || Object.keys(value).length !== 1) throw new Error("GIT_RESULT_INVALID");
+				const branch = value.branch === null ? null : remoteGitName(value.branch, 4096);
+				return { branch };
+			});
 		},
 		/** Creating a branch is a create-only native CAS at the HEAD the read confirmed; HEAD itself never moves. */
 		createBranch(projectId: string, name: unknown, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<{ branch: string }> {

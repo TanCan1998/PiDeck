@@ -16,6 +16,7 @@ import { initializeRemoteGitDiscardFixture, verifyRemoteGitDiscard } from "./rem
 import { initializeRemoteGitRecoveryFixture, verifyRemoteGitRecovery } from "./remote-git-recovery";
 import { initializeRemoteGitSyncFixture, verifyRemoteGitSync } from "./remote-git-sync";
 import { verifyRemoteGitCompare } from "./remote-git-compare";
+import { initializeRemoteGitInitFixture, verifyRemoteGitInit } from "./remote-git-init";
 import { verifyRemoteHistoryMutations } from "./remote-history-mutations";
 import { REMOTE_ACCEPTANCE_ENV, createRemoteSessionInProject, matchesRemoteFingerprint, readRemoteAcceptanceCredentials, readRemoteAcceptanceTimeouts, remoteProjectRow, runRemoteCommand, test, type RemoteAcceptanceCredentials, type RemoteAcceptanceTimeouts } from "./remote-fixtures";
 
@@ -834,6 +835,33 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 			await enrollRemoteProjectInSidebar(remoteWindow, paths.projectPath, timeouts);
 			await createRemoteSessionAndReadId(remoteWindow, paths.projectName, timeouts);
 			await verifyRemoteGitCompare({ window: remoteWindow, credentials: creds, root: paths.projectPath, timeoutMs: 40_000, testInfo });
+			await localControl.verify();
+		} finally {
+			preserveAppLogs(remoteUserDataRoot, paths.runId);
+			await localControl.dispose();
+			await cleanupRemoteRun(creds, paths, "");
+		}
+	});
+
+	test("远端 Git G5c：非仓库根显式初始化 → 原生 .git 出现 → 文件成为未跟踪改动 → 初始化入口消失", async ({ remoteWindow, remoteUserDataRoot }, testInfo) => {
+		test.setTimeout(600_000);
+		const creds = credentials;
+		if (!creds) {
+			test.skip(true, HELP_TEXT);
+			return;
+		}
+		const paths = await createRemoteRunPaths(creds);
+		const localControl = await createLocalGitReadControl();
+		try {
+			await dismissOnboarding(remoteWindow, 8_000);
+			// A genuinely non-repository project root: the directory and its files are created without Git, and the
+			// panel must offer only the explicit init action - never an automatic one.
+			await createRemoteProjectDirectory(creds, paths);
+			await initializeRemoteGitInitFixture(creds, paths.projectPath);
+			await addVerifiedRemoteHostAndConnect(remoteWindow, creds, timeouts);
+			await enrollRemoteProjectInSidebar(remoteWindow, paths.projectPath, timeouts);
+			await createRemoteSessionAndReadId(remoteWindow, paths.projectName, timeouts);
+			await verifyRemoteGitInit({ window: remoteWindow, credentials: creds, root: paths.projectPath, timeoutMs: 40_000, testInfo });
 			await localControl.verify();
 		} finally {
 			preserveAppLogs(remoteUserDataRoot, paths.runId);

@@ -659,4 +659,45 @@ export function createGitRecoveryProgram(fs, port, gates) {
 		}
 	}
 	return { list: list, restore: restore, drop: drop };
-}`.replace(/\r?\n[\t ]*/g, "");
+}
+/* Init: the only write that runs before a repository exists, so it is dispatched before the repository checks. The
+preconditions are read from disk (.git absent in any form, no governing repository above the root) and the result is
+confirmed on disk (.git is a real directory, a lock was not left behind, the canonical root is unchanged) before the
+branch is read natively. A failure after the command was dispatched is unconfirmed, never retried and never rolled
+back; a definitive absence of .git after the failure means nothing was written, so the mapped error is reported. */
+export function createGitInitProgram(fs, root, port) {
+	const fail = port.failure, MAX_PROBE = 65536;
+	function absent(name) { try { fs.lstatSync(name); return false; } catch (error) { if (error.code === "ENOENT") return true; throw error; } }
+	async function run(ctx) {
+		/* Preconditions, all before dispatch: no .git in any form at the root, and no repository governing it. */
+		if (!absent(ctx.cwd + "/.git")) throw fail("GIT_REPO_EXISTS");
+		const probe = await port.execute(ctx, ["rev-parse", "--git-dir"], MAX_PROBE, [1, 128]);
+		if (probe.exitCode === 0) throw fail("GIT_REPO_EXISTS");
+		ctx.check();
+		/* Fixed argv through the sanitized write executor: no template, no config override, no network, no hook/filter. */
+		let dispatchedError = null;
+		try { await port.execute(ctx, ["init", "--quiet"], MAX_PROBE); } catch (error) { dispatchedError = error; }
+		/* The post-condition is read from disk: a directory inside the root, never a link or a gitfile. */
+		let present = false;
+		try { const stats = fs.lstatSync(ctx.cwd + "/.git", { bigint: true }); present = stats.isDirectory() && !stats.isSymbolicLink(); } catch (error) { if (error.code !== "ENOENT") throw fail("GIT_WRITE_RESULT_UNCONFIRMED"); }
+		if (!present) {
+			/* A definitive absence means the dispatch changed nothing: the mapped failure is the honest answer. */
+			if (dispatchedError !== null && absent(ctx.cwd + "/.git")) throw dispatchedError;
+			throw fail("GIT_WRITE_RESULT_UNCONFIRMED");
+		}
+		if (dispatchedError !== null) throw fail("GIT_WRITE_RESULT_UNCONFIRMED");
+		try {
+			/* Root identity must still be the canonical directory this run opened, and .git must resolve inside it. */
+			if (fs.realpathSync(root) !== root) throw fail("GIT_WRITE_RESULT_UNCONFIRMED");
+			const rootStats = fs.lstatSync(root, { bigint: true });
+			if (!rootStats.isDirectory() || rootStats.isSymbolicLink() || [rootStats.dev, rootStats.ino].map(String).join(":") !== ctx.rootIdentity) throw fail("GIT_WRITE_RESULT_UNCONFIRMED");
+			if (fs.realpathSync(ctx.cwd + "/.git") !== root + "/.git") throw fail("GIT_WRITE_RESULT_UNCONFIRMED");
+			if (!absent(ctx.cwd + "/.git/index.lock")) throw fail("GIT_WRITE_RESULT_UNCONFIRMED");
+			const current = await port.head(ctx);
+			ctx.check();
+			return { branch: current.branch };
+		} catch (error) { throw fail("GIT_WRITE_RESULT_UNCONFIRMED"); }
+	}
+	return { run: run };
+}
+`.replace(/\r?\n[\t ]*/g, "");

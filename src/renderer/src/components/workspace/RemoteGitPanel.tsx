@@ -44,6 +44,7 @@ export function remoteGitErrorMessage(code: string): string {
 	if (code === "GIT_COMMIT_HEAD_CHANGED") return t("remoteGit.headChanged");
 	if (code === "GIT_REF_EXISTS") return t("remoteGit.refExists");
 	if (code === "GIT_REF_NOT_FOUND") return t("remoteGit.refNotFound");
+	if (code === "GIT_REPO_EXISTS") return t("remoteGit.repoExists");
 	if (code === "GIT_SWITCH_CONFLICT") return t("remoteGit.switchConflict");
 	if (code === "GIT_RECOVERY_ENTRY_NOT_FOUND") return t("remoteGit.recoveryEntryNotFound");
 	if (code === "GIT_SYNC_REMOTE_UNKNOWN") return t("remoteGit.syncRemoteUnknown");
@@ -92,6 +93,7 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 		loadRefs,
 		openHistoryFileDiff,
 		createBranch,
+		initRepository,
 		switchBranch,
 		discard,
 		loadRecovery,
@@ -115,6 +117,7 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 	const [recoveryOpen, setRecoveryOpen] = useState(false);
 	const [pendingDrop, setPendingDrop] = useState<RemoteGitRecoveryEntryView | null>(null);
 	const [pushConfirm, setPushConfirm] = useState(false);
+	const [initConfirm, setInitConfirm] = useState(false);
 	// Bounded refs polling: only while this section is expanded, the window is visible, the host is ready and
 	// refs facts exist. Collapsing/hiding/switching project/unmounting stops it; it never reads sync facts.
 	useRemoteGitRefsPolling({ active: refsOpen, refsLoaded: state.refs !== undefined, hostReady, poll: pollRefs, stop: stopRefsPolling });
@@ -248,29 +251,66 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 					<LoaderCircle size={14} className="animate-spin" />
 					{t(
 						state.mutating
-							? state.mutatingKind === "commit"
-								? "remoteGit.committing"
-								: state.mutatingKind === "branch"
-									? "remoteGit.creatingBranch"
-									: state.mutatingKind === "switch"
-										? "remoteGit.switchingBranch"
-										: state.mutatingKind === "discard"
-											? "remoteGit.discarding"
-											: state.mutatingKind === "restore"
-												? "remoteGit.restoring"
-												: state.mutatingKind === "drop"
-													? "remoteGit.dropping"
-													: "remoteGit.writing"
+							? state.mutatingKind === "init"
+								? "remoteGit.initializing"
+								: state.mutatingKind === "commit"
+									? "remoteGit.committing"
+									: state.mutatingKind === "branch"
+										? "remoteGit.creatingBranch"
+										: state.mutatingKind === "switch"
+											? "remoteGit.switchingBranch"
+											: state.mutatingKind === "discard"
+												? "remoteGit.discarding"
+												: state.mutatingKind === "restore"
+													? "remoteGit.restoring"
+													: state.mutatingKind === "drop"
+														? "remoteGit.dropping"
+														: "remoteGit.writing"
 							: "remoteGit.loading",
 					)}
 				</div>
 			) : null}
 			{state.errorCode ? (
-				<p role="alert" className="p-3 text-danger">
+				<p role="alert" data-testid={state.errorCode === "GIT_NOT_REPOSITORY" ? "remote-git-not-repository" : undefined} className="p-3 text-danger">
 					{remoteGitErrorMessage(state.errorCode)}
 				</p>
 			) : null}
 			{state.errorCode === "GIT_TRUST_REQUIRED" ? <RemoteGitTrustGate project={project} onApproved={refreshAll} /> : null}
+			{/* G5c: a confirmed non-repository gets one explicit, inline-confirmed init action; nothing is created otherwise. */}
+			{state.errorCode === "GIT_NOT_REPOSITORY" || state.initializing || state.initNotice !== undefined ? (
+				<div className="shrink-0 space-y-1 border-b border-border px-3 py-2">
+					{state.errorCode === "GIT_NOT_REPOSITORY" ? <p className="text-xs text-text-secondary">{t("remoteGit.initHint")}</p> : null}
+					{state.errorCode === "GIT_NOT_REPOSITORY" ? (
+						initConfirm ? (
+							<div className="flex items-center gap-2">
+								<span className="min-w-0 flex-1 text-xs text-danger">{t("remoteGit.initConfirm")}</span>
+								<Button
+									type="button"
+									size="sm"
+									data-testid="remote-git-init-confirm"
+									disabled={busy}
+									onClick={() => {
+										setInitConfirm(false);
+										initRepository();
+									}}
+								>
+									{t("remoteGit.initConfirmAction")}
+								</Button>
+								<Button type="button" variant="ghost" size="sm" data-testid="remote-git-init-cancel" disabled={busy} onClick={() => setInitConfirm(false)}>
+									{t("remoteGit.initCancel")}
+								</Button>
+							</div>
+						) : (
+							<Button type="button" size="sm" data-testid="remote-git-init" disabled={busy} onClick={() => setInitConfirm(true)}>
+								{t("remoteGit.initAction")}
+							</Button>
+						)
+					) : null}
+					<p data-testid="remote-git-init-outcome" aria-live="polite" className="text-xs text-text-secondary">
+						{state.initializing ? t("remoteGit.initializing") : state.initNotice ? t("remoteGit.initCreated", { branch: state.initNotice.branch ?? t("remoteGit.detached") }) : ""}
+					</p>
+				</div>
+			) : null}
 			{state.diffErrorCode ? (
 				<p role="alert" className="p-3 text-danger">
 					{remoteGitErrorMessage(state.diffErrorCode)}
