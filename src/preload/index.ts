@@ -791,28 +791,31 @@ const api = {
 			ipcRenderer.invoke(ipcChannels.gitRemoteMutateIndex, projectId, operation, group, target, token) as Promise<import("../shared/types").GitIndexMutationResult>,
 		// 只提交已确认的暂存区；消息逐字发送，不在渲染层做任何 Git 语义加工
 		commitRemote: (projectId: string, message: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteCommit, projectId, message, token) as Promise<import("../shared/types").GitCommitResult>,
-		remoteSnapshot: (projectId: string) => ipcRenderer.invoke(ipcChannels.gitRemoteSnapshot, projectId) as Promise<import("../shared/types").GitReadSnapshotResult>,
+		// G5d：读通道尾部可带项目相对 repo scope（空/缺省 = 项目根）；写通道仍只作用于根仓库。
+		remoteSnapshot: (projectId: string, repo?: string) => ipcRenderer.invoke(ipcChannels.gitRemoteSnapshot, projectId, repo) as Promise<import("../shared/types").GitReadSnapshotResult>,
+		// G5d：项目根下的有界仓库发现（无 token、纯读）
+		remoteRepos: (projectId: string) => ipcRenderer.invoke(ipcChannels.gitRemoteRepos, projectId) as Promise<import("../shared/types").RemoteGitReposResult>,
 		// 分支写面（G3b）：新建分支不移动 HEAD，切换走原生 switch 且冲突即拒（绝不 force）
 		createRemoteBranch: (projectId: string, name: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteCreateBranch, projectId, name, token) as Promise<import("../shared/types").RemoteGitBranchMutationResult>,
 		switchRemoteBranch: (projectId: string, name: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteSwitchBranch, projectId, name, token) as Promise<import("../shared/types").RemoteGitBranchMutationResult>,
 		// 可恢复丢弃（G4a）：先写恢复快照再动文件；返回可恢复 ref，main 注入指纹
 		discardRemote: (projectId: string, group: "workingTree" | "untracked", target: ProjectFileTarget, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteDiscard, projectId, group, target, token) as Promise<import("../shared/types").RemoteGitDiscardResult>,
 		// 同步（G5a）：facts 只读；fetch/push/pull 各自需要 grant，从不 force、不写配置、不注入凭据
-		syncFacts: (projectId: string) => ipcRenderer.invoke(ipcChannels.gitRemoteSyncFacts, projectId) as Promise<import("../shared/types").RemoteGitSyncFactsResult>,
+		syncFacts: (projectId: string, repo?: string) => ipcRenderer.invoke(ipcChannels.gitRemoteSyncFacts, projectId, repo) as Promise<import("../shared/types").RemoteGitSyncFactsResult>,
 		fetchRemote: (projectId: string, remote: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteFetch, projectId, remote, token) as Promise<import("../shared/types").RemoteGitFetchOutcomeResult>,
 		pushRemote: (projectId: string, remote: string, branch: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemotePush, projectId, remote, branch, token) as Promise<import("../shared/types").RemoteGitPushOutcomeResult>,
 		pullRemote: (projectId: string, remote: string, branch: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemotePull, projectId, remote, branch, token) as Promise<import("../shared/types").RemoteGitPullOutcomeResult>,
 		// 恢复存储（G4b）：列表只读；还原/删除各需自己的 grant，ref 只允许 refs/pideck/recovery/*
-		recoveryList: (projectId: string) => ipcRenderer.invoke(ipcChannels.gitRemoteRecoveryList, projectId) as Promise<import("../shared/types").RemoteGitRecoveryListResult>,
+		recoveryList: (projectId: string, repo?: string) => ipcRenderer.invoke(ipcChannels.gitRemoteRecoveryList, projectId, repo) as Promise<import("../shared/types").RemoteGitRecoveryListResult>,
 		recoveryRestore: (projectId: string, ref: string, oid: string, path: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteRecoveryRestore, projectId, ref, oid, path, token) as Promise<import("../shared/types").RemoteGitRecoveryRestoreResult>,
 		recoveryDrop: (projectId: string, ref: string, oid: string, token: string) => ipcRenderer.invoke(ipcChannels.gitRemoteRecoveryDrop, projectId, ref, oid, token) as Promise<import("../shared/types").RemoteGitRecoveryDropResult>,
 		// 只读历史（G3a）：分页日志／提交详情／本地引用／两版本间单文件；与 status 同一信任边界，无 token
-		remoteLog: (projectId: string, options?: { maxCount?: number; skip?: number }) => ipcRenderer.invoke(ipcChannels.gitRemoteLog, projectId, options) as Promise<import("../shared/types").RemoteGitLogResult>,
-		remoteCommitDetail: (projectId: string, oid: string) => ipcRenderer.invoke(ipcChannels.gitRemoteCommitDetail, projectId, oid) as Promise<import("../shared/types").RemoteGitCommitDetailResult>,
-		remoteRefs: (projectId: string) => ipcRenderer.invoke(ipcChannels.gitRemoteRefs, projectId) as Promise<import("../shared/types").RemoteGitRefsResult>,
-		remoteRefFileDiff: (projectId: string, base: string | null, head: string, target: ProjectFileTarget) => ipcRenderer.invoke(ipcChannels.gitRemoteRefFileDiff, projectId, base, head, target) as Promise<import("../shared/types").RemoteGitRefFileDiffResult>,
+		remoteLog: (projectId: string, options?: { maxCount?: number; skip?: number }, repo?: string) => ipcRenderer.invoke(ipcChannels.gitRemoteLog, projectId, options, repo) as Promise<import("../shared/types").RemoteGitLogResult>,
+		remoteCommitDetail: (projectId: string, oid: string, repo?: string) => ipcRenderer.invoke(ipcChannels.gitRemoteCommitDetail, projectId, oid, repo) as Promise<import("../shared/types").RemoteGitCommitDetailResult>,
+		remoteRefs: (projectId: string, repo?: string) => ipcRenderer.invoke(ipcChannels.gitRemoteRefs, projectId, repo) as Promise<import("../shared/types").RemoteGitRefsResult>,
+		remoteRefFileDiff: (projectId: string, base: string | null, head: string, target: ProjectFileTarget, repo?: string) => ipcRenderer.invoke(ipcChannels.gitRemoteRefFileDiff, projectId, base, head, target, repo) as Promise<import("../shared/types").RemoteGitRefFileDiffResult>,
 		// G5b：两个全名本地引用之间的只读树对比（无 token）；逐文件两侧内容仍走 remoteRefFileDiff
-		remoteCompare: (projectId: string, base: string, head: string) => ipcRenderer.invoke(ipcChannels.gitRemoteCompare, projectId, base, head) as Promise<import("../shared/types").RemoteGitCompareResult>,
+		remoteCompare: (projectId: string, base: string, head: string, repo?: string) => ipcRenderer.invoke(ipcChannels.gitRemoteCompare, projectId, base, head, repo) as Promise<import("../shared/types").RemoteGitCompareResult>,
 		// G5c：显式初始化项目根仓库（无 token；属于写操作，结果未知时不重放）
 		initRemote: (projectId: string) => ipcRenderer.invoke(ipcChannels.gitRemoteInit, projectId) as Promise<import("../shared/types").RemoteGitInitResult>,
 		status: (projectId: string, repoPath?: ProjectFileTarget) => ipcRenderer.invoke(ipcChannels.gitStatus, projectId, repoPath) as Promise<import("../shared/types").GitResourceGroups>,

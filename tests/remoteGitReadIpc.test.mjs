@@ -42,7 +42,7 @@ function fixture(overrides = {}) {
 	sender.isDestroyed = () => false;
 	const session = {
 		request: async (method, params, options) => {
-			calls.push({ method, params });
+			calls.push({ method, params, ...(options?.repo === undefined ? {} : { repo: options.repo }) });
 			options?.onRequestId?.("request-id");
 			if (method === "hello") return hello;
 			if (method === "git.status") return snapshot;
@@ -105,9 +105,13 @@ test("disabled remote Git refuses snapshot and compatibility ports with zero hel
 	assert.equal(f.calls.length, 0);
 });
 
-test("remote Git boundary rejects cross-project/nested repo/invalid target before connecting", async () => {
+test("remote Git boundary rejects escaping/cross-project scopes before connecting and accepts a nested repo", async () => {
 	const f = fixture();
-	for (const repo of [{ projectId: "other", relativePath: "" }, { projectId, relativePath: "nested" }, "/local/absolute"]) await assert.rejects(f.port.status(f.event, projectId, repo));
+	// G5d: a project-relative nested path is a legal read scope (the helper anchors and checks the repository).
+	await f.port.status(f.event, projectId, { projectId, relativePath: "nested" });
+	assert.deepEqual(plain(f.calls.at(-1)), { method: "git.status", params: {}, repo: "nested" });
+	f.calls.length = 0;
+	for (const repo of [{ projectId: "other", relativePath: "" }, "/local/absolute", "../outside", "nested/../root", "a\\b", "dir/.git", "x.lock/y"]) await assert.rejects(f.port.status(f.event, projectId, repo));
 	await assert.rejects(f.port.workspaceDiff(f.event, projectId, "workingTree", { projectId: "other", relativePath: "tracked.txt" }));
 	await assert.rejects(f.port.workspaceDiff(f.event, projectId, "workingTree", { projectId, relativePath: "../outside" }));
 	await assert.rejects(f.port.workspaceDiff(f.event, projectId, "invalid", { projectId, relativePath: "tracked.txt" }));
@@ -237,4 +241,138 @@ test("disabled remote history IPC refuses with zero helper work", async () => {
 	assert.equal((await f.handlers.get(ipcChannels.gitRemoteRefs)(f.event, projectId)).code, "REMOTE_FEATURE_DISABLED");
 	assert.equal((await f.handlers.get(ipcChannels.gitRemoteRefFileDiff)(f.event, projectId, null, oid("d"), { projectId, relativePath: "x.txt" })).code, "REMOTE_FEATURE_DISABLED");
 	assert.equal(f.calls.length, 0);
+});
+
+test("every read channel carries the repository scope into the helper frame", async () => {
+	const f = fixture();
+	const readCapabilities = ["git.status", "git.log", "git.commitDetail", "git.refs", "git.compare", "git.refFileDiff", "git.recoveryList", "git.syncFacts"];
+	f.session.request = async (method, params, options) => {
+		f.calls.push({ method, params, repo: options?.repo });
+		options?.onRequestId?.("request-" + f.calls.length);
+		if (method === "hello") return { protocolVersion: 1, root: locator.remotePath, capabilities: readCapabilities };
+		if (method === "git.status") return snapshot;
+		if (method === "git.log") return logPage;
+		if (method === "git.commitDetail") return { ...detailValue, oid: params.oid };
+		if (method === "git.refs") return refsValue;
+		if (method === "git.compare") return { base: { ref: params.base, oid: oid("a") }, head: { ref: params.head, oid: oid("b") }, files: [] };
+		if (method === "git.recoveryList") return { entries: [], truncated: false };
+		if (method === "git.syncFacts") return { branch: "main", upstream: null, ahead: 0, behind: 0, remotes: [] };
+		return { originalContent: "base\n", modifiedContent: "working\n" };
+	};
+	const scoped = "packages/nested";
+	assert.equal((await f.handlers.get(ipcChannels.gitRemoteSnapshot)(f.event, projectId, scoped)).ok, true);
+	assert.equal((await f.handlers.get(ipcChannels.gitRemoteLog)(f.event, projectId, { maxCount: 10 }, scoped)).ok, true);
+	assert.equal((await f.handlers.get(ipcChannels.gitRemoteCommitDetail)(f.event, projectId, oid("d"), scoped)).ok, true);
+	assert.equal((await f.handlers.get(ipcChannels.gitRemoteRefs)(f.event, projectId, scoped)).ok, true);
+	assert.equal((await f.handlers.get(ipcChannels.gitRemoteCompare)(f.event, projectId, "refs/heads/main", "refs/tags/v1", scoped)).ok, true);
+	assert.equal((await f.handlers.get(ipcChannels.gitRemoteRefFileDiff)(f.event, projectId, null, oid("d"), { projectId, relativePath: "x.txt" }, scoped)).ok, true);
+	assert.equal((await f.handlers.get(ipcChannels.gitRemoteRecoveryList)(f.event, projectId, scoped)).ok, true);
+	assert.equal((await f.handlers.get(ipcChannels.gitRemoteSyncFacts)(f.event, projectId, scoped)).ok, true);
+	const scopedCalls = f.calls.filter((call) => call.method !== "hello");
+	assert.equal(scopedCalls.length, 8, "eight scoped reads reach the helper");
+	for (const call of scopedCalls) assert.equal(call.repo, scoped, call.method + " must carry the selected repository");
+});
+
+test("a nested snapshot never mints a write grant, while the root snapshot keeps them", async () => {
+	const f = fixture();
+	f.session.hostRevision = 1;
+	const capabilities = ["git.status", "git.stage", "git.unstage", "git.commit", "git.createBranch", "git.switchBranch", "git.discard", "git.recoveryRestore", "git.recoveryDrop", "git.fetch", "git.push", "git.pull"];
+	f.session.request = async (method) => {
+		if (method === "hello") return { protocolVersion: 1, root: locator.remotePath, capabilities };
+		return { ...snapshot, revision: "a".repeat(64) };
+	};
+	const nested = await f.handlers.get(ipcChannels.gitRemoteSnapshot)(f.event, projectId, "packages/nested");
+	assert.equal(nested.ok, true);
+	for (const field of ["mutationToken", "commitToken", "branchToken", "switchToken", "discardToken", "restoreToken", "dropToken", "fetchToken", "pushToken", "pullToken"]) assert.equal(nested.snapshot[field], undefined, field + " must not be issued for a nested scope");
+	const root = await f.handlers.get(ipcChannels.gitRemoteSnapshot)(f.event, projectId);
+	assert.equal(root.ok, true);
+	assert.ok(root.snapshot.mutationToken && root.snapshot.commitToken && root.snapshot.fetchToken, "the root scope keeps its grants");
+});
+
+test("write channels refuse a supplied repository scope before any host work", async () => {
+	const f = fixture();
+	const writeCalls = [
+		["gitRemoteMutateIndex", [projectId, "stage", "workingTree", { projectId, relativePath: "a.txt" }, "token"]],
+		["gitRemoteCommit", [projectId, "message", "token"]],
+		["gitRemoteCreateBranch", [projectId, "feature", "token"]],
+		["gitRemoteSwitchBranch", [projectId, "feature", "token"]],
+		["gitRemoteDiscard", [projectId, "workingTree", { projectId, relativePath: "a.txt" }, "token"]],
+		["gitRemoteRecoveryRestore", [projectId, "refs/pideck/recovery/x", oid("a"), "a.txt", "token"]],
+		["gitRemoteRecoveryDrop", [projectId, "refs/pideck/recovery/x", oid("a"), "token"]],
+		["gitRemoteFetch", [projectId, "origin", "token"]],
+		["gitRemotePush", [projectId, "origin", "main", "token"]],
+		["gitRemotePull", [projectId, "origin", "main", "token"]],
+		["gitRemoteInit", [projectId]],
+	];
+	for (const [channel, args] of writeCalls) {
+		const result = await f.handlers.get(ipcChannels[channel])(f.event, ...args, "packages/nested");
+		assert.equal(result.ok, false, channel);
+		assert.equal(result.code, "GIT_RESULT_INVALID", channel + " must refuse a supplied repository scope");
+	}
+	assert.equal(f.calls.length, 0, "no write channel may reach the host with a supplied scope");
+	// A write without the extra argument keeps its exact old frame: no repo field at all.
+	f.session.request = async (method, params, options) => {
+		f.calls.push({ method, params, repo: options?.repo });
+		options?.onRequestId?.("request-" + f.calls.length);
+		if (method === "hello") return { ...hello, capabilities: [...hello.capabilities, "git.init"] };
+		return { applied: true };
+	};
+	await f.handlers.get(ipcChannels.gitRemoteInit)(f.event, projectId);
+	assert.deepEqual(
+		f.calls.map((call) => call.method),
+		["hello", "git.init"],
+	);
+	assert.equal(f.calls[1].repo, undefined);
+});
+
+test("remote repo discovery is a token-free read with a re-validated answer", async () => {
+	const f = fixture();
+	f.session.request = async (method, params, options) => {
+		f.calls.push({ method, params, repo: options?.repo });
+		options?.onRequestId?.("request-" + f.calls.length);
+		if (method === "hello") return { protocolVersion: 1, root: locator.remotePath, capabilities: ["git.repos"] };
+		return {
+			repos: [
+				{ path: "", name: "project" },
+				{ path: "packages/nested", name: "nested" },
+			],
+			truncated: true,
+		};
+	};
+	const result = await f.handlers.get(ipcChannels.gitRemoteRepos)(f.event, projectId);
+	assert.deepEqual(plain(result), {
+		ok: true,
+		repos: [
+			{ path: "", name: "project" },
+			{ path: "packages/nested", name: "nested" },
+		],
+		truncated: true,
+	});
+	assert.deepEqual(
+		f.calls.map((call) => call.method),
+		["hello", "git.repos"],
+	);
+	assert.equal(f.calls[1].repo, undefined, "discovery names no repository scope itself");
+	// Trust refusal and disabled mode issue zero helper requests.
+	const untrusted = fixture({ trusted: async () => false });
+	assert.deepEqual(plain(await untrusted.handlers.get(ipcChannels.gitRemoteRepos)(untrusted.event, projectId)), { ok: false, code: "GIT_TRUST_REQUIRED" });
+	assert.equal(untrusted.calls.length, 0);
+	const disabled = fixture({ enabled: false });
+	assert.deepEqual(plain(await disabled.handlers.get(ipcChannels.gitRemoteRepos)(disabled.event, projectId)), { ok: false, code: "REMOTE_FEATURE_DISABLED" });
+	assert.equal(disabled.calls.length, 0);
+	// Duplicate or escaping paths are refused, never silently filtered.
+	for (const reply of [
+		{
+			repos: [
+				{ path: "", name: "project" },
+				{ path: "", name: "again" },
+			],
+			truncated: false,
+		},
+		{ repos: [{ path: "../outside", name: "escape" }], truncated: false },
+	]) {
+		const broken = fixture();
+		broken.session.request = async (method) => (method === "hello" ? { protocolVersion: 1, root: locator.remotePath, capabilities: ["git.repos"] } : reply);
+		assert.deepEqual(plain(await broken.handlers.get(ipcChannels.gitRemoteRepos)(broken.event, projectId)), { ok: false, code: "GIT_RESULT_INVALID" });
+	}
 });

@@ -79,21 +79,22 @@ export type RemoteGitViewApi = {
 	cancelRemoteReads(projectId: string): Promise<void>;
 	commitRemote(projectId: string, message: string, token: string): Promise<GitCommitResult>;
 	mutateRemoteIndex(projectId: string, operation: "stage" | "unstage", group: GitResourceGroupType, target: ProjectFileTarget, token: string): Promise<GitIndexMutationResult>;
-	remoteSnapshot(projectId: string): Promise<GitReadSnapshotResult>;
-	workspaceFileDiff(projectId: string, group: GitResourceGroupType, target: ProjectFileTarget): Promise<GitWorkspaceFileDiff | null>;
-	remoteLog(projectId: string, options?: { maxCount?: number; skip?: number }): Promise<RemoteGitLogResult>;
-	remoteCommitDetail(projectId: string, oid: string): Promise<RemoteGitCommitDetailResult>;
-	remoteRefs(projectId: string): Promise<RemoteGitRefsResult>;
-	remoteRefFileDiff(projectId: string, base: string | null, head: string, target: ProjectFileTarget): Promise<RemoteGitRefFileDiffResult>;
-	remoteCompare(projectId: string, base: string, head: string): Promise<RemoteGitCompareResult>;
+	/* Every read names its repository scope ("" is the project root); writes never do. */
+	remoteSnapshot(projectId: string, repo?: string): Promise<GitReadSnapshotResult>;
+	workspaceFileDiff(projectId: string, group: GitResourceGroupType, target: ProjectFileTarget, repoPath?: ProjectFileTarget): Promise<GitWorkspaceFileDiff | null>;
+	remoteLog(projectId: string, options?: { maxCount?: number; skip?: number }, repo?: string): Promise<RemoteGitLogResult>;
+	remoteCommitDetail(projectId: string, oid: string, repo?: string): Promise<RemoteGitCommitDetailResult>;
+	remoteRefs(projectId: string, repo?: string): Promise<RemoteGitRefsResult>;
+	remoteRefFileDiff(projectId: string, base: string | null, head: string, target: ProjectFileTarget, repo?: string): Promise<RemoteGitRefFileDiffResult>;
+	remoteCompare(projectId: string, base: string, head: string, repo?: string): Promise<RemoteGitCompareResult>;
 	initRemote(projectId: string): Promise<RemoteGitInitResult>;
 	createRemoteBranch(projectId: string, name: string, token: string): Promise<RemoteGitBranchMutationResult>;
 	switchRemoteBranch(projectId: string, name: string, token: string): Promise<RemoteGitBranchMutationResult>;
 	discardRemote(projectId: string, group: "workingTree" | "untracked", target: ProjectFileTarget, token: string): Promise<RemoteGitDiscardResult>;
-	recoveryList(projectId: string): Promise<{ ok: true; entries: RemoteGitRecoveryEntryView[]; truncated: boolean } | { ok: false; code: string }>;
+	recoveryList(projectId: string, repo?: string): Promise<{ ok: true; entries: RemoteGitRecoveryEntryView[]; truncated: boolean } | { ok: false; code: string }>;
 	recoveryRestore(projectId: string, ref: string, oid: string, path: string, token: string): Promise<{ ok: true; path: string; bytes: number } | { ok: false; code: string }>;
 	recoveryDrop(projectId: string, ref: string, oid: string, token: string): Promise<{ ok: true } | { ok: false; code: string }>;
-	syncFacts(projectId: string): Promise<{ ok: true; facts: RemoteGitSyncFactsView } | { ok: false; code: string }>;
+	syncFacts(projectId: string, repo?: string): Promise<{ ok: true; facts: RemoteGitSyncFactsView } | { ok: false; code: string }>;
 	fetchRemote(projectId: string, remote: string, token: string): Promise<{ ok: true; outcome: RemoteGitFetchOutcome } | { ok: false; code: string }>;
 	pushRemote(projectId: string, remote: string, branch: string, token: string): Promise<{ ok: true; outcome: RemoteGitPushOutcome } | { ok: false; code: string }>;
 	pullRemote(projectId: string, remote: string, branch: string, token: string): Promise<{ ok: true; outcome: RemoteGitPullOutcome } | { ok: false; code: string }>;
@@ -131,8 +132,12 @@ function errorCode(error: unknown): string {
 	// Electron invoke prefixes errors with the channel; only the bounded code becomes visible text.
 	return /\b(?:GIT_[A-Z_]+|SSH_[A-Z_]+|REMOTE_FEATURE_DISABLED|UNSUPPORTED_CAPABILITY|RESULT_TOO_LARGE|REQUEST_TIMEOUT|REQUEST_CANCELLED|REMOTE_CONNECTION_LOST|PERMISSION_DENIED|PATH_[A-Z_]+|NOT_A_FILE|TOO_MANY_REQUESTS)\b/.exec(raw)?.[0] ?? "GIT_COMMAND_FAILED";
 }
-/** Single-owner controller: explicit, one-shot index actions and one commit per confirmed snapshot; no polling or replay. */
-export function createRemoteGitViewController(projectId: string, projectKey: string, api: RemoteGitViewApi, publish: (state: RemoteGitViewState) => void) {
+/**
+ * Single-owner controller: explicit, one-shot index actions and one commit per confirmed snapshot; no polling or replay.
+ * `repoPath` is the repository scope of this controller instance ("" is the project root): every read carries it,
+ * and a nested scope never offers init or a write action - those stay bound to the project-root repository.
+ */
+export function createRemoteGitViewController(projectId: string, projectKey: string, api: RemoteGitViewApi, publish: (state: RemoteGitViewState) => void, repoPath = "") {
 	let active = true;
 	let epoch = 0;
 	let diffEpoch = 0;
@@ -180,7 +185,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			// A failed refresh cannot resolve an uncertain write; only fresh repository facts can.
 			update({ projectKey, loading: true, diffLoading: false, ...(uncertainWrite ? { errorCode: "GIT_WRITE_RESULT_UNCONFIRMED" } : {}) });
 			try {
-				const result = await api.remoteSnapshot(projectId);
+				const result = await api.remoteSnapshot(projectId, repoPath);
 				if (!active || generation !== epoch) return;
 				if (result.ok) update({ projectKey, loading: false, diffLoading: false, snapshot: result.snapshot });
 				else update({ projectKey, loading: false, diffLoading: false, errorCode: failureCode(result.code) });
@@ -247,7 +252,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			const request = ++diffEpoch;
 			update({ ...state, diff: undefined, diffKind: "workspace", diffGroup: group, diffErrorCode: undefined, diffLoading: true });
 			try {
-				const diff = await api.workspaceFileDiff(projectId, group, target);
+				const diff = await api.workspaceFileDiff(projectId, group, target, repoPath === "" ? undefined : { projectId, relativePath: repoPath });
 				if (!active || generation !== epoch || request !== diffEpoch) return;
 				if (!diff || diff.target.projectId !== projectId || diff.target.relativePath !== target.relativePath) update({ ...state, diffLoading: false, diffErrorCode: "GIT_RESOURCE_CHANGED" });
 				else update({ ...state, diffLoading: false, diff });
@@ -266,7 +271,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			const generation = ++historyEpoch;
 			update({ ...state, history: undefined, historyErrorCode: undefined, historyLoading: true, detail: undefined, detailOid: undefined, detailErrorCode: undefined });
 			try {
-				const result = await api.remoteLog(projectId, { maxCount: 50 });
+				const result = await api.remoteLog(projectId, { maxCount: 50 }, repoPath);
 				if (!active || generation !== historyEpoch) return;
 				if (result.ok) update({ ...state, historyLoading: false, history: result.page });
 				else update({ ...state, historyLoading: false, historyErrorCode: result.code });
@@ -280,7 +285,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			const skip = state.history.commits.length;
 			update({ ...state, historyMoreLoading: true, historyErrorCode: undefined });
 			try {
-				const result = await api.remoteLog(projectId, { maxCount: 50, skip });
+				const result = await api.remoteLog(projectId, { maxCount: 50, skip }, repoPath);
 				if (!active || generation !== historyEpoch) return;
 				if (result.ok) update({ ...state, historyMoreLoading: false, history: { commits: [...state.history.commits, ...result.page.commits], hasMore: result.page.hasMore } });
 				// A failed page keeps the rows already on screen; only a fresh full load replaces them.
@@ -296,7 +301,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			const generation = ++detailEpoch;
 			update({ ...state, detailOid: oid, detail: undefined, detailErrorCode: undefined, detailLoading: true });
 			try {
-				const result = await api.remoteCommitDetail(projectId, oid);
+				const result = await api.remoteCommitDetail(projectId, oid, repoPath);
 				if (!active || generation !== detailEpoch) return;
 				if (result.ok && result.detail.oid === oid) update({ ...state, detailLoading: false, detail: result.detail });
 				else update({ ...state, detailLoading: false, detailErrorCode: result.ok ? "GIT_RESOURCE_CHANGED" : result.code });
@@ -311,7 +316,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			const generation = ++refsEpoch;
 			update({ ...state, refs: undefined, refsErrorCode: undefined, refsLoading: true });
 			try {
-				const result = await api.remoteRefs(projectId);
+				const result = await api.remoteRefs(projectId, repoPath);
 				if (!active || generation !== refsEpoch) return;
 				if (result.ok) update({ ...state, refsLoading: false, refs: result.refs });
 				else update({ ...state, refsLoading: false, refsErrorCode: result.code });
@@ -330,7 +335,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			const generation = ++compareEpoch;
 			update({ ...state, compare: undefined, compareErrorCode: undefined, compareLoading: true });
 			try {
-				const result = await api.remoteCompare(projectId, base, head);
+				const result = await api.remoteCompare(projectId, base, head, repoPath);
 				if (!active || generation !== compareEpoch) return;
 				if (result.ok && result.compare.base.ref === base && result.compare.head.ref === head) update({ ...state, compareLoading: false, compare: result.compare });
 				else update({ ...state, compareLoading: false, compareErrorCode: result.ok ? "GIT_RESOURCE_CHANGED" : result.code });
@@ -350,7 +355,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			const generation = ++refsPollEpoch;
 			const refsGeneration = refsEpoch;
 			try {
-				const result = await api.remoteRefs(projectId);
+				const result = await api.remoteRefs(projectId, repoPath);
 				if (!active || generation !== refsPollEpoch || refsGeneration !== refsEpoch) return;
 				if (result.ok) update({ ...state, refs: result.refs, refsErrorCode: undefined });
 				else update({ ...state, refsErrorCode: result.code });
@@ -372,7 +377,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			const request = ++diffEpoch;
 			update({ ...state, diff: undefined, diffKind: "revision", diffGroup: undefined, diffErrorCode: undefined, diffLoading: true });
 			try {
-				const result = await api.remoteRefFileDiff(projectId, base, head, target);
+				const result = await api.remoteRefFileDiff(projectId, base, head, target, repoPath);
 				if (!active || generation !== epoch || request !== diffEpoch) return;
 				const diff = result.ok ? result.diff : undefined;
 				if (!diff || diff.target.projectId !== projectId || diff.target.relativePath !== target.relativePath || diff.head !== head || diff.base !== base) update({ ...state, diffLoading: false, diffErrorCode: result.ok ? "GIT_RESOURCE_CHANGED" : result.code });
@@ -420,7 +425,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			const generation = ++syncEpoch;
 			update({ ...state, sync: undefined, syncErrorCode: undefined, syncLoading: true });
 			try {
-				const result = await api.syncFacts(projectId);
+				const result = await api.syncFacts(projectId, repoPath);
 				if (!active || generation !== syncEpoch) return;
 				if (result.ok) update({ ...state, syncLoading: false, sync: result.facts });
 				else update({ ...state, syncLoading: false, syncErrorCode: result.code });
@@ -488,7 +493,7 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			const generation = ++recoveryEpoch;
 			update({ ...state, recovery: undefined, recoveryErrorCode: undefined, recoveryLoading: true });
 			try {
-				const result = await api.recoveryList(projectId);
+				const result = await api.recoveryList(projectId, repoPath);
 				if (!active || generation !== recoveryEpoch) return;
 				if (result.ok) update({ ...state, recoveryLoading: false, recovery: { entries: result.entries, truncated: result.truncated } });
 				else update({ ...state, recoveryLoading: false, recoveryErrorCode: result.code });
@@ -607,10 +612,12 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 		 * lost after the helper may have created .git - keeps the uncertainty warning and is never replayed or
 		 * auto-refreshed: only a successful explicit refresh can clear it.
 		 */
-		async initRepository(): Promise<void> {
-			if (!active || state.loading || state.diffLoading || state.mutating || state.initializing) return;
+		async initRepository(): Promise<boolean> {
+			if (!active || state.loading || state.diffLoading || state.mutating || state.initializing) return false;
+			// Init creates .git at the project root only: a nested scope never offers it.
+			if (repoPath !== "") return false;
 			// Only a confirmed non-repository offers this action; anything else is a main/helper decision, not a guess.
-			if (state.errorCode !== "GIT_NOT_REPOSITORY") return;
+			if (state.errorCode !== "GIT_NOT_REPOSITORY") return false;
 			const generation = ++epoch;
 			diffEpoch += 1;
 			historyEpoch += 1;
@@ -621,16 +628,18 @@ export function createRemoteGitViewController(projectId: string, projectKey: str
 			update({ ...state, initializing: true, mutating: true, mutatingKind: "init", initNotice: undefined, errorCode: undefined, diff: undefined, diffErrorCode: undefined });
 			try {
 				const result = await api.initRemote(projectId);
-				if (!active || generation !== epoch) return;
+				if (!active || generation !== epoch) return false;
 				if (!result.ok) {
 					update({ projectKey, loading: false, diffLoading: false, initializing: false, errorCode: result.code });
-					return;
+					return false;
 				}
 				update({ projectKey, loading: false, diffLoading: false, initializing: false, initNotice: { branch: result.branch } });
 				await controller.refresh();
+				return true;
 			} catch {
 				// The helper may have created .git before the reply was lost: say so and never retry or auto-refresh.
 				if (active && generation === epoch) update({ projectKey, loading: false, diffLoading: false, initializing: false, errorCode: "GIT_WRITE_RESULT_UNCONFIRMED" });
+				return false;
 			}
 		},
 		/** Connection transitions invalidate facts without automatically reconnecting or refreshing. */

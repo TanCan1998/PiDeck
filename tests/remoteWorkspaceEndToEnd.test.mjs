@@ -426,7 +426,9 @@ seamTest("the frozen helper's hello frame is the handshake the connection layer 
 	assert.equal(request.hostId, HOST_ID);
 	assert.equal(request.generation, helper.client.connectionGeneration);
 	assert.equal(request.timeoutMs > 0, true);
-	assert.deepEqual(Object.keys(request).sort(), frameFields(REQUEST_FIELDS, ["params"]));
+	// `repo` is optional on the contract and only repository-scoped reads send it; a handshake carries neither
+	// `params` nor `repo`, so the required-only shape is the honest assertion here.
+	assert.deepEqual(Object.keys(request).sort(), frameFields(REQUEST_FIELDS, ["params", "repo"]));
 
 	// Inbound: one ok frame, the identity echoed unchanged, and exactly the contract's response fields.
 	assert.equal(helper.inbound.length, 1);

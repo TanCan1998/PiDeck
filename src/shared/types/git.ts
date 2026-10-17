@@ -163,6 +163,13 @@ export type RemoteGitCompareResult = { ok: true; compare: RemoteGitCompare } | {
  * The renderer only sends projectId; main and the helper decide whether the root may be initialized at all.
  */
 export type RemoteGitInitResult = { ok: true; branch: string | null } | { ok: false; code: string };
+/**
+ * G5d repository discovery: repositories under the project root as the remote helper found them. `path` is a
+ * project-relative POSIX path ("" is the root repository) and is the only value that may become a read scope;
+ * `name` is a display label. `truncated` says the helper's bounded walk was cut by a cap.
+ */
+export type RemoteGitRepo = { path: string; name: string };
+export type RemoteGitReposResult = { ok: true; repos: RemoteGitRepo[]; truncated: boolean } | { ok: false; code: string };
 /** G3b branch write face: creating and switching both move a ref the user explicitly asked for. */
 export type RemoteGitBranchMutationResult = { ok: true } | { ok: false; code: string };
 /** G4a recoverable discard: the snapshot ref (null when the discarded change was a deletion) goes back to the panel. */

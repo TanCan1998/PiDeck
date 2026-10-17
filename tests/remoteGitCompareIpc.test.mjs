@@ -70,7 +70,7 @@ test("remote compare IPC is a read with no token and answers the bounded file li
 	assert.deepEqual(plain(f.calls[1].params), { base: baseRef, head: headRef });
 	// The handler signature carries no token: a renderer cannot spend one on a read.
 	const parameters = f.handlers.get(ipcChannels.gitRemoteCompare).length;
-	assert.equal(parameters, 4, "handler takes (event, projectId, base, head)");
+	assert.equal(parameters, 5, "handler takes (event, projectId, base, head, repo)");
 	assert.equal(f.sender.listenerCount("destroyed"), 0);
 });
 

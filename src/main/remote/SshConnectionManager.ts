@@ -77,6 +77,11 @@ export type SshConnectionRequestOptions = {
 	 * at all, because there is no request the caller could withdraw.
 	 */
 	onRequestId?: (requestId: string) => void;
+	/**
+	 * Optional project-relative repository scope for this one request (the Git read batch only); it is a frame
+	 * field, not a client concern like `onRequestId`, so it is forwarded to the control client verbatim.
+	 */
+	repo?: string;
 };
 
 export type SshConnectionManager = {
@@ -239,10 +244,11 @@ function reportRequestId(options: SshConnectionRequestOptions | undefined, reque
 
 /**
  * The control client's own per-call options. `onRequestId` belongs to this layer and is deliberately not
- * forwarded, so the two option surfaces cannot drift into one another.
+ * forwarded, so the two option surfaces cannot drift into one another; `repo` is a wire field and is forwarded.
  */
-function clientRequestOptions(options: { timeoutMs?: number } | undefined): { timeoutMs?: number } | undefined {
-	return options?.timeoutMs === undefined ? undefined : { timeoutMs: options.timeoutMs };
+function clientRequestOptions(options: SshConnectionRequestOptions | undefined): { timeoutMs?: number; repo?: string } | undefined {
+	if (options?.timeoutMs === undefined && options?.repo === undefined) return undefined;
+	return { ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }), ...(options.repo === undefined ? {} : { repo: options.repo }) };
 }
 
 /**

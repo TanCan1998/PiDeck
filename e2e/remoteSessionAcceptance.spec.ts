@@ -17,6 +17,7 @@ import { initializeRemoteGitRecoveryFixture, verifyRemoteGitRecovery } from "./r
 import { initializeRemoteGitSyncFixture, verifyRemoteGitSync } from "./remote-git-sync";
 import { verifyRemoteGitCompare } from "./remote-git-compare";
 import { initializeRemoteGitInitFixture, verifyRemoteGitInit } from "./remote-git-init";
+import { initializeRemoteGitReposFixture, verifyRemoteGitRepos } from "./remote-git-repos";
 import { verifyRemoteHistoryMutations } from "./remote-history-mutations";
 import { REMOTE_ACCEPTANCE_ENV, createRemoteSessionInProject, matchesRemoteFingerprint, readRemoteAcceptanceCredentials, readRemoteAcceptanceTimeouts, remoteProjectRow, runRemoteCommand, test, type RemoteAcceptanceCredentials, type RemoteAcceptanceTimeouts } from "./remote-fixtures";
 
@@ -862,6 +863,32 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 			await enrollRemoteProjectInSidebar(remoteWindow, paths.projectPath, timeouts);
 			await createRemoteSessionAndReadId(remoteWindow, paths.projectName, timeouts);
 			await verifyRemoteGitInit({ window: remoteWindow, credentials: creds, root: paths.projectPath, timeoutMs: 40_000, testInfo });
+			await localControl.verify();
+		} finally {
+			preserveAppLogs(remoteUserDataRoot, paths.runId);
+			await localControl.dispose();
+			await cleanupRemoteRun(creds, paths, "");
+		}
+	});
+
+	test("远端 Git G5d：仓库发现与只读 scope → 嵌套仓库读取匹配原生 → 写控件禁用并提示 → 切回根恢复", async ({ remoteWindow, remoteUserDataRoot }, testInfo) => {
+		test.setTimeout(600_000);
+		const creds = credentials;
+		if (!creds) {
+			test.skip(true, HELP_TEXT);
+			return;
+		}
+		const paths = await createRemoteRunPaths(creds);
+		const localControl = await createLocalGitReadControl();
+		try {
+			await dismissOnboarding(remoteWindow, 8_000);
+			// A root repository plus a nested one, each with its own untracked change and an own branch name.
+			await createRemoteProjectDirectory(creds, paths);
+			await initializeRemoteGitReposFixture(creds, paths.projectPath);
+			await addVerifiedRemoteHostAndConnect(remoteWindow, creds, timeouts);
+			await enrollRemoteProjectInSidebar(remoteWindow, paths.projectPath, timeouts);
+			await createRemoteSessionAndReadId(remoteWindow, paths.projectName, timeouts);
+			await verifyRemoteGitRepos({ window: remoteWindow, credentials: creds, root: paths.projectPath, timeoutMs: 60_000, testInfo });
 			await localControl.verify();
 		} finally {
 			preserveAppLogs(remoteUserDataRoot, paths.runId);

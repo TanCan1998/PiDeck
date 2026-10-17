@@ -9,6 +9,7 @@ import {
 	type RemoteGitLogPage,
 	type RemoteGitRefFileDiff,
 	type RemoteGitRecoveryEntryView,
+	type RemoteGitRepo,
 	type RemoteGitRefs,
 	type RemoteGitFetchOutcome,
 	type RemoteGitPullOutcome,
@@ -32,6 +33,8 @@ import {
 	REMOTE_GIT_MAX_RESOURCES,
 	REMOTE_GIT_READ_TIMEOUT_MS,
 	REMOTE_GIT_RECOVERY_MAX_ENTRIES,
+	REMOTE_GIT_REPOS_MAX_REPOS,
+	REMOTE_GIT_REPO_PATH_MAX_BYTES,
 	REMOTE_GIT_REF_MAX_COUNT,
 	REMOTE_GIT_REF_MAX_NAME_BYTES,
 	REMOTE_GIT_STATUS_MAX_BYTES,
@@ -45,7 +48,7 @@ import {
 export type RemoteGitLocator = { hostId: string; remotePath: string };
 export type RemoteGitSession = {
 	readonly hostRevision?: number;
-	request(method: string, params?: unknown, options?: { timeoutMs?: number; onRequestId?: (id: string) => void }): Promise<unknown>;
+	request(method: string, params?: unknown, options?: { timeoutMs?: number; onRequestId?: (id: string) => void; repo?: string }): Promise<unknown>;
 	cancel(id: string, options?: { timeoutMs?: number }): Promise<unknown>;
 };
 /**
@@ -187,6 +190,43 @@ export function validateRemoteGitPath(value: unknown): string {
 		throw new Error("PATH_OUTSIDE_ROOT");
 	return value;
 }
+/**
+ * The per-request repository scope: a project-relative POSIX path naming a directory under the verified project root,
+ * with "" (or absent) meaning the root itself. The main-process copy of the frozen helper's own rule; it runs before
+ * an SSH session is opened, and the entry and worker re-check the same shape. A component that is itself .git or ends
+ * in .lock is not a directory this protocol addresses, and Git would read it as metadata.
+ */
+export function validateRemoteGitRepoPath(value: unknown): string {
+	if (value === undefined || value === null || value === "") return "";
+	if (
+		typeof value !== "string" ||
+		Buffer.byteLength(value, "utf8") > REMOTE_GIT_REPO_PATH_MAX_BYTES ||
+		/[\x00-\x1f\x7f]/.test(value) ||
+		value.startsWith("-") ||
+		value.startsWith("/") ||
+		value.includes("\\") ||
+		/^[A-Za-z]:/.test(value) ||
+		/%2e|%2f|%5c/i.test(value) ||
+		value.split("/").some((part) => !part || part === "." || part === ".." || /^\.git$/i.test(part) || part.endsWith(".lock"))
+	)
+		throw new Error("GIT_RESULT_INVALID");
+	return value;
+}
+/** Discovery output is re-validated field by field: unique project-relative paths, display names only, honest flag. */
+export function readRemoteGitRepos(value: unknown): { repos: RemoteGitRepo[]; truncated: boolean } {
+	if (!record(value) || Object.keys(value).length !== 2 || typeof value.truncated !== "boolean" || !Array.isArray(value.repos) || value.repos.length > REMOTE_GIT_REPOS_MAX_REPOS) throw new Error("GIT_RESULT_INVALID");
+	const seen = new Set<string>();
+	const repos = value.repos.map((entry) => {
+		if (!record(entry) || Object.keys(entry).length !== 2) throw new Error("GIT_RESULT_INVALID");
+		const path = validateRemoteGitRepoPath(entry.path);
+		// A duplicate would make the panel offer two indistinguishable scopes; refuse instead of silently filtering.
+		if (seen.has(path)) throw new Error("GIT_RESULT_INVALID");
+		seen.add(path);
+		if (typeof entry.name !== "string" || !entry.name || Buffer.byteLength(entry.name, "utf8") > 4096 || /[\x00-\x1f\x7f]/.test(entry.name)) throw new Error("GIT_RESULT_INVALID");
+		return { path, name: entry.name };
+	});
+	return { repos, truncated: value.truncated };
+}
 /** Validate the complete machine format before feeding the existing SCM parser, which tolerates local legacy data. */
 export function readRemoteGitStatus(value: unknown, projectId: string): RemoteGitReadSnapshot {
 	if (!record(value) || typeof value.status !== "string" || value.status.length > 4 * Math.ceil(REMOTE_GIT_STATUS_MAX_BYTES / 3) || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value.status)) throw new Error("GIT_RESULT_INVALID");
@@ -201,19 +241,26 @@ export function readRemoteGitStatus(value: unknown, projectId: string): RemoteGi
 		throw new Error("GIT_RESULT_INVALID");
 	}
 	if (raw && !raw.endsWith("\0")) throw new Error("GIT_RESULT_INVALID");
-	const fields = raw ? raw.slice(0, -1).split("\0") : [];
+	const records = raw ? raw.slice(0, -1).split("\0") : [];
 	let count = 0;
 	const intentPaths: string[] = [];
-	for (let i = 0; i < fields.length; i += 1) {
-		const line = fields[i];
+	for (let i = 0; i < records.length; i += 1) {
+		let line = records[i];
 		if (!line || line.length < 4 || line[2] !== " " || !/^[ MADRCUT?!]{2}$/.test(line.slice(0, 2))) throw new Error("GIT_RESULT_INVALID");
-		validateRemoteGitPath(line.slice(3));
-		if (line.startsWith(" A ")) intentPaths.push(line.slice(3));
-		if (/[RC]/.test(line.slice(0, 2))) validateRemoteGitPath(fields[++i]);
+		// Git names an untracked directory - an embedded repository above all - with a trailing slash. The resource is
+		// that directory's project-relative path, so the slash is removed before it becomes SCM data.
+		if (line.length > 4 && line.endsWith("/")) line = line.slice(0, -1);
+		records[i] = line;
+		const filePath = line.slice(3);
+		validateRemoteGitPath(filePath);
+		if (line.startsWith(" A ")) intentPaths.push(filePath);
+		if (/[RC]/.test(line.slice(0, 2))) validateRemoteGitPath(records[++i]);
 		if (++count > REMOTE_GIT_MAX_RESOURCES) throw new Error("RESULT_TOO_LARGE");
 	}
+	// The existing SCM parser reads the same normalized records; the raw bytes are never shown to the renderer.
+	const normalizedRaw = records.length > 0 ? records.join("\0") + "\0" : "";
 	const groups: GitResourceGroups = { merge: [], index: [], workingTree: [], untracked: [] };
-	for (const parsed of parsePorcelainStatus(raw)) {
+	for (const parsed of parsePorcelainStatus(normalizedRaw)) {
 		const target: ProjectFileTarget = { projectId, relativePath: parsed.path };
 		const resource: GitResource = { ...parsed, target, displayPath: parsed.path, ...(parsed.oldPath ? { oldTarget: { projectId, relativePath: parsed.oldPath } } : {}) };
 		if (resource.status === GitStatus.UNTRACKED) groups.untracked.push(resource);
@@ -397,6 +444,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 			| "git.refFileDiff"
 			| "git.compare"
 			| "git.init"
+			| "git.repos"
 			| "git.createBranch"
 			| "git.switchBranch"
 			| "git.discard"
@@ -411,7 +459,11 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 		signal: AbortSignal | undefined,
 		parse: (value: unknown, session: RemoteGitSession, capabilities: unknown[]) => T,
 		expected?: RemoteGitWriteExpectation,
+		repo?: string,
 	): Promise<T> {
+		// The scope is part of the request identity: a write can never be aimed at a nested repository through this path.
+		const repoPath = validateRemoteGitRepoPath(repo);
+		if (expected !== undefined && repoPath !== "") throw new Error("GIT_RESULT_INVALID");
 		const locator = target(projectId);
 		let dispatchedWrite = false;
 		try {
@@ -428,7 +480,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 						if (activeId) void session.cancel(activeId, { timeoutMs: 3000 }).catch(() => undefined);
 					};
 					signal?.addEventListener("abort", cancel);
-					async function request(name: string, input?: unknown) {
+					async function request(name: string, input?: unknown, frameRepo?: string) {
 						if (signal?.aborted) throw new Error("REQUEST_CANCELLED");
 						assertCurrent(projectId, locator);
 						try {
@@ -453,6 +505,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 							const timeoutMs = name === "git.fetch" || name === "git.push" || name === "git.pull" ? REMOTE_GIT_SYNC_TIMEOUT_MS : REMOTE_GIT_READ_TIMEOUT_MS;
 							const result = await session.request(name, input, {
 								timeoutMs,
+								...(frameRepo === undefined || frameRepo === "" ? {} : { repo: frameRepo }),
 								onRequestId: (id) => {
 									activeId = id;
 									if (signal?.aborted) cancel();
@@ -471,7 +524,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 						// Trust is mutable while the host lock is queued; check it at the actual operation boundary.
 						if (!(await ports.trusted(locator))) throw new Error("GIT_TRUST_REQUIRED");
 						if (expected && session.hostRevision !== expected.hostRevision) throw new Error("GIT_TARGET_CHANGED");
-						return parse(await request(method, params), session, hello.capabilities);
+						return parse(await request(method, params, repoPath), session, hello.capabilities);
 					} finally {
 						signal?.removeEventListener("abort", cancel);
 					}
@@ -485,27 +538,37 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 		}
 	}
 	return {
-		status(projectId: string, signal?: AbortSignal): Promise<RemoteGitReadSnapshot> {
-			return run(projectId, "git.status", {}, signal, (value, session, capabilities) => {
-				const snapshot = readRemoteGitStatus(value, projectId);
-				if (record(value) && value.revision !== undefined) {
-					if (typeof value.revision !== "string" || !/^[0-9a-f]{64}$/.test(value.revision)) throw new Error("GIT_RESULT_INVALID");
-					const hostRevision = session.hostRevision;
-					if (typeof hostRevision === "number" && Number.isSafeInteger(hostRevision) && hostRevision >= 0) {
-						if (capabilities.includes("git.stage") && capabilities.includes("git.unstage")) snapshot.writeExpectation = { kind: "index", revision: value.revision, hostRevision, target: target(projectId) };
-						if (capabilities.includes("git.commit")) snapshot.commitExpectation = { kind: "commit", revision: value.revision, hostRevision, target: target(projectId) };
-						if (capabilities.includes("git.createBranch")) snapshot.branchExpectation = { kind: "branch", revision: value.revision, hostRevision, target: target(projectId), head: snapshot.head };
-						if (capabilities.includes("git.switchBranch")) snapshot.switchExpectation = { kind: "switch", revision: value.revision, hostRevision, target: target(projectId), head: snapshot.head };
-						if (capabilities.includes("git.discard")) snapshot.discardExpectation = { kind: "discard", revision: value.revision, hostRevision, target: target(projectId) };
-						if (capabilities.includes("git.recoveryRestore")) snapshot.restoreExpectation = { kind: "restore", revision: value.revision, hostRevision, target: target(projectId) };
-						if (capabilities.includes("git.recoveryDrop")) snapshot.dropExpectation = { kind: "drop", revision: value.revision, hostRevision, target: target(projectId) };
-						if (capabilities.includes("git.fetch")) snapshot.fetchExpectation = { kind: "fetch", revision: value.revision, hostRevision, target: target(projectId) };
-						if (capabilities.includes("git.push")) snapshot.pushExpectation = { kind: "push", revision: value.revision, hostRevision, target: target(projectId) };
-						if (capabilities.includes("git.pull")) snapshot.pullExpectation = { kind: "pull", revision: value.revision, hostRevision, target: target(projectId) };
+		status(projectId: string, repo: string | undefined, signal?: AbortSignal): Promise<RemoteGitReadSnapshot> {
+			const repoPath = validateRemoteGitRepoPath(repo);
+			return run(
+				projectId,
+				"git.status",
+				{},
+				signal,
+				(value, session, capabilities) => {
+					const snapshot = readRemoteGitStatus(value, projectId);
+					// Only the project-root scope may hand out write grants: every write channel still targets the root repository.
+					if (repoPath === "" && record(value) && value.revision !== undefined) {
+						if (typeof value.revision !== "string" || !/^[0-9a-f]{64}$/.test(value.revision)) throw new Error("GIT_RESULT_INVALID");
+						const hostRevision = session.hostRevision;
+						if (typeof hostRevision === "number" && Number.isSafeInteger(hostRevision) && hostRevision >= 0) {
+							if (capabilities.includes("git.stage") && capabilities.includes("git.unstage")) snapshot.writeExpectation = { kind: "index", revision: value.revision, hostRevision, target: target(projectId) };
+							if (capabilities.includes("git.commit")) snapshot.commitExpectation = { kind: "commit", revision: value.revision, hostRevision, target: target(projectId) };
+							if (capabilities.includes("git.createBranch")) snapshot.branchExpectation = { kind: "branch", revision: value.revision, hostRevision, target: target(projectId), head: snapshot.head };
+							if (capabilities.includes("git.switchBranch")) snapshot.switchExpectation = { kind: "switch", revision: value.revision, hostRevision, target: target(projectId), head: snapshot.head };
+							if (capabilities.includes("git.discard")) snapshot.discardExpectation = { kind: "discard", revision: value.revision, hostRevision, target: target(projectId) };
+							if (capabilities.includes("git.recoveryRestore")) snapshot.restoreExpectation = { kind: "restore", revision: value.revision, hostRevision, target: target(projectId) };
+							if (capabilities.includes("git.recoveryDrop")) snapshot.dropExpectation = { kind: "drop", revision: value.revision, hostRevision, target: target(projectId) };
+							if (capabilities.includes("git.fetch")) snapshot.fetchExpectation = { kind: "fetch", revision: value.revision, hostRevision, target: target(projectId) };
+							if (capabilities.includes("git.push")) snapshot.pushExpectation = { kind: "push", revision: value.revision, hostRevision, target: target(projectId) };
+							if (capabilities.includes("git.pull")) snapshot.pullExpectation = { kind: "pull", revision: value.revision, hostRevision, target: target(projectId) };
+						}
 					}
-				}
-				return snapshot;
-			});
+					return snapshot;
+				},
+				undefined,
+				repoPath,
+			);
 		},
 		/** The expectation is issued by main; renderer data never becomes a host/revision authority. */
 		mutate(projectId: string, operation: "stage" | "unstage", group: GitResourceGroupType, file: ProjectFileTarget, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<void> {
@@ -538,17 +601,26 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 				expected,
 			);
 		},
-		workspaceDiff(projectId: string, group: GitResourceGroupType, file: ProjectFileTarget, signal?: AbortSignal): Promise<GitWorkspaceFileDiff> {
+		workspaceDiff(projectId: string, group: GitResourceGroupType, file: ProjectFileTarget, repo: string | undefined, signal?: AbortSignal): Promise<GitWorkspaceFileDiff> {
 			if (file.projectId !== projectId || !["merge", "index", "workingTree", "untracked"].includes(group)) throw new Error("GIT_RESULT_INVALID");
-			const path = validateRemoteGitPath(file.relativePath);
-			return run(projectId, "git.workspaceDiff", { group, path }, signal, (value) => {
-				if (!record(value) || typeof value.originalContent !== "string" || typeof value.modifiedContent !== "string") throw new Error("GIT_RESULT_INVALID");
-				for (const text of [value.originalContent, value.modifiedContent]) if (text.includes("\0") || Buffer.byteLength(text, "utf8") > REMOTE_GIT_TEXT_MAX_BYTES || Buffer.from(text, "utf8").toString("utf8") !== text) throw new Error("GIT_RESULT_INVALID");
-				return { path, target: { projectId, relativePath: path }, displayPath: path, originalContent: value.originalContent, modifiedContent: value.modifiedContent };
-			});
+			const path = validateRemoteGitPath(file.relativePath),
+				repoPath = validateRemoteGitRepoPath(repo);
+			return run(
+				projectId,
+				"git.workspaceDiff",
+				{ group, path },
+				signal,
+				(value) => {
+					if (!record(value) || typeof value.originalContent !== "string" || typeof value.modifiedContent !== "string") throw new Error("GIT_RESULT_INVALID");
+					for (const text of [value.originalContent, value.modifiedContent]) if (text.includes("\0") || Buffer.byteLength(text, "utf8") > REMOTE_GIT_TEXT_MAX_BYTES || Buffer.from(text, "utf8").toString("utf8") !== text) throw new Error("GIT_RESULT_INVALID");
+					return { path, target: { projectId, relativePath: path }, displayPath: path, originalContent: value.originalContent, modifiedContent: value.modifiedContent };
+				},
+				undefined,
+				repoPath,
+			);
 		},
 		/* Read-only history (G3a): no token, no write expectation, nothing staged or moved. */
-		log(projectId: string, options: unknown, signal?: AbortSignal): Promise<RemoteGitLogPage> {
+		log(projectId: string, options: unknown, repo: string | undefined, signal?: AbortSignal): Promise<RemoteGitLogPage> {
 			let maxCount = REMOTE_GIT_LOG_DEFAULT_COUNT;
 			let skip = 0;
 			if (options !== undefined) {
@@ -562,24 +634,36 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 					skip = options.skip;
 				}
 			}
-			return run(projectId, "git.log", { maxCount, skip }, signal, (value) => readRemoteGitLog(value));
+			return run(projectId, "git.log", { maxCount, skip }, signal, (value) => readRemoteGitLog(value), undefined, validateRemoteGitRepoPath(repo));
 		},
-		commitDetail(projectId: string, oid: unknown, signal?: AbortSignal): Promise<RemoteGitCommitDetail> {
+		commitDetail(projectId: string, oid: unknown, repo: string | undefined, signal?: AbortSignal): Promise<RemoteGitCommitDetail> {
 			const value = remoteGitOid(oid);
-			return run(projectId, "git.commitDetail", { oid: value }, signal, (raw) => {
-				const detail = readRemoteGitCommitDetail(raw);
-				if (detail.oid !== value) throw new Error("GIT_RESULT_INVALID");
-				return detail;
-			});
+			return run(
+				projectId,
+				"git.commitDetail",
+				{ oid: value },
+				signal,
+				(raw) => {
+					const detail = readRemoteGitCommitDetail(raw);
+					if (detail.oid !== value) throw new Error("GIT_RESULT_INVALID");
+					return detail;
+				},
+				undefined,
+				validateRemoteGitRepoPath(repo),
+			);
 		},
-		refs(projectId: string, signal?: AbortSignal): Promise<RemoteGitRefs> {
-			return run(projectId, "git.refs", {}, signal, (value) => readRemoteGitRefs(value));
+		refs(projectId: string, repo: string | undefined, signal?: AbortSignal): Promise<RemoteGitRefs> {
+			return run(projectId, "git.refs", {}, signal, (value) => readRemoteGitRefs(value), undefined, validateRemoteGitRepoPath(repo));
+		},
+		/** Bounded, side-effect-free discovery of the repositories under the project root; no token, no write. */
+		listRepositories(projectId: string, signal?: AbortSignal): Promise<{ repos: RemoteGitRepo[]; truncated: boolean }> {
+			return run(projectId, "git.repos", {}, signal, (value) => readRemoteGitRepos(value));
 		},
 		/** Read-only refs comparison: no token, no write expectation, nothing staged or moved. */
-		compare(projectId: string, base: unknown, head: unknown, signal?: AbortSignal): Promise<RemoteGitCompare> {
+		compare(projectId: string, base: unknown, head: unknown, repo: string | undefined, signal?: AbortSignal): Promise<RemoteGitCompare> {
 			const baseRef = validateRemoteGitRefFullName(base);
 			const headRef = validateRemoteGitRefFullName(head);
-			return run(projectId, "git.compare", { base: baseRef, head: headRef }, signal, (value) => readRemoteGitCompare(value, baseRef, headRef));
+			return run(projectId, "git.compare", { base: baseRef, head: headRef }, signal, (value) => readRemoteGitCompare(value, baseRef, headRef), undefined, validateRemoteGitRepoPath(repo));
 		},
 		/**
 		 * The explicit write that creates the repository at the project root. There is no main-owned token because there
@@ -652,19 +736,27 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 			);
 		},
 		/** Read-only listing of the recovery namespace; nothing here needs a grant or touches the repository. */
-		recoveryList(projectId: string, signal?: AbortSignal): Promise<{ entries: RemoteGitRecoveryEntryView[]; truncated: boolean }> {
-			return run(projectId, "git.recoveryList", {}, signal, (value) => {
-				if (!record(value) || Object.keys(value).length !== 2 || typeof value.truncated !== "boolean" || !Array.isArray(value.entries) || value.entries.length > REMOTE_GIT_RECOVERY_MAX_ENTRIES) throw new Error("GIT_RESULT_INVALID");
-				const entries = value.entries.map((entry) => {
-					if (!record(entry) || Object.keys(entry).length !== 5) throw new Error("GIT_RESULT_INVALID");
-					// The ref may only name our own namespace: remote output never becomes an arbitrary ref authority.
-					if (typeof entry.ref !== "string" || !/^refs\/pideck\/recovery\/[A-Za-z0-9._-]+$/.test(entry.ref)) throw new Error("GIT_RESULT_INVALID");
-					const bytes = remoteGitCount(entry.bytes);
-					const at = remoteGitCount(entry.at);
-					return { ref: entry.ref, oid: remoteGitOid(entry.oid), path: validateRemoteGitPath(entry.path), bytes, at };
-				});
-				return { entries, truncated: value.truncated };
-			});
+		recoveryList(projectId: string, repo: string | undefined, signal?: AbortSignal): Promise<{ entries: RemoteGitRecoveryEntryView[]; truncated: boolean }> {
+			return run(
+				projectId,
+				"git.recoveryList",
+				{},
+				signal,
+				(value) => {
+					if (!record(value) || Object.keys(value).length !== 2 || typeof value.truncated !== "boolean" || !Array.isArray(value.entries) || value.entries.length > REMOTE_GIT_RECOVERY_MAX_ENTRIES) throw new Error("GIT_RESULT_INVALID");
+					const entries = value.entries.map((entry) => {
+						if (!record(entry) || Object.keys(entry).length !== 5) throw new Error("GIT_RESULT_INVALID");
+						// The ref may only name our own namespace: remote output never becomes an arbitrary ref authority.
+						if (typeof entry.ref !== "string" || !/^refs\/pideck\/recovery\/[A-Za-z0-9._-]+$/.test(entry.ref)) throw new Error("GIT_RESULT_INVALID");
+						const bytes = remoteGitCount(entry.bytes);
+						const at = remoteGitCount(entry.at);
+						return { ref: entry.ref, oid: remoteGitOid(entry.oid), path: validateRemoteGitPath(entry.path), bytes, at };
+					});
+					return { entries, truncated: value.truncated };
+				},
+				undefined,
+				validateRemoteGitRepoPath(repo),
+			);
 		},
 		/** One snapshot's raw bytes go back to its path, and only where the worktree still matches the index. */
 		recoveryRestore(projectId: string, ref: unknown, oid: unknown, path: unknown, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<{ path: string; bytes: number }> {
@@ -701,13 +793,21 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 			);
 		},
 		/** Read-only sync facts: names and counts, never a URL (a remote URL can carry credentials). */
-		syncFacts(projectId: string, signal?: AbortSignal): Promise<RemoteGitSyncFactsView> {
-			return run(projectId, "git.syncFacts", {}, signal, (value) => {
-				if (!record(value) || Object.keys(value).length !== 5 || !Array.isArray(value.remotes) || value.remotes.length > REMOTE_GIT_SYNC_MAX_REMOTES) throw new Error("GIT_RESULT_INVALID");
-				const branch = value.branch === null ? null : remoteGitSyncRef(value.branch);
-				const upstream = value.upstream === null ? null : remoteGitSyncUpstream(value.upstream);
-				return { branch, upstream, ahead: remoteGitCount(value.ahead), behind: remoteGitCount(value.behind), remotes: value.remotes.map((name) => remoteGitSyncRemote(name)) };
-			});
+		syncFacts(projectId: string, repo: string | undefined, signal?: AbortSignal): Promise<RemoteGitSyncFactsView> {
+			return run(
+				projectId,
+				"git.syncFacts",
+				{},
+				signal,
+				(value) => {
+					if (!record(value) || Object.keys(value).length !== 5 || !Array.isArray(value.remotes) || value.remotes.length > REMOTE_GIT_SYNC_MAX_REMOTES) throw new Error("GIT_RESULT_INVALID");
+					const branch = value.branch === null ? null : remoteGitSyncRef(value.branch);
+					const upstream = value.upstream === null ? null : remoteGitSyncUpstream(value.upstream);
+					return { branch, upstream, ahead: remoteGitCount(value.ahead), behind: remoteGitCount(value.behind), remotes: value.remotes.map((name) => remoteGitSyncRemote(name)) };
+				},
+				undefined,
+				validateRemoteGitRepoPath(repo),
+			);
 		},
 		/** Fetch updates remote-tracking refs only; the helper verifies that nothing else moved. */
 		fetch(projectId: string, remote: unknown, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<RemoteGitFetchOutcome> {
@@ -767,16 +867,24 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 			);
 		},
 		/** `base: null` names the side that does not exist; both sides missing is a refusal, not an empty diff. */
-		refFileDiff(projectId: string, base: unknown, head: unknown, file: ProjectFileTarget, signal?: AbortSignal): Promise<RemoteGitRefFileDiff> {
+		refFileDiff(projectId: string, base: unknown, head: unknown, file: ProjectFileTarget, repo: string | undefined, signal?: AbortSignal): Promise<RemoteGitRefFileDiff> {
 			if (file.projectId !== projectId) throw new Error("GIT_RESULT_INVALID");
 			const path = validateRemoteGitPath(file.relativePath);
 			const headOid = remoteGitOid(head);
 			const baseOid = base === null ? null : remoteGitOid(base);
-			return run(projectId, "git.refFileDiff", { base: baseOid, head: headOid, path }, signal, (raw) => {
-				if (!record(raw) || Object.keys(raw).length !== 2 || typeof raw.originalContent !== "string" || typeof raw.modifiedContent !== "string") throw new Error("GIT_RESULT_INVALID");
-				for (const text of [raw.originalContent, raw.modifiedContent]) if (text.includes("\0") || Buffer.byteLength(text, "utf8") > REMOTE_GIT_TEXT_MAX_BYTES) throw new Error("GIT_RESULT_INVALID");
-				return { path, target: { projectId, relativePath: path }, displayPath: path, base: baseOid, head: headOid, originalContent: raw.originalContent, modifiedContent: raw.modifiedContent };
-			});
+			return run(
+				projectId,
+				"git.refFileDiff",
+				{ base: baseOid, head: headOid, path },
+				signal,
+				(raw) => {
+					if (!record(raw) || Object.keys(raw).length !== 2 || typeof raw.originalContent !== "string" || typeof raw.modifiedContent !== "string") throw new Error("GIT_RESULT_INVALID");
+					for (const text of [raw.originalContent, raw.modifiedContent]) if (text.includes("\0") || Buffer.byteLength(text, "utf8") > REMOTE_GIT_TEXT_MAX_BYTES) throw new Error("GIT_RESULT_INVALID");
+					return { path, target: { projectId, relativePath: path }, displayPath: path, base: baseOid, head: headOid, originalContent: raw.originalContent, modifiedContent: raw.modifiedContent };
+				},
+				undefined,
+				validateRemoteGitRepoPath(repo),
+			);
 		},
 	};
 }

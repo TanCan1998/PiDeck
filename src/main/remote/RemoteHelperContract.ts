@@ -134,6 +134,26 @@ export const REMOTE_HELPER_METHOD_GIT_INIT = "git.init";
 export type RemoteGitInitParams = Record<string, never>;
 /** `branch` is the default branch the freshly created repository reports; null is reported as read. */
 export type RemoteGitInitResult = { branch: string | null };
+/**
+ * G5d nested repository discovery: one bounded scan under the project root, side-effect free and never following a
+ * symlink. `path` is project-relative POSIX ("" is the root repository); `name` is a display label only.`truncated`
+ * says a repo-count or visited-directory cap really cut the walk - it is never silently complete (same precedent as
+ * fs.searchNames).
+ */
+export const REMOTE_HELPER_METHOD_GIT_REPOS = "git.repos";
+export const REMOTE_GIT_REPOS_MAX_REPOS = 50;
+export const REMOTE_GIT_REPOS_MAX_DEPTH = 4;
+export const REMOTE_GIT_REPOS_MAX_VISITED_DIRS = 512;
+export type RemoteGitRepoEntry = { path: string; name: string };
+export type RemoteGitReposResult = { repos: readonly RemoteGitRepoEntry[]; truncated: boolean };
+/**
+ * The per-request repository scope: an optional project-relative POSIX path (""/absent means the project root).
+ * Only the read methods in this list may receive a non-empty scope; writes, git.init and git.repos refuse one.
+ * The shape rules are repeated by the frozen entry and the frozen worker (they cannot import this file) and by
+ * main's validateRemoteGitRepoPath, all before a session or a Git child is started.
+ */
+export const REMOTE_GIT_REPO_PATH_MAX_BYTES = 4096;
+export const REMOTE_GIT_REPO_READ_METHODS = ["git.status", "git.workspaceDiff", "git.log", "git.commitDetail", "git.refs", "git.refFileDiff", "git.compare", "git.recoveryList", "git.syncFacts"] as const;
 export const REMOTE_GIT_STATUS_MAX_BYTES = 1024 * 1024;
 export const REMOTE_GIT_MAX_RESOURCES = 4096;
 export const REMOTE_GIT_TEXT_MAX_BYTES = 256 * 1024;
@@ -304,6 +324,7 @@ export const REMOTE_HELPER_CAPABILITIES = [
 	"git.push",
 	"git.pull",
 	"git.init",
+	"git.repos",
 ] as const;
 export type RemoteHelperCapability = (typeof REMOTE_HELPER_CAPABILITIES)[number];
 /**
@@ -350,6 +371,8 @@ export type RemoteHelperRequestFrame = {
 	method: string;
 	timeoutMs?: number;
 	params?: unknown;
+	/** Optional repository scope (project-relative POSIX path; empty/absent is the project root); read batch only. */
+	repo?: string;
 };
 
 export type RemoteHelperErrorBody = {

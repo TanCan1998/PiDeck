@@ -82,7 +82,7 @@ export type RemoteControlScheduler = {
 	clearTimeout(handle: ReturnType<typeof setTimeout>): void;
 };
 
-export type RemoteControlRequestOptions = { timeoutMs?: number };
+export type RemoteControlRequestOptions = { timeoutMs?: number /** Optional project-relative repository scope; main validates the shape before it gets here. */; repo?: string };
 
 export type RemoteControlClientOptions = {
 	hostId: string;
@@ -516,6 +516,7 @@ export function createRemoteControlClient(options: RemoteControlClientOptions): 
 			method,
 			timeoutMs,
 			...(params === undefined ? {} : { params }),
+			...(options?.repo === undefined ? {} : { repo: options.repo }),
 		};
 		const line = encodeFrame(frame);
 		const deferred = createDeferred<unknown>();

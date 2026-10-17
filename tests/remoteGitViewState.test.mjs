@@ -157,11 +157,11 @@ test("history pages append on demand and a failed page keeps the rows already on
 		},
 	});
 	await f.reads.loadHistory();
-	assert.deepEqual(plain(calls), [["project", { maxCount: 50 }]]);
+	assert.deepEqual(plain(calls), [["project", { maxCount: 50 }, ""]]);
 	assert.equal(f.current().history.commits.length, 1);
 	assert.equal(f.current().history.hasMore, true);
 	await f.reads.loadMoreHistory();
-	assert.deepEqual(plain(calls.at(-1)), ["project", { maxCount: 50, skip: 1 }]);
+	assert.deepEqual(plain(calls.at(-1)), ["project", { maxCount: 50, skip: 1 }, ""]);
 	assert.equal(f.current().history.commits.length, 1, "a failed page keeps the visible rows");
 	assert.equal(f.current().historyErrorCode, "GIT_COMMAND_FAILED");
 	failOnce = false;
@@ -248,14 +248,14 @@ test("refs load once at a time and a late answer after invalidation is discarded
 test("a revision file diff uses the shared diff surface and its identity is checked", async () => {
 	const calls = [];
 	const f = fixture({
-		remoteRefFileDiff: async (id, base, head, fileTarget) => {
-			calls.push([id, base, head, fileTarget]);
+		remoteRefFileDiff: async (id, base, head, fileTarget, repo) => {
+			calls.push([id, base, head, fileTarget, repo]);
 			return { ok: true, diff: { path: fileTarget.relativePath, target: fileTarget, displayPath: fileTarget.relativePath, base, head, originalContent: "old side", modifiedContent: "new side" } };
 		},
 	});
 	await f.reads.refresh();
 	await f.reads.openHistoryFileDiff(oid("a"), oid("b"), target);
-	assert.deepEqual(plain(calls), [["project", oid("a"), oid("b"), target]]);
+	assert.deepEqual(plain(calls), [["project", oid("a"), oid("b"), target, ""]]);
 	assert.equal(f.current().diffKind, "revision");
 	assert.equal(f.current().diff.originalContent, "old side");
 	assert.equal(f.current().diffGroup, undefined);
@@ -465,7 +465,7 @@ test("the recovery listing loads on demand and its truncation flag travels with 
 		},
 	});
 	await f.reads.loadRecovery();
-	assert.deepEqual(plain(calls), [["project"]]);
+	assert.deepEqual(plain(calls), [["project", ""]]);
 	assert.deepEqual(plain(f.current().recovery), { entries: [recoveryEntry], truncated: true });
 	assert.equal(f.current().recoveryLoading, false);
 	const failed = fixture({ recoveryList: async () => ({ ok: false, code: "GIT_COMMAND_FAILED" }) });

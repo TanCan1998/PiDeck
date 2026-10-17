@@ -44,6 +44,7 @@ const {
 	REMOTE_HELPER_METHOD_FS_READ,
 	REMOTE_HELPER_METHOD_FS_SEARCH_NAMES,
 	REMOTE_HELPER_METHOD_FS_STAT,
+	REMOTE_HELPER_METHOD_GIT_REPOS,
 	REMOTE_HELPER_METHOD_HELLO,
 	REMOTE_HELPER_MAX_ECHO_TEXT_LENGTH,
 	REMOTE_HELPER_MAX_HOST_ID_LENGTH,
@@ -64,7 +65,7 @@ const HOST_ID = "01234567-89ab-4def-8123-456789abcdef";
 /** The helper never resolves HOME into a path, so a POSIX literal is the honest fixture on any platform. */
 const HELPER_HOME = "/home/pideck-helper";
 /** Frozen digest, pinned here as well as in the module: editing the source means editing both. */
-const FROZEN_SHA256 = "e513bcfaf0ef06d1bb6610f58eb56eb5b4b96abe57a3f0cd144b51b8dda6709a";
+const FROZEN_SHA256 = "f0dfe0e2e8695d9527ac9ff5fdf09d176addb863dde0f6d4305375f2c930c9f9";
 const MAX_TEXT = 4096;
 const TEST_TIMEOUT_MS = 30_000;
 const GUARD_TIMEOUT_MS = 10_000;
@@ -424,6 +425,10 @@ helperTest("every frozen bundle artifact is one byte-frozen ASCII line with its 
 	}
 	// G5c: the init capability has no other literal occurrence, so "one declaration + one dispatch arm" is exact.
 	assert.equal(REMOTE_HELPER_INLINE_SOURCE.split('"git.init"').length - 1, 2, "git.init appears exactly once in CAPABILITIES and once in the dispatch");
+	// G5d: discovery is advertised and dispatched exactly once, and the entry validates the optional repo scope itself.
+	assert.equal(REMOTE_HELPER_INLINE_SOURCE.split('"git.repos"').length - 1, 2, "git.repos appears exactly once in CAPABILITIES and once in the dispatch");
+	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes("function readRepoValue("), "the entry must validate the per-request repo scope before forwarding it");
+	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes("parsed.repo"), "the dispatch must read the scope from the request frame");
 	// A stable code must be registered inside the frozen worker itself, or the helper's own mapping collapses it to IO_ERROR.
 	const stableSet = /const stable = new Set\(\[([^\]]*)\]\)/.exec(REMOTE_GIT_READ_SOURCE);
 	assert.ok(stableSet, "the frozen Git worker must keep its literal stable-code set");
@@ -439,7 +444,7 @@ helperTest("every frozen bundle artifact is one byte-frozen ASCII line with its 
 helperTest("the exported entry identity matches the frozen source", () => {
 	assert.equal(REMOTE_HELPER_ENTRY_FILE_NAME, "helper.mjs");
 	assert.match(REMOTE_HELPER_ENTRY_VERSION, /^\d+\.\d+\.\d+$/);
-	assert.equal(REMOTE_HELPER_ENTRY_VERSION, "1.17.0", "the explicit-init batch is helper 1.17.0");
+	assert.equal(REMOTE_HELPER_ENTRY_VERSION, "1.18.0", "the nested-repository batch is helper 1.18.0");
 	// The frozen source cannot import the contract, so its literals are checked against it here.
 	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes(`"${REMOTE_HELPER_ENTRY_VERSION}"`), "hello must report REMOTE_HELPER_ENTRY_VERSION");
 	for (const token of [REMOTE_HELPER_METHOD_HELLO, REMOTE_HELPER_METHOD_ECHO, REMOTE_HELPER_METHOD_CANCEL, REMOTE_HELPER_METHOD_FS_STAT, REMOTE_HELPER_METHOD_FS_LIST, REMOTE_HELPER_METHOD_FS_READ]) {
@@ -498,6 +503,35 @@ helperTest("hello answers the contract handshake through the production client",
 	assert.equal(session.lines.length, session.frames.length, "every stdout line has to be a protocol frame");
 	assert.equal(session.frames[0].id, session.requestIdAt(0));
 	assert.equal(session.stderr(), "", "the helper never writes stderr text");
+});
+
+helperTest("a repository scope is validated by the entry and refused for every write, init and discovery", async (t) => {
+	const session = startHelper(t);
+	// The entry owns the first shape check: nothing malformed is forwarded to the worker at all.
+	for (const repo of ["../escape", "/absolute", "a\\b", "C:/drive", "dir/.git", "x.lock/y", "-option", "a\u0000b", "a".repeat(REMOTE_HELPER_MAX_PATH_LENGTH + 1)]) {
+		const error = await rejection(guard(session.client.request(REMOTE_HELPER_METHOD_GIT_REPOS, {}, { repo }), "invalid repo scope"));
+		assert.equal(error.code, "GIT_RESULT_INVALID", JSON.stringify(repo));
+	}
+	// A well-formed scope reaches the worker, whose own prepare accepts it for a read method: the refusal that follows
+	// comes from the worker's own environment (not a repository / no root / not Linux), never from the shape check.
+	const forwarded = await rejection(guard(session.client.request("git.status", {}, { repo: "nested" }), "git.status with a scope"));
+	assert.notEqual(forwarded.code, "GIT_RESULT_INVALID", "a read method must accept a well-formed scope shape");
+	// Every write, init and discovery refuses a non-empty scope with GIT_RESULT_INVALID and starts no Git child: the
+	// root here is an empty directory, so a request that reached run() would answer GIT_NOT_REPOSITORY instead.
+	for (const method of ["git.stage", "git.unstage", "git.commit", "git.createBranch", "git.switchBranch", "git.discard", "git.recoveryRestore", "git.recoveryDrop", "git.fetch", "git.push", "git.pull", "git.init", REMOTE_HELPER_METHOD_GIT_REPOS]) {
+		const error = await rejection(guard(session.client.request(method, {}, { repo: "nested" }), method + " with a scope"));
+		assert.equal(error.code, "GIT_RESULT_INVALID", method);
+	}
+	// An absent or empty scope is the project root: on Linux discovery honestly answers an empty list for a plain
+	// empty directory, while the frozen worker refuses Git work altogether on the other platforms.
+	let empty;
+	try {
+		empty = plain(await guard(session.client.request(REMOTE_HELPER_METHOD_GIT_REPOS, {}), "empty scope repos"));
+	} catch (error) {
+		empty = { code: error.code };
+	}
+	if (process.platform === "linux") assert.deepEqual(empty, { repos: [], truncated: false });
+	else assert.equal(empty.code, "GIT_PLATFORM_UNSUPPORTED");
 });
 
 helperTest("hello fails closed when HOME is not an absolute POSIX path", async (t) => {

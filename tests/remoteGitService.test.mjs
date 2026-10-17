@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
-const { createRemoteGitService, readRemoteGitStatus, validateRemoteGitPath } = loadTsCommonJs("src/main/git/RemoteGitService.ts");
+const { createRemoteGitService, readRemoteGitStatus, readRemoteGitRepos, validateRemoteGitPath, validateRemoteGitRepoPath } = loadTsCommonJs("src/main/git/RemoteGitService.ts");
 const { REMOTE_GIT_READ_TIMEOUT_MS, REMOTE_GIT_SYNC_TIMEOUT_MS } = loadTsCommonJs("src/main/remote/RemoteHelperContract.ts");
 const { GitStatus } = loadTsCommonJs("src/shared/types/git.ts");
 const projectId = "project-a";
@@ -167,13 +167,13 @@ test("aborting a read cancels its exact request and discards any late success", 
 		controller.abort();
 		return encode("");
 	};
-	await assert.rejects(f.service.status(projectId, controller.signal), /REQUEST_CANCELLED/);
+	await assert.rejects(f.service.status(projectId, "", controller.signal), /REQUEST_CANCELLED/);
 	assert.deepEqual(
 		f.calls.filter((call) => call.method === "cancel"),
 		[{ method: "cancel", id: "exact-read-id" }],
 	);
 	f.calls.length = 0;
-	await assert.rejects(f.service.status(projectId, controller.signal), /REQUEST_CANCELLED/);
+	await assert.rejects(f.service.status(projectId, "", controller.signal), /REQUEST_CANCELLED/);
 	assert.equal(f.calls.length, 0);
 });
 
@@ -206,4 +206,125 @@ test("network verbs carry the sync budget while every other Git method keeps the
 	assert.equal(byMethod.get("git.log"), REMOTE_GIT_READ_TIMEOUT_MS);
 	assert.equal(byMethod.get("hello"), REMOTE_GIT_READ_TIMEOUT_MS);
 	for (const method of ["git.fetch", "git.push", "git.pull"]) assert.equal(byMethod.get(method), REMOTE_GIT_SYNC_TIMEOUT_MS, method);
+});
+
+test("a repository scope travels on read frames and never on hello or a write", async () => {
+	const f = fixture();
+	const capabilities = ["git.status", "git.log", "git.refFileDiff"];
+	f.session.request = async (method, params, options) => {
+		f.calls.push({ method, params, repo: options?.repo });
+		options?.onRequestId?.("request-" + f.calls.length);
+		if (method === "hello") return { protocolVersion: 1, root: locator.remotePath, capabilities };
+		if (method === "git.status") return encode(" M tracked.txt\0");
+		if (method === "git.log") return { commits: [], hasMore: false };
+		if (method === "git.refFileDiff") return { originalContent: "a", modifiedContent: "b" };
+		throw new Error("unexpected method " + method);
+	};
+	const scoped = "packages/nested";
+	await f.service.status(projectId, scoped);
+	await f.service.log(projectId, {}, scoped);
+	await f.service.refFileDiff(projectId, null, oid, { projectId, relativePath: "a.txt" }, scoped);
+	const byMethod = new Map(f.calls.map((call) => [call.method, call.repo]));
+	assert.equal(byMethod.get("hello"), undefined, "the handshake names no repository");
+	assert.equal(byMethod.get("git.status"), scoped);
+	assert.equal(byMethod.get("git.log"), scoped);
+	assert.equal(byMethod.get("git.refFileDiff"), scoped);
+	// A root read keeps the pre-G5d frame: no repo option at all.
+	f.calls.length = 0;
+	await f.service.status(projectId);
+	assert.equal(f.calls.find((call) => call.method === "git.status").repo, undefined);
+});
+
+test("a nested snapshot never mints a write grant; the root snapshot still does", async () => {
+	const f = fixture();
+	f.session.hostRevision = 1;
+	const capabilities = ["git.status", "git.stage", "git.unstage", "git.commit", "git.fetch", "git.push", "git.pull", "git.discard", "git.recoveryRestore", "git.recoveryDrop"];
+	f.session.request = async (method) => {
+		if (method === "hello") return { protocolVersion: 1, root: locator.remotePath, capabilities };
+		return { ...encode(""), revision: "a".repeat(64) };
+	};
+	const nested = await f.service.status(projectId, "packages/nested");
+	for (const field of ["writeExpectation", "commitExpectation", "branchExpectation", "switchExpectation", "discardExpectation", "restoreExpectation", "dropExpectation", "fetchExpectation", "pushExpectation", "pullExpectation"]) {
+		assert.equal(nested[field], undefined, field + " must not be issued for a nested scope");
+	}
+	const root = await f.service.status(projectId, "");
+	assert.ok(root.writeExpectation, "the root scope keeps its index grant");
+	assert.ok(root.commitExpectation, "the root scope keeps its commit grant");
+	assert.equal(root.writeExpectation.target.remotePath, locator.remotePath);
+});
+
+test("listRepositories is a bounded read with no scope or token on the frame", async () => {
+	const f = fixture();
+	f.session.request = async (method, params, options) => {
+		f.calls.push({ method, params, repo: options?.repo });
+		options?.onRequestId?.("request-" + f.calls.length);
+		if (method === "hello") return { protocolVersion: 1, root: locator.remotePath, capabilities: ["git.repos"] };
+		if (method === "git.repos")
+			return {
+				repos: [
+					{ path: "", name: "project" },
+					{ path: "packages/nested", name: "nested" },
+				],
+				truncated: true,
+			};
+		throw new Error("unexpected method " + method);
+	};
+	assert.deepEqual(plain(await f.service.listRepositories(projectId)), {
+		repos: [
+			{ path: "", name: "project" },
+			{ path: "packages/nested", name: "nested" },
+		],
+		truncated: true,
+	});
+	assert.deepEqual(
+		f.calls.map((call) => call.method),
+		["hello", "git.repos"],
+	);
+	assert.equal(f.calls[1].repo, undefined, "discovery has no repository scope");
+	assert.deepEqual(plain(f.calls[1].params), {});
+});
+
+test("an old helper without git.repos is refused with zero discovery work", async () => {
+	const f = fixture();
+	f.session.request = async (method) => {
+		f.calls.push({ method });
+		return { protocolVersion: 1, root: locator.remotePath, capabilities: ["git.status"] };
+	};
+	await assert.rejects(f.service.listRepositories(projectId), /UNSUPPORTED_CAPABILITY/);
+	assert.deepEqual(
+		f.calls.map((call) => call.method),
+		["hello"],
+	);
+});
+
+test("discovery replies are re-validated: duplicates, escapes, bounds and shape are refused", async () => {
+	const cases = [
+		{
+			repos: [
+				{ path: "", name: "project" },
+				{ path: "", name: "again" },
+			],
+			truncated: false,
+		},
+		{ repos: [{ path: "../outside", name: "escape" }], truncated: false },
+		{ repos: [{ path: "nested/.git", name: "metadata" }], truncated: false },
+		{ repos: [{ path: "nested", name: "" }], truncated: false },
+		{ repos: [{ path: "nested", name: "a\0b" }], truncated: false },
+		{ repos: [{ path: "nested", name: "nested", extra: true }], truncated: false },
+		{ repos: [], truncated: "yes" },
+		{ repos: Array.from({ length: 51 }, (_, index) => ({ path: "r" + index, name: "r" })), truncated: false },
+		{ repos: [], truncated: false, extra: 1 },
+	];
+	for (const reply of cases) {
+		const f = fixture();
+		f.session.request = async (method) => (method === "hello" ? { protocolVersion: 1, root: locator.remotePath, capabilities: ["git.repos"] } : reply);
+		await assert.rejects(f.service.listRepositories(projectId), (error) => error.message === "GIT_RESULT_INVALID", JSON.stringify(reply).slice(0, 80));
+	}
+});
+
+test("the repository scope rule matches the frozen helper rule", () => {
+	for (const value of ["", undefined, null, "packages/nested", "a/b/c", "目录 空格"]) assert.equal(validateRemoteGitRepoPath(value), value === undefined ? "" : value === null ? "" : value);
+	for (const value of ["/absolute", "../outside", "a/../b", "a\\b", "C:/drive", "-option", "dir/.git", "x.lock/y", "a\0b", "a".repeat(4097), 7]) assert.throws(() => validateRemoteGitRepoPath(value), /GIT_RESULT_INVALID/, String(value));
+	const valid = { repos: [{ path: "", name: "project" }], truncated: false };
+	assert.deepEqual(plain(readRemoteGitRepos(valid)), valid);
 });

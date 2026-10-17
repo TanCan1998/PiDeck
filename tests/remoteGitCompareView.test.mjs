@@ -52,7 +52,7 @@ test("compare names the two full refs and publishes the bounded list", async () 
 	});
 	await f.reads.refresh();
 	await f.reads.runCompare(baseRef, headRef);
-	assert.deepEqual(plain(calls), [[projectId, baseRef, headRef]]);
+	assert.deepEqual(plain(calls), [[projectId, baseRef, headRef, ""]]);
 	assert.deepEqual(plain(f.current().compare.files), compare.files);
 	assert.equal(f.current().compareLoading, false);
 	assert.equal(f.current().compareErrorCode, undefined);
@@ -135,8 +135,8 @@ test("a helper answer whose echoed refs differ is a resource change, not a subst
 test("the OIDs carried by the compare answer (not the ref names) reach the per-file refFileDiff", async () => {
 	const calls = [];
 	const f = fixture({
-		remoteRefFileDiff: async (id, base, head, fileTarget) => {
-			calls.push([id, base, head, fileTarget]);
+		remoteRefFileDiff: async (id, base, head, fileTarget, repo) => {
+			calls.push([id, base, head, fileTarget, repo]);
 			return { ok: true, diff: { path: fileTarget.relativePath, target: fileTarget, displayPath: fileTarget.relativePath, base, head, originalContent: "old side", modifiedContent: "new side" } };
 		},
 	});
@@ -144,7 +144,7 @@ test("the OIDs carried by the compare answer (not the ref names) reach the per-f
 	await f.reads.runCompare(baseRef, headRef);
 	const answer = f.current().compare;
 	await f.reads.openHistoryFileDiff(answer.base.oid, answer.head.oid, target);
-	assert.deepEqual(plain(calls), [[projectId, oid("a"), oid("b"), target]]);
+	assert.deepEqual(plain(calls), [[projectId, oid("a"), oid("b"), target, ""]]);
 	assert.equal(f.current().diffKind, "revision");
 	assert.equal(f.current().diff.originalContent, "old side");
 	// The panel must pass the answer's OIDs; a ref name would make the per-file read resolve a moving ref again.

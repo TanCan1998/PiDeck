@@ -852,6 +852,7 @@ export function createPreviewApi(): PiDesktopApi {
 		git: {
 			cancelRemoteReads: async () => {},
 			remoteSnapshot: async () => ({ ok: false, code: "REMOTE_FEATURE_DISABLED" }),
+			remoteRepos: async () => ({ ok: false, code: "REMOTE_FEATURE_DISABLED" }),
 			createRemoteBranch: async () => ({ ok: false, code: "REMOTE_FEATURE_DISABLED" }),
 			switchRemoteBranch: async () => ({ ok: false, code: "REMOTE_FEATURE_DISABLED" }),
 			discardRemote: async () => ({ ok: false, code: "REMOTE_FEATURE_DISABLED" }),

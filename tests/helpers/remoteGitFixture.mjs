@@ -60,7 +60,9 @@ function fixture(t, initialize = true, helperEnv = {}, rootName = "project") {
 		child.kill();
 		rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	});
-	const request = (method, params = {}, timeoutMs = 3_000, onId = () => undefined) =>
+	// `repo` is the optional G5d read scope: absent/empty is the project root, so every existing caller keeps the
+	// exact frame it sent before.
+	const request = (method, params = {}, timeoutMs = 3_000, onId = () => undefined, repo = "") =>
 		new Promise((resolve, reject) => {
 			const id = `git-read-${++sequence}`;
 			const timer = setTimeout(() => {
@@ -69,7 +71,7 @@ function fixture(t, initialize = true, helperEnv = {}, rootName = "project") {
 			}, 5_000);
 			pending.set(id, { resolve, reject, timer });
 			onId(id);
-			child.stdin.write(`${JSON.stringify({ v: 1, hostId: HOST_ID, generation: 1, id, method, timeoutMs, params })}\n`);
+			child.stdin.write(`${JSON.stringify({ v: 1, hostId: HOST_ID, generation: 1, id, method, timeoutMs, params, ...(repo === "" ? {} : { repo }) })}\n`);
 		});
 	return { root, git, request, directory, child };
 }

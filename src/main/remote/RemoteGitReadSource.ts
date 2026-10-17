@@ -30,12 +30,22 @@
  *   absence of `.git`: any existing repository - including a parent repository that governs the root - is a
  *   GIT_REPO_EXISTS refusal with no disk change, and a repository the dispatch cannot fully confirm is reported
  *   as GIT_WRITE_RESULT_UNCONFIRMED instead of guessed at.
+ * - nested repository scope (G5d): an optional per-request `repo` path (project-relative POSIX, empty is the root)
+ *   is accepted only by the read batch. The scope is anchored by walking from the already anchored root fd with
+ *   lstat no-follow and opening each segment O_RDONLY|O_DIRECTORY|O_NOFOLLOW, so a link segment, a missing
+ *   directory or a non-directory is GIT_NOT_REPOSITORY before any Git child; the final fd becomes ctx.cwd and is
+ *   closed with the request. Writes, init and repos refuse a non-empty scope (GIT_RESULT_INVALID).
+ * - repository discovery (G5d): `git.repos` walks the project root with the same bounded, link-free rules the local
+ *   walker uses (depth 4, 50 repositories, 512 visited directories, fixed skip names plus hidden directories) and
+ *   answers project-relative POSIX paths; it runs before the .git existence checks because a project without a root
+ *   repository may still contain nested ones. `truncated` is set only when a cap really cut the walk.
  */
 export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,createGitCommitProgram,createGitBranchProgram,createGitDiscardProgram,createGitRecoveryProgram,createGitInitProgram}from"./git-write.mjs";import{createGitSyncProgram}from"./git-sync.mjs";export function createGitReadProgram(root, fs, path) {
 	const cp = process.getBuiltinModule("node:child_process");
 	const crypto = process.getBuiltinModule("node:crypto");
 	const MAX_STATUS = 1048576, MAX_RESOURCES = 4096, MAX_TEXT = 262144, MAX_STDERR = 65536;
 	const MAX_INDEX = 16777216, MAX_METADATA = 20000, MAX_DEPTH = 32, MAX_PATH = 4096;
+	const MAX_REPOS = 50, MAX_REPO_DEPTH = 4, MAX_REPO_VISITED = 512;
 	const scopes = new Set();
 	const stable = new Set(["PATH_OUTSIDE_ROOT", "PATH_NOT_FOUND", "NOT_A_FILE", "PERMISSION_DENIED", "IO_ERROR", "RESULT_TOO_LARGE", "REQUEST_TIMEOUT", "REQUEST_CANCELLED", "REMOTE_CONNECTION_LOST", "GIT_NOT_FOUND", "GIT_VERSION_UNSUPPORTED", "GIT_NOT_REPOSITORY", "GIT_REPO_EXISTS", "GIT_UNSUPPORTED_REPOSITORY", "GIT_PLATFORM_UNSUPPORTED", "GIT_CONFIG_UNSUPPORTED", "GIT_COMMAND_FAILED", "GIT_RESULT_INVALID", "GIT_RESOURCE_CHANGED", "GIT_NOT_TEXT", "GIT_INDEX_LOCKED", "GIT_WRITE_UNSUPPORTED", "GIT_WRITE_RESULT_UNCONFIRMED", "GIT_COMMIT_NOTHING_STAGED", "GIT_COMMIT_MESSAGE_EMPTY", "GIT_COMMIT_IDENTITY_REQUIRED", "GIT_COMMIT_HEAD_CHANGED", "GIT_OBJECT_NOT_FOUND", "GIT_REF_EXISTS", "GIT_REF_NOT_FOUND", "GIT_SWITCH_CONFLICT", "GIT_RESTORE_CONFLICT", "GIT_RECOVERY_ENTRY_NOT_FOUND", "GIT_SYNC_REMOTE_UNKNOWN", "GIT_SYNC_DIRTY", "GIT_PULL_STRATEGY_REQUIRED", "GIT_PULL_CONFLICTS", "GIT_PUSH_REJECTED", "GIT_PUSH_REMOTE_REFUSED", "GIT_SYNC_FAILED", "GIT_WRITE_RESULT_UNCONFIRMED"]);
 	const control = /[\x00-\x1f\x7f]/;
@@ -49,6 +59,77 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,cr
 	function relative(value) {
 		if (typeof value !== "string" || !value || Buffer.byteLength(value) > MAX_PATH || control.test(value) || value.startsWith("-") || value.includes("\\") || value.startsWith("/") || /^[A-Za-z]:/.test(value) || /%2e|%2f|%5c/i.test(value) || value.split("/").some(function (part) { return !part || part === "." || part === ".."; })) throw failure("PATH_OUTSIDE_ROOT");
 		return value;
+	}
+	/* Only these reads may name a repository other than the project root; every write, init and repos stays root-only. */
+	const READ_REPO = new Set(["git.status", "git.workspaceDiff", "git.log", "git.commitDetail", "git.refs", "git.refFileDiff", "git.compare", "git.recoveryList", "git.syncFacts"]);
+	/* The optional scope: absent or empty is the root; any other shape is refused before a walk, a link check or a Git child. */
+	function readRepo(value) {
+		if (value === undefined || value === "") return "";
+		if (typeof value !== "string" || Buffer.byteLength(value) > MAX_PATH || control.test(value) || value.charAt(0) === "-" || value.charAt(0) === "/" || value.indexOf("\\") >= 0 || /^[A-Za-z]:/.test(value) || /%2e|%2f|%5c/i.test(value) || value.split("/").some(function (part) { return !part || part === "." || part === ".." || /^\.git$/i.test(part) || part.endsWith(".lock"); })) throw failure("GIT_RESULT_INVALID");
+		return value;
+	}
+	/* The scope is anchored the way every other path is: walk from the already anchored root fd, refuse a link or a non-directory segment, keep the final directory as an fd for the rest of the request. */
+	function anchorRepository(ctx, repo) {
+		if (repo === "") return;
+		const parts = repo.split("/");
+		let current = ctx.cwd;
+		for (let index = 0; index < parts.length; index += 1) {
+			ctx.check();
+			const candidate = current + "/" + parts[index];
+			let stats;
+			try { stats = fs.lstatSync(candidate); } catch (error) { if (error.code === "ENOENT" || error.code === "ENOTDIR") throw failure("GIT_NOT_REPOSITORY"); if (error.code === "EACCES" || error.code === "EPERM") throw failure("PERMISSION_DENIED"); throw error; }
+			if (stats.isSymbolicLink() || !stats.isDirectory()) throw failure("GIT_NOT_REPOSITORY");
+			let fd;
+			try { fd = fs.openSync(candidate, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW); } catch (error) { if (error.code === "ELOOP" || error.code === "ENOENT" || error.code === "ENOTDIR") throw failure("GIT_NOT_REPOSITORY"); if (error.code === "EACCES" || error.code === "EPERM") throw failure("PERMISSION_DENIED"); throw error; }
+			if (ctx.repoFd !== null) { try { fs.closeSync(ctx.repoFd); } catch {} }
+			ctx.repoFd = fd;
+			current = "/proc/" + process.pid + "/fd/" + fd;
+		}
+		ctx.cwd = current;
+	}
+	/* Discovery mirrors the local walker: fixed skip names plus every hidden directory, no symlink is descended, .git is an entry-name claim in any form. */
+	const REPO_SKIP = new Set(["node_modules", ".git", "dist", "out", "build", ".next", "target", "vendor", "__pycache__", ".venv", "venv", "coverage"]);
+	function isRepoDirectory(directory, entry) {
+		if (entry.isDirectory()) return true;
+		if (entry.isFile() || entry.isSymbolicLink()) return false;
+		try { return fs.lstatSync(directory + "/" + entry.name).isDirectory(); } catch { return false; }
+	}
+	function repoName(relativeValue) {
+		if (relativeValue !== "") return relativeValue.slice(relativeValue.lastIndexOf("/") + 1);
+		return root.slice(root.lastIndexOf("/") + 1);
+	}
+	/* Bounded, side-effect-free discovery: no Git child, no write, and truncated is only set when a cap really cut the walk. */
+	async function repositories(ctx) {
+		const queue = [{ absolute: ctx.cwd, relative: "", depth: 0 }];
+		const repos = [];
+		let visited = 0, truncated = false;
+		for (let next = 0; next < queue.length; next += 1) {
+			ctx.check();
+			if (visited >= MAX_REPO_VISITED) { truncated = true; break; }
+			visited += 1;
+			if (visited % 64 === 0) { await new Promise(function (resolve) { setImmediate(resolve); }); ctx.check(); }
+			const directory = queue[next];
+			let handle;
+			try { handle = fs.opendirSync(directory.absolute); } catch (error) { if (["EACCES", "EPERM", "ENOENT", "ENOTDIR"].includes(error.code)) continue; throw error; }
+			const children = [];
+			let hasGit = false;
+			try {
+				let entry;
+				while ((entry = handle.readSync()) !== null) {
+					if (entry.name === ".git") hasGit = true;
+					else if (!REPO_SKIP.has(entry.name) && !entry.name.startsWith(".") && isRepoDirectory(directory.absolute, entry)) children.push(entry.name);
+				}
+			} finally { handle.closeSync(); }
+			if (hasGit) {
+				if (repos.length >= MAX_REPOS) truncated = true;
+				else repos.push({ path: directory.relative, name: repoName(directory.relative) });
+			}
+			if (directory.depth >= MAX_REPO_DEPTH) continue;
+			children.sort(function (left, right) { return left < right ? -1 : left > right ? 1 : 0; });
+			for (const child of children) queue.push({ absolute: directory.absolute + "/" + child, relative: directory.relative === "" ? child : directory.relative + "/" + child, depth: directory.depth + 1 });
+		}
+		repos.sort(function (left, right) { if (left.path === right.path) return 0; if (left.path === "") return -1; if (right.path === "") return 1; return left.path < right.path ? -1 : 1; });
+		return { repos: repos, truncated: truncated };
 	}
 	function metadata(stats) { return [stats.dev, stats.ino, stats.mode, stats.size, stats.mtimeNs, stats.ctimeNs].map(String).join(":"); }
 	function kill(child) {
@@ -177,7 +258,7 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,cr
 		for (let i = 0; i < fields.length; i += 1) {
 			const line = fields[i];
 			if (line.length < 4 || line[2] !== " " || !/^[ MADRCUT?!]{2}$/.test(line.slice(0, 2))) throw failure("GIT_RESULT_INVALID");
-			const xy = line.slice(0, 2), value = relative(line.slice(3));
+			const xy = line.slice(0, 2), value = relative(line.slice(3).replace(/\/$/, ""));
 			const oldPath = /[RC]/.test(xy) ? relative(fields[++i]) : null;
 			result.push({ xy: xy, path: value, oldPath: oldPath });
 			if (result.length > MAX_RESOURCES) throw failure("RESULT_TOO_LARGE");
@@ -407,7 +488,7 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,cr
 	const recovery = createGitRecoveryProgram(fs, { failure: failure, crypto: crypto, execute: execute, rawStatus: rawStatus, head: head, readFile: readFile, relative: relative, fingerprint: writer.fingerprint, reaped: writer.reaped }, writer.gates);
 	const sync = createGitSyncProgram(fs, { failure: failure, execute: execute, rawStatus: rawStatus, head: head, snapshot: snapshot, fingerprint: writer.fingerprint, reaped: writer.reaped }, writer.gates);
 	const inits = createGitInitProgram(fs, root, { failure: failure, execute: execute, head: head });
-	async function run(ctx, params) {
+	async function run(ctx, params, repo) {
 		ctx.check();
 		if (process.platform !== "linux") throw failure("GIT_PLATFORM_UNSUPPORTED");
 		if (root === null) throw failure("PATH_OUTSIDE_ROOT");
@@ -418,8 +499,12 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,cr
 		ctx.rootIdentity = [rootStats.dev, rootStats.ino].map(String).join(":");
 		const openedRoot = fs.fstatSync(ctx.fd, { bigint: true });
 		if ([openedRoot.dev, openedRoot.ino].map(String).join(":") !== ctx.rootIdentity) throw failure("GIT_RESOURCE_CHANGED");
+		/* Discovery runs before any repository exists: it only walks bounded directories and never executes Git. */
+		if (params.method === "git.repos") return repositories(ctx);
 		/* The one write that runs before a repository exists: it verifies its own preconditions instead of the .git checks below. */
 		if (params.method === "git.init") { ctx.executable = executable(); ctx.env = environment(); return inits.run(ctx); }
+		/* A non-empty scope is anchored from the root fd before the .git checks, so the whole read targets that repository. */
+		anchorRepository(ctx, repo);
 		let gitStats;
 		try { gitStats = fs.lstatSync(ctx.cwd + "/.git", { bigint: true }); } catch (error) { if (error.code === "ENOENT") throw failure("GIT_NOT_REPOSITORY"); throw error; }
 		if (!gitStats.isDirectory() || gitStats.isSymbolicLink()) throw failure("GIT_UNSUPPORTED_REPOSITORY");
@@ -453,12 +538,15 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,cr
 		ctx.check();
 		return result;
 	}
-	function prepare(method, params) {
+	function prepare(method, params, repo) {
 		if (root === null) throw failure("PATH_OUTSIDE_ROOT");
+		const repoPath = readRepo(repo);
+		/* Only the read batch may name a repository other than the project root; every write keeps its root-only contract. */
+		if (repoPath !== "" && !READ_REPO.has(method)) throw failure("GIT_RESULT_INVALID");
 		if (params === undefined) params = {};
 		if (params === null || typeof params !== "object" || Array.isArray(params)) throw failure("GIT_RESULT_INVALID");
 		const keys = Object.keys(params);
-		if (method === "git.init" || method === "git.status") { if (keys.length) throw failure("GIT_RESULT_INVALID"); return { method: method }; }
+		if (method === "git.init" || method === "git.status" || method === "git.repos") { if (keys.length) throw failure("GIT_RESULT_INVALID"); return { method: method }; }
 		if (method === "git.log") {
 			if (keys.some(function (key) { return key !== "maxCount" && key !== "skip"; })) throw failure("GIT_RESULT_INVALID");
 			const maxCount = params.maxCount === undefined ? LOG_DEFAULT : params.maxCount, skip = params.skip === undefined ? 0 : params.skip;
@@ -512,14 +600,14 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,cr
 		if (keys.length !== 2 || !keys.includes("path") || !keys.includes("group") || !["merge", "index", "workingTree", "untracked"].includes(params.group)) throw failure("GIT_RESULT_INVALID");
 		return { method: method, path: relative(params.path), group: params.group };
 	}
-	function start(params, deadline, done) {
-		const ctx = { children: new Set(), rejectors: new Set(), fd: null, stopped: null };
+	function start(params, deadline, done, repo) {
+		const ctx = { children: new Set(), rejectors: new Set(), fd: null, repoFd: null, stopped: null };
 		ctx.check = function () { if (ctx.stopped !== null) throw failure(ctx.stopped); if (Date.now() >= deadline) throw failure("REQUEST_TIMEOUT"); };
 		ctx.abort = function (reason) { if (ctx.stopped !== null) return; ctx.stopped = reason; for (const reject of Array.from(ctx.rejectors)) reject(reason); for (const child of ctx.children) kill(child); };
 		scopes.add(ctx);
 		const timer = setTimeout(function () { ctx.abort("REQUEST_TIMEOUT"); }, Math.max(1, deadline - Date.now()));
-		Promise.resolve().then(function () { return run(ctx, params); }).then(function (result) { done(null, result); }, function (error) { done(code(error)); }).finally(function () {
-			clearTimeout(timer); for (const child of ctx.children) kill(child); if (ctx.fd !== null) { try { fs.closeSync(ctx.fd); } catch {} } scopes.delete(ctx);
+		Promise.resolve().then(function () { return run(ctx, params, repo); }).then(function (result) { done(null, result); }, function (error) { done(code(error)); }).finally(function () {
+			clearTimeout(timer); for (const child of ctx.children) kill(child); if (ctx.repoFd !== null) { try { fs.closeSync(ctx.repoFd); } catch {} } if (ctx.fd !== null) { try { fs.closeSync(ctx.fd); } catch {} } scopes.delete(ctx);
 		}).catch(function () { /* A transport shutdown cannot receive another terminal outcome. */ });
 		return function () { ctx.abort("REQUEST_CANCELLED"); };
 	}

@@ -3,16 +3,20 @@ import type { RemoteProject } from "../../../shared/types/project";
 import { desktopApi } from "../desktopApi";
 import { createRemoteGitViewController, type RemoteGitViewState } from "../utils/remoteGitViewState";
 
-/** The read-only panel owns this state; neither currentSession atoms nor native Git polling are subscribed. */
-export function useRemoteGitView(project: RemoteProject) {
-	const projectKey = JSON.stringify([project.id, project.locator.hostId, project.locator.remotePath]);
+/**
+ * The read-only panel owns this state; neither currentSession atoms nor native Git polling are subscribed. `repoPath`
+ * is the selected repository scope ("" is the project root): it is part of the identity key, so switching scope
+ * disposes the old controller and resets the view instead of mixing two repositories' facts in one panel.
+ */
+export function useRemoteGitView(project: RemoteProject, repoPath = "") {
+	const projectKey = JSON.stringify([project.id, project.locator.hostId, project.locator.remotePath, repoPath]);
 	const [state, setState] = useState<RemoteGitViewState>({ projectKey, loading: true, diffLoading: false });
 	// Polling is bounded by the host's observed state, not by guessing from a failed read: the optimistic initial
 	// value only covers the window before the first host event (the panel's own first read reports any failure).
 	const [hostReady, setHostReady] = useState(true);
 	const controller = useRef<ReturnType<typeof createRemoteGitViewController> | null>(null);
 	useEffect(() => {
-		const reads = createRemoteGitViewController(project.id, projectKey, desktopApi.git, setState);
+		const reads = createRemoteGitViewController(project.id, projectKey, desktopApi.git, setState, repoPath);
 		controller.current = reads;
 		// The sync facts belong to the project identity, not to a snapshot generation: they are read once after the
 		// first repository read, and afterwards only when the user acts (refresh or a sync verb). No effect watches
@@ -30,7 +34,7 @@ export function useRemoteGitView(project: RemoteProject) {
 			reads.dispose();
 			if (controller.current === reads) controller.current = null;
 		};
-	}, [project.id, project.locator.hostId, projectKey]);
+	}, [project.id, project.locator.hostId, projectKey, repoPath]);
 	const loadHistory = useCallback(() => {
 		void controller.current?.loadHistory();
 	}, []);
@@ -77,9 +81,7 @@ export function useRemoteGitView(project: RemoteProject) {
 	const createBranch = useCallback((name: string) => {
 		void controller.current?.createBranch(name);
 	}, []);
-	const initRepository = useCallback(() => {
-		void controller.current?.initRepository();
-	}, []);
+	const initRepository = useCallback((): Promise<boolean> => controller.current?.initRepository() ?? Promise.resolve(false), []);
 	const switchBranch = useCallback((name: string) => {
 		void controller.current?.switchBranch(name);
 	}, []);

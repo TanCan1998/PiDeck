@@ -88,7 +88,7 @@ export type RemoteProjectSession = {
 	runCommand(remoteCommand: string): Promise<{ exitCode: number; stdout: string }>;
 	/** Build and consume an interactive invocation under the host lock; no escaped stale spawn plan. */
 	withTerminalInvocation<T>(remoteCommand: string, launch: (invocation: PinnedSshInvocation, assertCurrent: () => Promise<void>) => T): Promise<T>;
-	request(method: string, params?: unknown, options?: { timeoutMs?: number; onRequestId?: (requestId: string) => void }): Promise<unknown>;
+	request(method: string, params?: unknown, options?: { timeoutMs?: number; onRequestId?: (requestId: string) => void; repo?: string }): Promise<unknown>;
 	cancel(requestId: string, options?: { timeoutMs?: number }): Promise<unknown>;
 };
 
@@ -717,7 +717,7 @@ export function createRemoteHostConnectionService(options: RemoteHostConnectionS
 		 * contract; the service owns the session) and it is what main-only callers use for one-off pinned
 		 * commands. The manager already refuses anything but a ready host with a live protocol client.
 		 */
-		request(hostId: string, method: string, params?: unknown, options?: { timeoutMs?: number; onRequestId?: (requestId: string) => void }): Promise<unknown> {
+		request(hostId: string, method: string, params?: unknown, options?: { timeoutMs?: number; onRequestId?: (requestId: string) => void; repo?: string }): Promise<unknown> {
 			const manager = hosts.get(hostId)?.manager;
 			if (manager === undefined) return Promise.reject(new Error("SSH_HOST_NOT_READY"));
 			return manager.request(hostId, method, params, options);

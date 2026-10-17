@@ -459,6 +459,8 @@ export const ipcChannels = {
 	gitStatus: "git:status",
 	/** SSH root repository facts plus SCM groups; writes/history/sync remain capability-blocked. */
 	gitRemoteSnapshot: "git:remote-snapshot",
+	/** G5d: bounded repository discovery under the project root (no token, read only). */
+	gitRemoteRepos: "git:remote-repos",
 	gitRemoteMutateIndex: "git:remote-mutate-index",
 	gitRemoteCommit: "git:remote-commit",
 	gitRemoteLog: "git:remote-log",
