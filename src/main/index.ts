@@ -430,6 +430,7 @@ import { PiAiCatalogUpdater } from "./pi/PiAiCatalogUpdater";
 import { fetchModelList, refreshModelCatalogIfStale, refreshModelList, getCachedModelList } from "./pi/modelListCache";
 import { registerFilesIpc } from "./ipc/filesIpc";
 import { FileIndexService } from "./files/FileIndexService";
+import { SessionStoreService } from "./sessions/SessionStoreService";
 import { registerClipboardIpc } from "./ipc/clipboardIpc";
 import { registerShellMenuIpc } from "./ipc/shellMenuIpc";
 import { QuickTaskWindowChrome } from "./quickTask/quickTaskWindowChrome";
@@ -562,6 +563,11 @@ let xueIndexService: XueIndexService | null = null;
 let sessionIndexService: SessionIndexService | null = null;
 /** 工作区文件索引 sidecar（Go file-index）：名字模糊检索 + 有界内容检索，缺失时回退 BFS。 */
 let fileIndexService: FileIndexService | null = null;
+/**
+ * 会话数据面 sidecar（Go session-store，Wave 1 骨架）：快照 + 行边界增量扫描。
+ * 暂无消费者（Wave 2 的窗口化读取会接进来），装配只做二进制定位与退出清理登记。
+ */
+let sessionStoreService: SessionStoreService | null = null;
 /** 提示词库 db 远程拉取/缓存服务；null = 未装配。 */
 let xuePromptDbStore: XuePromptDbStore | null = null;
 let skillManager: SkillManager;
@@ -4247,6 +4253,33 @@ app
 			fileIndexService?.dispose();
 			fileIndexService = null;
 		});
+		// 会话数据面 sidecar（Go session-store）：快照持久化 + 行边界增量扫描，Wave 2 起提供行级
+		// 条目表（get-index）。收益门禁未过（见计划 §8.10），默认不预热、由开关控制。
+		sessionStoreService = new SessionStoreService({
+			statePath: join(app.getPath("userData"), "session-store", "state.bin"),
+			resolveBinaryPath: () => {
+				// dev：仓库构建产物 resources/session-store/bin/（build 链自动 fail-open 构建）；
+				// 打包后需补 extraResources 才会命中 resourcesPath 分支（Wave 2 接线时加）。
+				const dir = app.isPackaged ? join(process.resourcesPath, "session-store") : join(app.getAppPath(), "resources", "session-store", "bin");
+				const name = process.platform === "win32" ? "session-store.exe" : "session-store";
+				const path = join(dir, name);
+				return existsSync(path) ? path : null;
+			},
+			logger: {
+				debug: (m) => appLogger.debug("session-store", m),
+				info: (m) => void appLogger.info("session-store", m),
+				warn: (m) => void appLogger.warn("session-store", m),
+				error: (m) => void appLogger.error("session-store", m),
+			},
+		});
+		quitCleanup.register("session-store", () => {
+			sessionStoreService?.dispose();
+			sessionStoreService = null;
+		});
+		// Wave 2 读取路径默认关（收益门禁未过，见 docs/session-data-plane-plan.md §8.10）。
+		// 开关打开时才预热：读者侧只在 sidecar 已就绪时问，不预热的话这条路径永远不会生效；
+		// 预热本身只拉进程 + 载入快照（毫秒级），真正的条目解析由 get-index 触发。
+		if (settingsStore.get().sessionStoreEnabled) sessionStoreService.warmup();
 		// 后台预热：首次全量建索引可达十余秒，启动后稍等即预热，避免用户首搜撞上
 		// 冷启动（预热失败静默——运行时搜索会再试）
 		setTimeout(() => {
@@ -4492,6 +4525,18 @@ app
 		);
 		// C12：退出清理登记（before-quit 统一 runAll，新增资源不再改 before-quit）
 		quitCleanup.register("pi-agents", () => agentManager?.stopAll());
+
+		// Wave 2：把 session-store 条目表接进会话历史读取（TS 缓存未命中时优先问 Go）。
+		// 收益门禁未过（sidecar 冷解析比 TS 冷建表慢 2–3×，见 docs/session-data-plane-plan.md §8.10），
+		// 因此由 settings.sessionStoreEnabled 闸住、默认关：关着时这条路径完全不参与，读者走 TS 逐行解析。
+		// 开启后也只在 sidecar **已就绪**时问：未就绪宁可走 TS 解析，也不让「打开会话」卡在冷扫上。
+		agentManager.setSessionStoreIndexReader(async (hostPath) => {
+			if (!settingsStore.get().sessionStoreEnabled) return null;
+			const service = sessionStoreService;
+			if (!service || !service.isReady()) return null;
+			const result = await service.getIndex(hostPath);
+			return result.ok ? result.value : null;
+		});
 
 		// 悬浮球控制器：主窗口隐藏后常驻屏幕角落的小圆点，点击展开 mini 浮窗/紧凑模式。
 		// 延迟到 agentManager 就绪后创建，因为依赖 addStateListener 订阅运行状态。

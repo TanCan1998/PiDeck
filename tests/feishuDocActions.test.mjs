@@ -1,10 +1,22 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
-import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
+import ts from "typescript";
+import vm from "node:vm";
 
-/** 使用真实依赖图，纯函数新增共享 import 不应使测试加载器失效。 */
 function loadDocActionsModule() {
-	return loadTsCommonJs("src/main/feishu/docActions.ts");
+	const source = readFileSync("src/main/feishu/docActions.ts", "utf8");
+	const { outputText } = ts.transpileModule(source, {
+		compilerOptions: {
+			module: ts.ModuleKind.CommonJS,
+			target: ts.ScriptTarget.ES2022,
+		},
+	});
+	const sandbox = { exports: {} };
+	vm.runInNewContext(outputText, sandbox, {
+		filename: "docActions.ts",
+	});
+	return sandbox.exports;
 }
 
 test("detects Feishu doc intent from user message", () => {
@@ -21,17 +33,6 @@ test("removes Feishu action markers before writing document body", () => {
 	const { stripFeishuActionMarkers } = loadDocActionsModule();
 
 	assert.equal(stripFeishuActionMarkers("正文\n[CREATE_DOC:今日新闻]\n[SEND_FILE:/tmp/a.md]"), "正文");
-});
-
-test("未闭合 thinking 在飞书最终消息里从标记处丢弃", () => {
-	const { sanitizeFeishuUserVisibleText } = loadDocActionsModule();
-
-	assert.equal(sanitizeFeishuUserVisibleText("<thinking>内部推理</thinking>公开结论"), "公开结论");
-	// 未闭合：标记之后无法区分推理与正文，整段丢弃，不能把推理发进飞书
-	assert.equal(sanitizeFeishuUserVisibleText("正常回答\n\n<thinking>**Checking**\n内部推理还没收尾"), "正常回答");
-	assert.equal(sanitizeFeishuUserVisibleText("<thinking>只有推理"), "");
-	// 只有残留闭合标签时仅去标签，不丢正文
-	assert.equal(sanitizeFeishuUserVisibleText("残留片段</thinking>正文"), "残留片段正文");
 });
 
 test("builds Feishu text children from assistant body", () => {

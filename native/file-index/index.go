@@ -63,7 +63,11 @@ type fileEntry struct {
 	// FoldedName 在索引期算好：名字命中是绝大多数查询的终点点，
 	// 每次查询对 40 万条现场折叠会白白分配几十 MB。
 	FoldedName string
-	IsDir      bool
+	// PinyinInitials/PinyinFull 同样在索引期算好（仅含汉字的条目非空）：
+	// 首字母串按「每字一组候选首字母、NUL 分隔」（重 → "zct"），全拼取默认读音。
+	PinyinInitials string
+	PinyinFull     string
+	IsDir          bool
 }
 
 type indexStats struct {
@@ -216,12 +220,15 @@ func (ix *Indexer) walkRoot(root string, out *[]fileEntry, truncated *bool) {
 			if relErr != nil {
 				continue
 			}
+			initials, full := pinyinKeys(name)
 			*out = append(*out, fileEntry{
-				AbsPath:    absPath,
-				RelPath:    filepath.ToSlash(relPath),
-				Name:       name,
-				FoldedName: foldASCII(name),
-				IsDir:      isDir,
+				AbsPath:        absPath,
+				RelPath:        filepath.ToSlash(relPath),
+				Name:           name,
+				FoldedName:     foldASCII(name),
+				PinyinInitials: initials,
+				PinyinFull:     full,
+				IsDir:          isDir,
 			})
 			if isDir && current.depth < maxIndexDepth {
 				stack = append(stack, frame{dir: absPath, depth: current.depth + 1})
@@ -253,14 +260,18 @@ func dedupeEntries(entries []fileEntry) []fileEntry {
 	return out
 }
 
-// SearchNames 模糊名字检索：名字精确 > 名字包含 > 名字子序列 > 路径包含 > 路径子序列。
+// SearchNames 模糊名字检索：名字精确 > 名字包含 > 拼音（首字母/全拼）>
+// 名字子序列 > 路径包含 > 路径子序列。
 // 这与旧 BFS 的「名字包含」是超集（原来漏掉的路径段命中现在能搜到），
-// 同时保留大小写不敏感语义（ASCII 折叠，与 session-index 同口径）。
+// 同时保留大小写不敏感语义（ASCII 折叠，与 session-index 同口径）。中文名字
+// 额外支持拼音与首字母（"ylcx" → 用量查询.md），详见 pinyin.go 的语义说明。
 func (ix *Indexer) SearchNames(query string, limit int) nameResult {
 	needle := foldASCII(strings.TrimSpace(query))
 	if needle == "" {
 		return nameResult{}
 	}
+	// 拼音通道只对纯字母查询启用：含中文/点/下划线的查询交给名字与路径匹配。
+	pinyinQuery := isPinyinQuery(needle)
 	ix.mu.RLock()
 	entries := ix.entries
 	ix.mu.RUnlock()
@@ -268,6 +279,13 @@ func (ix *Indexer) SearchNames(query string, limit int) nameResult {
 	hits := make([]nameHit, 0, 64)
 	for _, entry := range entries {
 		score, ok := fuzzyScore(entry.FoldedName, entry.RelPath, needle, entry.IsDir)
+		if pinyinQuery && entry.PinyinInitials != "" {
+			// 与名字/路径命中取高者：路径命中（≤400）会被拼音名字命中（≥560）抬上来，
+			// 真名字命中（≥600）仍然优先。
+			if pinyinScore, hit := pinyinNameScore(entry.PinyinInitials, entry.PinyinFull, needle); hit && (!ok || pinyinScore > score) {
+				score, ok = pinyinScore, true
+			}
+		}
 		if !ok {
 			continue
 		}

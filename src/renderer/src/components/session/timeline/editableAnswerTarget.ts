@@ -1,13 +1,12 @@
-import { cleanAnswerText } from "./answerText.ts";
+import { stripAnsi, stripThinkingTags } from "../TimelineFormat";
 import type { MessageItem } from "./types";
 
 /**
  * assistant 消息的可见正文：投影层会把 thinking 块内联成 <thinking> 标签混进 text，
- * 编辑场景只关心用户可见文字；清理器已去展示空白，不能再 trim 丢掉首行代码缩进，
- * 否则原样保存后的代码标签会被当成思考块，导致后续正文消失。
+ * 编辑场景只关心用户可见文字，先剥掉再收两端空白。
  */
 export function visibleAssistantText(text: string): string {
-	return cleanAnswerText(text);
+	return stripThinkingTags(stripAnsi(text)).trim();
 }
 
 /**

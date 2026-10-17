@@ -79,6 +79,13 @@ export interface SessionAgentGateway {
 	draftCommands?(projectId: string): Promise<PiCommand[] | null>;
 	restart(agentId: string): Promise<AgentTab>;
 	stop(agentId: string): Promise<void>;
+	/**
+	 * 可选能力：停止并等待进程退出（返回是否在超时内退出）。
+	 *
+	 * 删除会话必须先等 pi 释放会话文件句柄，否则 Windows 上 shell.trashItem 只会报通用的
+	 * 「Failed to perform delete operation」（issue #364）；未实现该能力的老网关退回只发 stop。
+	 */
+	stopAndWaitForExit?(agentId: string, timeoutMs?: number): Promise<boolean>;
 	rename(agentId: string, name: string): Promise<AgentTab>;
 	abort(agentId: string): Promise<void>;
 	compact(agentId: string, prompt?: string): Promise<AgentRuntimeState>;
@@ -225,6 +232,8 @@ class SessionRuntimeCommandError extends Error {
 const DELIVERY_CACHE_TTL_MS = 10 * 60_000;
 const DELIVERY_CACHE_MAX_ENTRIES = 500;
 const AGENT_READY_TIMEOUT_MS = 60_000;
+/** 删除前等 agent 进程退出的上限：超时也放行删除，由扫描层重试与结构化错误兜底。 */
+const DELETE_STOP_TIMEOUT_MS = 3000;
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -490,8 +499,8 @@ export class SessionRuntimeCoordinator {
 	}
 
 	/**
-	 * 删除前强制释放运行时：先解绑让侧栏立刻可删，agent 停在后台。
-	 * 运行中会话也允许删——用户不必先点停止。stop 失败也不挡 catalog 删除。
+	 * 删除前强制释放运行时：先解绑让侧栏立刻可删，再停进程并等它真的退出。
+	 * 运行中会话也允许删——用户不必先点停止。停进程失败/超时也不挡 catalog 删除。
 	 */
 	async releaseRuntimeForDelete(sessionId: string): Promise<void> {
 		const requestedSessionId = this.canonicalSessionId(sessionId);
@@ -514,11 +523,34 @@ export class SessionRuntimeCoordinator {
 			return;
 		}
 		this.unbindAgentUnchecked(target.agentId);
-		// 先解绑再停：删除 IPC 不必等 pi/DSH 进程退出。stop 完成前禁止重新 activate/bind。
-		void this.agents
-			.stop(target.agentId)
-			.catch(() => undefined)
-			.finally(() => this.deletingSessions.delete(requestedSessionId));
+		// 先解绑（侧栏立刻可删），但停进程必须等到真的退出：pi 还握着会话文件句柄时，
+		// 后续 shell.trashItem 会失败（issue #364）。等待有上限，超时放行。
+		try {
+			await this.stopForDelete(target.agentId);
+		} finally {
+			this.deletingSessions.delete(requestedSessionId);
+		}
+	}
+
+	/**
+	 * 删除路径的停进程收尾：有等待能力的网关必须等进程真正退出再返回。
+	 * 老网关（或 DSH 这类无进程池实现）退回只发 stop，超时也不挡删除。
+	 */
+	private async stopForDelete(agentId: string): Promise<void> {
+		const stopAndWait = this.agents.stopAndWaitForExit;
+		if (typeof stopAndWait !== "function") {
+			await this.agents.stop(agentId).catch(() => undefined);
+			return;
+		}
+		let exited = false;
+		try {
+			exited = await stopAndWait.call(this.agents, agentId, DELETE_STOP_TIMEOUT_MS);
+		} catch {
+			exited = false;
+		}
+		if (!exited) {
+			void this.logger?.warn("session-runtime", "Agent exit timed out before session delete", { agentId, timeoutMs: DELETE_STOP_TIMEOUT_MS });
+		}
 	}
 
 	getRuntimeMessages(sessionId: string): SessionTargetedValue<ChatMessage[]> | undefined {

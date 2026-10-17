@@ -454,6 +454,14 @@ export type AppSettings = {
 	 *  修改后只影响下一次预热/认领（进程 spawn 参数无法热更，指纹不匹配自动回退正常创建）。 */
 	standbyRuntimeEnabled?: boolean;
 
+	// ── session-store sidecar 的实验开关（默认 false）──
+	/** 是否让会话历史读取优先问 Go sidecar 的条目表（Wave 2）。
+	 *  实测（2026-10，4 个 19–31MiB 真实会话）：sidecar 冷解析 251–343ms，比 TS 冷建表（99–188ms）
+	 *  慢 2–3×，命中只在 sidecar 进程内的表缓存（app 重启即失效，快照只存文件级记账）。
+	 *  为通过收益门禁，默认关；开启后重复打开同一大会话仍由 TS 的内存 LRU 先受益。
+	 *  详见 docs/session-data-plane-plan.md §8.10。 */
+	sessionStoreEnabled?: boolean;
+
 	// ── CUA（Computer Use Agent）：让 Agent 观察屏幕并注入鼠标/键盘输入 ──
 	/**
 	 * 是否启用 CUA 能力，默认 false。
@@ -1065,6 +1073,9 @@ export function createDefaultAppSettings(): AppSettings {
 		idleAgentKeepCount: 5,
 		idleAgentTimeoutMin: 60,
 		standbyRuntimeEnabled: true,
+		// session-store 实验路径由 main 侧默认关闭（见 docs/session-data-plane-plan.md §8.10）：
+		// 渲染层不展示这个开关，但默认值必须与 main SettingsStore 一致，避免状态栏/设置页读到 undefined。
+		sessionStoreEnabled: false,
 		cuaEnabled: false,
 		cuaAutoApprove: true,
 		favoriteModels: [],

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "version": "1.0.1",
-  "bundleSha256": "24ea0f4cfcf35cc521a391eaaffbb910f69b7266b630882ca3e8f9612700d2be",
+  "bundleSha256": "c0d6c1734e56e3a7425e2c3f342a0cc881ae4015d65de168d292764a4f409763",
   "fileCount": 26,
   "files": [
     {
@@ -16,8 +16,8 @@
     },
     {
       "name": "pi-deck-goal-mode.ts",
-      "sha256": "9150096ae8fea01d026040ae839585dffae245ecb555d1a706275b78ae2389cc",
-      "bytes": 11623
+      "sha256": "70add6da406c7d0e682a7eed63cdd771b854a6c721b57c7d3ad5c17576538a52",
+      "bytes": 12572
     },
     {
       "name": "pi-deck-gui-bridge-gui-spec.ts",
@@ -81,8 +81,8 @@
     },
     {
       "name": "pi-deck-plan-mode.ts",
-      "sha256": "a0340c9e98b14f7deff9c0a7becd4f3ae4721833fdc98e5e9d56a53a08ba7375",
-      "bytes": 18788
+      "sha256": "ee840a6c63c22f803e6347611772b2caa8f3d4518a9a8d466a3bd7dd2f869026",
+      "bytes": 19897
     },
     {
       "name": "pi-deck-request-size-recovery.ts",
@@ -96,8 +96,8 @@
     },
     {
       "name": "pi-deck-security-gate.ts",
-      "sha256": "be21617750228608e60e7da818a25469a3c71838fa2b86fa9b1fb5177e1e6dc4",
-      "bytes": 13649
+      "sha256": "493b2402ec6bc00475d0407502ef54bfdece63516b1597c2d43918705ac1637b",
+      "bytes": 14938
     },
     {
       "name": "pi-deck-session-title.ts",
@@ -126,8 +126,8 @@
     },
     {
       "name": "pi-deck-trash-guard.ts",
-      "sha256": "db1753e697824cd0de37bf48c5eba56f7d822089c060398561f6cbf108a5b600",
-      "bytes": 19539
+      "sha256": "b2e2d82a1b0d0cc061a71a475506ca624ff9cf01d0194ae0ee0bafc4c2514b23",
+      "bytes": 20228
     },
     {
       "name": "pi-deck-vision.ts",

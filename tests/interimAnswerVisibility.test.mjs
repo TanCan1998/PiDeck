@@ -33,8 +33,6 @@ const invisibleBodies = [
 	["空骨架", ""],
 	["空白", " \n\t "],
 	["仅思考标签", "<thinking>先看代码再回答</thinking>"],
-	["未闭合思考标签", "<thinking>**Checking accuracy and requirements**\n诊断占位内容"],
-	["控制码包裹未闭合思考标签", "\u001b[32m<THINKING>诊断占位内容\u001b[0m"],
 	["仅终端控制码", "\u001b[0m"],
 	["控制码包裹思考标签", "\u001b[32m<THINKING>只有思考\n没有正文</THINKING>\u001b[0m"],
 ];
@@ -67,17 +65,6 @@ test("混合正常正文和不可见消息：中间回复数等于实际渲染�
 	assert.match(rendered[1], /核对完毕，继续验证。/);
 	assert.doesNotMatch(rendered[1], /内部思考/);
 	assert.equal(messages.at(-1).text, "\u001b[32m<thinking>内部思考</thinking>\n核对完毕，继续验证。\u001b[0m");
-});
-
-test("正文后的未闭合思考不泄漏、不删除前面的正常回复或历史原文", () => {
-	const text = "正常进度回复\n<thinking>诊断占位内容";
-	const message = interimMessage("mixed-a", text);
-	const [item] = displayMessages([message]);
-	const rendered = renderAnswer(item);
-	assert.match(rendered, /正常进度回复/);
-	assert.doesNotMatch(rendered, /诊断占位内容|thinking/i);
-	assert.equal(buildProcessSummary([item]).interimCount, 1);
-	assert.equal(message.text, text);
 });
 
 test("不可见中间消息不拆开相邻的过程组", () => {

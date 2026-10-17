@@ -125,6 +125,9 @@ resources/session-index/bin/*
 # Go file-index sidecar 二进制（npm run build:file-index 产物，同上）
 resources/file-index/bin/*
 !resources/file-index/bin/.gitkeep
+# Go session-store sidecar 二进制（npm run build:session-store 产物，同上）
+resources/session-store/bin/*
+!resources/session-store/bin/.gitkeep
 *.log
 # 官网「宿主插件开发指南」页：由 .vitepress/sharedGuideDocs.ts 从 docs/host-plugin-dev-guide.md 生成（构建产物，勿手改）
 docs-site/guide/host-plugins.md

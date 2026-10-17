@@ -62,13 +62,15 @@ test("Web wiring is Session-first and exposes no Agent compatibility creation", 
 	assert.doesNotMatch(main, /LEGACY_EXTERNAL_RUNTIME|ipcChannels\.agentsCreate/);
 });
 
-test("catalog deletion unbinds first then stops the agent in the background", () => {
+test("catalog deletion unbinds first then waits for the agent exit before touching files", () => {
 	assert.match(sessionIpc, /sessionsCatalogDelete[\s\S]*releaseRuntimeForDelete\(sessionId\)/);
 	assert.match(sessionIpc, /sessionsCatalogDelete[\s\S]*rememberDismissedDshSession\(/);
 	assert.match(main, /deleteSessionRecord: async \(sessionId\)[\s\S]*releaseRuntimeForDelete\(sessionId\)/);
 	assert.match(main, /deleteSessionRecord: async \(sessionId\)[\s\S]*rememberDismissedDshSession\(/);
 	assert.match(coordinator, /async releaseRuntimeForDelete\(sessionId: string\)/);
-	assert.match(coordinator, /void this\.agents\s*\.?\s*stop\(target\.agentId\)/);
+	// 先解绑（侧栏立刻可删），但停进程必须等它真的退出：pi 还握着会话文件句柄时删文件会失败（#364）。
+	assert.match(coordinator, /unbindAgentUnchecked\(target\.agentId\)[\s\S]*await this\.stopForDelete\(target\.agentId\)/);
+	assert.match(coordinator, /stopAndWait\.call\(this\.agents, agentId, DELETE_STOP_TIMEOUT_MS\)/);
 	assert.match(coordinator, /isActivating\(sessionId: string\): boolean/);
 });
 
