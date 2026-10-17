@@ -2890,7 +2890,10 @@ export class AgentManager {
 		};
 	}
 
-	/** 同步某 agent 的子任务（如 subagent）记录到性能追踪器中（消解并发区间重叠） */
+	/**
+	 * 同步某 agent 的子任务（如 subagent）记录到性能追踪器中（消解并发区间重叠）。
+	 * options.emit=false：只刷新快照不推事件，供只读列举路径使用（读接口不该产生状态推送）。
+	 */
 	syncSubagentPerfSpans(
 		agentId: string,
 		records: ReadonlyArray<{
@@ -2901,6 +2904,7 @@ export class AgentManager {
 			streamingTokens?: number;
 			streamingStartedAt?: number;
 		}>,
+		options?: { emit?: boolean },
 	): void {
 		const tasks = records
 			.filter((r): r is typeof r & { startedAt: number } => typeof r.startedAt === "number")
@@ -2910,7 +2914,8 @@ export class AgentManager {
 				completedAt: r.completedAt,
 				tokens: r.tokens,
 			}));
-		this.messagePerf.syncSubagentTasks(agentId, tasks, (channel, payload) => this.emit(channel, payload));
+		const emit = options?.emit === false ? undefined : (channel: string, payload: unknown) => this.emit(channel, payload);
+		this.messagePerf.syncSubagentTasks(agentId, tasks, emit);
 	}
 
 	private applyActiveToolCallState(agentId: string, state: ActiveToolCallState) {

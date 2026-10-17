@@ -1034,8 +1034,10 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			if (child?.filePath) record.childSessionPath = child.filePath;
 			if (child) record.childSessionId = child.id;
 		}
+		// 列举子代理时顺带刷新会话级性能区间（按 id 幂等覆盖，重复列举不会膨胀）；
+		// 读接口不推状态事件，避免把「看子代理列表」变成高频 runtime 推送。
 		if (liveTarget?.agentId) {
-			agentManager.syncSubagentPerfSpans(liveTarget.agentId, records);
+			agentManager.syncSubagentPerfSpans(liveTarget.agentId, records, { emit: false });
 		}
 		return records;
 	});

@@ -140,46 +140,40 @@ export class MessagePerfTracker {
 	}
 
 	/**
-	 * 记录派生任务（如 subagent 派生执行）的用量与耗时区间，消除重叠并纳入会话级平均 TPS 计算。
+	 * 写入/覆盖一条性能区间，只改区间表，不重算也不推送：
+	 * 单条记录与批量同步共用，保证批量同步在整批写入后只重算一次会话级指标。
+	 * 返回是否写入（非法区间直接忽略，批次据此判断要不要重算）。
 	 */
-	recordSubagentTask(agentId: string, task: { id?: string; startedAt: number; completedAt: number; tokens: number; firstDeltaAt?: number }, emit?: (channel: string, payload: unknown) => void): void {
-		if (!task || task.tokens < 0 || task.completedAt <= task.startedAt) return;
+	private upsertSpan(agentId: string, task: { id?: string; startedAt: number; completedAt: number; tokens: number; firstDeltaAt?: number }): boolean {
+		if (!task || !Number.isFinite(task.startedAt) || !Number.isFinite(task.completedAt) || !Number.isFinite(task.tokens)) return false;
+		if (task.tokens < 0 || task.completedAt <= task.startedAt) return false;
 		let spans = this.spansByAgent.get(agentId);
 		if (!spans) {
 			spans = [];
 			this.spansByAgent.set(agentId, spans);
 		}
-		if (task.id) {
-			const existingIndex = spans.findIndex((s) => s.id === task.id);
-			if (existingIndex >= 0) {
-				spans[existingIndex] = {
-					id: task.id,
-					startedAt: task.startedAt,
-					firstDeltaAt: task.firstDeltaAt && task.firstDeltaAt > 0 ? task.firstDeltaAt : undefined,
-					completedAt: task.completedAt,
-					outputTokens: task.tokens,
-				};
-			} else {
-				spans.push({
-					id: task.id,
-					startedAt: task.startedAt,
-					firstDeltaAt: task.firstDeltaAt && task.firstDeltaAt > 0 ? task.firstDeltaAt : undefined,
-					completedAt: task.completedAt,
-					outputTokens: task.tokens,
-				});
-			}
-		} else {
-			spans.push({
-				startedAt: task.startedAt,
-				firstDeltaAt: task.firstDeltaAt && task.firstDeltaAt > 0 ? task.firstDeltaAt : undefined,
-				completedAt: task.completedAt,
-				outputTokens: task.tokens,
-			});
-		}
+		const span: TaskPerfSpan = {
+			...(task.id ? { id: task.id } : {}),
+			startedAt: task.startedAt,
+			firstDeltaAt: task.firstDeltaAt && task.firstDeltaAt > 0 ? task.firstDeltaAt : undefined,
+			completedAt: task.completedAt,
+			outputTokens: task.tokens,
+		};
+		// 有 id 的记录原地覆盖：列举子代理会反复回放同一批记录，追加会让 token 与耗时重复膨胀。
+		const existingIndex = task.id ? spans.findIndex((s) => s.id === task.id) : -1;
+		if (existingIndex >= 0) spans[existingIndex] = span;
+		else spans.push(span);
+		return true;
+	}
 
-		const sessionPerf = calculateSessionTokensPerSecond(spans);
+	/**
+	 * 用当前区间重算会话级指标并刷新最近快照。
+	 * at 取本次刷新时刻，与随后推送的 perfAt 同源：否则 get_state 会带更旧的结算时刻，
+	 * 与已推送的「刚刚更新」自相矛盾。
+	 */
+	private refreshSessionPerf(agentId: string): MessagePerfSnapshot {
+		const sessionPerf = calculateSessionTokensPerSecond(this.spansByAgent.get(agentId) ?? []);
 		const last = this.lastPerfByAgent.get(agentId);
-		const now = Date.now();
 		const updated: MessagePerfSnapshot = {
 			ttftMs: last?.ttftMs,
 			totalMs: last?.totalMs ?? 0,
@@ -187,45 +181,39 @@ export class MessagePerfTracker {
 			tps: last?.tps,
 			sessionTps: sessionPerf.sessionTps,
 			sessionEndToEndTps: sessionPerf.sessionEndToEndTps,
-			at: last?.at ?? now,
+			at: Date.now(),
 		};
 		this.lastPerfByAgent.set(agentId, updated);
-		if (emit) {
-			emit(ipcChannels.agentsRuntimeState, {
-				agentId,
-				state: {
-					sessionTps: sessionPerf.sessionTps,
-					sessionEndToEndTps: sessionPerf.sessionEndToEndTps,
-					perfAt: now,
-				},
-			});
-		}
+		return updated;
+	}
+
+	/** 会话级三字段补丁；perfAt 直接取快照 at，两者永远一致。 */
+	private sessionStatePatch(snapshot: MessagePerfSnapshot) {
+		return { sessionTps: snapshot.sessionTps, sessionEndToEndTps: snapshot.sessionEndToEndTps, perfAt: snapshot.at };
+	}
+
+	/**
+	 * 记录派生任务（如 subagent 派生执行）的用量与耗时区间，消除重叠并纳入会话级平均 TPS 计算。
+	 */
+	recordSubagentTask(agentId: string, task: { id?: string; startedAt: number; completedAt: number; tokens: number; firstDeltaAt?: number }, emit?: (channel: string, payload: unknown) => void): void {
+		if (!this.upsertSpan(agentId, task)) return;
+		const updated = this.refreshSessionPerf(agentId);
+		emit?.(ipcChannels.agentsRuntimeState, { agentId, state: this.sessionStatePatch(updated) });
 	}
 
 	/**
 	 * 批量同步子代理记录（例如从会话持久化条目或列表恢复）。
+	 * 整批只重算一次并只推送一次；不传 emit 时静默刷新快照（只读列举路径用，避免读接口推状态事件）。
 	 */
 	syncSubagentTasks(agentId: string, tasks: ReadonlyArray<{ id?: string; startedAt: number; completedAt?: number; tokens?: number }>, emit?: (channel: string, payload: unknown) => void): void {
 		let modified = false;
 		for (const t of tasks) {
-			if (typeof t.startedAt === "number" && typeof t.completedAt === "number" && t.completedAt > t.startedAt && typeof t.tokens === "number" && t.tokens >= 0) {
-				this.recordSubagentTask(agentId, { id: t.id, startedAt: t.startedAt, completedAt: t.completedAt, tokens: t.tokens });
-				modified = true;
-			}
+			if (typeof t.completedAt !== "number" || typeof t.tokens !== "number") continue;
+			modified = this.upsertSpan(agentId, { id: t.id, startedAt: t.startedAt, completedAt: t.completedAt, tokens: t.tokens }) || modified;
 		}
-		if (modified && emit) {
-			const last = this.lastPerfByAgent.get(agentId);
-			if (last) {
-				emit(ipcChannels.agentsRuntimeState, {
-					agentId,
-					state: {
-						sessionTps: last.sessionTps,
-						sessionEndToEndTps: last.sessionEndToEndTps,
-						perfAt: Date.now(),
-					},
-				});
-			}
-		}
+		if (!modified) return;
+		const updated = this.refreshSessionPerf(agentId);
+		emit?.(ipcChannels.agentsRuntimeState, { agentId, state: this.sessionStatePatch(updated) });
 	}
 
 	/** 获取某 agent 会话已记录的所有性能区间 */

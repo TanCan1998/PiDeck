@@ -130,3 +130,42 @@ test("subagents task records merge with interval union for session tps", () => {
 	const last = f.tracker.getLast("a");
 	assert.equal(last.sessionEndToEndTps, 60);
 });
+
+test("batch subagent sync dedupes by id, recomputes once and keeps snapshot at in sync with perfAt", () => {
+	const f = fixture();
+	f.reply({ agentId: "a", start: 1000, delta: 2000, end: 3000, usage: { output: 100 } });
+	const batch = [
+		{ id: "sub-1", startedAt: 4000, completedAt: 6000, tokens: 100 },
+		{ id: "sub-2", startedAt: 5000, completedAt: 7000, tokens: 100 },
+	];
+	f.at(8000, () => f.tracker.syncSubagentTasks("a", batch, (channel, payload) => f.events.push({ channel, payload })));
+
+	// 整批写入后与逐条记录结果一致：300 tokens / union([1000,3000],[4000,7000]) = 60
+	assert.equal(f.tracker.getLast("a").sessionEndToEndTps, 60);
+	assert.equal(f.tracker.getSessionSpans("a").length, 3);
+	// 快照 at 与推送 perfAt 同源：读接口拿到的结算时刻不能比刚推的事件更旧
+	const state = f.events.at(-1).payload.state;
+	assert.equal(f.tracker.getLast("a").at, 8000);
+	assert.deepEqual({ ...state }, { sessionTps: 100, sessionEndToEndTps: 60, perfAt: 8000 });
+
+	// 重复回放同一批记录（列举子代理会反复读同一批）按 id 覆盖，不追加区间、不改变结果
+	f.at(9000, () => f.tracker.syncSubagentTasks("a", batch, (channel, payload) => f.events.push({ channel, payload })));
+	assert.equal(f.tracker.getSessionSpans("a").length, 3);
+	assert.equal(f.tracker.getLast("a").sessionEndToEndTps, 60);
+});
+
+test("silent sync refreshes the snapshot without pushing runtime state", () => {
+	const f = fixture();
+	f.reply({ agentId: "a", start: 1000, delta: 2000, end: 3000, usage: { output: 100 } });
+	const eventsBefore = f.events.length;
+	f.at(8000, () => f.tracker.syncSubagentTasks("a", [{ id: "sub-1", startedAt: 4000, completedAt: 6000, tokens: 100 }]));
+	assert.equal(f.events.length, eventsBefore);
+	assert.equal(f.tracker.getLast("a").sessionEndToEndTps, 50);
+	assert.equal(f.tracker.getLast("a").at, 8000);
+
+	// 非法区间（缺 completedAt / 负 tokens）不重算也不推事件
+	f.tracker.syncSubagentTasks("a", [{ id: "sub-2", startedAt: 4000, tokens: 100 }], (channel, payload) => f.events.push({ channel, payload }));
+	f.tracker.syncSubagentTasks("a", [{ id: "sub-3", startedAt: 4000, completedAt: 6000, tokens: -1 }], (channel, payload) => f.events.push({ channel, payload }));
+	assert.equal(f.events.length, eventsBefore);
+	assert.equal(f.tracker.getSessionSpans("a").length, 2);
+});
