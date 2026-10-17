@@ -5,7 +5,10 @@ import { collectSessionFileChanges, getToolDiffTarget, getToolFilePath, getToolN
 export { collectSessionFileChanges, getToolDiffTarget, getToolName, stripAnsi };
 import type { AgentRunItem } from "../app/AppUtils";
 
-export { stripThinkingTags } from "../../utils/thinkingText.ts";
+/* stripThinkingTags 与 AppUtils 同逻辑的内联副本（此文件被 node 单测直接加载，改动需同步） */
+export function stripThinkingTags(text: string): string {
+	return text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, "").trim();
+}
 
 export function getToolStatus(message: ChatMessage): "running" | "done" | "error" {
 	const status = String(message.meta?.status ?? "");
