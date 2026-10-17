@@ -1,6 +1,6 @@
 # 会话数据面统一 sidecar 对照计划（Session Data Plane）
 
-> 状态：**Wave 0 完成**（探针 `scripts/probeSessionRead.mjs` 已入库，基线数字见 §7；Wave 1–4 未开始。落地时按本文件收口：每波完成后更新状态行与 parity 表；全部迁完删除本文件）。
+> 状态：**Wave 0 完成；Wave 1/2 设计已细化（§8），实现未开始**（落地时按本文件收口：每波完成后更新状态行与 parity 表；全部迁完删除本文件）。
 > 前置已落地：`native/session-index`（跨会话正文搜索，多词 AND + 项目级 roots）、`native/file-index`（工作区文件索引 + 正文检索）、`native/xue-index`。三个 sidecar 的宿主客户端（`SessionIndexService` / `FileIndexService` / `XueIndexService`）已定型同一套纪律：NDJSON stdio 协议、roots/库签名变化重启、请求 id 配对、迟到响应丢弃、进程身份核对、失败一律 `{ ok: false }` 降级不抛异常。
 
 ## 1. 问题
@@ -107,3 +107,76 @@
 2. **打开大会话才是真痛点**：10–31 MiB 会话 87–165 ms 且必须整体流式扫一遍（无持久化索引），每次打开重建；20 MB 级文件已接近 32MiB 全量内存闸门。
 3. 因此 P3–P6（历史窗口）优先于 P1/P2（清单投影）在收益上更划算；P1/P2 仍值得做，但定位是「给 sidecar 立最小骨架 + 统一解析」，不是性能救命。
 4. 侧栏扫描的 4 秒（两根合计）里还有未计入的策略成本（身份修复、子代理分组、fork 链、标题推断），sidecar 化后这部分仍留在 TS。
+
+## 8. 详细设计（Wave 1/2 动手前定稿）
+
+### 8.1 形态结论（读码得出，决定迁移面大小）
+
+TS 历史路径已经是「**索引 + 定向读行**」两段式，而不是「整文件读进内存」：
+
+- 建表：`SessionHistoryReader.getSessionDisplayIndex()`（`src/main/pi/SessionHistoryReader.ts:1485`）扫全文件，产出 `entries: Map<id, SessionDisplayEntry>` + `activeBranch` + `metadata` + `contextEdits` + `endsWithNewline`；`SessionDisplayEntry` 定义见 `SessionHistoryReader.ts:187-234`，`SessionDisplayIndex` 见 `:236-260`；
+- 取值：`readIndexedLines()` 按 `{offset, byteLength}` 定向读单行，`readIndexedSessionMessages()` 只取每行的 `.message`，`readIndexedRawLines()` 取整行 JSON。
+
+因此：
+
+- **Wave 2 的 sidecar 只负责把 offset 表建快**（含 `id/parentId/type/role/offset/byteLength/…` 与 `hasCompaction/endsWithNewline`），消息体仍走现有定向读路径。迁移面小、字段 parity 可逐字段对照，风险可控。
+- **不做**：让 sidecar 回传解析后的 `ChatMessage`。那要把 `parseIndexLine` + 消息转换 + 分支/压缩/`context_edit` 语义全量搬进 Go，收益只是省一次读盘，工作量与漂移风险都大得多。
+- **派生留 TS**：`activeBranch`/`activeMessageEntries`/`metadata`/`contextEdits`/fork 链合并（`mergeForkChain`）/身份修复/去重/子代理分组/标题清洗/preview 截断全部是策略层，留在 TS，不进口协议。
+
+### 8.2 协议（`native/session-store`，NDJSON stdio，`ProtocolVersion = 1`）
+
+帧纪律照 `native/session-index`：`requestFrame{cmd,id,…}` / `readyFrame{type,protocolVersion,…}` / `responseFrame{type,id,ok,result,error}`；stdout 每帧显式 `Flush()`、日志一律 stderr 带 `[session-store] ` 前缀；空参/未知 cmd 回错误帧；请求串行；`id` 用 `json.RawMessage` 原样回填。
+
+| cmd | 入参 | 出参 | 用途 |
+|---|---|---|---|
+| `list-files` | `{roots}` | `{files:[{path,size,mtimeMs,entryCount,hasCompaction,endsWithNewline,cached}]}` | 版本探测与失效判定（Wave 1 骨架） |
+| `get-index` | `{path}` | `{entries:[EntryRecord…],hasCompaction,endsWithNewline,size,mtimeMs}` | 历史窗口索引（Wave 2） |
+| `list-summaries` | `{roots,limit?}` | `{summaries:[ScanProjection…]}` | 侧栏清单（Wave 3，字段见 8.4a） |
+| `refresh` | `{roots}` | `{changedFiles,rebuiltFiles,indexMs}` | 增量重建 |
+
+`EntryRecord` = `{id,parentId,type,offset,byteLength,role?,customType?,customDisplay?,toolName?,messageId?,messageTimestamp?,modelChangeProvider?,modelChangeId?,assistantModel?,thinkingLevel?,hasMessage,oversized?,summary?,timestamp?,tokensBefore?,firstKeptEntryId?,parentSession?,contextEditTargetId?,contextEditExcludes?,contextEditText?}`——与 `SessionDisplayEntry`（`SessionHistoryReader.ts:187-234`）逐字段对齐。
+
+### 8.3 快照布局
+
+- 布局照 `native/session-index`（已验证可跑）：`<userData>/session-store/state.bin` = magic + 版本 + head JSON + 定长记录区 + 字符串池（id/路径），写入走 `state.bin.tmp` + `os.Rename`（先语料后快照的两段改名顺序要吸取 `native/session-index` 的同代校验教训：`loadState` 必须校验 head 里声明的文件大小与实际一致，不一致就丢弃重建）。
+- 版本键：每文件 `{size, mtimeMs, endsWithNewline}`；命中即零读返回。
+- 增量追加：`size > 记录值` 且旧记录 `endsWithNewline === true` → 从记录 size 读到 EOF，**只接受完整行**（末尾残行不记入、下轮重读）；否则该文件整文件重建。
+- 失效：size 变小（压缩重写）或 `endsWithNewline` 为 false 或快照版本不匹配 → 重建单文件，不影响其它文件。
+- 只读纪律：会话文件一律只读打开，绝不写；不产生 `-wal/-shm` 类副产物（参考 `native/xue-index` 的 `mode=ro`）。
+
+### 8.4 Parity 判定依据
+
+**(a) 侧栏投影（Wave 3）**：`SessionScanLine`（`SessionScanner.ts:47-77`）共 24 个字段——`type/customType/timestamp/name/sessionName/cwd/projectPath/parentSession/provider/modelId/thinkingLevel/codexSessionId/sourcePath/threadSource/parentThreadId/agentRole/agentNickname/role/content/model/message/data/header/session`。来源行类型固定：`session`（头：cwd/parentSession）、`session_info`（name，含「复制的父历史」判定）、`message`（role/content/preview/model）、`model_change`、`thinking_level_change`、`custom`/`custom_message`（子代理记录与 todo）、codex 导入标记（session/header 里的 codex 字段）。
+
+**(b) 历史条目（Wave 2）**：`SessionDisplayEntry` 26 个字段中，**必须由 sidecar 提供**：`id/parentId/type/offset/byteLength/hasMessage/role/customType/customDisplay/toolName/messageId/messageTimestamp/modelChangeProvider/modelChangeId/assistantModel/thinkingLevel/oversized/summary/timestamp/tokensBefore/firstKeptEntryId/parentSession/contextEdit*`；**TS 派生**：`chainHostPath`（fork 链合并时标注）与整个 `SessionDisplayIndex` 的 `activeBranch/activeMessageEntries/metadata/contextEdits/chainSources`。
+
+**Policy 不进 sidecar**（写进门禁）：身份修复、目录/标题去重、子代理分组、fork 合并、标题清洗（`cleanScanTitle`）、preview 截断、各类上限（1600/600/10/32MiB 等）。
+
+### 8.5 P7（用量）重估
+
+`<agentDir>/analytics/usage.jsonl` 本机 13.6 MB / 6.5 万行（append-only，已有游标增量读取）。全量重扫成本比会话 JSONL 低一个量级，且已有增量机制——**建议 P7 降到 Wave 3 之后或不做**，不占 Wave 1–2 注意力。
+
+### 8.6 修订后的波次
+
+| 波次 | 内容 | 交付判据 |
+|---|---|---|
+| Wave 1 | `native/session-store` 骨架：`list-files` + 快照读写 + 增量/失效 + 宿主 `SessionStoreService`（照 `FileIndexService` 抄） + 开关 `settings.sessionStoreEnabled` | parity/失效/降级测试全绿；进程按需启动（无历史读取需求时不常驻） |
+| Wave 2 | `get-index` 接 `SessionHistoryReader`（先只用于「缓存未命中时的建表」，命中路径不变） | 索引 parity 逐字段一致；打开 10–31MiB 会话耗时/内存对比写回 §7 |
+| Wave 3 | `list-summaries` 接侧栏清单（P1/P2） | 清单 parity；首屏扫描耗时对比 |
+| Wave 4 | 进程收敛 + （可选）P7 | 视前几波结论决定 |
+
+### 8.7 专属测试矩阵（Wave 1/2）
+
+1. **索引 parity**：fixture JSONL 覆盖 正常 / fork（`parentSession`）/ 子代理锚点 / codex 导入 / 压缩条目 / `context_edit` / 巨型行（>64MiB，只留前缀）/ 末尾残行 / 空行 → sidecar 条目表与 `SessionHistoryReader` 建出的表逐字段相等；
+2. **增量正确性**：追加若干行后 `get-index` 结果 === 同一 fixture 全量重建结果；末尾残行不得被固化成条目；
+3. **失效**：文件被压缩重写（size 变小）/ mtime 变化 / 快照损坏（magic 不符）→ 重建而非回陈旧表；
+4. **降级**：二进制缺失、boot 超时、roots 变化、协议版本不符 → 全部回退 TS 建表，`history-changed` 语义不变；
+5. **不动 IPC**：`sessions:*` 历史通道出参形状逐字段不变（相关 e2e 差分一次）；
+6. **内存/耗时**：同口径对比（`scripts/probeSessionRead.mjs`）写回 §7，未变好就回退该波。
+
+### 8.8 未决问题（动手前拍板）
+
+1. **roots 语义**：现三个 sidecar 都是「单 roots 签名，变了重启」；会话文件按项目分目录，切项目会丢缓存。倾向：快照按**文件路径分桶**持久化（换 roots 不重建未变更文件），进程仍单 roots。
+2. **快照粒度**：单 `state.bin` vs 每 roots 一份；倾向前者 + 文件级记录复用。
+3. **收益证明**：`get-index` 建表同样要读全文件，收益来自「一次建表多次用 + 不在主进程建 10 万级对象」。Wave 2 门禁必须用同口径数字证明（对照 §7 的 87–165 ms）；若只有读盘没省其余，就不值得做。
+4. **WSL**：现有 sidecar 一律降级；session-store 不做 WSL 支持（UNC 读不可靠），沿用降级。
