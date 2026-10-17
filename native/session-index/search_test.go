@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -175,5 +176,81 @@ func TestSplitQueryTerms(t *testing.T) {
 	}
 	if terms := splitQueryTerms("   "); len(terms) != 0 {
 		t.Fatalf("空白查询应无词元，got %v", terms)
+	}
+}
+
+// ── 会话内查找（SearchInSession）────────────────────────────────────────
+//
+// 现场：「在某个会话里按关键词找那条消息，然后上一条/下一条跳过去」。
+// 与跨会话搜索共用匹配逻辑，差异只在范围（单文件）与顺序（时间线）。
+
+func TestSearchInSessionOnlyMatchesTargetFile(t *testing.T) {
+	fx := newFixture(t)
+	// 两个会话都含同一个词：会话内查找只能命中目标那一个
+	target := fx.writeSession("--t--a", userMsg("u1", "部署脚本超时"), userMsg("u2", "部署完成"))
+	fx.writeSession("--t--b", userMsg("u3", "部署脚本超时"))
+	fx.boot()
+
+	r := fx.indexer.SearchInSession("部署", target, 50)
+	if r.TotalHitSessions != 1 || len(r.Sessions) != 1 {
+		t.Fatalf("只应命中目标会话，got %+v", r)
+	}
+	hit := r.Sessions[0]
+	if hit.FilePath != target {
+		t.Fatalf("命中会话路径=%q, want %q", hit.FilePath, target)
+	}
+	// 跨会话搜索仍能看到两个会话（范围差异只作用于 SearchInSession）
+	if got := fx.indexer.Search("部署", 10, 5).TotalHitSessions; got != 2 {
+		t.Fatalf("跨会话搜索应命中 2 个会话，got %d", got)
+	}
+}
+
+func TestSearchInSessionOrdersByTimeline(t *testing.T) {
+	fx := newFixture(t)
+	// 三条命中：中间那条是「整句」（跨会话评分里最高），会话内查找必须仍按时间线
+	path := fx.writeSession("--t--a",
+		userMsg("u1", "alpha 很远 beta"),
+		userMsg("u2", "alpha beta"),
+		userMsg("u3", "alpha 又一次 beta"),
+	)
+	fx.boot()
+
+	hit := fx.indexer.SearchInSession("alpha beta", path, 50).Sessions[0]
+	if len(hit.Matches) != 3 {
+		t.Fatalf("应有 3 条命中，got %d", len(hit.Matches))
+	}
+	for index, want := range []string{"u1", "u2", "u3"} {
+		if hit.Matches[index].MessageId != want {
+			t.Fatalf("会话内命中必须按时间线排序：位置 %d got %q want %q", index, hit.Matches[index].MessageId, want)
+		}
+	}
+	if hit.HitCount != 3 {
+		t.Fatalf("hitCount=%d, want 3", hit.HitCount)
+	}
+}
+
+func TestSearchInSessionUnknownPathAndLimits(t *testing.T) {
+	fx := newFixture(t)
+	path := fx.writeSession("--t--a", userMsg("u1", "abc"), userMsg("u2", "abc"), userMsg("u3", "abc"))
+	fx.boot()
+
+	if got := fx.indexer.SearchInSession("abc", "", 50); len(got.Sessions) != 0 {
+		t.Fatalf("空路径应返回空结果，got %+v", got)
+	}
+	if got := fx.indexer.SearchInSession("abc", filepath.Join(fx.root, "nope.jsonl"), 50); len(got.Sessions) != 0 {
+		t.Fatalf("未索引路径应返回空结果，got %+v", got)
+	}
+	// limit 同时是「返回条数」上限，Truncated 标记真实命中更多
+	limited := fx.indexer.SearchInSession("abc", path, 2)
+	if len(limited.Sessions) != 1 || len(limited.Sessions[0].Matches) != 2 {
+		t.Fatalf("limit=2 应只返回 2 条，got %+v", limited.Sessions)
+	}
+	if !limited.Truncated {
+		t.Fatal("命中数超过 limit 时应标 truncated")
+	}
+	// 大小写不同的路径也应命中（Windows 路径在索引里统一小写）
+	upper := strings.ToUpper(path)
+	if got := fx.indexer.SearchInSession("abc", upper, 50); len(got.Sessions) != 1 {
+		t.Fatalf("大小写不同的路径应命中，got %+v", got)
 	}
 }

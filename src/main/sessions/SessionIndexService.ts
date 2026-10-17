@@ -50,6 +50,8 @@ export const MAX_SESSION_INDEX_LINE_CHARS = 4 * 1024 * 1024;
  */
 const DEFAULT_SEARCH_SESSION_LIMIT = 30;
 const DEFAULT_SEARCH_PER_SESSION = 5;
+/** 会话内查找的默认条数上限（单会话、按时间线返回，UI 直接上下跳）。 */
+const DEFAULT_IN_SESSION_LIMIT = 100;
 
 export type SessionIndexLogger = {
 	debug: (message: string) => void;
@@ -169,6 +171,19 @@ export class SessionIndexService {
 		const boot = await this.ensureChild(roots);
 		if (!boot.ok) return boot;
 		return this.request<SessionSearchResult>({ cmd: "search", query, limit, perSession });
+	}
+
+	/**
+	 * 会话内查找：只扫一个会话文件，命中按时间线顺序返回（上一条/下一条导航）。
+	 *
+	 * 与 search() 共用索引与匹配逻辑，差异只有范围与顺序；会话文件不在索引里
+	 * （未索引/WSL/索引未就绪）时返回空结果而不是错误。
+	 */
+	async searchInSession(roots: string[], sessionPath: string, query: string, limit = DEFAULT_IN_SESSION_LIMIT): Promise<SessionIndexCallResult<SessionSearchResult>> {
+		if (!sessionPath) return { ok: false, reason: "not-ready", message: "缺少会话路径" };
+		const boot = await this.ensureChild(roots);
+		if (!boot.ok) return boot;
+		return this.request<SessionSearchResult>({ cmd: "search-session", path: sessionPath, query, limit });
 	}
 
 	/** 增量重扫（新会话文件/mtime 变化/删除）。渲染层搜索前或定期触发。 */
@@ -317,7 +332,7 @@ export class SessionIndexService {
 	// 请求与消息泵
 	// ------------------------------------------------------------------
 
-	private async request<T>(frame: { cmd: string; query?: string; limit?: number; perSession?: number }): Promise<SessionIndexCallResult<T>> {
+	private async request<T>(frame: { cmd: string; query?: string; limit?: number; perSession?: number; path?: string }): Promise<SessionIndexCallResult<T>> {
 		const child = this.child;
 		if (!child) return { ok: false, reason: "boot-failed", message: "会话搜索进程不可用" };
 		const id = this.nextId++;

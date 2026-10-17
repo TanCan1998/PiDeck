@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: 156b49fc495845a675c340abc2faa6038ccba11e7f35ebefb76963d92d2495ad（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: 676bea075f881d2da50aad38af65b85ecff60540e96543c2faa131fd93577c14（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -3650,6 +3650,8 @@ export const zhTW: Record<TranslationKey, string> = {
 	"config.wechat.unavailable": "當前環境不支援微信橋接。",
 	"config.wechat.loading": "正在載入微信配置…",
 	"config.wechat.account": "帳號",
+	"config.wechat.displayNameHint": "這裡只改 PiDeck 裡的顯示名：微信 iLink 沒有提供改機器人暱稱的介面，微信裡顯示的名字不會變。",
+	"config.wechat.singleAccountHint": "一個 PiDeck 只能連一個微訊號：重新掃碼會把這個通道換到掃碼的那個號，之前那個號再發訊息就不會有回覆。同一個微訊號在多臺裝置上登入不需要重掃。",
 	"config.wechat.status.connected": "已連線",
 	"config.wechat.status.connecting": "連線中",
 	"config.wechat.status.disconnected": "未連線",
@@ -4145,6 +4147,19 @@ export const zhTW: Record<TranslationKey, string> = {
 	"settings.shortcuts.openNewSessionDesc": "開啟新建會話引導頁。預設 Ctrl/Cmd+N；輸入框聚焦時不會觸發。",
 	"settings.shortcuts.openSearchLabel": "搜尋會話",
 	"settings.shortcuts.openSearchDesc": "開啟會話搜尋命令面板。預設 Ctrl/Cmd+F；輸入框聚焦時不會觸發。",
+	"sessionFind.open": "在當前會話中查詢",
+	"sessionFind.placeholder": "在當前會話中查詢…",
+	"sessionFind.noResults": "沒有匹配",
+	"sessionFind.unavailable": "會話索引尚未就緒，稍候再試（首次建索引需要一會兒）",
+	"sessionFind.searching": "查詢中…",
+	"sessionFind.prev": "上一條命中",
+	"sessionFind.next": "下一條命中",
+	"sessionFind.close": "關閉查詢",
+	"sessionFind.count": "{index}/{total}",
+	"sessionFind.roleUser": "我",
+	"sessionFind.roleAssistant": "助手",
+	"settings.shortcuts.findInSessionLabel": "在當前會話中查詢",
+	"settings.shortcuts.findInSessionDesc": "在當前會話的訊息裡查詢關鍵詞，回車/↑↓ 逐條跳轉。預設 Ctrl/Cmd+Shift+F。",
 	"settings.shortcuts.openCommandPaletteLabel": "命令面板",
 	"settings.shortcuts.openCommandPaletteDesc": "開啟命令面板：模糊搜尋設定項並跳轉，或執行重啟 Agent 等操作。預設 Ctrl/Cmd+P；輸入框聚焦時不會觸發。",
 	"settings.shortcuts.cycleModelLabel": "切換模型（收藏內迴圈）",

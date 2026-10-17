@@ -1,9 +1,11 @@
-import React, { useEffect, useMemo, useRef } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useAtomValue, useSetAtom } from "jotai";
 import { pendingMessageJumpAtom, sessionRecordByIdAtomFamily } from "../../atoms";
 import { useSessionTimelineController } from "../../hooks/useSessionTimelineController";
 import { SessionRuntimeInjector } from "./SessionRuntimeInjector";
 import { useSessionPaneServices } from "./SessionPaneServices";
+import { SessionFindOverlay } from "./SessionFindOverlay";
+import { desktopApi } from "../../desktopApi";
 import { t } from "../../i18n";
 
 export type ChatSessionPaneProps = {
@@ -29,6 +31,17 @@ export function ChatSessionPane(props: ChatSessionPaneProps) {
 
 	const sessionTimeline = useSessionTimelineController({ sessionId });
 
+	// 会话内查找（Ctrl/Cmd+Shift+F）：openSignal 自增即请求浮层展开并聚焦输入框。
+	// 只有聚焦栏响应快捷键——分屏时按键作用于用户正在看的那一栏。
+	const [findSignal, setFindSignal] = useState(0);
+	useEffect(() => {
+		if (!focused) return;
+		return desktopApi.app.onShortcutTriggered((id) => {
+			if (id !== "findInSession") return;
+			setFindSignal((value) => value + 1);
+		});
+	}, [focused]);
+
 	const localHeaderRef = useRef<HTMLDivElement | null>(null);
 	const localComposerRef = useRef<HTMLElement | null>(null);
 	const localQueuedTrackRef = useRef<HTMLElement | null>(null);
@@ -36,6 +49,10 @@ export function ChatSessionPane(props: ChatSessionPaneProps) {
 	const layoutRefs = services.layoutRefs;
 	const chatHeaderRef = focused ? layoutRefs.chatHeaderRef : localHeaderRef;
 	const composerRef = focused ? layoutRefs.composerRef : localComposerRef;
+
+	// 会话内查找依赖 pi 会话 JSONL 索引：DSH/ACP 后端不走 sidecar，直接不挂入口
+	// （避免出现一个永远「没有匹配」的搜索框）。
+	const findSupported = !record?.backend || record.backend === "pi";
 
 	const activeQueuedPrompts = services.queuedPromptsBySession[sessionId] ?? [];
 
@@ -71,19 +88,31 @@ export function ChatSessionPane(props: ChatSessionPaneProps) {
 	);
 
 	return (
-		<SessionRuntimeInjector
-			currentSessionId={sessionId}
-			sessionTitle={sessionTitle}
-			sessionTimeline={sessionTimeline}
-			splitPane={splitPane}
-			focused={focused}
-			onFocusPane={onFocusPane}
-			chatHeaderRef={layout.chatHeaderRef}
-			composerRef={layout.composerRef}
-			composerOffsetHeight={layout.composerOffsetHeight}
-			terminalRowHeight={layout.terminalRowHeight}
-			activeQueuedPrompts={activeQueuedPrompts}
-			queuedTrackRef={localQueuedTrackRef}
-		/>
+		<>
+			{findSupported && (
+				<SessionFindOverlay
+					sessionId={record?.filePath ?? sessionId}
+					anchorRef={services.layoutRefs.chatPaneRef}
+					openSignal={findSignal}
+					onJump={(messageId) => {
+						sessionTimeline.jumpToMessage(messageId);
+					}}
+				/>
+			)}
+			<SessionRuntimeInjector
+				currentSessionId={sessionId}
+				sessionTitle={sessionTitle}
+				sessionTimeline={sessionTimeline}
+				splitPane={splitPane}
+				focused={focused}
+				onFocusPane={onFocusPane}
+				chatHeaderRef={layout.chatHeaderRef}
+				composerRef={layout.composerRef}
+				composerOffsetHeight={layout.composerOffsetHeight}
+				terminalRowHeight={layout.terminalRowHeight}
+				activeQueuedPrompts={activeQueuedPrompts}
+				queuedTrackRef={localQueuedTrackRef}
+			/>
+		</>
 	);
 }

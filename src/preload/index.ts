@@ -502,6 +502,7 @@ const api = {
 		list: (projectId?: string) => ipcRenderer.invoke(ipcChannels.sessionsList, projectId) as Promise<SessionSummary[]>,
 		/** 跨会话正文搜索（Go sidecar）；null = 不可用（未构建/boot 中/失败），调用方回退标题过滤。 */
 		searchContent: (query: string) => ipcRenderer.invoke(ipcChannels.sessionsSearchContent, query) as Promise<SessionSearchResult | null>,
+		searchInSession: (sessionPath: string, query: string) => ipcRenderer.invoke(ipcChannels.sessionsSearchInSession, sessionPath, query) as Promise<SessionSearchResult | null>,
 		listCatalog: (projectId: string, options?: { scan?: boolean }) => ipcRenderer.invoke(ipcChannels.sessionsCatalogList, projectId, options) as Promise<SessionRecord[]>,
 		/** 后台扫描完成推送：目录缓存已合并，监听方应以 scan:false 重新拉取。返回退订函数。 */
 		onCatalogRefreshed: (listener: (input: { projectId: string }) => void) => {

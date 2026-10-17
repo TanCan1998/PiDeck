@@ -112,7 +112,25 @@ func matchTerms(hay []byte, terms [][]byte, phrase []byte) (at, score int, ok bo
 	return at, score, true
 }
 
+// Search 跨会话检索（跨会话搜索面板）。
 func (ix *Indexer) Search(query string, limit, perSession int) searchResult {
+	return ix.search(query, limit, perSession, "")
+}
+
+// SearchInSession 只在一个会话文件里检索（会话内查找：Ctrl+Shift+F / 头部放大镜）。
+//
+// 与跨会话搜索共享全部匹配与评分逻辑，差异只有两点：
+//   - 只扫目标文件的语料段（entries 先按 fileRef 过滤，不再读整库）；
+//   - 命中按**文档顺序**（tsMs 升序）返回，因为会话内查找是「上一条/下一条」导航，
+//     用户预期是时间线顺序而不是相关度顺序。
+func (ix *Indexer) SearchInSession(query, sessionPath string, limit int) searchResult {
+	if sessionPath == "" {
+		return searchResult{Sessions: []searchSessionHits{}}
+	}
+	return ix.search(query, limit, limit, sessionPath)
+}
+
+func (ix *Indexer) search(query string, limit, perSession int, onlyPath string) searchResult {
 	// 词元化：单词查询就是原来的子串匹配（评分恒定，于是排序退化为时间序）；
 	// 多词要求全部出现，顺序无关、可跨行
 	wordList := splitQueryTerms(query)
@@ -154,6 +172,31 @@ func (ix *Indexer) Search(query string, limit, perSession int) searchResult {
 	}
 	entries := make([]entry, len(ix.entries))
 	copy(entries, ix.entries)
+	if onlyPath != "" {
+		// 目标文件可能因大小写/分隔符差异与索引键不同（Windows 路径一律小写入索引），
+		// 因此按小写比较；找不到就是没命中（未索引的会话不报错）。
+		target := strings.ToLower(onlyPath)
+		var fileID int32 = -1
+		for _, fs := range ix.files {
+			if strings.ToLower(fs.Path) == target {
+				fileID = fs.FileId
+				break
+			}
+		}
+		if fileID < 0 {
+			return searchResult{Sessions: []searchSessionHits{}}
+		}
+		filtered := entries[:0]
+		for _, e := range entries {
+			if e.fileRef == fileID {
+				filtered = append(filtered, e)
+			}
+		}
+		entries = filtered
+		if len(entries) == 0 {
+			return searchResult{Sessions: []searchSessionHits{}}
+		}
+	}
 	sortEntriesByOffset(entries)
 	corpus := ix.corpusFile
 
@@ -262,6 +305,10 @@ func (ix *Indexer) Search(query string, limit, perSession int) searchResult {
 	for _, fileRef := range order {
 		agg := aggByFile[fileRef]
 		sort.SliceStable(agg.hits, func(i, j int) bool {
+			// 会话内查找按时间线顺序（导航语义）；跨会话仍按相关度挑最相关的几条
+			if onlyPath != "" {
+				return agg.hits[i].e.tsMs < agg.hits[j].e.tsMs
+			}
 			if agg.hits[i].score != agg.hits[j].score {
 				return agg.hits[i].score > agg.hits[j].score
 			}
@@ -293,6 +340,12 @@ func (ix *Indexer) Search(query string, limit, perSession int) searchResult {
 		return sessions[i].FilePath < sessions[j].FilePath
 	})
 	total := len(sessions)
+	// 会话内查找的「截断」指命中条数被 perSession 截断（会话数恒为 1），
+	// 跨会话仍是「会话数超过 limit」。
+	if onlyPath != "" {
+		truncated := total > 0 && sessions[0].HitCount > perSession
+		return searchResult{Sessions: sessions, TotalHitSessions: total, Truncated: truncated}
+	}
 	truncated := total > limit
 	if truncated {
 		sessions = sessions[:limit]

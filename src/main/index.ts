@@ -2380,6 +2380,13 @@ async function createWindow() {
 			mainWindow.webContents.send(ipcChannels.appShortcutTriggered, "openSearch");
 			return;
 		}
+		// 会话内查找：与 openSearch（跨会话）分开，默认 Ctrl/Cmd+Shift+F；由聚焦的会话栏
+		// 自己响应（分屏时只作用于用户正在看的那一栏），主进程不持有会话上下文。
+		if (isShortcutInput("findInSession", input)) {
+			event.preventDefault();
+			mainWindow.webContents.send(ipcChannels.appShortcutTriggered, "findInSession");
+			return;
+		}
 		if (isShortcutInput("openCommandPalette", input)) {
 			event.preventDefault();
 			mainWindow.webContents.send(ipcChannels.appShortcutTriggered, "openCommandPalette");
@@ -3272,6 +3279,22 @@ function registerIpc() {
 			const refreshed = await sessionIndexService.refresh(roots);
 			if (!refreshed.ok && !sessionIndexService.isReady(roots)) return null;
 			const result = await sessionIndexService.search(roots, query);
+			return result.ok ? result.value : null;
+		},
+		// 会话内查找（Ctrl+Shift+F / 会话头部放大镜）：只扫一个会话文件、命中按时间线
+		// 返回。就绪判定与降级策略与跨会话搜索一致——未就绪先 warmup 再回 null，渲染层
+		// 显示「索引准备中」，绝不让输入框等 boot。
+		sessionMessageSearch: async (sessionPath, query) => {
+			if (!sessionIndexService) return null;
+			const roots = await sessionScanner.resolveContentSearchRoots(projectPathsForContentSearch());
+			if (roots.length === 0) return null;
+			if (!sessionIndexService.isReady(roots)) {
+				sessionIndexService.warmup(roots);
+				return null;
+			}
+			const refreshed = await sessionIndexService.refresh(roots);
+			if (!refreshed.ok && !sessionIndexService.isReady(roots)) return null;
+			const result = await sessionIndexService.searchInSession(roots, sessionPath, query);
 			return result.ok ? result.value : null;
 		},
 		// C1：DSH 后端专用 IPC 依赖按后端分组（注册表化铺路；未来新增后端各自提供一份）
