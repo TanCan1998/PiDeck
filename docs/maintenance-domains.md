@@ -51,12 +51,13 @@
 ## 工作区文件搜索（file-index Go sidecar）
 
 - **能力**：文件抽屉（Ctrl+F）除按名称搜索外，另在**工作区文件正文**里搜词，结果按「名字命中 / 文件内容」两段展示（内容行含相对路径:行号 + 命中片段），点击打开该文件。文件名命中仍是毫秒级本地扫描，内容命中有独立的加载态。
-- **架构**：Go sidecar（`native/file-index`，纯标准库零依赖，`native/file-index/{main,index,fuzzy,textmatch}.go`）持有**单项目**的常驻内存索引（全量重扫 + 目录名/路径模糊匹配 + 文本文件内容扫描），宿主客户端 `src/main/files/FileIndexService.ts`（与 session-index 同哲学：roots 变化重启进程、请求超时、迟到响应丢弃、fail-open）。**索引跨项目切换会重建**（requests 带 roots，签名变化即杀进程重拉）——后续可扩成多项目缓存。
+- **架构**：Go sidecar（`native/file-index`，纯 Go，唯一依赖 `github.com/mozillazg/go-pinyin`（字典随包，走 `go.sum` + workflow 模块缓存），源码 `native/file-index/{main,index,fuzzy,textmatch,pinyin}.go`）持有**单项目**的常驻内存索引（全量重扫 + 目录名/路径模糊匹配 + 拼音检索 + 文本文件内容扫描），宿主客户端 `src/main/files/FileIndexService.ts`（与 session-index 同哲学：roots 变化重启进程、请求超时、迟到响应丢弃、fail-open）。**索引跨项目切换会重建**（requests 带 roots，签名变化即杀进程重拉）——后续可扩成多项目缓存。
+- **拼音检索（文件名/目录名，硬性语义）**：含汉字的条目在索引期预算两把键（`native/file-index/pinyin.go`）：首字母按「逐字读音集合」存（重 → `zct`，因此 `cq` 与 `zq` 都能命中「重庆」），全拼取库默认读音。查询是纯 ASCII 字母且长度 2–24 时才启用，四级优先：整名首字母（700）> 首字母前缀（680）> 全拼子串（640）> 跳字首字母（560），全部落在名字通道内、路径命中（400/250）之上，不改动既有名字/路径分级。已知边界：全拼不覆盖异读（`chongqing` 搜不到「重庆」，`cq` 可以）、内容检索不参与拼音、`FileSystemService` 扫盘兜底路径**没有**拼音（sidecar 不可用时行为与今天一致）。
 - **内容扫描边界（硬性）**：文本扩展名白名单 + 已知文本文件名（Makefile/Dockerfile/.env/README…）；跳过忽略目录（与 `FileSystemService` 的 `ignoredNames` 同源，改一处必须改两处）、二进制探测（头部含 NUL 即跳过）；单文件默认 1MiB、单次查询总扫描 64MiB 字节预算，超限截断并回传 `truncated`；片段前后各截 80 字符且单行只保留前 3 条命中。
 - **降级链（fail-open）**：IPC 侧 `files:search-content` 在「没有 sidecar / 未就绪 / 异常」时返回 null，渲染层不渲染内容分区（名字结果照常返回）；`files:search`（名字）在 sidecar 不可用时回退既有 `FileSystemService.searchNames` 目录扫描，行为与今天一致。
 - **WSL**：WSL 项目不进索引（宿主 Go 进程读 UNC 不可靠），`files:search-content` 对 WSL 项目直接不启用（返回 null），名字搜索保持原样。
-- **构建链**：`npm run build:file-index`（fail-open，Go 缺失/构建失败只告警 exit 0）；`scripts/dev.js` 自动构建；`package.json` 的 `build` 链与 `extraResources`（`resources/file-index/bin` → `file-index`）；`.gitignore` 忽略产物只留 `.gitkeep`；三平台 workflow 的 `FILE_INDEX_OS/ARCH` env + `go -C native/file-index test ./...`。
-- 测试：`tests/fileIndexService.test.mjs`（宿主协议生命周期）+ `tests/fileSearchContentChain.test.mjs`（IPC 三处同步/降级/渲染层接线源码契约）+ Go 侧 `native/file-index/*_test.go`（名字排序/模糊匹配/内容扫描/预算截断/片段）。
+- **构建链**：`npm run build:file-index`（fail-open，Go 缺失/构建失败只告警 exit 0）；`scripts/dev.js` 自动构建；`package.json` 的 `build` 链与 `extraResources`（`resources/file-index/bin` → `file-index`）；`.gitignore` 忽略产物只留 `.gitkeep`；`native/file-index/go.sum` 必须入库（拼音依赖），三平台 workflow 的 `FILE_INDEX_OS/ARCH` env + `cache-dependency-path` 含该 go.sum + `go -C native/file-index test ./...`。
+- 测试：`tests/fileIndexService.test.mjs`（宿主协议生命周期）+ `tests/fileSearchContentChain.test.mjs`（IPC 三处同步/降级/渲染层接线/拼音依赖入库源码契约）+ Go 侧 `native/file-index/*_test.go`（名字排序/模糊匹配/拼音分级与异读/内容扫描/预算截断/片段）。
 
 ## 会话数据面 sidecar（session-store，Wave 1 骨架 + Wave 2 get-index 默认关）
 

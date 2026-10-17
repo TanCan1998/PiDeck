@@ -110,5 +110,18 @@ test("打包/CI：构建脚本、extraResources、gitignore、dev 与三平台 w
 		assert.match(source, /FILE_INDEX_OS:/);
 		assert.match(source, /FILE_INDEX_ARCH:/);
 		assert.match(source, /go -C native\/file-index test \.\/\.\.\./);
+		// 拼音依赖解析不到时 go build 会失败并 fail-open（功能静默消失），缓存清单必须带上 go.sum
+		assert.match(source, /cache-dependency-path: \|[\s\S]{0,200}?native\/file-index\/go\.sum/);
 	}
+});
+
+test("拼音检索：go.mod 声明依赖、go.sum 入库（fail-open 下静默丢功能的那个坑）", () => {
+	const gomod = read("../native/file-index/go.mod");
+	assert.match(gomod, /require github\.com\/mozillazg\/go-pinyin v\d/);
+	const gosum = read("../native/file-index/go.sum");
+	assert.match(gosum, /github\.com\/mozillazg\/go-pinyin v\d[\d.]* h1:/);
+	// 拼音通道只在 sidecar 通道里：扫盘兜底（FileSystemService）不得出现拼音实现，
+	// 否则两套语义会分叉（用户在不同机器上看到不同结果）。
+	const fsService = read("../src/main/fs/FileSystemService.ts");
+	assert.doesNotMatch(fsService, /pinyin/i);
 });

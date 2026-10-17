@@ -32,6 +32,14 @@ const (
 	scoreNameFuzzy = 600
 	scorePathHas   = 400
 	scorePathFuzzy = 250
+
+	// 拼音通道（native/file-index/pinyin.go）：首字母整名对齐 > 首字母前缀 >
+	// 全拼子串 > 跳字首字母。全落在名字通道内、路径通道（400/250）之上：
+	// 拼音命中比「路径里凑巧出现的子序列」更接近用户意图，但弱于真名字命中。
+	scoreNamePinyinExact  = 700
+	scoreNamePinyinPrefix = 680
+	scoreNamePinyinFull   = 640
+	scoreNamePinyinSkip   = 560
 )
 
 // fuzzyScore 返回命中分数；needle 必须是已折叠的查询词。
