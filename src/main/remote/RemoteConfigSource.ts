@@ -27,7 +27,9 @@ export function createConfigScope(home, fs, path, crypto) {
 	const FILES = { models: "models.json", settings: "settings.json" };
 	const DEFAULTS = { models: "{\"providers\":{}}", settings: "{}" };
 	const MAX_BYTES = 1048576, MAX_NODES = 20000, MAX_DEPTH = 32;
-	const SECRET_KEY = /(?:api[-_]?key|access[-_]?token|refresh[-_]?token|token|secret|password|passwd|authorization|cookie|credential|private[-_]?key)/i;
+	/* Whole-name matching: maxTokens/tokenizer must NOT be treated as secrets (they are real, patchable model fields). */
+	const SECRET_KEY = /^(?:[a-z0-9]+[-_])*(?:api[-_]?key|access[-_]?token|refresh[-_]?token|auth[-_]?token|token|secret|password|passwd|authorization|cookie|credential|private[-_]?key)$/i;
+	const RESERVED = /^(?:__proto__|constructor|prototype)$/;
 	const CONTROL = /[\u0000-\u001f\u007f]/;
 	function failure(code) { return new Error(code); }
 	function isRecord(value) { return typeof value === "object" && value !== null && !Array.isArray(value); }
@@ -95,8 +97,10 @@ export function createConfigScope(home, fs, path, crypto) {
 	function sha256(buffer) { return crypto.createHash("sha256").update(buffer).digest("hex"); }
 	function defaultBytes(file) { return Buffer.from(DEFAULTS[file], "utf8"); }
 	function parseData(buffer) {
+		let text = null;
+		try { text = new TextDecoder("utf-8", { fatal: true }).decode(buffer); } catch { throw failure("CONFIG_FILE_INVALID"); }
 		let parsed = null;
-		try { parsed = JSON.parse(buffer.toString("utf8")); } catch { throw failure("CONFIG_FILE_INVALID"); }
+		try { parsed = JSON.parse(text); } catch { throw failure("CONFIG_FILE_INVALID"); }
 		if (isRecord(parsed) === false) throw failure("CONFIG_FILE_INVALID");
 		return parsed;
 	}
@@ -121,6 +125,7 @@ export function createConfigScope(home, fs, path, crypto) {
 				budget.nodes += 1;
 				if (budget.nodes > MAX_NODES) throw failure("CONFIG_FILE_INVALID");
 				const child = prefix === "" ? key : prefix + "." + key;
+				if (RESERVED.test(key)) throw failure("CONFIG_FILE_INVALID");
 				if (SECRET_KEY.test(key)) {
 					const status = value[key] === "missing" || value[key] === null || value[key] === undefined || value[key] === "" ? "missing" : "configured";
 					value[key] = status;
@@ -151,13 +156,16 @@ export function createConfigScope(home, fs, path, crypto) {
 		const target = isRecord(base) ? base : {};
 		for (const key of Object.keys(patch)) {
 			const next = patch[key];
+			if (RESERVED.test(key)) throw failure("CONFIG_FILE_INVALID");
 			if (SECRET_KEY.test(key)) {
-				if (typeof next === "string" && next !== "configured" && next !== "missing") target[key] = next;
+				/* A secret is only ever replaced by a value; a non-string is a caller shape error, not a silent no-op. */
+				if (typeof next !== "string") throw failure("CONFIG_FILE_INVALID");
+				if (next !== "configured" && next !== "missing") Object.defineProperty(target, key, { value: next, enumerable: true, configurable: true, writable: true });
 				continue;
 			}
 			const merged = mergeInto(target[key], next, depth + 1, budget);
 			if (merged.deleted === true) delete target[key];
-			else target[key] = merged.value;
+			else Object.defineProperty(target, key, { value: merged.value, enumerable: true, configurable: true, writable: true });
 		}
 		return { value: target };
 	}
@@ -192,8 +200,24 @@ export function createConfigScope(home, fs, path, crypto) {
 		const current = readBytes(target);
 		return snapshot(file, current === null ? defaultBytes(file) : current);
 	}
+	/** Reject reserved keys anywhere in the patch (including array elements) before any merge walk. */
+	function validatePatch(value, depth, budget) {
+		if (depth > MAX_DEPTH) throw failure("CONFIG_FILE_INVALID");
+		budget.nodes += 1;
+		if (budget.nodes > MAX_NODES) throw failure("CONFIG_FILE_INVALID");
+		if (Array.isArray(value)) {
+			for (const entry of value) validatePatch(entry, depth + 1, budget);
+			return;
+		}
+		if (isRecord(value) === false) return;
+		for (const key of Object.keys(value)) {
+			if (RESERVED.test(key)) throw failure("CONFIG_FILE_INVALID");
+			validatePatch(value[key], depth + 1, budget);
+		}
+	}
 	function patch(value) {
 		const params = patchParams(value);
+		validatePatch(params.patch, 0, { nodes: 0 });
 		const target = agentDirectory() + "/" + FILES[params.file];
 		const current = readBytes(target);
 		const before = current === null ? defaultBytes(params.file) : current;
@@ -216,4 +240,4 @@ export function createConfigScope(home, fs, path, crypto) {
 `.replace(/\r?\n[\t ]*/g, "");
 
 /** sha256 of REMOTE_CONFIG_SOURCE as UTF-8 bytes; pinned here and re-checked by the helper contract tests. */
-export const REMOTE_HELPER_CONFIG_SHA256 = "6bc92a9a27a0881c4ee67492288e9858620f08b9d09ca8a069a088b2228e30b2";
+export const REMOTE_HELPER_CONFIG_SHA256 = "95bee7d28e2a0cd94a540d2ef51abacf108d75596733b12baca409555eac42b7";

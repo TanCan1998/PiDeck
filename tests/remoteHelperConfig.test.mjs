@@ -110,7 +110,7 @@ function homeWith(files = {}) {
 	return { home, agent };
 }
 
-configTest("hello advertises the config scope and the frozen helper reports build 1.21.0", async (t) => {
+configTest("hello advertises the config scope and the frozen helper reports build 1.21.1", async (t) => {
 	const { home } = homeWith();
 	const session = startHelper(t, home);
 	const hello = plain(await guard(session.client.request("hello"), "hello"));
@@ -254,4 +254,50 @@ configTest("read is repeatable and patch is idempotent only through its returned
 	assert.ok(replay.code);
 	assert.equal(patched.data.b, 2);
 	assert.deepEqual(JSON.parse(readText(join(agent, "settings.json"))), { a: 1, b: 2 });
+});
+
+configTest("reserved keys in a patch are refused before any merge", async (t) => {
+	const { home } = homeWith({ "settings.json": JSON.stringify({ theme: "dark" }) });
+	const session = startHelper(t, home);
+	const before = plain(await guard(session.client.request("config.read", { file: "settings" }), "before"));
+	const ownProto = JSON.parse('{"__proto__":{"polluted":"yes"}}');
+	await expectRefusal(session, "config.patch", { file: "settings", expectedVersion: before.version, patch: ownProto }, "CONFIG_FILE_INVALID");
+	const nested = JSON.parse('{"list":[{"constructor":{"prototype":{"polluted":"yes"}}}]}');
+	await expectRefusal(session, "config.patch", { file: "settings", expectedVersion: before.version, patch: nested }, "CONFIG_FILE_INVALID");
+	const after = plain(await guard(session.client.request("config.read", { file: "settings" }), "after"));
+	assert.equal(after.version, before.version, "a refused patch must not touch the file");
+	assert.equal(after.data.theme, "dark");
+	assert.equal(JSON.stringify(after).includes("polluted"), false);
+	const hello = plain(await guard(session.client.request("hello"), "hello after refusals"));
+	assert.equal(hello.helperVersion, entry.REMOTE_HELPER_ENTRY_VERSION, "the helper stays healthy after refused patches");
+});
+
+configTest("real model fields are not secrets and numeric patches apply", async (t) => {
+	const { home, agent } = homeWith({ "models.json": JSON.stringify({ providers: { p: { maxTokens: 32000, max_tokens: 10, tokenizer: "x", provider_token: "t" } } }) });
+	const session = startHelper(t, home);
+	const read = plain(await guard(session.client.request("config.read", { file: "models" }), "read models"));
+	assert.equal(read.data.providers.p.maxTokens, 32000);
+	assert.equal(read.data.providers.p.max_tokens, 10);
+	assert.equal(read.data.providers.p.tokenizer, "x");
+	assert.equal(read.data.providers.p.provider_token, "configured");
+	assert.deepEqual(
+		read.secrets.map((entry) => entry.path),
+		["providers.p.provider_token"],
+		"only the real secret name is redacted",
+	);
+	const patched = plain(await guard(session.client.request("config.patch", { file: "models", expectedVersion: read.version, patch: { providers: { p: { maxTokens: 8192 } } } }), "patch maxTokens"));
+	assert.equal(patched.data.providers.p.maxTokens, 8192);
+	assert.notEqual(patched.version, read.version);
+	assert.equal(JSON.parse(readText(join(agent, "models.json"))).providers.p.maxTokens, 8192);
+	await expectRefusal(session, "config.patch", { file: "models", expectedVersion: patched.version, patch: { providers: { p: { provider_token: 123 } } } }, "CONFIG_FILE_INVALID");
+});
+
+configTest("invalid UTF-8 is refused and the file is never overwritten", async (t) => {
+	const { home, agent } = homeWith();
+	const target = join(agent, "settings.json");
+	const corrupt = Buffer.from([0x7b, 0xff, 0xfe, 0x7d]);
+	writeFileSync(target, corrupt);
+	const session = startHelper(t, home);
+	await expectRefusal(session, "config.read", { file: "settings" }, "CONFIG_FILE_INVALID");
+	assert.deepEqual(readFileSync(target), corrupt, "a corrupt file is reported, never rewritten");
 });

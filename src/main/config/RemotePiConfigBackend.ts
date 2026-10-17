@@ -145,7 +145,12 @@ function validatePatch(patch: Record<string, unknown>): void {
 			return;
 		}
 		if (!isRecord(value)) return;
-		for (const key of Object.keys(value)) walk(value[key], depth + 1);
+		for (const key of Object.keys(value)) {
+			// Prototype pollution defense in depth: the helper refuses these too, but the host round-trip is not
+			// the right place to discover it.
+			if (key === "__proto__" || key === "constructor" || key === "prototype") throw stable(REMOTE_CONFIG_CODES.fileInvalid);
+			walk(value[key], depth + 1);
+		}
 	}
 	walk(patch, 0);
 	const serialized = JSON.stringify(patch);

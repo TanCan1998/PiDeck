@@ -120,6 +120,16 @@ test("invalid inputs are refused before the transport is called", async () => {
 	assert.equal(await rejectionCode(async () => backendModule.createRemotePiConfigBackend({})), shared.REMOTE_CONFIG_CODES.unavailable);
 });
 
+test("reserved keys are rejected recursively before any transport call", async () => {
+	const h = harness();
+	const ownProto = JSON.parse('{"__proto__":{"polluted":"yes"}}');
+	const nested = JSON.parse('{"providers":{"p":{"constructor":{"prototype":{"x":1}}}}}');
+	for (const patch of [ownProto, nested, { settings: { prototype: 1 } }]) {
+		assert.equal(await rejectionCode(() => h.backend.patch({ hostId: HOST, file: "models", expectedVersion: VERSION, patch })), shared.REMOTE_CONFIG_CODES.fileInvalid);
+	}
+	assert.deepEqual(h.calls, [], "no patch carrying a reserved key may reach the host");
+});
+
 test("the backend never imports the local ConfigManager or a filesystem module", () => {
 	const source = readFileSync("src/main/config/RemotePiConfigBackend.ts", "utf8");
 	assert.doesNotMatch(source, /from "[^"]*ConfigManager/);
