@@ -12,6 +12,11 @@ import type { FetchedModel, ConfigProxyMode } from "../../shared/types/fetchedMo
 import { Component, forwardRef, useRef, useState, useEffect, useCallback, useImperativeHandle, useMemo, type ReactNode, type Ref } from "react";
 import type { PiDesktopApi } from "../../preload";
 import { AuthTab } from "./config/AuthTab";
+import { PiConfigTargetSelector, type PiConfigTargetHost } from "./config/PiConfigTargetSelector";
+import { RemoteConfigPanel } from "./config/RemoteConfigPanel";
+import { REMOTE_CONFIG_UNSUPPORTED_TAB_COPY, RemoteConfigUnsupportedNotice } from "./config/RemoteConfigUnsupportedNotice";
+import type { PiConfigTarget } from "../../shared/piConfig";
+import type { RemoteHostListItem } from "../../shared/types/remoteHost";
 import { buildProviderOrderScope } from "./utils/providerOrder";
 import { ModelsTab } from "./config/ModelsTab";
 import { TokenDancePanel, type TokendanceInstallOutcome } from "./config/TokenDancePanel";
@@ -448,6 +453,15 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 	const mcpTabRef = useRef<McpTabHandle>(null);
 	/** 关闭弹框时存在未保存修改 → 弹出保存确认（借鉴设置页关闭逻辑） */
 	const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
+	/** 远端目标（Batch B）：缺省本机；切换前若远端有未应用 patch，显式确认丢弃。 */
+	const [configTarget, setConfigTarget] = useState<PiConfigTarget>({ kind: "local" });
+	const [remoteConfigHosts, setRemoteConfigHosts] = useState<PiConfigTargetHost[]>([]);
+	/** 当前远端面板是否有未应用 patch（用于关闭/切换目标时的显式确认）。 */
+	const [remoteConfigDirty, setRemoteConfigDirty] = useState(false);
+	const [pendingTargetSwitch, setPendingTargetSwitch] = useState<PiConfigTarget | null>(null);
+	const [remoteDiscardConfirmOpen, setRemoteDiscardConfirmOpen] = useState(false);
+	const remoteTargetHostId = configTarget.kind === "ssh" ? configTarget.hostId : null;
+	const remoteHostLabel = remoteTargetHostId ? remoteConfigHosts.find((host) => host.id === remoteTargetHostId)?.label : undefined;
 	const hasDirty = dirtyTabs.size > 0;
 	// DSH/Pi 顶层分页与 DSH 左侧导航的黄点来源：dsh:<nav> 归 DSH，其余归 Pi
 	const dshDirtyNavIds = useMemo(() => {
@@ -931,6 +945,25 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 			})
 			.catch(() => {
 				// 获取失败不影响源文件编辑，仅不展示路径
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [open]);
+
+	// 远端配置目标选择器（Batch B）：只列出已验证且未禁用的主机；列表失败时仍保留「本机」，不阻塞本机配置。
+	useEffect(() => {
+		if (!open) return;
+		let cancelled = false;
+		void api.remoteHosts
+			.list()
+			.then((result) => {
+				if (cancelled) return;
+				const hosts: RemoteHostListItem[] = result.ok ? result.hosts : [];
+				setRemoteConfigHosts(hosts.filter((host) => host.verified && !host.disabled).map((host) => ({ id: host.id, label: host.label, sshHost: host.sshHost })));
+			})
+			.catch(() => {
+				if (!cancelled) setRemoteConfigHosts([]);
 			});
 		return () => {
 			cancelled = true;
@@ -2297,6 +2330,9 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 	 */
 	const handleSaveCurrent = async () => {
 		if (saving) return;
+		// 远端目标下统一保存按钮被禁用（远端面板自带「应用 patch」按钮），这里再兜底一次，
+		// 保证任何键盘/外壳触发都不会把本机 models/settings 写入磁盘。
+		if (configTarget.kind === "ssh") return;
 		// 新增/编辑页的第一次点击只把页内草稿提交到 modelsData；
 		// React state 更新后下一轮 effect 会自动继续落盘，用户无需再点一次保存。
 		if (backendPane === "pi" && section === "config" && tab === "models" && (addingProvider || editingProvider)) {
@@ -2309,10 +2345,31 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 		await saveByKey(currentTabKey);
 	};
 
+	/** 切换配置目标：同目标忽略；远端有未应用 patch 时先显式确认（丢弃草稿不能静默发生）。 */
+	const handleConfigTargetChange = (next: PiConfigTarget) => {
+		const same = next.kind === configTarget.kind && (next.kind === "local" || (configTarget.kind === "ssh" && next.hostId === configTarget.hostId));
+		if (same) return;
+		if (remoteConfigDirty) {
+			setPendingTargetSwitch(next);
+			return;
+		}
+		setConfigTarget(next);
+		setRemoteConfigDirty(false);
+	};
+	const applyPendingTargetSwitch = () => {
+		if (pendingTargetSwitch) {
+			setConfigTarget(pendingTargetSwitch);
+			setRemoteConfigDirty(false);
+			setPendingTargetSwitch(null);
+		}
+	};
 	/** 关闭弹框：有未保存修改时先弹保存确认（借鉴设置页），无修改直接关闭。 */
 	const handleClose = () => {
 		if (dirtyTabs.size > 0) {
 			setCloseConfirmOpen(true);
+		} else if (remoteConfigDirty) {
+			// 远端 patch 不会随本机保存动作落盘；必须显式确认丢弃后才能关闭。
+			setRemoteDiscardConfirmOpen(true);
 		} else {
 			props.onClose();
 		}
@@ -2330,6 +2387,8 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 			// 外壳统一关闭确认时调用：把配置分区全部脏来源逐个保存（dsh:<nav> 归并 dsh），
 			// 与独立 ConfigModal「保存并关闭」走同一套 saveByKey 分发，任一失败返回 false 留在窗口。
 			saveAllDirty: async () => {
+				// 只有远端 patch 时本机保存链路无事可做；返回 false 让外壳保留窗口，用户可显式丢弃/关闭。
+				if (dirtyTabs.size === 0 && remoteConfigDirty) return false;
 				const roots = new Set<string>();
 				for (const key of dirtyTabs) {
 					roots.add(key.startsWith("dsh:") ? "dsh" : key);
@@ -2360,7 +2419,7 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 	useEffect(() => {
 		props.onPaneStateChange?.({
 			saving,
-			hasDirty,
+			hasDirty: hasDirty || remoteConfigDirty,
 			unsaved: configUnsavedSummary ? { totalCount: configUnsavedSummary.totalCount, items: configUnsavedSummary.items } : { totalCount: 0, items: [] },
 		});
 	}, [saving, hasDirty, configUnsavedSummary, props.onPaneStateChange]);
@@ -2379,6 +2438,11 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 			if (!ok) return;
 		}
 		setCloseConfirmOpen(false);
+		if (remoteConfigDirty) {
+			// 本机脏项已逐个保存，但远端 patch 不在本机保存链路内：转成显式丢弃确认。
+			setRemoteDiscardConfirmOpen(true);
+			return;
+		}
 		props.onClose();
 	};
 
@@ -2519,90 +2583,97 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 
 						<TabsContent value="config:models" className="config-main min-w-0">
 							<div className="config-content">
-								{statusBlock}
-								{configDiagnosticBlock}
-								{!loading && (
+								<PiConfigTargetSelector target={configTarget} hosts={remoteConfigHosts} disabled={saving} onChange={handleConfigTargetChange} />
+								{remoteTargetHostId ? (
+									<RemoteConfigPanel key={"remote-models-" + remoteTargetHostId} file="models" hostId={remoteTargetHostId} hostLabel={remoteHostLabel} onDirtyChange={setRemoteConfigDirty} />
+								) : (
 									<>
-										{/* TokenDance：确认后一键写入配置（pi models.json + DSH 模型目录），不内置注入 */}
-										<TokenDancePanel configured={!!modelsData.providers[TOKENDANCE_PROVIDER]} onInstalled={handleTokendanceInstalled} />
-										<ModelsTab
-											data={modelsData}
-											expandedProvider={expandedProvider}
-											focusProvider={focusedProvider}
-											onOpenUsageProbeDialog={(provider) => openUsageProbeDialogFor(provider, "pi")}
-											addingProvider={addingProvider}
-											providerPageSaveRef={providerPageSaveRef}
-											hiddenProviders={hiddenProviders}
-											onToggleHiddenProvider={handleToggleHiddenProvider}
-											providerOrder={providerOrder}
-											providerOrderScope={providerOrderScope}
-											onReorderProviders={handleReorderProviders}
-											onResetProviders={handleResetProviderOrder}
-											hiddenModels={hiddenModels}
-											onToggleHiddenModel={handleToggleHiddenModel}
-											fetchingProvider={fetchingProvider}
-											fetchedModels={fetchedModels}
-											fetchModelsErrorByProvider={fetchModelsErrorByProvider}
-											testingProvider={testingProvider}
-											testResult={testResult}
-											testModelIdByProvider={testModelIdByProvider}
-											testProxyModeByProvider={testProxyModeByProvider}
-											saving={saving}
-											onToggleProvider={(name) => setExpandedProvider(expandedProvider === name ? null : name)}
-											onStartAddProvider={() => {
-												setAddingProvider(true);
-											}}
-											onCancelAddProvider={() => setAddingProvider(false)}
-											onConfirmAddProvider={handleAddProvider}
-											editingProvider={editingProvider}
-											onStartEditProvider={(name) => setEditingProvider(name)}
-											onCancelEditProvider={() => setEditingProvider(null)}
-											onConfirmEditProvider={handleEditProvider}
-											onDeleteProvider={handleDeleteProvider}
-											onDuplicateProvider={handleDuplicateProvider}
-											onDeleteProviders={handleDeleteProviders}
-											onAddModel={handleAddModel}
-											onUpdateModel={handleUpdateModel}
-											onUpdateModelThinkingLevel={handleUpdateModelThinkingLevel}
-											onUpdateModelUserAgent={handleUpdateModelUserAgent}
-											getModelUserAgentOverride={(providerName, index) => {
-												const provider = modelsData.providers[providerName];
-												const model = provider?.models[index];
-												return model ? getModelUserAgentOverride(provider.modelOverrides, model.id) : "";
-											}}
-											onDeleteModel={handleDeleteModel}
-											onDeleteModels={handleDeleteModels}
-											onResetModel={handleResetModelToAdaptive}
-											resettingModelKey={resettingModelKey}
-											onFetchModels={handleFetchModels}
-											onTestProvider={handleTestProvider}
-											onChangeTestModelId={(providerName, modelId) =>
-												setTestModelIdByProvider((current) => ({
-													...current,
-													[providerName]: modelId,
-												}))
-											}
-											onChangeTestProxyMode={(providerName, mode) =>
-												setTestProxyModeByProvider((current) => ({
-													...current,
-													[providerName]: mode,
-												}))
-											}
-											onClearTestResult={() => setTestResult(null)}
-											onSave={handleSaveModels}
-											onChangeProvider={(name, field, value) => {
-												const provider = modelsData.providers[name];
-												if (!provider) return;
-												setModelsData({
-													...modelsData,
-													providers: {
-														...modelsData.providers,
-														[name]: { ...provider, [field]: value },
-													},
-												});
-												markDirty("config:models");
-											}}
-										/>
+										{statusBlock}
+										{configDiagnosticBlock}
+										{!loading && (
+											<>
+												{/* TokenDance：确认后一键写入配置（pi models.json + DSH 模型目录），不内置注入 */}
+												<TokenDancePanel configured={!!modelsData.providers[TOKENDANCE_PROVIDER]} onInstalled={handleTokendanceInstalled} />
+												<ModelsTab
+													data={modelsData}
+													expandedProvider={expandedProvider}
+													focusProvider={focusedProvider}
+													onOpenUsageProbeDialog={(provider) => openUsageProbeDialogFor(provider, "pi")}
+													addingProvider={addingProvider}
+													providerPageSaveRef={providerPageSaveRef}
+													hiddenProviders={hiddenProviders}
+													onToggleHiddenProvider={handleToggleHiddenProvider}
+													providerOrder={providerOrder}
+													providerOrderScope={providerOrderScope}
+													onReorderProviders={handleReorderProviders}
+													onResetProviders={handleResetProviderOrder}
+													hiddenModels={hiddenModels}
+													onToggleHiddenModel={handleToggleHiddenModel}
+													fetchingProvider={fetchingProvider}
+													fetchedModels={fetchedModels}
+													fetchModelsErrorByProvider={fetchModelsErrorByProvider}
+													testingProvider={testingProvider}
+													testResult={testResult}
+													testModelIdByProvider={testModelIdByProvider}
+													testProxyModeByProvider={testProxyModeByProvider}
+													saving={saving}
+													onToggleProvider={(name) => setExpandedProvider(expandedProvider === name ? null : name)}
+													onStartAddProvider={() => {
+														setAddingProvider(true);
+													}}
+													onCancelAddProvider={() => setAddingProvider(false)}
+													onConfirmAddProvider={handleAddProvider}
+													editingProvider={editingProvider}
+													onStartEditProvider={(name) => setEditingProvider(name)}
+													onCancelEditProvider={() => setEditingProvider(null)}
+													onConfirmEditProvider={handleEditProvider}
+													onDeleteProvider={handleDeleteProvider}
+													onDuplicateProvider={handleDuplicateProvider}
+													onDeleteProviders={handleDeleteProviders}
+													onAddModel={handleAddModel}
+													onUpdateModel={handleUpdateModel}
+													onUpdateModelThinkingLevel={handleUpdateModelThinkingLevel}
+													onUpdateModelUserAgent={handleUpdateModelUserAgent}
+													getModelUserAgentOverride={(providerName, index) => {
+														const provider = modelsData.providers[providerName];
+														const model = provider?.models[index];
+														return model ? getModelUserAgentOverride(provider.modelOverrides, model.id) : "";
+													}}
+													onDeleteModel={handleDeleteModel}
+													onDeleteModels={handleDeleteModels}
+													onResetModel={handleResetModelToAdaptive}
+													resettingModelKey={resettingModelKey}
+													onFetchModels={handleFetchModels}
+													onTestProvider={handleTestProvider}
+													onChangeTestModelId={(providerName, modelId) =>
+														setTestModelIdByProvider((current) => ({
+															...current,
+															[providerName]: modelId,
+														}))
+													}
+													onChangeTestProxyMode={(providerName, mode) =>
+														setTestProxyModeByProvider((current) => ({
+															...current,
+															[providerName]: mode,
+														}))
+													}
+													onClearTestResult={() => setTestResult(null)}
+													onSave={handleSaveModels}
+													onChangeProvider={(name, field, value) => {
+														const provider = modelsData.providers[name];
+														if (!provider) return;
+														setModelsData({
+															...modelsData,
+															providers: {
+																...modelsData.providers,
+																[name]: { ...provider, [field]: value },
+															},
+														});
+														markDirty("config:models");
+													}}
+												/>
+											</>
+										)}
 									</>
 								)}
 							</div>
@@ -2610,58 +2681,71 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 
 						<TabsContent value="config:auth" className="config-main min-w-0">
 							<div className="config-content">
-								{statusBlock}
-								{configDiagnosticBlock}
-								{!loading && (
-									<AuthTab
-										data={authData}
-										expandedAuth={expandedAuth}
-										addingAuth={addingAuth}
-										newAuthName={newAuthName}
-										saving={saving}
-										modelsData={modelsData}
-										hiddenAuthProviders={hiddenAuthProviders}
-										providerOrder={providerOrder}
-										providerOrderScope={providerOrderScope}
-										onReorderProviders={handleReorderProviders}
-										onResetProviders={handleResetProviderOrder}
-										onToggleHiddenAuthProvider={handleToggleHiddenAuthProvider}
-										onToggleAuth={(name) => setExpandedAuth(expandedAuth === name ? null : name)}
-										onStartAddAuth={() => {
-											setAddingAuth(true);
-											setNewAuthName("");
-										}}
-										onCancelAddAuth={() => setAddingAuth(false)}
-										onChangeNewAuthName={setNewAuthName}
-										onConfirmAddAuth={(name, key) => handleAddAuth(name, key)}
-										onDuplicateAuth={handleDuplicateAuth}
-										onDeleteAuths={handleDeleteAuths}
-										onDeleteAuth={handleDeleteAuth}
-										onUpdate={handleUpdateAuth}
-										onSave={handleSaveAuth}
-										onOpenUsageProbeDialog={(provider) => openUsageProbeDialogFor(provider, "pi")}
-									/>
+								{remoteTargetHostId ? (
+									<RemoteConfigUnsupportedNotice bodyKey={REMOTE_CONFIG_UNSUPPORTED_TAB_COPY.auth.bodyKey} code={REMOTE_CONFIG_UNSUPPORTED_TAB_COPY.auth.code} hostLabel={remoteHostLabel} testId="remote-config-unsupported-auth" />
+								) : (
+									<>
+										{statusBlock}
+										{configDiagnosticBlock}
+										{!loading && (
+											<AuthTab
+												data={authData}
+												expandedAuth={expandedAuth}
+												addingAuth={addingAuth}
+												newAuthName={newAuthName}
+												saving={saving}
+												modelsData={modelsData}
+												hiddenAuthProviders={hiddenAuthProviders}
+												providerOrder={providerOrder}
+												providerOrderScope={providerOrderScope}
+												onReorderProviders={handleReorderProviders}
+												onResetProviders={handleResetProviderOrder}
+												onToggleHiddenAuthProvider={handleToggleHiddenAuthProvider}
+												onToggleAuth={(name) => setExpandedAuth(expandedAuth === name ? null : name)}
+												onStartAddAuth={() => {
+													setAddingAuth(true);
+													setNewAuthName("");
+												}}
+												onCancelAddAuth={() => setAddingAuth(false)}
+												onChangeNewAuthName={setNewAuthName}
+												onConfirmAddAuth={(name, key) => handleAddAuth(name, key)}
+												onDuplicateAuth={handleDuplicateAuth}
+												onDeleteAuths={handleDeleteAuths}
+												onDeleteAuth={handleDeleteAuth}
+												onUpdate={handleUpdateAuth}
+												onSave={handleSaveAuth}
+												onOpenUsageProbeDialog={(provider) => openUsageProbeDialogFor(provider, "pi")}
+											/>
+										)}
+									</>
 								)}
 							</div>
 						</TabsContent>
 
 						<TabsContent value="config:settings" className="config-main min-w-0">
 							<div className="config-content">
-								{statusBlock}
-								{configDiagnosticBlock}
-								{!loading && (
-									<SettingsTab
-										data={settingsData}
-										saving={saving}
-										modelsData={modelsData}
-										authData={authData}
-										discoveredModels={discoveredModels}
-										onChange={(data) => {
-											setSettingsData(data);
-											markDirty("config:settings");
-										}}
-										onSave={handleSaveSettings}
-									/>
+								<PiConfigTargetSelector target={configTarget} hosts={remoteConfigHosts} disabled={saving} onChange={handleConfigTargetChange} />
+								{remoteTargetHostId ? (
+									<RemoteConfigPanel key={"remote-settings-" + remoteTargetHostId} file="settings" hostId={remoteTargetHostId} hostLabel={remoteHostLabel} onDirtyChange={setRemoteConfigDirty} />
+								) : (
+									<>
+										{statusBlock}
+										{configDiagnosticBlock}
+										{!loading && (
+											<SettingsTab
+												data={settingsData}
+												saving={saving}
+												modelsData={modelsData}
+												authData={authData}
+												discoveredModels={discoveredModels}
+												onChange={(data) => {
+													setSettingsData(data);
+													markDirty("config:settings");
+												}}
+												onSave={handleSaveSettings}
+											/>
+										)}
+									</>
 								)}
 							</div>
 						</TabsContent>
@@ -2821,46 +2905,64 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 						{/* forceMount：MCP 页自管草稿，切走再回来不能丢未保存编辑；inactive 必须 hidden，否则叠在别的 tab 上。 */}
 						<TabsContent value="config:mcp" forceMount className="config-main min-w-0 data-[state=inactive]:hidden">
 							<div className="config-content flex min-h-0 flex-col">
-								{/* MCP 页自持作用域：项目级 mcp.json 仅此入口，项目下拉与脏保护都在 McpTab 内部 */}
-								<McpTab ref={mcpTabRef} projects={projects} activeProjectId={projectId} onDirtyChange={handleMcpDirtyChange} />
+								{remoteTargetHostId ? (
+									<RemoteConfigUnsupportedNotice bodyKey={REMOTE_CONFIG_UNSUPPORTED_TAB_COPY.mcp.bodyKey} code={REMOTE_CONFIG_UNSUPPORTED_TAB_COPY.mcp.code} hostLabel={remoteHostLabel} testId="remote-config-unsupported-mcp" />
+								) : (
+									<>
+										{/* MCP 页自持作用域：项目级 mcp.json 仅此入口，项目下拉与脏保护都在 McpTab 内部 */}
+										<McpTab ref={mcpTabRef} projects={projects} activeProjectId={projectId} onDirtyChange={handleMcpDirtyChange} />
+									</>
+								)}
 							</div>
 						</TabsContent>
 
 						<TabsContent value="config:trust" className="config-main min-w-0">
 							<div className="config-content">
-								{statusBlock}
-								{configDiagnosticBlock}
-								{!loading && (
-									<TrustTab
-										data={trustData}
-										saving={saving}
-										onChange={(data) => {
-											setTrustData(data);
-											markDirty("config:trust");
-										}}
-										onSave={handleSaveTrust}
-									/>
+								{remoteTargetHostId ? (
+									<RemoteConfigUnsupportedNotice bodyKey={REMOTE_CONFIG_UNSUPPORTED_TAB_COPY.trust.bodyKey} code={REMOTE_CONFIG_UNSUPPORTED_TAB_COPY.trust.code} hostLabel={remoteHostLabel} testId="remote-config-unsupported-trust" />
+								) : (
+									<>
+										{statusBlock}
+										{configDiagnosticBlock}
+										{!loading && (
+											<TrustTab
+												data={trustData}
+												saving={saving}
+												onChange={(data) => {
+													setTrustData(data);
+													markDirty("config:trust");
+												}}
+												onSave={handleSaveTrust}
+											/>
+										)}
+									</>
 								)}
 							</div>
 						</TabsContent>
 
 						<TabsContent value="config:raw" className="config-main min-w-0">
 							<div className="config-content flex min-h-0 flex-col">
-								{statusBlock}
-								{configDiagnosticBlock}
-								{!loading && (
-									<RawTab
-										fileName={rawFileName}
-										content={rawContent}
-										saving={saving}
-										configDir={piConfigDir ?? undefined}
-										onChangeFileName={handleRawFileChange}
-										onChangeContent={(value) => {
-											setRawContent(value);
-											markDirty("config:raw");
-										}}
-										onSave={handleSaveRaw}
-									/>
+								{remoteTargetHostId ? (
+									<RemoteConfigUnsupportedNotice bodyKey={REMOTE_CONFIG_UNSUPPORTED_TAB_COPY.raw.bodyKey} code={REMOTE_CONFIG_UNSUPPORTED_TAB_COPY.raw.code} hostLabel={remoteHostLabel} testId="remote-config-unsupported-raw" />
+								) : (
+									<>
+										{statusBlock}
+										{configDiagnosticBlock}
+										{!loading && (
+											<RawTab
+												fileName={rawFileName}
+												content={rawContent}
+												saving={saving}
+												configDir={piConfigDir ?? undefined}
+												onChangeFileName={handleRawFileChange}
+												onChangeContent={(value) => {
+													setRawContent(value);
+													markDirty("config:raw");
+												}}
+												onSave={handleSaveRaw}
+											/>
+										)}
+									</>
 								)}
 							</div>
 						</TabsContent>
@@ -2943,6 +3045,25 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 				</AlertDialog>
 			)}
 
+			{/* 目标切换确认：远端有未应用 patch 时，切换会丢弃草稿，必须显式确认 */}
+			{pendingTargetSwitch && <ConfirmDialog title={t("config.target.switchTitle")} message={t("config.target.switchMessage")} confirmLabel={t("config.target.switchConfirm")} danger onConfirm={applyPendingTargetSwitch} onCancel={() => setPendingTargetSwitch(null)} />}
+
+			{/* 远端草稿关闭确认：本机保存链路不会落盘远端 patch，只能显式丢弃或取消 */}
+			{remoteDiscardConfirmOpen && (
+				<ConfirmDialog
+					title={t("config.target.discardTitle")}
+					message={t("config.target.discardMessage")}
+					confirmLabel={t("config.target.discardConfirm")}
+					danger
+					onConfirm={() => {
+						setRemoteDiscardConfirmOpen(false);
+						setRemoteConfigDirty(false);
+						props.onClose();
+					}}
+					onCancel={() => setRemoteDiscardConfirmOpen(false)}
+				/>
+			)}
+
 			{/* toast 已改用 sonner */}
 			{deleteConfirm && <ConfirmDialog title={deleteConfirm.title} message={deleteConfirm.message} confirmLabel={t("common.delete")} danger onConfirm={deleteConfirm.onConfirm} onCancel={() => setDeleteConfirm(null)} />}
 		</>
@@ -2964,7 +3085,7 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 					<div className="flex items-center gap-1.5">
 						{/* 顶部统一保存：各 tab 内部保存按钮可能被滚动藏住，这里常驻可见；
 						    有未保存修改时按钮带黄点标记；无修改也放开再次保存，不再禁用 */}
-						<Button variant="default" size="sm" onClick={() => void handleSaveCurrent()} disabled={saving} title={hasDirty ? t("config.dirtyTooltip") : undefined}>
+						<Button variant="default" size="sm" onClick={() => void handleSaveCurrent()} disabled={saving || configTarget.kind === "ssh"} title={configTarget.kind === "ssh" ? t("config.target.remoteSaveHint") : hasDirty ? t("config.dirtyTooltip") : undefined}>
 							{hasDirty && <span className="size-2 rounded-full bg-amber-400" aria-hidden="true" />}
 							{saving ? t("common.saving") : t("common.save")}
 						</Button>

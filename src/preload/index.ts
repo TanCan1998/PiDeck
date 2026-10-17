@@ -1107,11 +1107,13 @@ const api = {
 	config: {
 		previewProviderMigration: (direction: import("../shared/types/providerMigration").ProviderMigrationDirection) => ipcRenderer.invoke(ipcChannels.configPreviewProviderMigration, direction) as Promise<import("../shared/types/providerMigration").ProviderMigrationPreview>,
 		applyProviderMigration: (direction: import("../shared/types/providerMigration").ProviderMigrationDirection, provider: string) => ipcRenderer.invoke(ipcChannels.configApplyProviderMigration, direction, provider) as Promise<import("../shared/types/providerMigration").ProviderMigrationResult>,
-		getModels: () =>
-			ipcRenderer.invoke(ipcChannels.configGetModels) as Promise<{
+		/** 目标路由（Batch B）：options 缺省 = 本机，shape/返回值与旧调用逐字兼容；ssh 目标返回 remote 元数据。 */
+		getModels: (options?: import("../shared/piConfig").PiConfigReadOptions) =>
+			ipcRenderer.invoke(ipcChannels.configGetModels, options) as Promise<{
 				raw: string;
 				parsed: { providers: Record<string, unknown> };
 				diagnostic?: ConfigFileDiagnostic;
+				remote?: import("../shared/piConfig").RemotePiConfigSnapshot;
 			}>,
 		getAuth: () =>
 			ipcRenderer.invoke(ipcChannels.configGetAuth) as Promise<{
@@ -1119,11 +1121,12 @@ const api = {
 				parsed: Record<string, unknown>;
 				diagnostic?: ConfigFileDiagnostic;
 			}>,
-		getSettings: () =>
-			ipcRenderer.invoke(ipcChannels.configGetSettings) as Promise<{
+		getSettings: (options?: import("../shared/piConfig").PiConfigReadOptions) =>
+			ipcRenderer.invoke(ipcChannels.configGetSettings, options) as Promise<{
 				raw: string;
 				parsed: Record<string, unknown>;
 				diagnostic?: ConfigFileDiagnostic;
+				remote?: import("../shared/piConfig").RemotePiConfigSnapshot;
 			}>,
 		getTrust: () =>
 			ipcRenderer.invoke(ipcChannels.configGetTrust) as Promise<{
@@ -1140,8 +1143,8 @@ const api = {
 		probeMcp: (definition: import("../shared/types/mcp").McpServerDefinition) => ipcRenderer.invoke(ipcChannels.configProbeMcp, definition) as Promise<import("../shared/types/mcp").McpProbeResult>,
 		// 只读：pi 全局配置目录（源文件编辑页标注实际路径用）。
 		getConfigDir: () => ipcRenderer.invoke(ipcChannels.configGetDir) as Promise<string>,
-		saveModels: (data: unknown) =>
-			ipcRenderer.invoke(ipcChannels.configSaveModels, data) as Promise<{
+		saveModels: (data: unknown, options?: import("../shared/piConfig").PiConfigWriteOptions) =>
+			ipcRenderer.invoke(ipcChannels.configSaveModels, data, options) as Promise<{
 				valid: boolean;
 				error?: string;
 				/** 即时验证：刚写入的 models.json 解析出的模型数（不含 pi fork 验证） */
@@ -1149,6 +1152,8 @@ const api = {
 				modelCount?: number;
 				modelLoadReason?: string | null;
 				modelLoadDetail?: string;
+				/** ssh 目标成功回执（本机目标不出现）。 */
+				remote?: import("../shared/piConfig").RemotePiConfigWriteReceipt;
 			}>,
 		// 保存 models 后的后台 pi 验证结果（fork 真实 pi ~17s，仅失败时推送）。
 		onModelsVerifyResult: (callback: (payload: ModelsVerifyResult) => void) => subscribe<ModelsVerifyResult>(ipcChannels.configModelsVerifyResult, callback),
@@ -1157,10 +1162,11 @@ const api = {
 				valid: boolean;
 				error?: string;
 			}>,
-		saveSettings: (settings: Record<string, unknown>) =>
-			ipcRenderer.invoke(ipcChannels.configSaveSettings, settings) as Promise<{
+		saveSettings: (settings: Record<string, unknown>, options?: import("../shared/piConfig").PiConfigWriteOptions) =>
+			ipcRenderer.invoke(ipcChannels.configSaveSettings, settings, options) as Promise<{
 				valid: boolean;
 				error?: string;
+				remote?: import("../shared/piConfig").RemotePiConfigWriteReceipt;
 			}>,
 		saveRaw: (fileName: string, rawJson: string) => ipcRenderer.invoke(ipcChannels.configSaveRaw, fileName, rawJson) as Promise<{ valid: boolean; error?: string }>,
 		export: () => ipcRenderer.invoke(ipcChannels.configExport) as Promise<string>,

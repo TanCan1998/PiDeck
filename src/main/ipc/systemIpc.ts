@@ -1620,7 +1620,9 @@ export function registerSystemIpc(deps: SystemIpcDeps): void {
 
 	ipcMain.handle(ipcChannels.configGetModels, async (_event, options?: unknown) => {
 		const routed = await piConfigRouter.readModels(options);
-		return routed.kind === "local" ? routed.value : routed;
+		if (routed.kind === "local") return routed.value;
+		// Batch B renderer DTO: local-compatible fields plus the sanitized remote snapshot (no secret plaintext).
+		return { raw: JSON.stringify(routed.data, null, 2), parsed: routed.data, remote: routed };
 	});
 	// 预览/执行单供应商互迁：方向必须是枚举，供应商名在服务层再校验。
 	ipcMain.handle(ipcChannels.configPreviewProviderMigration, async (_event, direction: unknown) => {
@@ -1655,7 +1657,8 @@ export function registerSystemIpc(deps: SystemIpcDeps): void {
 	ipcMain.handle(ipcChannels.configGetAuth, () => configManager.getAuthConfig());
 	ipcMain.handle(ipcChannels.configGetSettings, async (_event, options?: unknown) => {
 		const routed = await piConfigRouter.readSettings(options);
-		return routed.kind === "local" ? routed.value : routed;
+		if (routed.kind === "local") return routed.value;
+		return { raw: JSON.stringify(routed.data, null, 2), parsed: routed.data, remote: routed };
 	});
 	ipcMain.handle(ipcChannels.configGetTrust, () => configManager.getTrustConfig());
 	// MCP project layers are selected by a stable registered project id; renderer paths are never trusted.
@@ -1691,7 +1694,7 @@ export function registerSystemIpc(deps: SystemIpcDeps): void {
 		if (routed.kind === "remote") {
 			// 远端 patch 成功：不触碰本机模型缓存/后台 fork（本机 models.json 没变），只回传供下一次 patch 的 version。
 			void appLogger.info("config", "Remote models config patched", { hostId: routed.hostId, version: routed.version });
-			return { valid: true, remote: { hostId: routed.hostId, file: routed.file, version: routed.version, sha256: routed.sha256 } };
+			return { valid: true, remote: routed };
 		}
 		const result = routed.value;
 		if (!result.valid) return result;
@@ -1725,7 +1728,7 @@ export function registerSystemIpc(deps: SystemIpcDeps): void {
 		const routed = await piConfigRouter.saveSettings(settings, options);
 		if (routed.kind === "remote") {
 			void appLogger.info("config", "Remote settings config patched", { hostId: routed.hostId, version: routed.version });
-			return { valid: true, remote: { hostId: routed.hostId, file: routed.file, version: routed.version, sha256: routed.sha256 } };
+			return { valid: true, remote: routed };
 		}
 		const result = routed.value;
 		void appLogger.info("config", "Pi settings config saved", { keys: Object.keys(settings ?? {}) });

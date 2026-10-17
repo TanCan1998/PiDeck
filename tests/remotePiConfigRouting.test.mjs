@@ -156,7 +156,12 @@ test("the existing config IPC/preload contract now routes an optional target wit
 	assert.match(mainIndex, /createRemotePiConfigBackend\(\{/);
 	assert.match(mainIndex, /remotePiConfig,/);
 	assert.match(mainIndex, /remoteExperimentEnabled[\s\S]{0,200}?createRemotePiConfigBackend/);
-	// Preload stays body-only for now (Batch B adds the renderer target arg); no second channel is introduced.
-	assert.match(preload, /getModels: \(\) =>\s*ipcRenderer\.invoke\(ipcChannels\.configGetModels\)/);
-	assert.match(preload, /saveModels: \(data: unknown\) =>\s*ipcRenderer\.invoke\(ipcChannels\.configSaveModels, data\)/);
+	// Batch B (after the A1/A2/A4 security fix) extends the four existing methods with optional options; no new channel.
+	assert.match(preload, /getModels: \(options\?: [\s\S]{0,160}?\) =>\s*ipcRenderer\.invoke\(ipcChannels\.configGetModels, options\)/);
+	assert.match(preload, /getSettings: \(options\?: [\s\S]{0,160}?\) =>\s*ipcRenderer\.invoke\(ipcChannels\.configGetSettings, options\)/);
+	assert.match(preload, /saveModels: \(data: unknown, options\?: [\s\S]{0,160}?\) =>\s*ipcRenderer\.invoke\(ipcChannels\.configSaveModels, data, options\)/);
+	assert.match(preload, /saveSettings: \(settings: Record<string, unknown>, options\?: [\s\S]{0,160}?\) =>\s*ipcRenderer\.invoke\(ipcChannels\.configSaveSettings, settings, options\)/);
+	// Remote answers stay local-compatible DTOs with sanitized remote metadata; save returns the receipt.
+	assert.match(systemIpc, /raw: JSON\.stringify\(routed\.data, null, 2\), parsed: routed\.data, remote: routed/);
+	assert.match(systemIpc, /return \{ valid: true, remote: routed \};/);
 });

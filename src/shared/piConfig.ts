@@ -68,3 +68,27 @@ export type PiConfigWriteOptions = PiConfigReadOptions & { expectedVersion?: str
 
 /** Successful remote write receipt: a new version the caller can use for the next patch. */
 export type RemotePiConfigWriteReceipt = { kind: "remote"; hostId: string; file: PiConfigFileKey; version: string; sha256: string };
+
+/**
+ * Renderer-facing result shapes (Batch B). The existing local DTOs stay exactly as they were; a remote
+ * answer carries an extra optional `remote` snapshot so no-argument callers keep compiling untouched.
+ */
+export type RemotePiConfigReadResult = { remote?: RemotePiConfigSnapshot };
+export type RemotePiConfigSaveResult = { remote?: RemotePiConfigWriteReceipt };
+
+/** true only for a remote snapshot produced by the target-routed backend (never inferred from local data). */
+export function isRemotePiConfigSnapshot(value: unknown): value is RemotePiConfigSnapshot {
+	return typeof value === "object" && value !== null && (value as { kind?: unknown }).kind === "remote";
+}
+
+/** true only for a remote write receipt (main returns {valid:true, remote:<receipt>}). */
+export function isRemotePiConfigWriteReceipt(value: unknown): value is RemotePiConfigWriteReceipt {
+	return typeof value === "object" && value !== null && (value as { kind?: unknown }).kind === "remote" && typeof (value as { version?: unknown }).version === "string";
+}
+
+/** Extract the stable REMOTE_CONFIG_* code from a rejected IPC call (Electron prefixes its message). */
+export function remotePiConfigCodeFromError(error: unknown): string | undefined {
+	const message = typeof error === "object" && error !== null && "message" in error ? String((error as { message?: unknown }).message ?? "") : String(error ?? "");
+	const match = /(REMOTE_CONFIG_[A-Z_]+)/.exec(message);
+	return match?.[1];
+}

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { encodePiSessionDirectory } from "../src/main/remote/remoteSessionProjectMatch";
 import { initializeRemoteCodeFixture, verifyRemoteCodeEditing, verifyRemoteCodeIsolation, verifyRemoteCodeDisconnect, assertRemoteNodeTestExecuted } from "./remote-file-editing";
 import { createEmptyRemoteProjectInSidebar, verifyRemoteFileManagement } from "./remote-file-management";
+import { verifyRemoteConfig } from "./remote-config";
 import { verifyRemoteTerminals } from "./remote-terminal";
 import { createLocalGitReadControl, initializeRemoteGitFixture, verifyRemoteGitRead } from "./remote-git";
 import { verifyRemoteGitSoak } from "./remote-git-soak";
@@ -932,6 +933,9 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 			const created = await runRemoteCommand(creds, "test -d '" + createPath + "' && [ -z \"$(ls -A '" + createPath + "')\" ] && echo CREATED_EMPTY", 60_000);
 			expect(created.stdout.trim(), "新建空项目必须真的创建一个空目录").toBe("CREATED_EMPTY");
 			await verifyRemoteFileManagement({ window: remoteWindow, credentials: creds, projectPath: createPath, testInfo, timeoutMs: timeouts.helperMs });
+			await test.step("远端配置：目标选择器 → 脱敏读取（version/密钥徽标）→ 一次非密钥 patch → 认证页禁用副本", async () => {
+				await verifyRemoteConfig({ window: remoteWindow, credentials: creds, runId: paths.runId, timeoutMs: timeouts.helperMs });
+			});
 			expect(consoleErrors, "文件管理链路不应出现渲染层 console error").toEqual([]);
 			await runRemoteCommand(creds, "rm -rf " + createPath + "; test ! -e " + createPath + " && echo CLEANUP_OK", 60_000);
 			await runRemoteCommand(creds, "test ! -e " + paths.e2eRoot + " && echo CLEANUP_OK", 30_000);
