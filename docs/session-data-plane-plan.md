@@ -160,7 +160,7 @@ TS 历史路径已经是「**索引 + 定向读行**」两段式，而不是「�
 
 | 波次 | 内容 | 交付判据 |
 |---|---|---|
-| Wave 1 | `native/session-store` 骨架：`list-files` + 快照读写 + 增量/失效 + 宿主 `SessionStoreService`（照 `FileIndexService` 抄） + 开关 `settings.sessionStoreEnabled` | parity/失效/降级测试全绿；进程按需启动（无历史读取需求时不常驻） |
+| Wave 1 | `native/session-store` 骨架：`list-files` + 快照读写 + 增量/失效 + 宿主 `SessionStoreService`（照 `FileIndexService` 抄）；构建/CI 登记齐全 | parity/失效/降级测试全绿；无消费者不常驻（启动不预热） |
 | Wave 2 | `get-index` 接 `SessionHistoryReader`（先只用于「缓存未命中时的建表」，命中路径不变） | 索引 parity 逐字段一致；打开 10–31MiB 会话耗时/内存对比写回 §7 |
 | Wave 3 | `list-summaries` 接侧栏清单（P1/P2） | 清单 parity；首屏扫描耗时对比 |
 | Wave 4 | 进程收敛 + （可选）P7 | 视前几波结论决定 |
@@ -180,3 +180,28 @@ TS 历史路径已经是「**索引 + 定向读行**」两段式，而不是「�
 2. **快照粒度**：单 `state.bin` vs 每 roots 一份；倾向前者 + 文件级记录复用。
 3. **收益证明**：`get-index` 建表同样要读全文件，收益来自「一次建表多次用 + 不在主进程建 10 万级对象」。Wave 2 门禁必须用同口径数字证明（对照 §7 的 87–165 ms）；若只有读盘没省其余，就不值得做。
 4. **WSL**：现有 sidecar 一律降级；session-store 不做 WSL 支持（UNC 读不可靠），沿用降级。
+
+### 8.9 Wave 1 落地记录（已完成，未接线到任何消费者）
+
+**已交付**：`native/session-store`（`go.mod`/`main.go`/`store.go`/`scan.go` + 两个测试文件，纯标准库零依赖）+ 宿主 `src/main/sessions/SessionStoreService.ts` + 构建/打包/CI/文档登记 + 装配（`src/main/index.ts`：二进制定位、`statePath` 落 `<userData>/session-store/state.bin`、`quitCleanup.register("session-store")`，**启动不预热**）。
+
+**§8.8 未决问题的落地答案**：
+
+1. **roots 语义（Q1）**：快照按**绝对文件路径**分键持久化，roots 改为**逐请求参数**（`list-files {roots}`），换 roots 不重启进程、不丢未变更文件的复用记录。spawn 形态因此与三个兄弟服务不同：`spawnFn(binaryPath, [statePath])` 不带 roots。
+2. **快照粒度（Q2）**：单 `state.bin`（JSON，`formatVersion = 1`，每文件一条记录），原子 `state.bin.tmp` + rename 落盘。
+3. **开关（Wave 1 行的 `sessionStoreEnabled`）暂缓**：Wave 1 无消费者（接线要等 Wave 2 的 `get-index`），一个没人读的开关只会成为死配置；Wave 2 接线时与 `extraResources` 一起补（构建脚本头注释已写明这一点）。
+4. **WSL**：沿用降级（不由本模块决定，调用方按 `environment === "wsl"` 跳过）。
+
+**快照口径（Wave 1 已定，Wave 2 若需精确 parity 再升 `formatVersion`）**：每文件记录 `{path,size,mtimeMs,entryCount,hasCompaction,endsWithNewline}`；`entryCount` = 带 `id` 的完整行数（**行口径，未做身份去重**），`hasCompaction` = 文件里出现过 `compaction` 行（**文件口径，非 activeBranch 口径**）。Wave 2 的 `get-index` 必须补真实条目表，届时升版本。
+
+**行边界提交不变量**：`size` 永远只推进到最后一个完整行（`\n` 结尾），末尾残行不计入；因此「size 变大 且 快照记录以换行结尾」才做增量尾扫，否则全量重建。单行超过 64MiB 时只留前 64KiB 前缀做 `id`/`compaction` 探测（与 `txt/jsonlLineStream.ts:MAX_JSONL_LINE_BYTES` 同口径），不会 OOM。
+
+**实测（本机，源码 889 文件 / 两处根合计 ~595MiB；`reused`/`incremental`/`full`/`pruned`/`indexMs` 来自 ready/response 帧）**：
+
+| 场景 | 数字 |
+|---|---|
+| 首建（冷启动全量扫，逐行探测） | `full = 889`，`indexMs = 7224`（端到端 7.26s）；快照 221 KB |
+| 二开（快照复用，无文件变化） | `reused = 889`，`full = 0`，`indexMs = 40`，`bootMs = 2`（端到端 65ms） |
+| 对照：TS 侧首屏（Wave 0 `probeSessionRead.mjs`，仅读每文件前 1MiB 头部） | `headSweepMs` 699ms |
+
+结论：**冷启一次全量比 TS 只读头部慢一个量级（7.2s vs 0.7s，因为要逐行扫完 595MiB），但快照命中后是 40ms，比 TS 首屏还快 ~17×**。所以 Wave 2 接线必须把它用在「打开会话/读窗口」这类**重复读**路径上（首次仍可让 TS 顶一下），不能用在首屏清单扫描上；这条写入 Wave 2 门禁。

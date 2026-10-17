@@ -430,6 +430,7 @@ import { PiAiCatalogUpdater } from "./pi/PiAiCatalogUpdater";
 import { fetchModelList, refreshModelCatalogIfStale, refreshModelList, getCachedModelList } from "./pi/modelListCache";
 import { registerFilesIpc } from "./ipc/filesIpc";
 import { FileIndexService } from "./files/FileIndexService";
+import { SessionStoreService } from "./sessions/SessionStoreService";
 import { registerClipboardIpc } from "./ipc/clipboardIpc";
 import { registerShellMenuIpc } from "./ipc/shellMenuIpc";
 import { QuickTaskWindowChrome } from "./quickTask/quickTaskWindowChrome";
@@ -562,6 +563,11 @@ let xueIndexService: XueIndexService | null = null;
 let sessionIndexService: SessionIndexService | null = null;
 /** 工作区文件索引 sidecar（Go file-index）：名字模糊检索 + 有界内容检索，缺失时回退 BFS。 */
 let fileIndexService: FileIndexService | null = null;
+/**
+ * 会话数据面 sidecar（Go session-store，Wave 1 骨架）：快照 + 行边界增量扫描。
+ * 暂无消费者（Wave 2 的窗口化读取会接进来），装配只做二进制定位与退出清理登记。
+ */
+let sessionStoreService: SessionStoreService | null = null;
 /** 提示词库 db 远程拉取/缓存服务；null = 未装配。 */
 let xuePromptDbStore: XuePromptDbStore | null = null;
 let skillManager: SkillManager;
@@ -4246,6 +4252,30 @@ app
 		quitCleanup.register("file-index", () => {
 			fileIndexService?.dispose();
 			fileIndexService = null;
+		});
+		// 会话数据面 sidecar（Go session-store）：快照持久化 + 行边界增量扫描，为 Wave 2 的
+		// 窗口化读取打底。启动时**不**预热（没有消费者，拉起进程只是白占内存），
+		// 由 Wave 2 的调用方按需 warmup()。
+		sessionStoreService = new SessionStoreService({
+			statePath: join(app.getPath("userData"), "session-store", "state.bin"),
+			resolveBinaryPath: () => {
+				// dev：仓库构建产物 resources/session-store/bin/（build 链自动 fail-open 构建）；
+				// 打包后需补 extraResources 才会命中 resourcesPath 分支（Wave 2 接线时加）。
+				const dir = app.isPackaged ? join(process.resourcesPath, "session-store") : join(app.getAppPath(), "resources", "session-store", "bin");
+				const name = process.platform === "win32" ? "session-store.exe" : "session-store";
+				const path = join(dir, name);
+				return existsSync(path) ? path : null;
+			},
+			logger: {
+				debug: (m) => appLogger.debug("session-store", m),
+				info: (m) => void appLogger.info("session-store", m),
+				warn: (m) => void appLogger.warn("session-store", m),
+				error: (m) => void appLogger.error("session-store", m),
+			},
+		});
+		quitCleanup.register("session-store", () => {
+			sessionStoreService?.dispose();
+			sessionStoreService = null;
 		});
 		// 后台预热：首次全量建索引可达十余秒，启动后稍等即预热，避免用户首搜撞上
 		// 冷启动（预热失败静默——运行时搜索会再试）

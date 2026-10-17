@@ -44,6 +44,7 @@ jobs:
           go -C native/session-index test ./...
           go -C native/xue-index test ./...
           go -C native/file-index test ./...
+          go -C native/session-store test ./...
 
       - name: Install dependencies
         run: npm ci
@@ -61,6 +62,8 @@ jobs:
           SESSION_INDEX_ARCH: ${{ matrix.arch }}
           FILE_INDEX_OS: linux
           FILE_INDEX_ARCH: ${{ matrix.arch }}
+          SESSION_STORE_OS: linux
+          SESSION_STORE_ARCH: ${{ matrix.arch }}
 
       - name: Upload Linux ${{ matrix.arch }} artifact
         uses: actions/upload-artifact@v4

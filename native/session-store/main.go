@@ -1,0 +1,109 @@
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"os"
+	"time"
+)
+
+// 与宿主 src/main/sessions/SessionStoreService.ts 对齐；不匹配即视为协议不通。
+const protocolVersion = 1
+
+// 请求帧行上限：请求只带 roots 列表，1MiB 足够。
+const maxRequestLineBytes = 1024 * 1024
+
+type requestFrame struct {
+	Cmd   string          `json:"cmd"`
+	ID    json.RawMessage `json:"id"`
+	Roots []string        `json:"roots"`
+}
+
+type readyFrame struct {
+	Type            string `json:"type"`
+	ProtocolVersion int    `json:"protocolVersion"`
+	SnapshotFiles   int    `json:"snapshotFiles"`
+	BootMs          int64  `json:"bootMs"`
+}
+
+type responseFrame struct {
+	Type   string          `json:"type"`
+	ID     json.RawMessage `json:"id"`
+	OK     bool            `json:"ok"`
+	Result any             `json:"result,omitempty"`
+	Error  string          `json:"error,omitempty"`
+}
+
+var logPrefix = "[session-store] "
+
+func logf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, logPrefix+format+"\n", args...)
+}
+
+func main() {
+	if len(os.Args) < 2 {
+		logf("usage: session-store <statePath>")
+		os.Exit(1)
+	}
+	bootStartedAt := time.Now()
+	store := OpenStore(os.Args[1])
+
+	out := bufio.NewWriter(os.Stdout)
+	writeFrame := func(frame any) {
+		payload, err := json.Marshal(frame)
+		if err != nil {
+			logf("encode frame failed: %v", err)
+			return
+		}
+		if _, err := out.Write(append(payload, '\n')); err != nil {
+			logf("write frame failed: %v", err)
+			return
+		}
+		if err := out.Flush(); err != nil {
+			logf("flush frame failed: %v", err)
+		}
+	}
+
+	writeFrame(readyFrame{
+		Type:            "ready",
+		ProtocolVersion: protocolVersion,
+		SnapshotFiles:   store.SnapshotSize(),
+		BootMs:          time.Since(bootStartedAt).Milliseconds(),
+	})
+
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxRequestLineBytes)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var request requestFrame
+		if err := json.Unmarshal(line, &request); err != nil {
+			logf("invalid request line: %v", err)
+			continue
+		}
+		switch request.Cmd {
+		case "list-files", "refresh":
+			if len(request.Roots) == 0 {
+				writeFrame(responseFrame{Type: "response", ID: request.ID, OK: false, Error: "no roots"})
+				continue
+			}
+			stats, err := store.ListFiles(request.Roots)
+			if err != nil {
+				logf("%s failed: %v", request.Cmd, err)
+				writeFrame(responseFrame{Type: "response", ID: request.ID, OK: false, Error: err.Error()})
+				continue
+			}
+			logf("%s %s", request.Cmd, formatStats(stats))
+			writeFrame(responseFrame{Type: "response", ID: request.ID, OK: true, Result: stats})
+		default:
+			writeFrame(responseFrame{Type: "response", ID: request.ID, OK: false, Error: "unknown cmd: " + request.Cmd})
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		logf("stdin read failed: %v", err)
+	}
+}
