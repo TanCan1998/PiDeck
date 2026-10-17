@@ -148,12 +148,14 @@ export type RemoteGitRepoEntry = { path: string; name: string };
 export type RemoteGitReposResult = { repos: readonly RemoteGitRepoEntry[]; truncated: boolean };
 /**
  * The per-request repository scope: an optional project-relative POSIX path (""/absent means the project root).
- * Only the read methods in this list may receive a non-empty scope; writes, git.init and git.repos refuse one.
- * The shape rules are repeated by the frozen entry and the frozen worker (they cannot import this file) and by
- * main's validateRemoteGitRepoPath, all before a session or a Git child is started.
+ * The read batch and every managed write verb accept a non-empty scope (G5e); git.init and git.repos stay root-only and
+ * refuse one. The method lists are repeated by the frozen entry's REPO_METHODS and by the frozen worker's READ_REPO /
+ * WRITE_REPO sets, and the shape rules by all three plus main's validateRemoteGitRepoPath - all before a session or a Git
+ * child is started. A test pins the three method lists against each other.
  */
 export const REMOTE_GIT_REPO_PATH_MAX_BYTES = 4096;
 export const REMOTE_GIT_REPO_READ_METHODS = ["git.status", "git.workspaceDiff", "git.log", "git.commitDetail", "git.refs", "git.refFileDiff", "git.compare", "git.recoveryList", "git.syncFacts"] as const;
+export const REMOTE_GIT_REPO_WRITE_METHODS = ["git.stage", "git.unstage", "git.commit", "git.createBranch", "git.switchBranch", "git.discard", "git.recoveryRestore", "git.recoveryDrop", "git.fetch", "git.push", "git.pull"] as const;
 export const REMOTE_GIT_STATUS_MAX_BYTES = 1024 * 1024;
 export const REMOTE_GIT_MAX_RESOURCES = 4096;
 export const REMOTE_GIT_TEXT_MAX_BYTES = 256 * 1024;

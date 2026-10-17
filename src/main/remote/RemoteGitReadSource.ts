@@ -34,11 +34,18 @@
  *   is accepted only by the read batch. The scope is anchored by walking from the already anchored root fd with
  *   lstat no-follow and opening each segment O_RDONLY|O_DIRECTORY|O_NOFOLLOW, so a link segment, a missing
  *   directory or a non-directory is GIT_NOT_REPOSITORY before any Git child; the final fd becomes ctx.cwd and is
- *   closed with the request. Writes, init and repos refuse a non-empty scope (GIT_RESULT_INVALID).
+ *   closed with the request. The write batch accepts the same scope (G5e); init and repos refuse a non-empty scope
+ *   (GIT_RESULT_INVALID).
  * - repository discovery (G5d): `git.repos` walks the project root with the same bounded, link-free rules the local
  *   walker uses (depth 4, 50 repositories, 512 visited directories, fixed skip names plus hidden directories) and
  *   answers project-relative POSIX paths; it runs before the .git existence checks because a project without a root
  *   repository may still contain nested ones. `truncated` is set only when a cap really cut the walk.
+ * - nested write scope (G5e): every existing write program accepts the same optional `repo`, because each one already roots
+ *   every check (repository metadata, official index lock, scratch context, restore, ref CAS, witness) at `ctx.cwd` and
+ *   `run()` keeps the root canonical/identity checks in front of all of them. The anchor is therefore reused verbatim: a link
+ *   segment or a missing directory is still GIT_NOT_REPOSITORY before a Git child, and the only repository a write can reach
+ *   is the one the frame named. `git.init` and `git.repos` stay root-only. Nothing about hooks/filter/signing/in-progress
+ *   gates, budgets, cancellation, cleanup or unconfirmed-result semantics changes for a nested write.
  */
 export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,createGitCommitProgram,createGitBranchProgram,createGitDiscardProgram,createGitRecoveryProgram,createGitInitProgram}from"./git-write.mjs";import{createGitSyncProgram}from"./git-sync.mjs";export function createGitReadProgram(root, fs, path) {
 	const cp = process.getBuiltinModule("node:child_process");
@@ -60,8 +67,10 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,cr
 		if (typeof value !== "string" || !value || Buffer.byteLength(value) > MAX_PATH || control.test(value) || value.startsWith("-") || value.includes("\\") || value.startsWith("/") || /^[A-Za-z]:/.test(value) || /%2e|%2f|%5c/i.test(value) || value.split("/").some(function (part) { return !part || part === "." || part === ".."; })) throw failure("PATH_OUTSIDE_ROOT");
 		return value;
 	}
-	/* Only these reads may name a repository other than the project root; every write, init and repos stays root-only. */
+	/* Reads and managed writes may name a repository other than the project root; git.init and git.repos stay root-only. */
 	const READ_REPO = new Set(["git.status", "git.workspaceDiff", "git.log", "git.commitDetail", "git.refs", "git.refFileDiff", "git.compare", "git.recoveryList", "git.syncFacts"]);
+	/* Every write program already runs entirely from ctx.cwd, so the same anchored scope can carry a write to a nested repository. */
+	const WRITE_REPO = new Set(["git.stage", "git.unstage", "git.commit", "git.createBranch", "git.switchBranch", "git.discard", "git.recoveryRestore", "git.recoveryDrop", "git.fetch", "git.push", "git.pull"]);
 	/* The optional scope: absent or empty is the root; any other shape is refused before a walk, a link check or a Git child. */
 	function readRepo(value) {
 		if (value === undefined || value === "") return "";
@@ -503,7 +512,7 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,cr
 		if (params.method === "git.repos") return repositories(ctx);
 		/* The one write that runs before a repository exists: it verifies its own preconditions instead of the .git checks below. */
 		if (params.method === "git.init") { ctx.executable = executable(); ctx.env = environment(); return inits.run(ctx); }
-		/* A non-empty scope is anchored from the root fd before the .git checks, so the whole read targets that repository. */
+		/* A non-empty scope is anchored from the root fd before the .git checks, so the whole request (read or write) targets that repository. */
 		anchorRepository(ctx, repo);
 		let gitStats;
 		try { gitStats = fs.lstatSync(ctx.cwd + "/.git", { bigint: true }); } catch (error) { if (error.code === "ENOENT") throw failure("GIT_NOT_REPOSITORY"); throw error; }
@@ -541,8 +550,8 @@ export const REMOTE_GIT_READ_SOURCE = String.raw`import{createGitWriteProgram,cr
 	function prepare(method, params, repo) {
 		if (root === null) throw failure("PATH_OUTSIDE_ROOT");
 		const repoPath = readRepo(repo);
-		/* Only the read batch may name a repository other than the project root; every write keeps its root-only contract. */
-		if (repoPath !== "" && !READ_REPO.has(method)) throw failure("GIT_RESULT_INVALID");
+		/* The read and write batches accept a repository scope; git.init and git.repos are root-only and refuse one before any Git child. */
+		if (repoPath !== "" && !READ_REPO.has(method) && !WRITE_REPO.has(method)) throw failure("GIT_RESULT_INVALID");
 		if (params === undefined) params = {};
 		if (params === null || typeof params !== "object" || Array.isArray(params)) throw failure("GIT_RESULT_INVALID");
 		const keys = Object.keys(params);

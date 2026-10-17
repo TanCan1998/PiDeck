@@ -10,6 +10,8 @@ const oid = "a".repeat(40);
 const locator = { hostId: "host-a", remotePath: "/work/project-a" };
 const encode = (raw) => ({ status: Buffer.from(raw).toString("base64"), head: oid, branch: "main" });
 const plain = (value) => JSON.parse(JSON.stringify(value));
+/** A main-owned grant; repoPath is part of its identity (G5e). */
+const expectation = (kind, repoPath = "") => ({ kind, revision: "f".repeat(64), hostRevision: 1, target: locator, repoPath });
 
 /** Bound substitute records protocol traffic; it never exposes a local cwd or fs operation. */
 function fixture(overrides = {}) {
@@ -180,7 +182,6 @@ test("aborting a read cancels its exact request and discards any late success", 
 test("network verbs carry the sync budget while every other Git method keeps the read budget", async () => {
 	const f = fixture();
 	f.session.hostRevision = 1;
-	const expectation = (kind) => ({ kind, revision: "f".repeat(64), hostRevision: 1, target: locator });
 	const capabilities = ["git.status", "git.log", "git.fetch", "git.push", "git.pull"];
 	f.session.request = async (method, params, options) => {
 		f.calls.push({ method, params, timeoutMs: options?.timeoutMs });
@@ -208,49 +209,58 @@ test("network verbs carry the sync budget while every other Git method keeps the
 	for (const method of ["git.fetch", "git.push", "git.pull"]) assert.equal(byMethod.get(method), REMOTE_GIT_SYNC_TIMEOUT_MS, method);
 });
 
-test("a repository scope travels on read frames and never on hello or a write", async () => {
+test("a repository scope travels on read and write frames but never on hello", async () => {
 	const f = fixture();
-	const capabilities = ["git.status", "git.log", "git.refFileDiff"];
+	f.session.hostRevision = 1;
+	const capabilities = ["git.status", "git.log", "git.fetch", "git.push"];
 	f.session.request = async (method, params, options) => {
-		f.calls.push({ method, params, repo: options?.repo });
+		f.calls.push({ method, params, repo: options?.repo, timeoutMs: options?.timeoutMs });
 		options?.onRequestId?.("request-" + f.calls.length);
 		if (method === "hello") return { protocolVersion: 1, root: locator.remotePath, capabilities };
 		if (method === "git.status") return encode(" M tracked.txt\0");
 		if (method === "git.log") return { commits: [], hasMore: false };
-		if (method === "git.refFileDiff") return { originalContent: "a", modifiedContent: "b" };
+		if (method === "git.fetch") return { applied: true, upToDate: true, updated: [] };
+		if (method === "git.push") return { applied: true, outcome: "up-to-date", refspec: "refs/heads/main:refs/heads/main" };
 		throw new Error("unexpected method " + method);
 	};
 	const scoped = "packages/nested";
 	await f.service.status(projectId, scoped);
 	await f.service.log(projectId, {}, scoped);
-	await f.service.refFileDiff(projectId, null, oid, { projectId, relativePath: "a.txt" }, scoped);
+	await f.service.fetch(projectId, "origin", expectation("fetch", scoped), scoped);
+	await f.service.push(projectId, "origin", "main", expectation("push", scoped), scoped);
 	const byMethod = new Map(f.calls.map((call) => [call.method, call.repo]));
 	assert.equal(byMethod.get("hello"), undefined, "the handshake names no repository");
-	assert.equal(byMethod.get("git.status"), scoped);
-	assert.equal(byMethod.get("git.log"), scoped);
-	assert.equal(byMethod.get("git.refFileDiff"), scoped);
-	// A root read keeps the pre-G5d frame: no repo option at all.
+	for (const method of ["git.status", "git.log", "git.fetch", "git.push"]) assert.equal(byMethod.get(method), scoped, method + " must carry the selected repository");
+	// A root scope keeps the pre-G5d frame: no repo option at all, and a root grant names "".
 	f.calls.length = 0;
 	await f.service.status(projectId);
+	await f.service.fetch(projectId, "origin", expectation("fetch"), "");
 	assert.equal(f.calls.find((call) => call.method === "git.status").repo, undefined);
+	assert.equal(f.calls.find((call) => call.method === "git.fetch").repo, undefined);
 });
 
-test("a nested snapshot never mints a write grant; the root snapshot still does", async () => {
+test("every scope mints grants bound to its own repository, and a cross-scope grant is refused before any host work", async () => {
 	const f = fixture();
 	f.session.hostRevision = 1;
-	const capabilities = ["git.status", "git.stage", "git.unstage", "git.commit", "git.fetch", "git.push", "git.pull", "git.discard", "git.recoveryRestore", "git.recoveryDrop"];
+	const capabilities = ["git.status", "git.stage", "git.unstage", "git.commit", "git.createBranch", "git.switchBranch", "git.discard", "git.recoveryRestore", "git.recoveryDrop", "git.fetch", "git.push", "git.pull"];
 	f.session.request = async (method) => {
 		if (method === "hello") return { protocolVersion: 1, root: locator.remotePath, capabilities };
 		return { ...encode(""), revision: "a".repeat(64) };
 	};
 	const nested = await f.service.status(projectId, "packages/nested");
 	for (const field of ["writeExpectation", "commitExpectation", "branchExpectation", "switchExpectation", "discardExpectation", "restoreExpectation", "dropExpectation", "fetchExpectation", "pushExpectation", "pullExpectation"]) {
-		assert.equal(nested[field], undefined, field + " must not be issued for a nested scope");
+		assert.ok(nested[field], field + " must be issued for a nested snapshot");
+		assert.equal(nested[field].repoPath, "packages/nested", field + " must name the nested scope");
+		assert.equal(nested[field].kind, field.replace("Expectation", "").replace("write", "index"));
 	}
 	const root = await f.service.status(projectId, "");
-	assert.ok(root.writeExpectation, "the root scope keeps its index grant");
-	assert.ok(root.commitExpectation, "the root scope keeps its commit grant");
-	assert.equal(root.writeExpectation.target.remotePath, locator.remotePath);
+	assert.ok(root.writeExpectation && root.commitExpectation && root.fetchExpectation, "the root scope keeps its grants");
+	assert.equal(root.writeExpectation.repoPath, "", "the root grant names the project root");
+	// A nested grant used against the root scope (and vice versa) is refused before the locator/trust/withProject boundary.
+	f.calls.length = 0;
+	await assert.rejects(f.service.fetch(projectId, "origin", { ...nested.fetchExpectation }, ""), /GIT_TARGET_CHANGED/);
+	await assert.rejects(f.service.fetch(projectId, "origin", { ...root.fetchExpectation }, "packages/nested"), /GIT_TARGET_CHANGED/);
+	assert.equal(f.calls.length, 0, "a cross-scope grant must not queue any host work");
 });
 
 test("listRepositories is a bounded read with no scope or token on the frame", async () => {

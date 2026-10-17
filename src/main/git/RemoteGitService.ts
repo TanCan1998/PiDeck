@@ -56,7 +56,7 @@ export type RemoteGitSession = {
  * authorizes. `head` is the HEAD the read confirmed, so a branch action can only ever be applied to the state
  * the user was looking at - the renderer names a branch, never the commit the branch may move to.
  */
-export type RemoteGitWriteExpectation = { kind: "index" | "commit" | "branch" | "switch" | "discard" | "restore" | "drop" | "fetch" | "push" | "pull"; revision: string; hostRevision: number; target: RemoteGitLocator; head?: string | null };
+export type RemoteGitWriteExpectation = { kind: "index" | "commit" | "branch" | "switch" | "discard" | "restore" | "drop" | "fetch" | "push" | "pull"; revision: string; hostRevision: number; target: RemoteGitLocator; repoPath: string; head?: string | null };
 export type RemoteGitReadSnapshot = GitReadSnapshot & {
 	writeExpectation?: RemoteGitWriteExpectation;
 	commitExpectation?: RemoteGitWriteExpectation;
@@ -461,9 +461,10 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 		expected?: RemoteGitWriteExpectation,
 		repo?: string,
 	): Promise<T> {
-		// The scope is part of the request identity: a write can never be aimed at a nested repository through this path.
+		// The scope is part of the request identity: a grant minted for one repository can never be used against another.
+		// This runs before the locator/trust/withProject boundary, so a cross-scope write is refused without any host work.
 		const repoPath = validateRemoteGitRepoPath(repo);
-		if (expected !== undefined && repoPath !== "") throw new Error("GIT_RESULT_INVALID");
+		if (expected !== undefined && expected.repoPath !== repoPath) throw new Error("GIT_TARGET_CHANGED");
 		const locator = target(projectId);
 		let dispatchedWrite = false;
 		try {
@@ -547,21 +548,22 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 				signal,
 				(value, session, capabilities) => {
 					const snapshot = readRemoteGitStatus(value, projectId);
-					// Only the project-root scope may hand out write grants: every write channel still targets the root repository.
-					if (repoPath === "" && record(value) && value.revision !== undefined) {
+					// Every confirmed scope hands out grants bound to itself (G5e): a nested snapshot authorizes nested writes
+					// only, and the token layer refuses a grant used against another repository.
+					if (record(value) && value.revision !== undefined) {
 						if (typeof value.revision !== "string" || !/^[0-9a-f]{64}$/.test(value.revision)) throw new Error("GIT_RESULT_INVALID");
 						const hostRevision = session.hostRevision;
 						if (typeof hostRevision === "number" && Number.isSafeInteger(hostRevision) && hostRevision >= 0) {
-							if (capabilities.includes("git.stage") && capabilities.includes("git.unstage")) snapshot.writeExpectation = { kind: "index", revision: value.revision, hostRevision, target: target(projectId) };
-							if (capabilities.includes("git.commit")) snapshot.commitExpectation = { kind: "commit", revision: value.revision, hostRevision, target: target(projectId) };
-							if (capabilities.includes("git.createBranch")) snapshot.branchExpectation = { kind: "branch", revision: value.revision, hostRevision, target: target(projectId), head: snapshot.head };
-							if (capabilities.includes("git.switchBranch")) snapshot.switchExpectation = { kind: "switch", revision: value.revision, hostRevision, target: target(projectId), head: snapshot.head };
-							if (capabilities.includes("git.discard")) snapshot.discardExpectation = { kind: "discard", revision: value.revision, hostRevision, target: target(projectId) };
-							if (capabilities.includes("git.recoveryRestore")) snapshot.restoreExpectation = { kind: "restore", revision: value.revision, hostRevision, target: target(projectId) };
-							if (capabilities.includes("git.recoveryDrop")) snapshot.dropExpectation = { kind: "drop", revision: value.revision, hostRevision, target: target(projectId) };
-							if (capabilities.includes("git.fetch")) snapshot.fetchExpectation = { kind: "fetch", revision: value.revision, hostRevision, target: target(projectId) };
-							if (capabilities.includes("git.push")) snapshot.pushExpectation = { kind: "push", revision: value.revision, hostRevision, target: target(projectId) };
-							if (capabilities.includes("git.pull")) snapshot.pullExpectation = { kind: "pull", revision: value.revision, hostRevision, target: target(projectId) };
+							if (capabilities.includes("git.stage") && capabilities.includes("git.unstage")) snapshot.writeExpectation = { kind: "index", revision: value.revision, hostRevision, target: target(projectId), repoPath };
+							if (capabilities.includes("git.commit")) snapshot.commitExpectation = { kind: "commit", revision: value.revision, hostRevision, target: target(projectId), repoPath };
+							if (capabilities.includes("git.createBranch")) snapshot.branchExpectation = { kind: "branch", revision: value.revision, hostRevision, target: target(projectId), repoPath, head: snapshot.head };
+							if (capabilities.includes("git.switchBranch")) snapshot.switchExpectation = { kind: "switch", revision: value.revision, hostRevision, target: target(projectId), repoPath, head: snapshot.head };
+							if (capabilities.includes("git.discard")) snapshot.discardExpectation = { kind: "discard", revision: value.revision, hostRevision, target: target(projectId), repoPath };
+							if (capabilities.includes("git.recoveryRestore")) snapshot.restoreExpectation = { kind: "restore", revision: value.revision, hostRevision, target: target(projectId), repoPath };
+							if (capabilities.includes("git.recoveryDrop")) snapshot.dropExpectation = { kind: "drop", revision: value.revision, hostRevision, target: target(projectId), repoPath };
+							if (capabilities.includes("git.fetch")) snapshot.fetchExpectation = { kind: "fetch", revision: value.revision, hostRevision, target: target(projectId), repoPath };
+							if (capabilities.includes("git.push")) snapshot.pushExpectation = { kind: "push", revision: value.revision, hostRevision, target: target(projectId), repoPath };
+							if (capabilities.includes("git.pull")) snapshot.pullExpectation = { kind: "pull", revision: value.revision, hostRevision, target: target(projectId), repoPath };
 						}
 					}
 					return snapshot;
@@ -571,7 +573,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 			);
 		},
 		/** The expectation is issued by main; renderer data never becomes a host/revision authority. */
-		mutate(projectId: string, operation: "stage" | "unstage", group: GitResourceGroupType, file: ProjectFileTarget, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<void> {
+		mutate(projectId: string, operation: "stage" | "unstage", group: GitResourceGroupType, file: ProjectFileTarget, expected: RemoteGitWriteExpectation, repoPath: string, signal?: AbortSignal): Promise<void> {
 			if (file.projectId !== projectId || (operation === "unstage" ? group !== "index" : !["workingTree", "untracked"].includes(group))) throw new Error("GIT_RESULT_INVALID");
 			return run(
 				projectId,
@@ -582,10 +584,11 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 					if (!record(value) || value.applied !== true || Object.keys(value).length !== 1) throw new Error("GIT_RESULT_INVALID");
 				},
 				expected,
+				repoPath,
 			);
 		},
 		/** One commit of the exact index the user confirmed; the message is passed verbatim, bounded and NUL-free. */
-		commit(projectId: string, message: string, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<{ head: string; tree: string }> {
+		commit(projectId: string, message: string, expected: RemoteGitWriteExpectation, repoPath: string, signal?: AbortSignal): Promise<{ head: string; tree: string }> {
 			if (expected.kind !== "commit") throw new Error("GIT_RESULT_INVALID");
 			if (typeof message !== "string" || message.length === 0 || message.trim().length === 0 || message.includes("\0") || Buffer.byteLength(message, "utf8") > REMOTE_GIT_COMMIT_MESSAGE_MAX_BYTES) throw new Error("GIT_COMMIT_MESSAGE_EMPTY");
 			return run(
@@ -599,6 +602,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 					return { head: value.head, tree: value.tree };
 				},
 				expected,
+				repoPath,
 			);
 		},
 		workspaceDiff(projectId: string, group: GitResourceGroupType, file: ProjectFileTarget, repo: string | undefined, signal?: AbortSignal): Promise<GitWorkspaceFileDiff> {
@@ -679,7 +683,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 			});
 		},
 		/** Creating a branch is a create-only native CAS at the HEAD the read confirmed; HEAD itself never moves. */
-		createBranch(projectId: string, name: unknown, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<{ branch: string }> {
+		createBranch(projectId: string, name: unknown, expected: RemoteGitWriteExpectation, repoPath: string, signal?: AbortSignal): Promise<{ branch: string }> {
 			if (expected.kind !== "branch") throw new Error("GIT_RESULT_INVALID");
 			const branch = validateRemoteGitBranchName(name);
 			return run(
@@ -692,10 +696,11 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 					return { branch };
 				},
 				expected,
+				repoPath,
 			);
 		},
 		/** Switching runs native `git switch` for an existing local branch; a conflicting worktree is refused. */
-		switchBranch(projectId: string, name: unknown, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<{ branch: string; head: string | null }> {
+		switchBranch(projectId: string, name: unknown, expected: RemoteGitWriteExpectation, repoPath: string, signal?: AbortSignal): Promise<{ branch: string; head: string | null }> {
 			if (expected.kind !== "switch") throw new Error("GIT_RESULT_INVALID");
 			const branch = validateRemoteGitBranchName(name);
 			return run(
@@ -709,13 +714,14 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 					return { branch, head: value.head };
 				},
 				expected,
+				repoPath,
 			);
 		},
 		/**
 		 * The recoverable one: main only ever names a project-relative path and a group, and the helper refuses the
 		 * whole action unless the bytes are safely in the object store behind the returned recovery ref first.
 		 */
-		discard(projectId: string, group: unknown, file: ProjectFileTarget, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<{ recoveryRef: string | null }> {
+		discard(projectId: string, group: unknown, file: ProjectFileTarget, expected: RemoteGitWriteExpectation, repoPath: string, signal?: AbortSignal): Promise<{ recoveryRef: string | null }> {
 			if (expected.kind !== "discard") throw new Error("GIT_RESULT_INVALID");
 			if (file.projectId !== projectId || (group !== "workingTree" && group !== "untracked")) throw new Error("GIT_RESULT_INVALID");
 			const path = validateRemoteGitPath(file.relativePath);
@@ -733,6 +739,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 					return { recoveryRef: value.recoveryRef };
 				},
 				expected,
+				repoPath,
 			);
 		},
 		/** Read-only listing of the recovery namespace; nothing here needs a grant or touches the repository. */
@@ -759,7 +766,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 			);
 		},
 		/** One snapshot's raw bytes go back to its path, and only where the worktree still matches the index. */
-		recoveryRestore(projectId: string, ref: unknown, oid: unknown, path: unknown, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<{ path: string; bytes: number }> {
+		recoveryRestore(projectId: string, ref: unknown, oid: unknown, path: unknown, expected: RemoteGitWriteExpectation, repoPath: string, signal?: AbortSignal): Promise<{ path: string; bytes: number }> {
 			if (expected.kind !== "restore") throw new Error("GIT_RESULT_INVALID");
 			const target = remoteGitRecoveryRef(ref);
 			const commit = remoteGitOid(oid);
@@ -774,10 +781,11 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 					return { path: relative, bytes: remoteGitCount(value.bytes) };
 				},
 				expected,
+				repoPath,
 			);
 		},
 		/** The one operation that discards a snapshot for good: a compare-and-swap on the exact commit listed. */
-		recoveryDrop(projectId: string, ref: unknown, oid: unknown, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<void> {
+		recoveryDrop(projectId: string, ref: unknown, oid: unknown, expected: RemoteGitWriteExpectation, repoPath: string, signal?: AbortSignal): Promise<void> {
 			if (expected.kind !== "drop") throw new Error("GIT_RESULT_INVALID");
 			const target = remoteGitRecoveryRef(ref);
 			const commit = remoteGitOid(oid);
@@ -790,6 +798,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 					if (!record(value) || value.applied !== true || Object.keys(value).length !== 1) throw new Error("GIT_RESULT_INVALID");
 				},
 				expected,
+				repoPath,
 			);
 		},
 		/** Read-only sync facts: names and counts, never a URL (a remote URL can carry credentials). */
@@ -810,7 +819,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 			);
 		},
 		/** Fetch updates remote-tracking refs only; the helper verifies that nothing else moved. */
-		fetch(projectId: string, remote: unknown, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<RemoteGitFetchOutcome> {
+		fetch(projectId: string, remote: unknown, expected: RemoteGitWriteExpectation, repoPath: string, signal?: AbortSignal): Promise<RemoteGitFetchOutcome> {
 			if (expected.kind !== "fetch") throw new Error("GIT_RESULT_INVALID");
 			const name = remoteGitSyncRemote(remote);
 			return run(
@@ -827,10 +836,11 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 					return { upToDate: value.upToDate, updated };
 				},
 				expected,
+				repoPath,
 			);
 		},
 		/** Push is never forced and never sets an upstream; the helper reports what the remote did. */
-		push(projectId: string, remote: unknown, branch: unknown, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<RemoteGitPushOutcome> {
+		push(projectId: string, remote: unknown, branch: unknown, expected: RemoteGitWriteExpectation, repoPath: string, signal?: AbortSignal): Promise<RemoteGitPushOutcome> {
 			if (expected.kind !== "push") throw new Error("GIT_RESULT_INVALID");
 			const name = remoteGitSyncRemote(remote),
 				local = validateRemoteGitBranchName(branch);
@@ -846,10 +856,11 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 					return { outcome: value.outcome, refspec: value.refspec };
 				},
 				expected,
+				repoPath,
 			);
 		},
 		/** Pull may rewrite HEAD and the worktree; the helper refuses a dirty tree and any strategy choice of its own. */
-		pull(projectId: string, remote: unknown, branch: unknown, expected: RemoteGitWriteExpectation, signal?: AbortSignal): Promise<RemoteGitPullOutcome> {
+		pull(projectId: string, remote: unknown, branch: unknown, expected: RemoteGitWriteExpectation, repoPath: string, signal?: AbortSignal): Promise<RemoteGitPullOutcome> {
 			if (expected.kind !== "pull") throw new Error("GIT_RESULT_INVALID");
 			const name = remoteGitSyncRemote(remote),
 				local = validateRemoteGitBranchName(branch);
@@ -864,6 +875,7 @@ export function createRemoteGitService(ports: { locator(projectId: string): Remo
 					return { mode: value.mode, head: remoteGitOid(value.head) };
 				},
 				expected,
+				repoPath,
 			);
 		},
 		/** `base: null` names the side that does not exist; both sides missing is a refusal, not an empty diff. */

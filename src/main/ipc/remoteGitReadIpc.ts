@@ -105,8 +105,9 @@ export function registerRemoteGitReadIpc(input: { enabled: boolean; locator(proj
 			const repoPath = validateRemoteGitRepoPath(repo);
 			tokens.revoke(event.sender.id, typeof projectId === "string" ? projectId : "");
 			const { writeExpectation, commitExpectation, branchExpectation, switchExpectation, discardExpectation, restoreExpectation, dropExpectation, fetchExpectation, pushExpectation, pullExpectation, ...snapshot } = await read(event, projectId, repoPath, (id, signal) => git.status(id, repoPath, signal));
-			// Nested scopes are read-only: a snapshot of a nested repository never mints a write grant.
-			if (typeof projectId === "string" && repoPath === "") {
+			// Every confirmed scope mints grants bound to itself (G5e): a nested snapshot's tokens carry its repoPath, so
+			// the token layer refuses them against another repository.
+			if (typeof projectId === "string") {
 				if (writeExpectation) snapshot.mutationToken = tokens.issue(event.sender.id, projectId, writeExpectation);
 				if (commitExpectation) snapshot.commitToken = tokens.issue(event.sender.id, projectId, commitExpectation);
 				if (branchExpectation) snapshot.branchToken = tokens.issue(event.sender.id, projectId, branchExpectation);
@@ -145,9 +146,10 @@ export function registerRemoteGitReadIpc(input: { enabled: boolean; locator(proj
 			return { ok: false, code: remoteGitFailureCode(error) };
 		}
 	});
-	ipcMain.handle(ipcChannels.gitRemoteMutateIndex, async (event, projectId: unknown, operation: unknown, group: unknown, value: unknown, token: unknown, ...extra: unknown[]): Promise<GitIndexMutationResult> => {
+	ipcMain.handle(ipcChannels.gitRemoteMutateIndex, async (event, projectId: unknown, operation: unknown, group: unknown, value: unknown, token: unknown, repo: unknown, ...extra: unknown[]): Promise<GitIndexMutationResult> => {
 		try {
-			// Index mutations are root-scoped: a supplied repository scope is refused before any host work.
+			// The trailing scope is validated before any host work; undefined/'' keeps the project-root repository.
+			const repoPath = validateRemoteGitRepoPath(repo);
 			if (extra.length) throw new Error("GIT_RESULT_INVALID");
 			if (operation !== "stage" && operation !== "unstage") throw new Error("GIT_RESULT_INVALID");
 			if (group !== "index" && group !== "workingTree" && group !== "untracked") throw new Error("GIT_RESULT_INVALID");
@@ -155,11 +157,11 @@ export function registerRemoteGitReadIpc(input: { enabled: boolean; locator(proj
 			await read(
 				event,
 				projectId,
-				undefined,
+				repoPath,
 				(id, signal) => {
 					const file = fileTarget(id, value);
-					const expected = tokens.take(event.sender.id, id, "index", token);
-					return git.mutate(id, operation, group, file, expected, signal);
+					const expected = tokens.take(event.sender.id, id, "index", repoPath, token);
+					return git.mutate(id, operation, group, file, expected, repoPath, signal);
 				},
 				true,
 			);
@@ -168,42 +170,46 @@ export function registerRemoteGitReadIpc(input: { enabled: boolean; locator(proj
 			return { ok: false, code: remoteGitFailureCode(error) };
 		}
 	});
-	ipcMain.handle(ipcChannels.gitRemoteCommit, async (event, projectId: unknown, message: unknown, token: unknown, ...extra: unknown[]): Promise<GitCommitResult> => {
+	ipcMain.handle(ipcChannels.gitRemoteCommit, async (event, projectId: unknown, message: unknown, token: unknown, repo: unknown, ...extra: unknown[]): Promise<GitCommitResult> => {
 		try {
+			const repoPath = validateRemoteGitRepoPath(repo);
 			if (extra.length) throw new Error("GIT_RESULT_INVALID");
 			// The message is user input, so it is bounded here before any SSH session is queued for it.
 			if (typeof message !== "string" || message.length === 0 || message.trim().length === 0 || message.includes("\0") || Buffer.byteLength(message, "utf8") > REMOTE_GIT_COMMIT_MESSAGE_MAX_BYTES) throw new Error("GIT_COMMIT_MESSAGE_EMPTY");
-			await read(event, projectId, undefined, (id, signal) => git.commit(id, message, tokens.take(event.sender.id, id, "commit", token), signal), true);
+			await read(event, projectId, repoPath, (id, signal) => git.commit(id, message, tokens.take(event.sender.id, id, "commit", repoPath, token), repoPath, signal), true);
 			return { ok: true };
 		} catch (error) {
 			return { ok: false, code: remoteGitFailureCode(error) };
 		}
 	});
-	ipcMain.handle(ipcChannels.gitRemoteCreateBranch, async (event, projectId: unknown, name: unknown, token: unknown, ...extra: unknown[]): Promise<RemoteGitBranchMutationResult> => {
+	ipcMain.handle(ipcChannels.gitRemoteCreateBranch, async (event, projectId: unknown, name: unknown, token: unknown, repo: unknown, ...extra: unknown[]): Promise<RemoteGitBranchMutationResult> => {
 		try {
-			// Write channels take no repository scope: a supplied one is refused before any SSH/host work.
+			// The trailing scope is validated before any host work; undefined/'' keeps the project-root repository.
+			const repoPath = validateRemoteGitRepoPath(repo);
 			if (extra.length) throw new Error("GIT_RESULT_INVALID");
-			await read(event, projectId, undefined, (id, signal) => git.createBranch(id, name, tokens.take(event.sender.id, id, "branch", token), signal), true);
+			await read(event, projectId, repoPath, (id, signal) => git.createBranch(id, name, tokens.take(event.sender.id, id, "branch", repoPath, token), repoPath, signal), true);
 			return { ok: true };
 		} catch (error) {
 			return { ok: false, code: remoteGitFailureCode(error) };
 		}
 	});
-	ipcMain.handle(ipcChannels.gitRemoteSwitchBranch, async (event, projectId: unknown, name: unknown, token: unknown, ...extra: unknown[]): Promise<RemoteGitBranchMutationResult> => {
+	ipcMain.handle(ipcChannels.gitRemoteSwitchBranch, async (event, projectId: unknown, name: unknown, token: unknown, repo: unknown, ...extra: unknown[]): Promise<RemoteGitBranchMutationResult> => {
 		try {
-			// Write channels take no repository scope: a supplied one is refused before any SSH/host work.
+			// The trailing scope is validated before any host work; undefined/'' keeps the project-root repository.
+			const repoPath = validateRemoteGitRepoPath(repo);
 			if (extra.length) throw new Error("GIT_RESULT_INVALID");
-			await read(event, projectId, undefined, (id, signal) => git.switchBranch(id, name, tokens.take(event.sender.id, id, "switch", token), signal), true);
+			await read(event, projectId, repoPath, (id, signal) => git.switchBranch(id, name, tokens.take(event.sender.id, id, "switch", repoPath, token), repoPath, signal), true);
 			return { ok: true };
 		} catch (error) {
 			return { ok: false, code: remoteGitFailureCode(error) };
 		}
 	});
-	ipcMain.handle(ipcChannels.gitRemoteDiscard, async (event, projectId: unknown, group: unknown, value: unknown, token: unknown, ...extra: unknown[]): Promise<RemoteGitDiscardResult> => {
+	ipcMain.handle(ipcChannels.gitRemoteDiscard, async (event, projectId: unknown, group: unknown, value: unknown, token: unknown, repo: unknown, ...extra: unknown[]): Promise<RemoteGitDiscardResult> => {
 		try {
-			// Write channels take no repository scope: a supplied one is refused before any SSH/host work.
+			// The trailing scope is validated before any host work; undefined/'' keeps the project-root repository.
+			const repoPath = validateRemoteGitRepoPath(repo);
 			if (extra.length) throw new Error("GIT_RESULT_INVALID");
-			const result = await read(event, projectId, undefined, (id, signal) => git.discard(id, group, fileTarget(id, value), tokens.take(event.sender.id, id, "discard", token), signal), true);
+			const result = await read(event, projectId, repoPath, (id, signal) => git.discard(id, group, fileTarget(id, value), tokens.take(event.sender.id, id, "discard", repoPath, token), repoPath, signal), true);
 			return { ok: true, recoveryRef: result.recoveryRef };
 		} catch (error) {
 			return { ok: false, code: remoteGitFailureCode(error) };
@@ -218,21 +224,23 @@ export function registerRemoteGitReadIpc(input: { enabled: boolean; locator(proj
 			return { ok: false, code: remoteGitFailureCode(error) };
 		}
 	});
-	ipcMain.handle(ipcChannels.gitRemoteRecoveryRestore, async (event, projectId: unknown, ref: unknown, oid: unknown, path: unknown, token: unknown, ...extra: unknown[]): Promise<RemoteGitRecoveryRestoreResult> => {
+	ipcMain.handle(ipcChannels.gitRemoteRecoveryRestore, async (event, projectId: unknown, ref: unknown, oid: unknown, path: unknown, token: unknown, repo: unknown, ...extra: unknown[]): Promise<RemoteGitRecoveryRestoreResult> => {
 		try {
-			// Write channels take no repository scope: a supplied one is refused before any SSH/host work.
+			// The trailing scope is validated before any host work; undefined/'' keeps the project-root repository.
+			const repoPath = validateRemoteGitRepoPath(repo);
 			if (extra.length) throw new Error("GIT_RESULT_INVALID");
-			const restored = await read(event, projectId, undefined, (id, signal) => git.recoveryRestore(id, ref, oid, path, tokens.take(event.sender.id, id, "restore", token), signal), true);
+			const restored = await read(event, projectId, repoPath, (id, signal) => git.recoveryRestore(id, ref, oid, path, tokens.take(event.sender.id, id, "restore", repoPath, token), repoPath, signal), true);
 			return { ok: true, path: restored.path, bytes: restored.bytes };
 		} catch (error) {
 			return { ok: false, code: remoteGitFailureCode(error) };
 		}
 	});
-	ipcMain.handle(ipcChannels.gitRemoteRecoveryDrop, async (event, projectId: unknown, ref: unknown, oid: unknown, token: unknown, ...extra: unknown[]): Promise<RemoteGitRecoveryDropResult> => {
+	ipcMain.handle(ipcChannels.gitRemoteRecoveryDrop, async (event, projectId: unknown, ref: unknown, oid: unknown, token: unknown, repo: unknown, ...extra: unknown[]): Promise<RemoteGitRecoveryDropResult> => {
 		try {
-			// Write channels take no repository scope: a supplied one is refused before any SSH/host work.
+			// The trailing scope is validated before any host work; undefined/'' keeps the project-root repository.
+			const repoPath = validateRemoteGitRepoPath(repo);
 			if (extra.length) throw new Error("GIT_RESULT_INVALID");
-			await read(event, projectId, undefined, (id, signal) => git.recoveryDrop(id, ref, oid, tokens.take(event.sender.id, id, "drop", token), signal), true);
+			await read(event, projectId, repoPath, (id, signal) => git.recoveryDrop(id, ref, oid, tokens.take(event.sender.id, id, "drop", repoPath, token), repoPath, signal), true);
 			return { ok: true };
 		} catch (error) {
 			return { ok: false, code: remoteGitFailureCode(error) };
@@ -247,29 +255,32 @@ export function registerRemoteGitReadIpc(input: { enabled: boolean; locator(proj
 			return { ok: false, code: remoteGitFailureCode(error) };
 		}
 	});
-	ipcMain.handle(ipcChannels.gitRemoteFetch, async (event, projectId: unknown, remote: unknown, token: unknown, ...extra: unknown[]): Promise<RemoteGitFetchOutcomeResult> => {
+	ipcMain.handle(ipcChannels.gitRemoteFetch, async (event, projectId: unknown, remote: unknown, token: unknown, repo: unknown, ...extra: unknown[]): Promise<RemoteGitFetchOutcomeResult> => {
 		try {
-			// Write channels take no repository scope: a supplied one is refused before any SSH/host work.
+			// The trailing scope is validated before any host work; undefined/'' keeps the project-root repository.
+			const repoPath = validateRemoteGitRepoPath(repo);
 			if (extra.length) throw new Error("GIT_RESULT_INVALID");
-			return { ok: true, outcome: await read(event, projectId, undefined, (id, signal) => git.fetch(id, remote, tokens.take(event.sender.id, id, "fetch", token), signal), true) };
+			return { ok: true, outcome: await read(event, projectId, repoPath, (id, signal) => git.fetch(id, remote, tokens.take(event.sender.id, id, "fetch", repoPath, token), repoPath, signal), true) };
 		} catch (error) {
 			return { ok: false, code: remoteGitFailureCode(error) };
 		}
 	});
-	ipcMain.handle(ipcChannels.gitRemotePush, async (event, projectId: unknown, remote: unknown, branch: unknown, token: unknown, ...extra: unknown[]): Promise<RemoteGitPushOutcomeResult> => {
+	ipcMain.handle(ipcChannels.gitRemotePush, async (event, projectId: unknown, remote: unknown, branch: unknown, token: unknown, repo: unknown, ...extra: unknown[]): Promise<RemoteGitPushOutcomeResult> => {
 		try {
-			// Write channels take no repository scope: a supplied one is refused before any SSH/host work.
+			// The trailing scope is validated before any host work; undefined/'' keeps the project-root repository.
+			const repoPath = validateRemoteGitRepoPath(repo);
 			if (extra.length) throw new Error("GIT_RESULT_INVALID");
-			return { ok: true, outcome: await read(event, projectId, undefined, (id, signal) => git.push(id, remote, branch, tokens.take(event.sender.id, id, "push", token), signal), true) };
+			return { ok: true, outcome: await read(event, projectId, repoPath, (id, signal) => git.push(id, remote, branch, tokens.take(event.sender.id, id, "push", repoPath, token), repoPath, signal), true) };
 		} catch (error) {
 			return { ok: false, code: remoteGitFailureCode(error) };
 		}
 	});
-	ipcMain.handle(ipcChannels.gitRemotePull, async (event, projectId: unknown, remote: unknown, branch: unknown, token: unknown, ...extra: unknown[]): Promise<RemoteGitPullOutcomeResult> => {
+	ipcMain.handle(ipcChannels.gitRemotePull, async (event, projectId: unknown, remote: unknown, branch: unknown, token: unknown, repo: unknown, ...extra: unknown[]): Promise<RemoteGitPullOutcomeResult> => {
 		try {
-			// Write channels take no repository scope: a supplied one is refused before any SSH/host work.
+			// The trailing scope is validated before any host work; undefined/'' keeps the project-root repository.
+			const repoPath = validateRemoteGitRepoPath(repo);
 			if (extra.length) throw new Error("GIT_RESULT_INVALID");
-			return { ok: true, outcome: await read(event, projectId, undefined, (id, signal) => git.pull(id, remote, branch, tokens.take(event.sender.id, id, "pull", token), signal), true) };
+			return { ok: true, outcome: await read(event, projectId, repoPath, (id, signal) => git.pull(id, remote, branch, tokens.take(event.sender.id, id, "pull", repoPath, token), repoPath, signal), true) };
 		} catch (error) {
 			return { ok: false, code: remoteGitFailureCode(error) };
 		}

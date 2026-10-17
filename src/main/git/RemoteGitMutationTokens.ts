@@ -26,10 +26,15 @@ export function createRemoteGitMutationTokens(now = Date.now) {
 			entries.set(token, { senderId, projectId, expected, expires: now() + 15 * 60_000 });
 			return token;
 		},
-		/** Consume synchronously before the caller's first await; another window cannot burn the owner's token. */
-		take(senderId: number, projectId: string, kind: RemoteGitMutationKind, token: unknown): RemoteGitWriteExpectation {
+		/**
+		 * Consume synchronously before the caller's first await; another window cannot burn the owner's token.
+		 * The repository scope is part of the grant identity (G5e): a token minted for one repository is unusable against
+		 * another, exactly like a token minted for another window or project, and a mismatch never burns it. A wrong action
+		 * kind stays a caller bug with its own code and also does not burn the token the user still owns.
+		 */
+		take(senderId: number, projectId: string, kind: RemoteGitMutationKind, repoPath: string, token: unknown): RemoteGitWriteExpectation {
 			const entry = typeof token === "string" && /^[0-9a-f]{32}$/.test(token) ? entries.get(token) : undefined;
-			if (!entry || entry.senderId !== senderId || entry.projectId !== projectId) throw new Error("GIT_WRITE_SNAPSHOT_EXPIRED");
+			if (!entry || entry.senderId !== senderId || entry.projectId !== projectId || entry.expected.repoPath !== repoPath) throw new Error("GIT_WRITE_SNAPSHOT_EXPIRED");
 			// A token for the other action kind is a caller bug: refuse without burning the token the user still owns.
 			if (entry.expected.kind !== kind) throw new Error("GIT_RESULT_INVALID");
 			entries.delete(String(token));

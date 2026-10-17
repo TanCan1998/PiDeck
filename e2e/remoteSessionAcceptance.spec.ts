@@ -871,7 +871,7 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 		}
 	});
 
-	test("远端 Git G5d：仓库发现与只读 scope → 嵌套仓库读取匹配原生 → 写控件禁用并提示 → 切回根恢复", async ({ remoteWindow, remoteUserDataRoot }, testInfo) => {
+	test("远端 Git G5d/G5e：仓库发现与 scope → 嵌套读取匹配原生 → 嵌套写控件可用并真实暂存 → 切回根恢复", async ({ remoteWindow, remoteUserDataRoot }, testInfo) => {
 		test.setTimeout(600_000);
 		const creds = credentials;
 		if (!creds) {

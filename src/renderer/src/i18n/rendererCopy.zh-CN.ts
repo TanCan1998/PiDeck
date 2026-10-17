@@ -8,7 +8,6 @@ export const zhCN = {
 	"remoteGit.refresh": "刷新远端 Git",
 	"remoteGit.repoScope": "仓库范围",
 	"remoteGit.repoScopeRoot": "项目根",
-	"remoteGit.repoReadOnlyNote": "嵌套仓库当前只读：暂存／提交、分支、丢弃、恢复与同步只作用于项目根仓库；嵌套仓库的写能力稍后提供。",
 	"remoteGit.repoReposTruncated": "仓库列表达到扫描上限，可能不完整；请缩小项目范围或在终端确认。",
 	"remoteGit.repoNotFound": "该路径下没有 Git 仓库（嵌套仓库列表可能已过期）。请刷新后重新选择。",
 	"remoteGit.back": "返回远端变更列表",

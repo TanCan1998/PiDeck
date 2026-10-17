@@ -151,27 +151,27 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 	const detail = state.detail;
 	const viewingDiff = state.diffLoading || state.diff !== undefined || state.diffErrorCode !== undefined;
 	const busy = state.loading || state.diffLoading || state.mutating;
-	// Nested repositories are read-only in this batch: every write/branch/sync/recovery action targets the root.
+	// A nested scope writes its own repository (G5e); only the explicit init remains root-only.
 	const nested = repoPath !== "";
 	const rootRepoPresent = repos?.some((repo) => repo.path === "") === true;
 	const showRepoScope = repos !== undefined && (repos.length > 1 || (repos.length > 0 && !rootRepoPresent));
 	const messageBytes = new TextEncoder().encode(message).length;
-	// A nested scope is read-only: the root-scoped grants may not even be issued, and the explicit `!nested` keeps the
-	// disabled state honest even if a token ever leaked through a future capability change.
-	const canCommit = !nested && snapshot?.commitToken !== undefined && !busy && message.trim().length > 0 && messageBytes <= 4096;
-	const canCreateBranch = !nested && snapshot?.branchToken !== undefined && !busy && validRemoteGitBranchName(newBranch);
-	const canSwitchBranch = !nested && snapshot?.switchToken !== undefined && !busy;
-	const canDiscard = !nested && snapshot?.discardToken !== undefined && !busy;
-	const canRestore = !nested && snapshot?.restoreToken !== undefined && !busy;
-	const canDrop = !nested && snapshot?.dropToken !== undefined && !busy;
+	// Every scope's grants are minted by main for that repository, so the controls depend on the token and the facts
+	// alone (G5e); only init keeps an explicit root-only condition below.
+	const canCommit = snapshot?.commitToken !== undefined && !busy && message.trim().length > 0 && messageBytes <= 4096;
+	const canCreateBranch = snapshot?.branchToken !== undefined && !busy && validRemoteGitBranchName(newBranch);
+	const canSwitchBranch = snapshot?.switchToken !== undefined && !busy;
+	const canDiscard = snapshot?.discardToken !== undefined && !busy;
+	const canRestore = snapshot?.restoreToken !== undefined && !busy;
+	const canDrop = snapshot?.dropToken !== undefined && !busy;
 	const syncFacts = state.sync;
 	const syncRemote = syncFacts?.remotes[0];
 	const syncBranch = syncFacts?.branch ?? null;
-	const canFetch = !nested && snapshot?.fetchToken !== undefined && !busy && syncRemote !== undefined;
+	const canFetch = snapshot?.fetchToken !== undefined && !busy && syncRemote !== undefined;
 	// Push and pull need a checked-out branch whose upstream is on a remote this repository actually has.
 	const syncTracked = syncFacts?.upstream != null && syncBranch !== null && syncRemote !== undefined;
-	const canPush = !nested && snapshot?.pushToken !== undefined && !busy && syncTracked;
-	const canPull = !nested && snapshot?.pullToken !== undefined && !busy && syncTracked;
+	const canPush = snapshot?.pushToken !== undefined && !busy && syncTracked;
+	const canPull = snapshot?.pullToken !== undefined && !busy && syncTracked;
 	// The tree offers index actions and the recoverable discard as separate capabilities: either grant is enough.
 	const writable = snapshot?.mutationToken !== undefined || snapshot?.discardToken !== undefined;
 	// Expanding a section is the user action that loads it; an error stays until the header is clicked again.
@@ -198,8 +198,8 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 				</Button>
 			</div>
 			{/*
-			 * G5d repository scope: shown once discovery found more than one repository, or a rootless project with nested
-			 * ones. A nested choice is read-only in this batch, stated right above the controls it disables.
+			 * G5d/G5e repository scope: shown once discovery found more than one repository, or a rootless project with
+			 * nested ones. A nested choice reads AND writes that repository; only init stays root-only.
 			 */}
 			{showRepoScope ? (
 				<div data-testid="remote-git-repo-scope" className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-1">
@@ -217,11 +217,6 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 						</SelectContent>
 					</Select>
 				</div>
-			) : null}
-			{nested ? (
-				<p data-testid="remote-git-repo-readonly-note" className="shrink-0 border-b border-border px-3 py-1 text-xs text-text-secondary">
-					{t("remoteGit.repoReadOnlyNote")}
-				</p>
 			) : null}
 			{reposTruncated ? (
 				<p data-testid="remote-git-repos-truncated" className="shrink-0 border-b border-border px-3 py-1 text-xs text-text-secondary">
@@ -282,7 +277,7 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 			<p className="shrink-0 border-b border-border px-3 py-2 text-xs text-text-secondary">{t(snapshot && (snapshot.mutationToken || snapshot.commitToken || snapshot.branchToken || snapshot.switchToken || snapshot.discardToken) ? "remoteGit.managedIndex" : "remoteGit.readOnly")}</p>
 			{snapshot && !viewingDiff ? (
 				<div className="shrink-0 space-y-2 border-b border-border px-3 py-2">
-					<Textarea data-testid="remote-git-commit-message" aria-label={t("remoteGit.commitMessage")} placeholder={t("remoteGit.commitPlaceholder")} value={message} rows={2} disabled={nested || busy || snapshot.commitToken === undefined} onChange={(event) => setMessage(event.target.value)} />
+					<Textarea data-testid="remote-git-commit-message" aria-label={t("remoteGit.commitMessage")} placeholder={t("remoteGit.commitPlaceholder")} value={message} rows={2} disabled={busy || snapshot.commitToken === undefined} onChange={(event) => setMessage(event.target.value)} />
 					<div className="flex items-center gap-2">
 						<Button type="button" size="sm" disabled={!canCommit} onClick={() => commit(message)}>
 							{t("remoteGit.commitAction")}
@@ -322,7 +317,7 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 				</p>
 			) : null}
 			{state.errorCode === "GIT_TRUST_REQUIRED" ? <RemoteGitTrustGate project={project} onApproved={refreshAll} /> : null}
-			{/* G5c: a confirmed non-repository gets one explicit, inline-confirmed init action; nested scopes never do. */}
+			{/* G5c: a confirmed non-repository gets one explicit, inline-confirmed init action at the project root; nested scopes never do. */}
 			{!nested && (state.errorCode === "GIT_NOT_REPOSITORY" || state.initializing || state.initNotice !== undefined) ? (
 				<div className="shrink-0 space-y-1 border-b border-border px-3 py-2">
 					{state.errorCode === "GIT_NOT_REPOSITORY" ? <p className="text-xs text-text-secondary">{t("remoteGit.initHint")}</p> : null}
@@ -586,7 +581,7 @@ export function RemoteGitPanel({ project }: { project: RemoteProject }) {
 						{refsOpen ? (
 							<>
 								<div className="flex items-center gap-2 px-3 pb-1">
-									<Input data-testid="remote-git-branch-name" aria-label={t("remoteGit.branchName")} placeholder={t("remoteGit.branchNamePlaceholder")} value={newBranch} disabled={nested || busy || snapshot?.branchToken === undefined} onChange={(event) => setNewBranch(event.target.value)} />
+									<Input data-testid="remote-git-branch-name" aria-label={t("remoteGit.branchName")} placeholder={t("remoteGit.branchNamePlaceholder")} value={newBranch} disabled={busy || snapshot?.branchToken === undefined} onChange={(event) => setNewBranch(event.target.value)} />
 									<Button type="button" size="sm" data-testid="remote-git-create-branch" disabled={!canCreateBranch} onClick={() => createBranch(newBranch)}>
 										{t("remoteGit.createBranch")}
 									</Button>

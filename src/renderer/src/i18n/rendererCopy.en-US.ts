@@ -9,7 +9,6 @@ export const enUS: Record<TranslationKey, string> = {
 	"remoteGit.refresh": "Refresh remote Git",
 	"remoteGit.repoScope": "Repository",
 	"remoteGit.repoScopeRoot": "Project root",
-	"remoteGit.repoReadOnlyNote": "Nested repositories are read-only for now: stage/commit, branch, discard, recovery and sync actions apply to the project-root repository only; writes for nested repositories arrive later.",
 	"remoteGit.repoReposTruncated": "The repository list hit its scan bound and may be incomplete; narrow the project root or check in a terminal.",
 	"remoteGit.repoNotFound": "No Git repository at this path (the nested list may be stale). Refresh and choose again.",
 	"remoteGit.back": "Back to remote changes",

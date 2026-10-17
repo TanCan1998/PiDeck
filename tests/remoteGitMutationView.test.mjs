@@ -49,7 +49,7 @@ test("remote index view serializes one explicit write, disables refresh, and ref
 	resolve({ ok: true });
 	await pending;
 	assert.equal(f.calls.filter((call) => call === "read").length, 2);
-	assert.deepEqual(f.calls[1], ["project", "stage", "workingTree", target, snapshot.mutationToken]);
+	assert.deepEqual(f.calls[1], ["project", "stage", "workingTree", target, snapshot.mutationToken, ""]);
 });
 
 test("remote index unknown outcome clears grant/facts without read or write replay", async () => {
@@ -140,7 +140,7 @@ test("an explicit commit sends the message verbatim, counts one confirmation and
 	await f.controller.commit("subject\n\nbody\n");
 	assert.deepEqual(
 		f.calls.filter((call) => Array.isArray(call)),
-		[["commit", "project", "subject\n\nbody\n", "c".repeat(32)]],
+		[["commit", "project", "subject\n\nbody\n", "c".repeat(32), ""]],
 	);
 	assert.equal(f.current().confirmedCommits, 1);
 	assert.ok(f.current().mutating !== true, "the in-flight flag must be released once the commit is confirmed");

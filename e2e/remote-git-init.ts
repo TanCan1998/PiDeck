@@ -44,6 +44,9 @@ export async function verifyRemoteGitInit(input: { window: Page; credentials: Re
 		await window.getByTestId("drawer-rail-git").click();
 		await expect(panel).toBeVisible();
 		const trust = panel.getByRole("button", { name: "信任此项目及其 .pi 资源", exact: true });
+		// The trust gate can render after the panel's first read: wait for the gate or the settled state before
+		// sampling it, otherwise a one-shot isVisible() silently skips the click and the panel stays gated.
+		await expect(trust.or(panel.getByTestId("remote-git-not-repository"))).toBeVisible({ timeout: timeoutMs });
 		if (await trust.isVisible().catch(() => false)) await trust.click();
 		const notRepository = panel.getByTestId("remote-git-not-repository");
 		await expect(notRepository).toContainText("不是普通 Git 仓库", { timeout: timeoutMs });

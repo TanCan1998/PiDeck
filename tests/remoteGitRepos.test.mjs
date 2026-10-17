@@ -289,28 +289,16 @@ test("a scope that is missing, not a directory, a link or not a repository is GI
 	assert.ok(!linked.repos.some((repo) => repo.path.startsWith("link-repo")));
 });
 
-test("every write, init and discovery refuses a non-empty repository scope", options, async (t) => {
+test("git.init and git.repos refuse a non-empty repository scope; writes are scoped since G5e", options, async (t) => {
 	const f = multiRepoFixture(t);
-	const revision = successful(await f.request("git.status")).revision;
-	for (const [method, params] of [
-		["git.stage", { path: "root.txt", group: "workingTree", expectedRevision: revision }],
-		["git.unstage", { path: "root.txt", group: "index", expectedRevision: revision }],
-		["git.commit", { message: "m", expectedRevision: revision }],
-		["git.createBranch", { name: "scope-branch", expectedHead: null }],
-		["git.switchBranch", { name: "scope-branch", expectedHead: null }],
-		["git.discard", { path: "root.txt", group: "workingTree", expectedRevision: revision }],
-		["git.recoveryRestore", { ref: "refs/pideck/recovery/x", oid: "a".repeat(40), path: "a.txt", expectedRevision: revision }],
-		["git.recoveryDrop", { ref: "refs/pideck/recovery/x", oid: "a".repeat(40), expectedRevision: revision }],
-		["git.fetch", { remote: "origin", expectedRevision: revision }],
-		["git.push", { remote: "origin", branch: "main", expectedRevision: revision }],
-		["git.pull", { remote: "origin", branch: "main", expectedRevision: revision }],
-		["git.init", {}],
-		["git.repos", {}],
-	]) {
-		assert.equal(await refusal(f, method, params, NESTED), "GIT_RESULT_INVALID", method);
-	}
+	// Discovery and the explicit root init are the two methods that never take a scope (G5e keeps them root-only).
+	assert.equal(await refusal(f, "git.init", {}, NESTED), "GIT_RESULT_INVALID");
+	assert.equal(await refusal(f, "git.repos", {}, NESTED), "GIT_RESULT_INVALID");
 	// The same methods keep their root behaviour: init is refused because the root already is a repository.
 	assert.equal(await refusal(f, "git.init", {}, ""), "GIT_REPO_EXISTS");
+	// The write batch is exercised against a nested repository by tests/remoteGitScopedWrite.test.mjs.
+	const revision = successful(await f.request("git.status")).revision;
+	assert.equal(await refusal(f, "git.stage", { path: "root.txt", group: "workingTree", expectedRevision: revision }, "missing-repo"), "GIT_NOT_REPOSITORY");
 });
 
 test("git.repos takes no parameters and keeps the bounded shapes", options, async (t) => {

@@ -299,7 +299,7 @@ test("creating a branch sends the main-owned grant, refreshes only after confirm
 	// One action at a time: a second click while the first is in flight never reaches the API.
 	await f.reads.createBranch("feature/two");
 	assert.equal(calls.length, 1);
-	assert.deepEqual(plain(calls[0]), ["project", "feature/one", branchSnapshot.branchToken]);
+	assert.deepEqual(plain(calls[0]), ["project", "feature/one", branchSnapshot.branchToken, ""]);
 	resolve({ ok: true });
 	await pending;
 	assert.equal(f.current().mutating, undefined);
@@ -353,7 +353,7 @@ test("switching uses its own grant, refreshes on confirmation and reports a conf
 	});
 	await f.reads.refresh();
 	await f.reads.switchBranch("feature");
-	assert.deepEqual(plain(calls), [["project", "feature", branchSnapshot.switchToken]]);
+	assert.deepEqual(plain(calls), [["project", "feature", branchSnapshot.switchToken, ""]]);
 	// A grant is single use, so the second click can only work because the confirmed switch re-read the repository.
 	const readsBefore = f.states.filter((entry) => entry.snapshot !== undefined).length;
 	await f.reads.switchBranch("feature");
@@ -383,7 +383,7 @@ test("discarding a file asks main for the backup, keeps the recovery ref and re-
 	});
 	await f.reads.refresh();
 	await f.reads.discard("workingTree", target);
-	assert.deepEqual(plain(calls), [["project", "workingTree", target, discardSnapshot.discardToken]]);
+	assert.deepEqual(plain(calls), [["project", "workingTree", target, discardSnapshot.discardToken, ""]]);
 	assert.deepEqual(plain(f.current().discardRecovery), { ref: "refs/pideck/recovery/20261016120000-ab12cd34", path: "file.txt" });
 	// The note is what tells the user how to get the bytes back, so a later read must not erase it.
 	await f.reads.refresh();
@@ -391,7 +391,7 @@ test("discarding a file asks main for the backup, keeps the recovery ref and re-
 	// A second discard replaces the note instead of accumulating stale ones.
 	await f.reads.discard("untracked", { projectId, relativePath: "junk.txt" });
 	assert.deepEqual(plain(f.current().discardRecovery), { ref: "refs/pideck/recovery/20261016120000-ab12cd34", path: "junk.txt" });
-	assert.deepEqual(plain(calls.at(-1)), ["project", "untracked", { projectId, relativePath: "junk.txt" }, discardSnapshot.discardToken]);
+	assert.deepEqual(plain(calls.at(-1)), ["project", "untracked", { projectId, relativePath: "junk.txt" }, discardSnapshot.discardToken, ""]);
 });
 
 test("a discard that has nothing to back up reports that honestly", async () => {
@@ -493,7 +493,7 @@ test("restoring a snapshot keeps the recovery store and answers with its own gra
 	});
 	await f.reads.refresh();
 	await f.reads.restoreRecovery(recoveryEntry);
-	assert.deepEqual(plain(calls), [["project", recoveryEntry.ref, recoveryEntry.oid, recoveryEntry.path, recoverySnapshot.restoreToken]]);
+	assert.deepEqual(plain(calls), [["project", recoveryEntry.ref, recoveryEntry.oid, recoveryEntry.path, recoverySnapshot.restoreToken, ""]]);
 	assert.deepEqual(plain(f.current().recoveryNotice), { kind: "restored", path: "file.txt" });
 	assert.equal(f.current().mutating, undefined);
 	// The listing is reloaded after a restore, and the notice survives the refresh that follows it.
@@ -514,7 +514,7 @@ test("deleting a snapshot is its own action with its own grant", async () => {
 	});
 	await f.reads.refresh();
 	await f.reads.dropRecovery(recoveryEntry);
-	assert.deepEqual(plain(calls), [["project", recoveryEntry.ref, recoveryEntry.oid, recoverySnapshot.dropToken]]);
+	assert.deepEqual(plain(calls), [["project", recoveryEntry.ref, recoveryEntry.oid, recoverySnapshot.dropToken, ""]]);
 	assert.deepEqual(plain(f.current().recoveryNotice), { kind: "dropped", path: "file.txt" });
 	// The repository facts come back with the outcome: a drop must not leave the panel looking empty.
 	assert.ok(f.current().snapshot, "the panel re-reads the repository after a drop");
@@ -618,15 +618,15 @@ test("sync facts load on demand and the three verbs use their own grants and rep
 	await f.reads.refresh();
 	await f.reads.loadSync();
 	await f.reads.fetch("origin");
-	assert.deepEqual(plain(calls.filter((call) => call[0] === "fetch").at(-1)), ["fetch", "project", "origin", syncSnapshot.fetchToken]);
+	assert.deepEqual(plain(calls.filter((call) => call[0] === "fetch").at(-1)), ["fetch", "project", "origin", syncSnapshot.fetchToken, ""]);
 	assert.deepEqual(plain(f.current().syncNotice), { kind: "fetch", outcome: "updated:1" });
 	await f.reads.loadSync();
 	await f.reads.push("origin", "main");
-	assert.deepEqual(plain(calls.filter((call) => call[0] === "push").at(-1)), ["push", "project", "origin", "main", syncSnapshot.pushToken]);
+	assert.deepEqual(plain(calls.filter((call) => call[0] === "push").at(-1)), ["push", "project", "origin", "main", syncSnapshot.pushToken, ""]);
 	assert.deepEqual(plain(f.current().syncNotice), { kind: "push", outcome: "pushed" });
 	await f.reads.loadSync();
 	await f.reads.pull("origin", "main");
-	assert.deepEqual(plain(calls.filter((call) => call[0] === "pull").at(-1)), ["pull", "project", "origin", "main", syncSnapshot.pullToken]);
+	assert.deepEqual(plain(calls.filter((call) => call[0] === "pull").at(-1)), ["pull", "project", "origin", "main", syncSnapshot.pullToken, ""]);
 	assert.deepEqual(plain(f.current().syncNotice), { kind: "pull", outcome: "fast-forward" });
 	// The notice survives the refresh the verb performs, and the facts are re-read with it.
 	await f.reads.refresh();

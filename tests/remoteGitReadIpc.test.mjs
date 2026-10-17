@@ -273,56 +273,104 @@ test("every read channel carries the repository scope into the helper frame", as
 	for (const call of scopedCalls) assert.equal(call.repo, scoped, call.method + " must carry the selected repository");
 });
 
-test("a nested snapshot never mints a write grant, while the root snapshot keeps them", async () => {
+const WRITE_CAPABILITIES = ["git.status", "git.stage", "git.unstage", "git.commit", "git.createBranch", "git.switchBranch", "git.discard", "git.recoveryRestore", "git.recoveryDrop", "git.fetch", "git.push", "git.pull"];
+const WRITE_TOKENS = ["mutationToken", "commitToken", "branchToken", "switchToken", "discardToken", "restoreToken", "dropToken", "fetchToken", "pushToken", "pullToken"];
+
+/** Every write handler, in call order: the trailing scope is the last argument, exactly like preload sends it. */
+function writeInvocations(grants, repo) {
+	return [
+		["gitRemoteMutateIndex", projectId, "stage", "workingTree", { projectId, relativePath: "a.txt" }, grants.mutationToken, repo],
+		["gitRemoteCommit", projectId, "message", grants.commitToken, repo],
+		["gitRemoteCreateBranch", projectId, "feature", grants.branchToken, repo],
+		["gitRemoteSwitchBranch", projectId, "feature", grants.switchToken, repo],
+		["gitRemoteDiscard", projectId, "workingTree", { projectId, relativePath: "a.txt" }, grants.discardToken, repo],
+		["gitRemoteRecoveryRestore", projectId, "refs/pideck/recovery/x", oid("a"), "a.txt", grants.restoreToken, repo],
+		["gitRemoteRecoveryDrop", projectId, "refs/pideck/recovery/x", oid("a"), grants.dropToken, repo],
+		["gitRemoteFetch", projectId, "origin", grants.fetchToken, repo],
+		["gitRemotePush", projectId, "origin", "main", grants.pushToken, repo],
+		["gitRemotePull", projectId, "origin", "main", grants.pullToken, repo],
+	];
+}
+
+/** One write reply per helper method; shapes are the ones RemoteGitService re-validates. */
+function writeReply(method, params) {
+	if (method === "git.commit") return { applied: true, head: oid("a"), tree: oid("b") };
+	if (method === "git.createBranch" || method === "git.switchBranch") return { applied: true, branch: params.name, ...(method === "git.switchBranch" ? { head: oid("a") } : {}) };
+	if (method === "git.discard") return { applied: true, recoveryRef: null, path: params.path, mode: "restored" };
+	if (method === "git.recoveryRestore") return { applied: true, path: params.path, bytes: 1 };
+	if (method === "git.recoveryDrop") return { applied: true };
+	if (method === "git.fetch") return { applied: true, upToDate: true, updated: [] };
+	if (method === "git.push") return { applied: true, outcome: "up-to-date", refspec: "refs/heads/main:refs/heads/main" };
+	if (method === "git.pull") return { applied: true, mode: "up-to-date", head: oid("a") };
+	return { applied: true };
+}
+
+/** A fixture whose helper answers the whole write batch, with the snapshot carrying every grant. */
+function writeFixture() {
 	const f = fixture();
 	f.session.hostRevision = 1;
-	const capabilities = ["git.status", "git.stage", "git.unstage", "git.commit", "git.createBranch", "git.switchBranch", "git.discard", "git.recoveryRestore", "git.recoveryDrop", "git.fetch", "git.push", "git.pull"];
-	f.session.request = async (method) => {
-		if (method === "hello") return { protocolVersion: 1, root: locator.remotePath, capabilities };
-		return { ...snapshot, revision: "a".repeat(64) };
+	f.session.request = async (method, params, options) => {
+		f.calls.push({ method, params, ...(options?.repo === undefined ? {} : { repo: options.repo }) });
+		options?.onRequestId?.("request-" + f.calls.length);
+		if (method === "hello") return { protocolVersion: 1, root: locator.remotePath, capabilities: [...WRITE_CAPABILITIES, "git.init"] };
+		if (method === "git.status") return { ...snapshot, revision: "a".repeat(64) };
+		return writeReply(method, params);
 	};
+	return f;
+}
+
+test("every snapshot mints grants bound to its own scope, and a cross-scope token is refused without host work", async () => {
+	const f = writeFixture();
 	const nested = await f.handlers.get(ipcChannels.gitRemoteSnapshot)(f.event, projectId, "packages/nested");
 	assert.equal(nested.ok, true);
-	for (const field of ["mutationToken", "commitToken", "branchToken", "switchToken", "discardToken", "restoreToken", "dropToken", "fetchToken", "pushToken", "pullToken"]) assert.equal(nested.snapshot[field], undefined, field + " must not be issued for a nested scope");
-	const root = await f.handlers.get(ipcChannels.gitRemoteSnapshot)(f.event, projectId);
-	assert.equal(root.ok, true);
-	assert.ok(root.snapshot.mutationToken && root.snapshot.commitToken && root.snapshot.fetchToken, "the root scope keeps its grants");
+	for (const field of WRITE_TOKENS) assert.match(nested.snapshot[field] ?? "", /^[0-9a-f]{32}$/, field + " must be issued for a nested snapshot");
+	// The nested token names the nested repository: using it for a root write is a scope mismatch, not a host request.
+	const callsBefore = f.calls.length;
+	const crossed = await f.handlers.get(ipcChannels.gitRemoteMutateIndex)(f.event, projectId, "stage", "workingTree", { projectId, relativePath: "a.txt" }, nested.snapshot.mutationToken);
+	assert.equal(crossed.code, "GIT_WRITE_SNAPSHOT_EXPIRED");
+	assert.equal(f.calls.length, callsBefore, "a cross-scope token must never reach the helper");
+	// The same grant still works in the scope it was minted for.
+	const scoped = await f.handlers.get(ipcChannels.gitRemoteMutateIndex)(f.event, projectId, "stage", "workingTree", { projectId, relativePath: "a.txt" }, nested.snapshot.mutationToken, "packages/nested");
+	assert.equal(scoped.ok, true);
+	assert.equal(f.calls.at(-1).repo, "packages/nested");
 });
 
-test("write channels refuse a supplied repository scope before any host work", async () => {
-	const f = fixture();
-	const writeCalls = [
-		["gitRemoteMutateIndex", [projectId, "stage", "workingTree", { projectId, relativePath: "a.txt" }, "token"]],
-		["gitRemoteCommit", [projectId, "message", "token"]],
-		["gitRemoteCreateBranch", [projectId, "feature", "token"]],
-		["gitRemoteSwitchBranch", [projectId, "feature", "token"]],
-		["gitRemoteDiscard", [projectId, "workingTree", { projectId, relativePath: "a.txt" }, "token"]],
-		["gitRemoteRecoveryRestore", [projectId, "refs/pideck/recovery/x", oid("a"), "a.txt", "token"]],
-		["gitRemoteRecoveryDrop", [projectId, "refs/pideck/recovery/x", oid("a"), "token"]],
-		["gitRemoteFetch", [projectId, "origin", "token"]],
-		["gitRemotePush", [projectId, "origin", "main", "token"]],
-		["gitRemotePull", [projectId, "origin", "main", "token"]],
-		["gitRemoteInit", [projectId]],
-	];
-	for (const [channel, args] of writeCalls) {
-		const result = await f.handlers.get(ipcChannels[channel])(f.event, ...args, "packages/nested");
-		assert.equal(result.ok, false, channel);
-		assert.equal(result.code, "GIT_RESULT_INVALID", channel + " must refuse a supplied repository scope");
+test("write channels carry the trailing repository scope into the helper frame", async () => {
+	const f = writeFixture();
+	const scoped = "packages/nested";
+	const nested = await f.handlers.get(ipcChannels.gitRemoteSnapshot)(f.event, projectId, scoped);
+	const grants = nested.snapshot;
+	f.calls.length = 0;
+	for (const [channel, ...args] of writeInvocations(grants, scoped)) {
+		const result = await f.handlers.get(ipcChannels[channel])(f.event, ...args);
+		assert.equal(result.ok, true, channel + " must reach the helper with its scope");
+		assert.equal(f.calls.at(-1).repo, scoped, channel + " must carry the repository scope in its frame");
 	}
-	assert.equal(f.calls.length, 0, "no write channel may reach the host with a supplied scope");
-	// A write without the extra argument keeps its exact old frame: no repo field at all.
-	f.session.request = async (method, params, options) => {
-		f.calls.push({ method, params, repo: options?.repo });
-		options?.onRequestId?.("request-" + f.calls.length);
-		if (method === "hello") return { ...hello, capabilities: [...hello.capabilities, "git.init"] };
-		return { applied: true };
-	};
-	await f.handlers.get(ipcChannels.gitRemoteInit)(f.event, projectId);
-	assert.deepEqual(
-		f.calls.map((call) => call.method),
-		["hello", "git.init"],
-	);
-	assert.equal(f.calls[1].repo, undefined);
+	// A root-scope write keeps the old frame shape: no repo field at all.
+	f.calls.length = 0;
+	const root = await f.handlers.get(ipcChannels.gitRemoteSnapshot)(f.event, projectId);
+	for (const [channel, ...args] of writeInvocations(root.snapshot, undefined)) {
+		const result = await f.handlers.get(ipcChannels[channel])(f.event, ...args);
+		assert.equal(result.ok, true, channel + " root write");
+		assert.equal(Object.prototype.hasOwnProperty.call(f.calls.at(-1), "repo"), false, channel + " root frame names no repository");
+	}
+});
+
+test("a write channel refuses an unsafe scope before any host work", async () => {
+	const f = writeFixture();
+	const nested = await f.handlers.get(ipcChannels.gitRemoteSnapshot)(f.event, projectId);
+	const callsBefore = f.calls.length;
+	for (const repo of ["../outside", "/absolute", "a\\b", "nested/.git", "x.lock/y"]) {
+		for (const [channel, ...args] of writeInvocations(nested.snapshot, repo)) {
+			const result = await f.handlers.get(ipcChannels[channel])(f.event, ...args);
+			assert.equal(result.code, "GIT_RESULT_INVALID", channel + " " + repo);
+		}
+	}
+	assert.equal(f.calls.length, callsBefore, "an unsafe scope never reaches the helper");
+	// Init stays root-only: a trailing argument is still refused before any host work.
+	const init = await f.handlers.get(ipcChannels.gitRemoteInit)(f.event, projectId, "packages/nested");
+	assert.equal(init.code, "GIT_RESULT_INVALID");
+	assert.equal(f.calls.length, callsBefore);
 });
 
 test("remote repo discovery is a token-free read with a re-validated answer", async () => {

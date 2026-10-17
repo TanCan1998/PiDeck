@@ -53,6 +53,8 @@ const {
 	REMOTE_HELPER_PROTOCOL_VERSION,
 	REMOTE_HELPER_MAX_REQUEST_TIMEOUT_MS,
 	REMOTE_GIT_READ_TIMEOUT_MS,
+	REMOTE_GIT_REPO_READ_METHODS,
+	REMOTE_GIT_REPO_WRITE_METHODS,
 	REMOTE_GIT_SYNC_TIMEOUT_MS,
 } = loadTsCommonJs("src/main/remote/RemoteHelperContract.ts");
 const { REMOTE_HELPER_ARTIFACTS, REMOTE_HELPER_ENTRY_FILE_NAME, REMOTE_HELPER_ENTRY_SHA256, REMOTE_HELPER_ENTRY_VERSION, REMOTE_HELPER_GIT_READ_SHA256, REMOTE_HELPER_GIT_SYNC_SHA256, REMOTE_HELPER_GIT_WRITE_SHA256, REMOTE_HELPER_INLINE_SOURCE } = loadTsCommonJs("src/main/remote/RemoteHelperEntry.ts");
@@ -65,7 +67,7 @@ const HOST_ID = "01234567-89ab-4def-8123-456789abcdef";
 /** The helper never resolves HOME into a path, so a POSIX literal is the honest fixture on any platform. */
 const HELPER_HOME = "/home/pideck-helper";
 /** Frozen digest, pinned here as well as in the module: editing the source means editing both. */
-const FROZEN_SHA256 = "f0dfe0e2e8695d9527ac9ff5fdf09d176addb863dde0f6d4305375f2c930c9f9";
+const FROZEN_SHA256 = "7a77c38ec0b6b7b1a1be60c5cfcbbb9184bec09d3522886e2a8de9acd59d514a";
 const MAX_TEXT = 4096;
 const TEST_TIMEOUT_MS = 30_000;
 const GUARD_TIMEOUT_MS = 10_000;
@@ -429,6 +431,30 @@ helperTest("every frozen bundle artifact is one byte-frozen ASCII line with its 
 	assert.equal(REMOTE_HELPER_INLINE_SOURCE.split('"git.repos"').length - 1, 2, "git.repos appears exactly once in CAPABILITIES and once in the dispatch");
 	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes("function readRepoValue("), "the entry must validate the per-request repo scope before forwarding it");
 	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes("parsed.repo"), "the dispatch must read the scope from the request frame");
+	// G5e: the entry and the frozen worker accept the repository scope for exactly the read batch plus every write verb;
+	// the contract states the same two lists, and init/discovery stay root-only.
+	const repoMethods = /const REPO_METHODS = new Set\(\[([^\]]*)\]\);/.exec(REMOTE_HELPER_INLINE_SOURCE);
+	assert.ok(repoMethods, "the entry must enforce the repository-scope acceptance face");
+	assert.deepEqual(
+		Array.from(repoMethods[1].matchAll(/"([^"]+)"/g), (match) => match[1]),
+		[...REMOTE_GIT_REPO_READ_METHODS, ...REMOTE_GIT_REPO_WRITE_METHODS],
+		"the entry's accepted scope methods must equal the contract's read + write lists",
+	);
+	const readRepoSet = /const READ_REPO = new Set\(\[([^\]]*)\]\)/.exec(REMOTE_GIT_READ_SOURCE);
+	const writeRepoSet = /const WRITE_REPO = new Set\(\[([^\]]*)\]\)/.exec(REMOTE_GIT_READ_SOURCE);
+	assert.ok(readRepoSet && writeRepoSet, "the frozen worker must keep both scope lists");
+	assert.deepEqual(
+		Array.from(readRepoSet[1].matchAll(/"([^"]+)"/g), (match) => match[1]),
+		[...REMOTE_GIT_REPO_READ_METHODS],
+		"worker read scope list",
+	);
+	assert.deepEqual(
+		Array.from(writeRepoSet[1].matchAll(/"([^"]+)"/g), (match) => match[1]),
+		[...REMOTE_GIT_REPO_WRITE_METHODS],
+		"worker write scope list",
+	);
+	assert.ok(REMOTE_GIT_READ_SOURCE.includes("!READ_REPO.has(method) && !WRITE_REPO.has(method)"), "the frozen prepare must accept exactly the read + write batch");
+	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes("!REPO_METHODS.has(method)"), "the entry must refuse a scope for any other method before forwarding");
 	// A stable code must be registered inside the frozen worker itself, or the helper's own mapping collapses it to IO_ERROR.
 	const stableSet = /const stable = new Set\(\[([^\]]*)\]\)/.exec(REMOTE_GIT_READ_SOURCE);
 	assert.ok(stableSet, "the frozen Git worker must keep its literal stable-code set");
@@ -444,7 +470,7 @@ helperTest("every frozen bundle artifact is one byte-frozen ASCII line with its 
 helperTest("the exported entry identity matches the frozen source", () => {
 	assert.equal(REMOTE_HELPER_ENTRY_FILE_NAME, "helper.mjs");
 	assert.match(REMOTE_HELPER_ENTRY_VERSION, /^\d+\.\d+\.\d+$/);
-	assert.equal(REMOTE_HELPER_ENTRY_VERSION, "1.18.0", "the nested-repository batch is helper 1.18.0");
+	assert.equal(REMOTE_HELPER_ENTRY_VERSION, "1.19.0", "the nested-write batch is helper 1.19.0");
 	// The frozen source cannot import the contract, so its literals are checked against it here.
 	assert.ok(REMOTE_HELPER_INLINE_SOURCE.includes(`"${REMOTE_HELPER_ENTRY_VERSION}"`), "hello must report REMOTE_HELPER_ENTRY_VERSION");
 	for (const token of [REMOTE_HELPER_METHOD_HELLO, REMOTE_HELPER_METHOD_ECHO, REMOTE_HELPER_METHOD_CANCEL, REMOTE_HELPER_METHOD_FS_STAT, REMOTE_HELPER_METHOD_FS_LIST, REMOTE_HELPER_METHOD_FS_READ]) {
@@ -505,7 +531,7 @@ helperTest("hello answers the contract handshake through the production client",
 	assert.equal(session.stderr(), "", "the helper never writes stderr text");
 });
 
-helperTest("a repository scope is validated by the entry and refused for every write, init and discovery", async (t) => {
+helperTest("a repository scope is validated by the entry and accepted for reads and writes", async (t) => {
 	const session = startHelper(t);
 	// The entry owns the first shape check: nothing malformed is forwarded to the worker at all.
 	for (const repo of ["../escape", "/absolute", "a\\b", "C:/drive", "dir/.git", "x.lock/y", "-option", "a\u0000b", "a".repeat(REMOTE_HELPER_MAX_PATH_LENGTH + 1)]) {
@@ -516,9 +542,30 @@ helperTest("a repository scope is validated by the entry and refused for every w
 	// comes from the worker's own environment (not a repository / no root / not Linux), never from the shape check.
 	const forwarded = await rejection(guard(session.client.request("git.status", {}, { repo: "nested" }), "git.status with a scope"));
 	assert.notEqual(forwarded.code, "GIT_RESULT_INVALID", "a read method must accept a well-formed scope shape");
-	// Every write, init and discovery refuses a non-empty scope with GIT_RESULT_INVALID and starts no Git child: the
-	// root here is an empty directory, so a request that reached run() would answer GIT_NOT_REPOSITORY instead.
-	for (const method of ["git.stage", "git.unstage", "git.commit", "git.createBranch", "git.switchBranch", "git.discard", "git.recoveryRestore", "git.recoveryDrop", "git.fetch", "git.push", "git.pull", "git.init", REMOTE_HELPER_METHOD_GIT_REPOS]) {
+	// G5e: every write verb accepts the same well-formed scope. The root here is an empty directory, so a request that
+	// got past the entry/prepare acceptance face answers GIT_NOT_REPOSITORY (Linux) or GIT_PLATFORM_UNSUPPORTED instead
+	// of the shape refusal the G5d batch produced.
+	const revision = "a".repeat(64),
+		writeParams = {
+			"git.stage": { path: "a.txt", group: "workingTree", expectedRevision: revision },
+			"git.unstage": { path: "a.txt", group: "index", expectedRevision: revision },
+			"git.commit": { message: "message", expectedRevision: revision },
+			"git.createBranch": { name: "feature", expectedHead: null },
+			"git.switchBranch": { name: "feature", expectedHead: null },
+			"git.discard": { path: "a.txt", group: "workingTree", expectedRevision: revision },
+			"git.recoveryRestore": { ref: "refs/pideck/recovery/x", oid: "b".repeat(40), path: "a.txt", expectedRevision: revision },
+			"git.recoveryDrop": { ref: "refs/pideck/recovery/x", oid: "b".repeat(40), expectedRevision: revision },
+			"git.fetch": { remote: "origin", expectedRevision: revision },
+			"git.push": { remote: "origin", branch: "main", expectedRevision: revision },
+			"git.pull": { remote: "origin", branch: "main", expectedRevision: revision },
+		};
+	for (const [method, params] of Object.entries(writeParams)) {
+		const error = await rejection(guard(session.client.request(method, params, { repo: "nested" }), method + " with a scope"));
+		assert.notEqual(error.code, "GIT_RESULT_INVALID", method + " must accept a well-formed scope");
+		assert.equal(error.code, process.platform === "linux" ? "GIT_NOT_REPOSITORY" : "GIT_PLATFORM_UNSUPPORTED", method);
+	}
+	// Init and discovery stay root-only: a non-empty scope is refused before any Git child.
+	for (const method of ["git.init", REMOTE_HELPER_METHOD_GIT_REPOS]) {
 		const error = await rejection(guard(session.client.request(method, {}, { repo: "nested" }), method + " with a scope"));
 		assert.equal(error.code, "GIT_RESULT_INVALID", method);
 	}

@@ -149,17 +149,17 @@ test("a cross-project call, a disabled feature and a disposed port never reach t
 
 test("issuing a branch grant twice replaces only that kind, leaving the other actions usable", () => {
 	const tokens = tokensModule.createRemoteGitMutationTokens();
-	const base = { revision, hostRevision: 1, target: locator, head };
+	const base = { revision, hostRevision: 1, target: locator, head, repoPath: "" };
 	const first = tokens.issue(1, projectId, { kind: "branch", ...base });
 	const second = tokens.issue(1, projectId, { kind: "branch", ...base });
 	const switcher = tokens.issue(1, projectId, { kind: "switch", ...base });
 	const index = tokens.issue(1, projectId, { kind: "index", ...base });
-	assert.throws(() => tokens.take(1, projectId, "branch", first), /GIT_WRITE_SNAPSHOT_EXPIRED/, "the replaced grant of the same kind is gone");
-	assert.equal(tokens.take(1, projectId, "branch", second).kind, "branch");
-	assert.equal(tokens.take(1, projectId, "switch", switcher).kind, "switch");
-	assert.equal(tokens.take(1, projectId, "index", index).kind, "index");
+	assert.throws(() => tokens.take(1, projectId, "branch", "", first), /GIT_WRITE_SNAPSHOT_EXPIRED/, "the replaced grant of the same kind is gone");
+	assert.equal(tokens.take(1, projectId, "branch", "", second).kind, "branch");
+	assert.equal(tokens.take(1, projectId, "switch", "", switcher).kind, "switch");
+	assert.equal(tokens.take(1, projectId, "index", "", index).kind, "index");
 	// Another window cannot burn this window's branch grant.
 	const foreign = tokens.issue(1, projectId, { kind: "branch", ...base });
-	assert.throws(() => tokens.take(2, projectId, "branch", foreign), /GIT_WRITE_SNAPSHOT_EXPIRED/);
-	assert.equal(tokens.take(1, projectId, "branch", foreign).kind, "branch");
+	assert.throws(() => tokens.take(2, projectId, "branch", "", foreign), /GIT_WRITE_SNAPSHOT_EXPIRED/);
+	assert.equal(tokens.take(1, projectId, "branch", "", foreign).kind, "branch");
 });
