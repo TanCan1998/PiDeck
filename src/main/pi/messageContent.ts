@@ -5,6 +5,12 @@ function stripCpaCompletionMarker(text: string): string {
 	return text.replace(/(?:^|\r?\n)<CPA_DONE>\s*$/, "");
 }
 
+/** 桌面消息统一剥宿主提示与传输标记，保留 Markdown 首行缩进。 */
+function projectMessageText(text: string): string {
+	const options = { preserveMarkdownIndent: true };
+	return stripCpaCompletionMarker(stripHostInstruction(stripFeishuDocActionHint(text, options), options));
+}
+
 /**
  * 将 pi/RPC 的 content 字段转换为桌面端消息正文。
  * 兼容部分 Anthropic-compatible 服务把同一段 assistant 文本拆成多个 {type:"text"}
@@ -14,7 +20,7 @@ function stripCpaCompletionMarker(text: string): string {
 export function extractMessageText(content: unknown): string {
 	if (typeof content === "string") {
 		// 宿主指令 / 飞书能力提示只给模型看，UI 与历史展示前剥离。
-		return stripCpaCompletionMarker(stripHostInstruction(stripFeishuDocActionHint(content)));
+		return projectMessageText(content);
 	}
 	if (!Array.isArray(content)) return "";
 
@@ -42,7 +48,7 @@ export function extractMessageText(content: unknown): string {
 		text += String(typed.text ?? "");
 	}
 
-	return stripCpaCompletionMarker(stripHostInstruction(stripFeishuDocActionHint(text)));
+	return projectMessageText(text);
 }
 
 /**

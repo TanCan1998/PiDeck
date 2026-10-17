@@ -12,6 +12,7 @@ import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
 const { visibleAssistantText, pickEditableAssistantMessage } = loadTsCommonJs("src/renderer/src/components/session/timeline/editableAnswerTarget.ts");
 const turnRowSource = readFileSync("src/renderer/src/components/session/turn/TurnRow.tsx", "utf8");
+const { cleanAnswerText } = loadTsCommonJs("src/renderer/src/components/session/timeline/answerText.ts");
 
 function assistantMessage(id, text) {
 	return { kind: "message", message: { id, role: "assistant", text, entryId: `entry-${id}` } };
@@ -48,6 +49,19 @@ test("visibleAssistantText 剥内联 thinking 标签并收两端空白", () => {
 	assert.equal(visibleAssistantText("  <thinking>plan</thinking>\nWorld  "), "World");
 	assert.equal(visibleAssistantText("plain"), "plain");
 	assert.equal(visibleAssistantText("<thinking>only</thinking>"), "");
+});
+
+test("缩进代码原样编辑保存后仍可见，首行 Markdown 缩进不能被清理掉", () => {
+	const text = "    <thinking>代码示例\n\n正常结论不能丢失";
+	const item = assistantMessage("code-a", text);
+	const target = pickEditableAssistantMessage([item]);
+	assert.equal(target?.message.id, item.message.id);
+	const initialEditText = visibleAssistantText(target.message.text);
+	assert.equal(initialEditText, text);
+	// 模拟编辑入口原样保存，再走真实正文清理出口，不访问会话文件。
+	assert.equal(cleanAnswerText(initialEditText), text);
+	assert.equal(visibleAssistantText(initialEditText), initialEditText);
+	assert.equal(item.message.text, text);
 });
 
 test("issue #310 源码契约：TurnRow 编辑初值不得来自 mergedText，保存与加载同源", () => {

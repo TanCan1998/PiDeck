@@ -9,6 +9,8 @@ import { isRetryStatusMessage } from "../session/timelineFailureNotice";
 import type { TranslationKey } from "../../i18n";
 import { formatFilePathRef } from "../session/composer/chips";
 import { replaceExpandedRefBlocksWithLabels } from "../session/composer/quoteChip";
+import { stripThinkingTags } from "../../utils/thinkingText.ts";
+export { stripThinkingTags };
 
 /* ── 文件树拖拽负载 ── */
 
@@ -80,10 +82,6 @@ const ANSI_RE = /\x1b\[[0-9;]*[a-zA-Z]/g;
 
 export function stripAnsi(text: string): string {
 	return text.replace(ANSI_RE, "");
-}
-
-export function stripThinkingTags(text: string): string {
-	return text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, "").trim();
 }
 
 /* ── 时间和摘要 ── */

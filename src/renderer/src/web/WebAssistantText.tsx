@@ -9,12 +9,7 @@
 import { isValidElement, memo, type ReactNode } from "react";
 import "katex/dist/katex.min.css";
 import { MarkdownStream } from "@/components/session/MarkdownStream";
-import { stripAnsi } from "@/components/session/TimelineFormat";
-
-/** 从正文里剥除 <thinking> 标签（思考内容由 reasoning part 单独渲染）。 */
-function stripThinkingTags(text: string): string {
-	return text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, "").trim();
-}
+import { cleanAnswerText } from "../components/session/timeline/answerText.ts";
 
 function extractText(node: ReactNode): string {
 	if (typeof node === "string" || typeof node === "number") return String(node);
@@ -28,7 +23,7 @@ function extractText(node: ReactNode): string {
 export const WebAssistantText = memo(
 	function WebAssistantText(props: { text: string; isStreaming?: boolean; onOpenFile?: (path: string, line?: number) => void }) {
 		// 清理 ANSI 转义码与 <thinking> 标签，thinking 由调用方折叠渲染
-		const cleanText = stripThinkingTags(stripAnsi(props.text));
+		const cleanText = cleanAnswerText(props.text);
 		return (
 			<div className="assistant-text markdown-body">
 				<MarkdownStream
