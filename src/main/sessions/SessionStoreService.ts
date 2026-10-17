@@ -36,8 +36,13 @@ const DEFAULT_BOOT_TIMEOUT_MS = 20_000;
  * 慢盘上可能更久；命中快照时是几十毫秒。
  */
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
-/** stdout 单行上限：结果按文件数增长（889 文件 ≈ 221KB），留足余量防异常帧撑爆内存。 */
-export const MAX_SESSION_STORE_LINE_CHARS = 8 * 1024 * 1024;
+/**
+ * stdout 单行上限：`list-files` 结果按文件数增长（889 文件 ≈ 221KB）；`get-index`
+ * 的条目表随会话长度增长（10 万条 × ~250B ≈ 25MB，journal 类超大会话）。
+ * 取 32MiB 统一封顶：既不让正常响应被误判成协议异常，也保证异常帧不会撑爆内存
+ * （字符串只在单个响应帧上瞬时占用，解析后即释放）。
+ */
+export const MAX_SESSION_STORE_LINE_CHARS = 32 * 1024 * 1024;
 
 export type SessionStoreLogger = {
 	debug: (message: string) => void;
@@ -76,6 +81,23 @@ export type SessionStoreReadyInfo = {
 	bootMs: number;
 };
 
+/**
+ * `get-index` 的线形状（native/session-store/table.go 的 table）。
+ *
+ * `entries` 刻意是 `unknown[]`：它来自外部进程（子进程输出一律不可信），
+ * 字段级校验与类型收窄由消费者 `SessionHistoryReader` 的 validator 完成，
+ * 本服务只保证「取到了 JSON」。
+ */
+export type SessionStoreIndexTable = {
+	path: string;
+	size: number;
+	mtimeMs: number;
+	endsWithNewline: boolean;
+	lastEntryId?: string;
+	entries: unknown[];
+	oversizedLines: number;
+};
+
 export type SessionStoreServiceOptions = {
 	/** 快照落盘路径（装配层给 `<userData>/session-store/state.bin`）。 */
 	statePath: string;
@@ -92,8 +114,9 @@ type ResponseFrame = { type: "response"; id?: number; ok?: boolean; result?: unk
 type HostRecord = ReadyFrame | ResponseFrame | { type: string };
 
 type RequestFrame = {
-	cmd: "list-files" | "refresh";
+	cmd: "list-files" | "refresh" | "get-index";
 	roots: string[];
+	path?: string;
 };
 
 type PendingRequest = {
@@ -181,6 +204,19 @@ export class SessionStoreService {
 		const boot = await this.ensureChild();
 		if (!boot.ok) return boot;
 		return this.request<SessionStoreListStats>({ cmd: "refresh", roots: [...roots] });
+	}
+
+	/**
+	 * 取单个会话文件的条目表（Wave 2：替代「缓存未命中时的全量逐行解析」）。
+	 *
+	 * 与 list-files 一样会等 boot 结束；调用方应先 isReady() 判断，未就绪就走 TS 解析。
+	 * 返回的行数据未经校验，消费方必须做字段级校验后再用。
+	 */
+	async getIndex(hostPath: string): Promise<SessionStoreCallResult<SessionStoreIndexTable>> {
+		if (!hostPath) return { ok: false, reason: "not-ready", message: "会话文件路径为空" };
+		const boot = await this.ensureChild();
+		if (!boot.ok) return boot;
+		return this.request<SessionStoreIndexTable>({ cmd: "get-index", roots: [], path: hostPath });
 	}
 
 	/** 退出清理：结算所有在途请求并杀进程（幂等）。 */

@@ -273,3 +273,46 @@ test("ready 帧带快照信息，dispose/退出后清空诊断信息", async () 
 	const result = await pending;
 	assert.equal(result.ok, false);
 });
+
+test("get-index：带上路径请求并回传未校验的条目表", async () => {
+	const { service, harnesses } = createService();
+	const pending = service.getIndex("C:\root\a\one.jsonl");
+	await tick();
+	bootReady(harnesses[0]);
+	await tick();
+	const commands = harnesses[0].commands();
+	assert.equal(commands.length, 1);
+	assert.equal(commands[0].cmd, "get-index");
+	assert.equal(commands[0].path, "C:\root\a\one.jsonl");
+	assert.deepEqual(commands[0].roots, []);
+	const table = { path: "C:\root\a\one.jsonl", size: 120, mtimeMs: 1, endsWithNewline: true, entries: [{ id: "a" }], oversizedLines: 0 };
+	harnesses[0].emitLine({ type: "response", id: commands[0].id, ok: true, result: table });
+	const result = await pending;
+	assert.equal(result.ok, true);
+	// 服务只保证「取到 JSON」：字段级校验在消费者的 validator 里（tests/sessionStoreIndexParity.test.mjs）
+	// 跨 vm realm 的对象不能用 deepStrictEqual（原型不同），逐字段比对。
+	assert.equal(result.value.entries.length, 1);
+	assert.equal(result.value.entries[0].id, "a");
+	assert.equal(result.value.endsWithNewline, true);
+});
+
+test("get-index：空路径不拉进程直接 not-ready", async () => {
+	const { service, spawnCalls } = createService();
+	const result = await service.getIndex("");
+	assert.equal(result.ok, false);
+	assert.equal(result.reason, "not-ready");
+	assert.equal(spawnCalls.length, 0);
+});
+
+test("get-index：sidecar 报错时以 request-failed 结算（不抛异常）", async () => {
+	const { service, harnesses } = createService();
+	const pending = service.getIndex("/root/a/one.jsonl");
+	await tick();
+	bootReady(harnesses[0]);
+	await tick();
+	const commands = harnesses[0].commands();
+	harnesses[0].emitLine({ type: "response", id: commands[0].id, ok: false, error: "boom" });
+	const result = await pending;
+	assert.equal(result.ok, false);
+	assert.equal(result.reason, "request-failed");
+});

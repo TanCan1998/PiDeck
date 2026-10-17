@@ -88,3 +88,99 @@ test("CI：三平台都跑 session-store 的 Go 单测并注入交叉编译目�
 		assert.match(source, /SESSION_STORE_ARCH:\s*\$\{\{\s*matrix\.arch\s*\}\}/, `${workflow} 缺 SESSION_STORE_ARCH`);
 	}
 });
+
+test("Wave 2 Go 侧：get-index 命令 + 条目表镜像 + 缓存边界", () => {
+	const mainSource = read("../native/session-store/main.go");
+	assert.match(mainSource, /case\s*"get-index":/);
+	assert.match(mainSource, /getIndexTable\(/);
+
+	const tableSource = read("../native/session-store/table.go");
+	// 行级镜像：与 TS 的 parseIndexLine 同口径（过渡语义见 tests/sessionStoreIndexParity.test.mjs）
+	assert.match(tableSource, /func parseIndexEntry\(line string, offset int64, byteLength int64\)/);
+	assert.match(tableSource, /func scanTable\(path string, size int64, mtimeMs float64\)/);
+	// assistantModel 取自 message.provider/message.model（不是 message.model.provider 对象）
+	assert.match(tableSource, /rawString\(message,\s*"provider"\)/);
+	assert.match(tableSource, /rawString\(message,\s*"model"\)/);
+	// 可选字段用指针 + omitempty：空字符串是保留值，不能被省略
+	assert.match(tableSource, /json:"toolName,omitempty"/);
+
+	const cacheSource = read("../native/session-store/indexcache.go");
+	assert.match(cacheSource, /maxCachedTables\s*=/);
+	assert.match(cacheSource, /maxCachedTableBytes\s*=/);
+	assert.match(cacheSource, /func getIndexTable\(cache \*tableCache, path string\)/);
+});
+
+test("Wave 2 TS 侧：宿主 getIndex + 读者校验分支 + 装配注入", () => {
+	const service = read("../src/main/sessions/SessionStoreService.ts");
+	assert.match(service, /cmd:\s*"list-files"\s*\|\s*"refresh"\s*\|\s*"get-index"/);
+	assert.match(service, /async getIndex\(hostPath: string\)/);
+	assert.match(service, /cmd:\s*"get-index",\s*roots:\s*\[\],\s*path:/);
+	// 条目表可能到几十 MB：单行上限放宽到 32MiB（仍是有界）
+	assert.match(service, /MAX_SESSION_STORE_LINE_CHARS\s*=\s*32\s*\*\s*1024\s*\*\s*1024/);
+
+	const reader = read("../src/main/pi/SessionHistoryReader.ts");
+	// 子进程输出不可信：整体校验，形状不符即回退 TS 逐行解析
+	assert.match(reader, /readIndexTable\?:\s*\(hostPath: string, version: \{ size: number; mtimeMs: number \}\) => Promise<unknown>/);
+	assert.match(reader, /function parseIndexTableRows\(value: unknown\)/);
+	assert.match(reader, /function parseIndexTableEntry\(value: unknown\)/);
+	assert.match(reader, /const sidecarTable = this\.parseIndexTable\(await this\.requestIndexTable\(hostPath, version\), hostPath\)/);
+	// 末尾无完整行时忽略 sidecar（残行口径不同）
+	assert.match(reader, /table\.endsWithNewline === false\) return null/);
+
+	const manager = read("../src/main/pi/AgentManager.ts");
+	assert.match(manager, /setSessionStoreIndexReader\(/);
+	assert.match(manager, /readIndexTable: \(hostPath, version\) => this\.sessionStoreIndexReader\?\.\(hostPath, version\) \?\? Promise\.resolve\(null\)/);
+
+	const index = read("../src/main/index.ts");
+	assert.match(index, /agentManager\.setSessionStoreIndexReader\(async \(hostPath\) => \{/);
+	assert.match(index, /if \(!service \|\| !service\.isReady\(\)\) return null;/);
+	assert.match(index, /const result = await service\.getIndex\(hostPath\)/);
+});
+
+test("Wave 2 parity 资产：fixture/基准/生成脚本齐备，基准与 fixture 配对", () => {
+	assert.equal(existsSync(new URL("../tests/fixtures/sessionStoreIndexParity.jsonl", import.meta.url)), true);
+	const goldenPath = new URL("../tests/fixtures/sessionStoreIndexParity.golden.json", import.meta.url);
+	assert.equal(existsSync(goldenPath), true);
+	const golden = JSON.parse(readFileSync(goldenPath, "utf8"));
+	assert.equal(golden.endsWithNewline, true);
+	assert.equal(golden.entries.length >= 18, true);
+	assert.equal(golden.path, "tests/fixtures/sessionStoreIndexParity.jsonl");
+	assert.equal(golden.mtimeMs, 0);
+	// 基准必须覆盖关键条目形态，避免 fixture 被改瘦后门禁变成空转
+	for (const type of ["session", "message", "model_change", "thinking_level_change", "custom_message", "compaction", "context_edit", "custom"]) {
+		assert.equal(
+			golden.entries.some((entry) => entry.type === type),
+			true,
+			`基准缺少 ${type} 条目`,
+		);
+	}
+	assert.equal(
+		golden.entries.some((entry) => entry.assistantModel?.modelId === "gpt-5.2-codex"),
+		true,
+	);
+	assert.equal(
+		golden.entries.some((entry) => entry.toolName === ""),
+		true,
+	);
+	assert.match(read("../scripts/genSessionStoreIndexGolden.mjs"), /tests",\s*"fixtures",\s*"sessionStoreIndexParity\.golden\.json"/);
+	assert.match(read("../native/session-store/parity_test.go"), /TestIndexTableMatchesGolden/);
+});
+
+test("Wave 2 开关：默认关闭，读取路径受 settings.sessionStoreEnabled 闸", () => {
+	// 收益门禁未过（docs/session-data-plane-plan.md §8.10），所以接线必须默认不生效：
+	// 主进程默认值与渲染层默认值都关，装配闭包第一行就是开关判断。
+	const settingsStore = read("../src/main/settings/SettingsStore.ts");
+	assert.match(settingsStore, /sessionStoreEnabled:\s*false/);
+	const sharedSettings = read("../src/shared/types/settings.ts");
+	assert.match(sharedSettings, /sessionStoreEnabled\?:\s*boolean;/);
+	assert.match(sharedSettings, /sessionStoreEnabled:\s*false/);
+	const index = read("../src/main/index.ts");
+	assert.match(index, /if \(!settingsStore\.get\(\)\.sessionStoreEnabled\) return null;/);
+	// 开关打开时必须预热，否则「只在已就绪时问」的读者路径永远不会生效
+	assert.match(index, /if \(settingsStore\.get\(\)\.sessionStoreEnabled\) sessionStoreService\.warmup\(\);/);
+	// 门禁结论必须留档（数字写回计划文档），否则开关会变成没人知道为什么关的死配置
+	const plan = read("../docs/session-data-plane-plan.md");
+	assert.match(plan, /### 8\.10 Wave 2 落地记录/);
+	assert.match(plan, /收益门禁未过/);
+	assert.match(plan, /Wave 2b/);
+});

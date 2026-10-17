@@ -18,6 +18,8 @@ type requestFrame struct {
 	Cmd   string          `json:"cmd"`
 	ID    json.RawMessage `json:"id"`
 	Roots []string        `json:"roots"`
+	// Path 仅 get-index 使用：宿主已 stat 过的会话文件绝对路径。
+	Path string `json:"path"`
 }
 
 type readyFrame struct {
@@ -48,6 +50,7 @@ func main() {
 	}
 	bootStartedAt := time.Now()
 	store := OpenStore(os.Args[1])
+	tables := newTableCache()
 
 	out := bufio.NewWriter(os.Stdout)
 	writeFrame := func(frame any) {
@@ -99,6 +102,21 @@ func main() {
 			}
 			logf("%s %s", request.Cmd, formatStats(stats))
 			writeFrame(responseFrame{Type: "response", ID: request.ID, OK: true, Result: stats})
+		case "get-index":
+			if request.Path == "" {
+				writeFrame(responseFrame{Type: "response", ID: request.ID, OK: false, Error: "no path"})
+				continue
+			}
+			startedAt := time.Now()
+			index, err := getIndexTable(tables, request.Path)
+			if err != nil {
+				logf("get-index failed (%s): %v", request.Path, err)
+				writeFrame(responseFrame{Type: "response", ID: request.ID, OK: false, Error: err.Error()})
+				continue
+			}
+			hits, misses, evicted := tables.statsSnapshot()
+			logf("get-index %s entries=%d oversized=%d endsWithNewline=%t elapsedMs=%d cache(hit=%d miss=%d evict=%d)", request.Path, len(index.Entries), index.OversizedLines, index.EndsWithNewline, time.Since(startedAt).Milliseconds(), hits, misses, evicted)
+			writeFrame(responseFrame{Type: "response", ID: request.ID, OK: true, Result: index})
 		default:
 			writeFrame(responseFrame{Type: "response", ID: request.ID, OK: false, Error: "unknown cmd: " + request.Cmd})
 		}

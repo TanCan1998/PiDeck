@@ -273,6 +273,10 @@ Gitmoji 对应关系：
 	// standby 预热池默认开启：新建会话近即时；10 分钟未使用自动回收，与闲置释放互补
 	standbyRuntimeEnabled: true,
 
+	// session-store 实验路径（Wave 2）默认关：收益门禁未过（sidecar 冷解析比 TS 冷建表慢 2–3×，
+	// 见 docs/session-data-plane-plan.md §8.10），需要自行实验时在 settings.json 里置 true。
+	sessionStoreEnabled: false,
+
 	// CUA 默认关闭：关闭时不监听本地端点、不改动 pi 的 mcp.json，与现状完全一致
 	cuaEnabled: false,
 	// 自动审批默认开启；显式保存的 false 仍由 load 合并保留，不自动改写用户选择。

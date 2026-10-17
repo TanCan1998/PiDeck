@@ -58,17 +58,17 @@
 - **构建链**：`npm run build:file-index`（fail-open，Go 缺失/构建失败只告警 exit 0）；`scripts/dev.js` 自动构建；`package.json` 的 `build` 链与 `extraResources`（`resources/file-index/bin` → `file-index`）；`.gitignore` 忽略产物只留 `.gitkeep`；三平台 workflow 的 `FILE_INDEX_OS/ARCH` env + `go -C native/file-index test ./...`。
 - 测试：`tests/fileIndexService.test.mjs`（宿主协议生命周期）+ `tests/fileSearchContentChain.test.mjs`（IPC 三处同步/降级/渲染层接线源码契约）+ Go 侧 `native/file-index/*_test.go`（名字排序/模糊匹配/内容扫描/预算截断/片段）。
 
-## 会话数据面 sidecar（session-store，Wave 1 骨架）
+## 会话数据面 sidecar（session-store，Wave 1 骨架 + Wave 2 get-index 默认关）
 
-- **定位**：同一份 pi 会话 JSONL 现在被四套 TS 各自解析（`SessionScanner`/`SessionCatalog`/`SessionHistoryReader`/`usageStats`），这是 `docs/session-data-plane-plan.md` 要收口的对象。Wave 1 **只交付骨架**：Go 侧快照 + 行边界增量扫描，宿主侧客户端，构建/CI/装配登记；**没有任何消费者**（不接 IPC、不接 UI），所以启动不预热、进程只在被调用时才拉起。
+- **定位**：同一份 pi 会话 JSONL 现在被四套 TS 各自解析（`SessionScanner`/`SessionCatalog`/`SessionHistoryReader`/`usageStats`），这是 `docs/session-data-plane-plan.md` 要收口的对象。Wave 1 交付骨架（Go 侧快照 + 行边界增量扫描、宿主客户端、构建/CI/装配登记），Wave 2 补上 `get-index`（行级条目表）并接到 `SessionHistoryReader`，但**收益门禁未过 → 由 `settings.sessionStoreEnabled` 闸住、默认关**（见 `docs/session-data-plane-plan.md` §8.10：sidecar 冷解析 251–343ms，比 TS 冷建表 99–188ms 慢 2–3×；快照只存文件级记账、重启后没有条目缓存）。默认关时这条路径完全不参与，读者走 TS 逐行解析。
 - **快照口径（改这里必须同步改两侧测试）**：`<userData>/session-store/state.bin`（JSON，`formatVersion = 1`，单文件多条记录，先写 `state.bin.tmp` 再 rename 原子替换，与 `snapshotFormatVersion` 常量同源）。每文件记录 `{path,size,mtimeMs,entryCount,hasCompaction,endsWithNewline}`：`size` **只会推进到最后一个完整行**（末尾残行不入账），`entryCount` 是带 `id` 的完整行数（**行口径**，未做身份去重），`hasCompaction` 是文件里出现过 `compaction` 行（**文件口径**）。Wave 2 接真实时条目表时需升 `formatVersion` 并补去重。
 - **增量前提（性能核心）**：只有「`size` 变大 **且** 上次记录以换行结尾（`endsWithNewline`）」才从 `prev.size` 开始尾扫；其余（变小/mtime 变但 size 同/上次残行结尾/无记录）一律全量重建。**换行结尾的判断不能省**（打开前尾部就是半行时接着扫会把半行当整行固化）。
 - **扫描口径**：只收 `*.jsonl`（大小写不敏感），跳过 `.pideck-archive` 与 `subagent-artifacts` 目录（成品归档/子代理产物不是可读会话，与 TS 侧一致），深度≤ 32，同路径去重；单行 ≥ 64MiB 时只用一个 64KiB 前缀探 `id`/`compaction`（与 `src/main/pi/jsonlLineStream.ts` 的 `MAX_JSONL_LINE_BYTES` 同口径），不会 OOM。
 - **与三个兄弟 sidecar 的差异（勿盲改）**：roots **不进 spawn 参数**（`spawnFn(binaryPath, [statePath])`），而是 `list-files {roots}` / `refresh {roots}` 的逐请求字段——快照按绝对路径分键，换 roots 不重启进程也不丢未变更文件的复用记录（解决了计划 §8.8 Q1）。
-- **fail-open**：二进制缺失/启动失败/boot 超时/协议版本不符/请求超时全部返回 `{ ok: false, reason }`，调用方回退 TS 解析；sidecar 永不抛异常。装配在 `src/main/index.ts`（`new SessionStoreService({...})` + `quitCleanup.register("session-store")`）；**Wave 1 不进 `extraResources`、不加 `settings.sessionStoreEnabled` 开关**，Wave 2 接线时一并补（构建脚本头注释已写明）。
+- **fail-open**：二进制缺失/启动失败/boot 超时/协议版本不符/请求超时全部返回 `{ ok: false, reason }`，调用方回退 TS 解析；sidecar 永不抛异常。装配在 `src/main/index.ts`（`new SessionStoreService({...})` + `quitCleanup.register("session-store")`）；`settings.sessionStoreEnabled`（**默认 false**、无 UI，实验时写 settings.json）= Wave 2 读取路径的总闸。**仍未进 `extraResources`**（默认关、无消费者；接线时再补）。
 - **构建链**：`npm run build:session-store`（fail-open，Go 缺失/构建失败只告警 exit 0），产物 `resources/session-store/bin/session-store(.exe)`（`.gitignore` 忽略，只留 `.gitkeep`）；`scripts/dev.js` 自动构建；三平台 workflow 的 `SESSION_STORE_OS/ARCH` env + `go -C native/session-store test ./...`。
 - **实测（本机 889 文件 / ~595MiB）**：首建全量扫 `indexMs = 7224`（端到端 7.26s，快照 221KB）；快照命中二开 `indexMs = 40`/`bootMs = 2`（端到端 65ms）。对照 TS 侧首屏 699ms（只读每文件前 1MiB）——**冷启慢一个量级、复用后快 ~17×**，所以 Wave 2 只能把它接到「重复读」路径（打开会话/读窗口），不能接到首屏清单扫描。
-- 测试：`tests/sessionStoreService.test.mjs`（宿主协议/超时/降级/roots 逐请求）+ `tests/sessionStoreChain.test.mjs`（装配/构建/CI 登记源码契约）+ Go 侧 `native/session-store/store_test.go`（复用/尾扫/残行/变小重建/压缩粘滞/忽略目录/快照损坏/巨型行）。
+- 测试：`tests/sessionStoreService.test.mjs`（宿主协议/超时/降级/roots 逐请求/`get-index`）+ `tests/sessionStoreChain.test.mjs`（装配/构建/CI/开关 登记源码契约）+ `tests/sessionStoreIndexParity.test.mjs`（同一文件、native reader vs sidecar reader 的公开 API 输出逐字段相等；残行/坏形状/抛错回退）+ Go 侧 `native/session-store/{store_test.go,table_test.go,parity_test.go}`（复用/尾扫/残行/变小重建/压缩粘滞/忽略目录/快照损坏/巨型行/条目表镜像与基准）。
 
 ## 技能商店安装链路（net.fetch 搜索 + spawn 进度 + 代理 env 注入）
 - **主进程联网一律走注入的 `fetchImpl`（= Electron `net.fetch`）**：裸全局 `fetch` 是 undici，既不读系统代理也不读 Electron 桌面 session 代理，代理环境下境外 API 挂到超时且只抛含糊 `AbortError`。`storeIpc.ts` 四个商店 handler（`skillHubSearch` / `skillStoreSearch` / `promptStoreSearch` / `promptStoreGet`）全部经 `deps.fetchImpl`；测试用 `createStoreIpc({ fetchImpl })` 注桩，未注入时才回退全局 fetch（测试沙箱无 fetch，故必须惰性取值）。

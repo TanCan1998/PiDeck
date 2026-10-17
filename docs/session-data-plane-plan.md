@@ -205,3 +205,33 @@ TS 历史路径已经是「**索引 + 定向读行**」两段式，而不是「�
 | 对照：TS 侧首屏（Wave 0 `probeSessionRead.mjs`，仅读每文件前 1MiB 头部） | `headSweepMs` 699ms |
 
 结论：**冷启一次全量比 TS 只读头部慢一个量级（7.2s vs 0.7s，因为要逐行扫完 595MiB），但快照命中后是 40ms，比 TS 首屏还快 ~17×**。所以 Wave 2 接线必须把它用在「打开会话/读窗口」这类**重复读**路径上（首次仍可让 TS 顶一下），不能用在首屏清单扫描上；这条写入 Wave 2 门禁。
+
+### 8.10 Wave 2 落地记录（已实现 + parity 全绿，但收益门禁未过 → 默认关）
+
+**已交付**
+
+- Go 侧 `get-index`：`native/session-store/table.go`（行级 `displayEntry` 镜像 + 超长行降级 + 与 TS 同 pattern 的字段探取）、`indexcache.go`（进程内表缓存：`maxCachedTables = 16` / 256MiB 上限 / LRU）、`main.go` 命令分支、`table_test.go` + `parity_test.go`（对基准逐字段）。
+- 宿主：`SessionStoreService.getIndex(hostPath)`（单行上限放宽到 32MiB，条目表可能几十 MB）；`SessionHistoryReader` 加 `readIndexTable` 可选注入 + 字段级校验器（子进程输出不可信，形状不符整体弃用）+ 「缓存未命中先问 sidecar」分支；`AgentManager.setSessionStoreIndexReader`；`src/main/index.ts` 装配。
+- 双向 parity 门禁：`tests/fixtures/sessionStoreIndexParity.jsonl` + `.golden.json`（18 条覆盖 session/message/model_change/thinking_level_change/custom/custom_message/compaction/context_edit/oversized）+ `scripts/genSessionStoreIndexGolden.mjs`（基准由**真实 Go 二进制**产出）+ Go 侧 `TestIndexTableMatchesGolden` + TS 侧 `tests/sessionStoreIndexParity.test.mjs`（同一文件、两个读者的公开 API 输出逐字段相等；残行/坏形状/sidecar 抛错三种情况都回退 TS）。
+- 开关：`settings.sessionStoreEnabled`（**默认 false**、无 UI；实验时写 settings.json）。
+
+**收益实测（本机 2026-10，4 个真实大会话；TS = 新建 reader 后 `readLoadWindow` 冷索引耗时；Go = `get-index` 的 `elapsedMs`）**
+
+| 文件大小 | TS 冷建表（3 次） | TS 同实例再开 | Go 冷解析 | Go 表缓存命中 |
+|---|---|---|---|---|
+| 31.1 MiB | 116 / 113 / 99 | 35 | 343 | 0 |
+| 29.2 MiB | 67 / 60 / 73 | 3 | 328 | 0 |
+| 23.1 MiB | 188 / 158 / 163 | 58 | 319 | 0 |
+| 19.4 MiB | 79 / 80 / 83 | 2 | 251 | 0 |
+
+（与 §7 Wave 0 基线「打开会话 87–165ms」同量级。）
+
+**结论（§8.8-Q3 的判定：不通过）**，所以不动产品路径：
+
+1. Go 冷解析比 TS 冷建表慢 2–3×（`encoding/json` 逐行 vs V8 `JSON.parse`）——首次打开反而更慢。
+2. sidecar 的表缓存只在进程内（`maxCachedTables = 16`），app 重启后没有条目缓存：快照 `state.bin` 只存文件级记账（`entryCount`/`hasCompaction`），不含条目表，所以「一次建表多次用」跨重启不成立。
+3. 同一次运行内 TS 自己的 `sessionDisplayIndexes` LRU 已把「重复打开」做到 2–58ms；sidecar 只在 LRU 未命中时更快，而 LRU 未命中恰好就是冷解析（更慢）。
+
+**Wave 2b 才是收益来源（未做）**：把条目表按文件落进快照（`formatVersion` 升为二进制定长记录区 + 字符串池）并在 pi 追加后做增量尾扫；那时重启后首次打开也能从 99–188ms 降到 ~10ms。代价：快照体积与写入放大（每次追加重写该文件记录）、Go 侧第二套持久化实现。
+
+**启用方式（仅供实验）**：settings.json 置 `"sessionStoreEnabled": true`（装配处据此预热 sidecar，否则「只在已就绪时问」的读者路径永远不会生效）；协议/缓存/降级/parity 都已有测试，闸门只是不把未过门禁的路径默认塞给用户。**`extraResources` 仍未登记**（默认关、无用户的打包体积/签名成本），等真实消费者（Wave 2b 或 IPC）再接。
