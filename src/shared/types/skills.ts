@@ -134,6 +134,18 @@ export interface SkillHubDetail {
 	};
 }
 
+/**
+ * `skill-hub:search` 的请求参数：preload 与主进程 handler 共用这一份形状。
+ * 历史 bug：preload 曾透传 api.skillhub.cn 时代的 page/pageSize/sortBy/order，主进程只读 query/limit，
+ * 面板传的第二个参数落到 page 上被静默丢弃（limit 永远走默认值）。统一用本类型后，再漂移会在 typecheck 暴露。
+ */
+export interface SkillHubSearchOptions {
+	/** 搜索关键词 */
+	query: string;
+	/** 返回条数上限；缺省 50 */
+	limit?: number;
+}
+
 /** SkillHub 搜索结果整体 */
 export interface SkillHubSearchResult {
 	query: string;

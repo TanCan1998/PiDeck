@@ -231,3 +231,21 @@ export function needsBottomUnlock(escapedFromLock: boolean, isAtBottom: boolean)
 export function isFollowEscapeEdge(previousFollow: boolean, currentFollow: boolean): boolean {
 	return previousFollow && !currentFollow;
 }
+
+/**
+ * 跟随态上报的新鲜度判定：提交快照与引擎实况一致时才允许上报。
+ *
+ * MessageScroller 的上报跑在 passive effect 里，读到的是本次渲染提交的 React 快照
+ * `isFollowing`；而 layout effect 级联（followOutput 效应 → scrollToBottom/stopScroll →
+ * 引擎 setState）可能已经把引擎可变单例 `state.isAtBottom` 翻到另一侧。此时上报的是
+ * 过期快照：写进 controller 的 autoScroll → followOutput 反相 → layout effect 再把引擎
+ * 翻回去 → 下一份反相的过期上报……周期-2 振荡永不收敛，嵌套 50 层触发 React #185
+ * （maximum update depth）。
+ *
+ * 判定与翻转方向无关：relock（false→true）与 unlock（true→false）两侧的过期上报都
+ * 必须丢弃。引擎每次真实翻转都会提交一份新快照，收敛后自然有一份新鲜上报补上；级联里
+ * 被合并抵消（净零变化）的翻转本就无需上报。
+ */
+export function isFollowSnapshotFresh(committed: boolean, live: boolean): boolean {
+	return committed === live;
+}

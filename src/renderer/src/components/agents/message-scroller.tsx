@@ -10,7 +10,7 @@
 import { useReducedMotion } from "motion/react";
 import { type ComponentPropsWithRef, type Ref, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { isFollowEscapeEdge, useStickToBottom, type ScrollToBottom, type ScrollByWheel, type StopScroll } from "@/lib/stick-to-bottom";
+import { isFollowEscapeEdge, isFollowSnapshotFresh, useStickToBottom, type ScrollToBottom, type ScrollByWheel, type StopScroll } from "@/lib/stick-to-bottom";
 
 /** 供时间线 controller 调用的引擎滚动 API（回底弹簧 / 原子恢复位置）。 */
 export type MessageScrollerScrollApi = {
@@ -186,7 +186,7 @@ export function MessageScroller({
 		// 重载后内存缓存全丢 = ACP 会话「切走再切回消息消失」的入口）。丢弃过期上报即可
 		// 断链：引擎每次翻转都会提交一份新快照，收敛后自然有一份新鲜上报补上；级联里被
 		// 合并抵消（净零变化）的翻转本就无需上报。
-		if (engineLiveState.isAtBottom !== isFollowing) return;
+		if (!isFollowSnapshotFresh(isFollowing, engineLiveState.isAtBottom)) return;
 		onFollowChange?.(isFollowing);
 	}, [isFollowing, onFollowChange, engineLiveState]);
 

@@ -5,7 +5,8 @@
  * 70 命名空间清单与每命名空间方法清单做 sha256 快照（A10：暴露面零变化），
  * 并核对数量锚点（sessions 111 / config 48 / git 38 / app 32）与订阅形态。
  * 摘要来源：T7 只读探针实测（2026-10-14；2026-10-16 合并刷新随 dev 演进重算：
- * yaoPrompts 方法与 sessions.searchContent、skillHub.onInstallProgress 入场，命名空间数不变）。
+ * yaoPrompts 方法与 sessions.searchContent、skillHub.onInstallProgress 入场，命名空间数不变；
+ * 2026-10-17 再刷新：files.searchContent（file-index 工作区文件内容检索）入场，命名空间/方法数锚点不变）。
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -13,7 +14,7 @@ import { test } from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
 const NS_LIST_SHA256 = "5f3768123e04385116d679b8b3e6f16b638a84657c46d036d18faa9fb57ae804";
-const FULL_METHODS_SHA256 = "6b8b7791ee0eff6513a53417acb6d5dd53228fc47b8604af84463c1502098683";
+const FULL_METHODS_SHA256 = "385737d79d2001662e0f9e7df7ffe5e1a38bc498bbe62ea37e5bbbc3019439b1";
 const NAMESPACE_COUNT = 70;
 
 /** 捕获 preload 暴露的 piDesktop；null/undefined/形态不符时显式红并给诊断（F8-6 共用）。 */
