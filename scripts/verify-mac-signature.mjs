@@ -262,8 +262,12 @@ if (isMain) {
 		} else {
 			const result = await verifyMacSignature(options);
 			if (options.json) console.log(JSON.stringify(result, null, 2));
-			else if (result.ok) console.log(`macOS bundles signed (${result.apps.length}): ${result.apps.map((app) => app.path).join(", ")}`);
-			else {
+			else if (result.ok) {
+				// 把 identifier 与 Helper 数量打出来：下一轮 #347 类事故时，日志本身就能证明门禁查到了什么，
+				// 不用再回头翻构建产物。
+				const detail = result.apps.map((app) => `${app.path} (identifier=${app.identifier ?? "?"}, helpers=${app.nested?.length ?? 0})`);
+				console.log(`macOS bundles signed (${result.apps.length}): ${detail.join(", ")}`);
+			} else {
 				console.error(`macOS signature verification failed (${result.errors.length}):`);
 				for (const error of result.errors) console.error(`- ${error}`);
 				console.error('提示：无 Apple 证书时 package.json build.mac.identity 必须为 "-"（显式 ad-hoc），见 docs/release-process.md「macOS 签名（无 Apple 证书时的 ad-hoc 策略）」。');
