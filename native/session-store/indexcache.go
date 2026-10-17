@@ -1,13 +1,13 @@
 package main
 
-// 条目表缓存（Wave 2）：`get-index` 的重复读取命中内存，避免同一会话反复逐行解析。
+// 条目表缓存（Wave 2 + 2b）：`get-index` 的重复读取命中内存，避免同一会话反复逐行解析；
+// 退出后仍可从磁盘条目文件复用（见 tablepersist.go，Wave 2b）。
 //
-// 有界是硬要求（主进程与 sidecar 都是长命进程）：
+// 内存有界是硬要求（主进程与 sidecar 都是长命进程）：
 //   - 命中上限 maxCachedTables 个文件；
 //   - 估算上限 maxCachedTableBytes，超出时按 LRU 淘汰。
 //
 // 版本判定与 TS 侧缓存同口径：size 与 mtimeMs 都相等才复用；任一变化即重扫。
-// 这里**只做内存缓存**，不落盘——持久化留给后续波次（磁盘上的条目表体积远超快照）。
 
 import (
 	"os"
@@ -32,6 +32,8 @@ type cachedTable struct {
 type tableCache struct {
 	mu      sync.Mutex
 	entries map[string]cachedTable
+	// dir 条目文件的落盘目录（Wave 2b）；空串 = 只做内存缓存（tests 与降级路径）。
+	dir     string
 	clock   uint64
 	cost    int
 	hits    int
@@ -39,8 +41,8 @@ type tableCache struct {
 	evicted int
 }
 
-func newTableCache() *tableCache {
-	return &tableCache{entries: make(map[string]cachedTable)}
+func newTableCache(dir string) *tableCache {
+	return &tableCache{entries: make(map[string]cachedTable), dir: dir}
 }
 
 // get 命中且版本一致时返回表（同时刷新 LRU 次序）。
@@ -95,8 +97,9 @@ func (cache *tableCache) statsSnapshot() (hits int, misses int, evicted int) {
 	return cache.hits, cache.misses, cache.evicted
 }
 
-// getIndexTable 取一个会话文件的条目表：内存命中直接返回，否则全量扫描并缓存。
+// getIndexTable 取一个会话文件的条目表：内存 → 磁盘条目文件 → 全量扫描，逐级回退。
 //
+// 磁盘命中是 Wave 2b 的核心：重启后首次打开大会话不再重扫源文件（详见 tablepersist.go）。
 // 失败（文件不可读/stat 失败）由调用方转成错误帧；宿主侧对此一律回退 TS 建表。
 func getIndexTable(cache *tableCache, path string) (table, error) {
 	info, err := os.Stat(path)
@@ -108,10 +111,35 @@ func getIndexTable(cache *tableCache, path string) (table, error) {
 	if cached, ok := cache.get(path, size, mtimeMs); ok {
 		return cached, nil
 	}
+
+	// 磁盘条目文件：版本键一致直接用；只是变长且上次停在换行边界时尾部增量。
+	if persisted, hit, appendable := readPersistedTable(cache.dir, path, size, mtimeMs); hit {
+		logf("get-index %s table=disk entries=%d", path, len(persisted.Entries))
+		cache.put(persisted)
+		return persisted, nil
+	} else if appendable {
+		tail, err := scanTableFrom(path, size, mtimeMs, persisted.Size, persisted.Entries, persisted.LastEntryID, persisted.OversizedLines)
+		if err == nil {
+			logf("get-index %s table=disk+tail entries=%d (reused=%d)", path, len(tail.Entries), len(persisted.Entries))
+			cache.put(tail)
+			persistTable(cache.dir, tail)
+			return tail, nil
+		}
+		logf("get-index %s tail scan failed (%v), full rescan", path, err)
+	}
+
 	scanned, err := scanTable(path, size, mtimeMs)
 	if err != nil {
 		return table{}, err
 	}
 	cache.put(scanned)
+	persistTable(cache.dir, scanned)
 	return scanned, nil
+}
+
+// persistTable 写盘失败只 log：条目表是加速器，写不进去不影响本次查询。
+func persistTable(dir string, entryTable table) {
+	if err := writePersistedTable(dir, entryTable); err != nil {
+		logf("persist table failed for %s: %v", entryTable.Path, err)
+	}
 }

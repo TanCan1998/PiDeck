@@ -101,6 +101,11 @@ export type SessionStoreIndexTable = {
 export type SessionStoreServiceOptions = {
 	/** 快照落盘路径（装配层给 `<userData>/session-store/state.bin`）。 */
 	statePath: string;
+	/**
+	 * 条目表落盘目录（装配层给 `<userData>/session-store/tables`，Wave 2b）。
+	 * 给了才写盘；缺省时 sidecar 只做进程内缓存（与 Wave 2 行为一致）。
+	 */
+	tablesDir?: string;
 	/** 二进制定位：返回 null 表示 sidecar 不可用（未构建/未随包分发），调用方直接降级。 */
 	resolveBinaryPath: () => string | null;
 	logger?: SessionStoreLogger;
@@ -139,6 +144,7 @@ function parseRecord(line: string): HostRecord | undefined {
 
 export class SessionStoreService {
 	private readonly statePath: string;
+	private readonly tablesDir: string;
 	private readonly resolveBinaryPath: () => string | null;
 	private readonly logger?: SessionStoreLogger;
 	private readonly spawnFn: typeof spawn;
@@ -161,6 +167,7 @@ export class SessionStoreService {
 
 	constructor(options: SessionStoreServiceOptions) {
 		this.statePath = options.statePath;
+		this.tablesDir = options.tablesDir ?? "";
 		this.resolveBinaryPath = options.resolveBinaryPath;
 		this.logger = options.logger;
 		this.spawnFn = options.spawnFn ?? spawn;
@@ -239,7 +246,8 @@ export class SessionStoreService {
 
 		let child: ChildProcessWithoutNullStreams;
 		try {
-			child = this.spawnFn(binaryPath, [this.statePath], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true }) as ChildProcessWithoutNullStreams;
+			const args = this.tablesDir ? [this.statePath, this.tablesDir] : [this.statePath];
+			child = this.spawnFn(binaryPath, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true }) as ChildProcessWithoutNullStreams;
 		} catch {
 			return { ok: false, reason: "binary-missing", message: "会话存储进程启动失败" };
 		}

@@ -273,9 +273,9 @@ Gitmoji 对应关系：
 	// standby 预热池默认开启：新建会话近即时；10 分钟未使用自动回收，与闲置释放互补
 	standbyRuntimeEnabled: true,
 
-	// session-store 实验路径（Wave 2）默认关：收益门禁未过（sidecar 冷解析比 TS 冷建表慢 2–3×，
-	// 见 docs/session-data-plane-plan.md §8.10），需要自行实验时在 settings.json 里置 true。
-	sessionStoreEnabled: false,
+	// session-store 条目表默认开：Wave 2b 把条目表落盘后，重启后首次打开大会话 14–20ms
+	// （TS 冷建表 99–188ms），见 docs/session-data-plane-plan.md §8.11；置 false 可回退纯 TS 解析。
+	sessionStoreEnabled: true,
 
 	// CUA 默认关闭：关闭时不监听本地端点、不改动 pi 的 mcp.json，与现状完全一致
 	cuaEnabled: false,

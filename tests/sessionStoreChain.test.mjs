@@ -34,11 +34,12 @@ test("Go 侧协议与快照口径：命令集、版本、忽略目录、行上�
 	assert.match(scanSource, /CommittedSize\s*\+=/);
 });
 
-test("宿主服务：argv 只带 statePath，roots 逐请求，生命周期入口齐全", () => {
+test("宿主服务：argv 只有 statePath（+可选 tablesDir），roots 逐请求，生命周期入口齐全", () => {
 	const source = read("../src/main/sessions/SessionStoreService.ts");
 	assert.match(source, /SESSION_STORE_PROTOCOL_VERSION\s*=\s*1/);
 	// 与两个兄弟服务的差异点：roots 不进 spawn 参数，换根不重启进程
-	assert.match(source, /spawnFn\(binaryPath,\s*\[this\.statePath\]/);
+	assert.match(source, /const args = this\.tablesDir \? \[this\.statePath, this\.tablesDir\] : \[this\.statePath\];/);
+	assert.match(source, /spawnFn\(binaryPath, args,/);
 	assert.match(source, /cmd:\s*"list-files",\s*roots:/);
 	assert.match(source, /cmd:\s*"refresh",\s*roots:/);
 	assert.match(source, /isReady\(\):\s*boolean/);
@@ -166,21 +167,27 @@ test("Wave 2 parity 资产：fixture/基准/生成脚本齐备，基准与 fixtu
 	assert.match(read("../native/session-store/parity_test.go"), /TestIndexTableMatchesGolden/);
 });
 
-test("Wave 2 开关：默认关闭，读取路径受 settings.sessionStoreEnabled 闸", () => {
-	// 收益门禁未过（docs/session-data-plane-plan.md §8.10），所以接线必须默认不生效：
-	// 主进程默认值与渲染层默认值都关，装配闭包第一行就是开关判断。
+test("Wave 2b：条目表落盘默认开启（可闸），落盘目录与 extraResources 已登记", () => {
+	// Wave 2 门禁未过 → Wave 2b 把条目表落盘后重启首次打开 14–20ms（§8.11），因此默认开；
+	// 开关仍在：settings.json 置 false 即回退纯 TS 解析。
 	const settingsStore = read("../src/main/settings/SettingsStore.ts");
-	assert.match(settingsStore, /sessionStoreEnabled:\s*false/);
+	assert.match(settingsStore, /sessionStoreEnabled:\s*true/);
 	const sharedSettings = read("../src/shared/types/settings.ts");
 	assert.match(sharedSettings, /sessionStoreEnabled\?:\s*boolean;/);
-	assert.match(sharedSettings, /sessionStoreEnabled:\s*false/);
+	assert.match(sharedSettings, /sessionStoreEnabled:\s*true/);
 	const index = read("../src/main/index.ts");
 	assert.match(index, /if \(!settingsStore\.get\(\)\.sessionStoreEnabled\) return null;/);
-	// 开关打开时必须预热，否则「只在已就绪时问」的读者路径永远不会生效
+	// 默认开时必须预热，否则「只在已就绪时问」的读者路径永远不会生效
 	assert.match(index, /if \(settingsStore\.get\(\)\.sessionStoreEnabled\) sessionStoreService\.warmup\(\);/);
-	// 门禁结论必须留档（数字写回计划文档），否则开关会变成没人知道为什么关的死配置
+	// 条目表目录必须接进装配，否则 sidecar 退化成纯内存缓存（等于回到 Wave 2）
+	assert.match(index, /tablesDir:\s*join\(app\.getPath\("userData"\),\s*"session-store",\s*"tables"\)/);
+	// 打包：二进制必须随包，否则打包后永远 binary-missing
+	const pkg = JSON.parse(read("../package.json"));
+	const entry = (pkg.build.extraResources ?? []).find((item) => item.to === "session-store");
+	assert.ok(entry, "session-store 必须进 extraResources");
+	assert.deepEqual(entry.filter, ["session-store", "session-store.exe"]);
+	assert.match(String(pkg.scripts.build), /npm run build:session-store/);
+	// 收益结论必须留档，否则默认值没人知道为什么开
 	const plan = read("../docs/session-data-plane-plan.md");
-	assert.match(plan, /### 8\.10 Wave 2 落地记录/);
-	assert.match(plan, /收益门禁未过/);
-	assert.match(plan, /Wave 2b/);
+	assert.match(plan, /### 8\.11/);
 });

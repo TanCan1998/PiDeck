@@ -4257,6 +4257,8 @@ app
 		// 条目表（get-index）。收益门禁未过（见计划 §8.10），默认不预热、由开关控制。
 		sessionStoreService = new SessionStoreService({
 			statePath: join(app.getPath("userData"), "session-store", "state.bin"),
+			// Wave 2b：条目表落盘（重启后首次打开大会话直接读表，不再重扫源文件）。
+			tablesDir: join(app.getPath("userData"), "session-store", "tables"),
 			resolveBinaryPath: () => {
 				// dev：仓库构建产物 resources/session-store/bin/（build 链自动 fail-open 构建）；
 				// 打包后需补 extraResources 才会命中 resourcesPath 分支（Wave 2 接线时加）。
@@ -4526,10 +4528,10 @@ app
 		// C12：退出清理登记（before-quit 统一 runAll，新增资源不再改 before-quit）
 		quitCleanup.register("pi-agents", () => agentManager?.stopAll());
 
-		// Wave 2：把 session-store 条目表接进会话历史读取（TS 缓存未命中时优先问 Go）。
-		// 收益门禁未过（sidecar 冷解析比 TS 冷建表慢 2–3×，见 docs/session-data-plane-plan.md §8.10），
-		// 因此由 settings.sessionStoreEnabled 闸住、默认关：关着时这条路径完全不参与，读者走 TS 逐行解析。
-		// 开启后也只在 sidecar **已就绪**时问：未就绪宁可走 TS 解析，也不让「打开会话」卡在冷扫上。
+		// Wave 2 + 2b：把 session-store 条目表接进会话历史读取（TS 缓存未命中时优先问 Go）。
+		// 条目表落盘后重启首次打开大会话 14–20ms（TS 冷建表 99–188ms，见计划 §8.11），故默认开启；
+		// settings.sessionStoreEnabled 置 false 即回退纯 TS 解析（紧急开关，无 UI）。
+		// 只在 sidecar **已就绪**时问：未就绪宁可走 TS 解析，也不让「打开会话」卡在冷扫上。
 		agentManager.setSessionStoreIndexReader(async (hostPath) => {
 			if (!settingsStore.get().sessionStoreEnabled) return null;
 			const service = sessionStoreService;

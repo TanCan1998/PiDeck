@@ -234,4 +234,23 @@ TS 历史路径已经是「**索引 + 定向读行**」两段式，而不是「�
 
 **Wave 2b 才是收益来源（未做）**：把条目表按文件落进快照（`formatVersion` 升为二进制定长记录区 + 字符串池）并在 pi 追加后做增量尾扫；那时重启后首次打开也能从 99–188ms 降到 ~10ms。代价：快照体积与写入放大（每次追加重写该文件记录）、Go 侧第二套持久化实现。
 
-**启用方式（仅供实验）**：settings.json 置 `"sessionStoreEnabled": true`（装配处据此预热 sidecar，否则「只在已就绪时问」的读者路径永远不会生效）；协议/缓存/降级/parity 都已有测试，闸门只是不把未过门禁的路径默认塞给用户。**`extraResources` 仍未登记**（默认关、无用户的打包体积/签名成本），等真实消费者（Wave 2b 或 IPC）再接。
+**启用方式（Wave 2 阶段，已被 §8.11 取代）**：当时只能 settings.json 置 `"sessionStoreEnabled": true` 手动实验，`extraResources` 未登记。
+
+### 8.11 Wave 2b 落地记录（条目表落盘 → 收益门禁通过，默认开启）
+
+**做了什么**：`native/session-store` 增加条目表磁盘持久化（`tablepersist.go`），宿主 `SessionStoreService` 增加可选 `tablesDir`（装配层给 `<userData>/session-store/tables`），于是「重启后首次打开大会话」不再重扫源文件；`settings.sessionStoreEnabled` 默认值由 `false` 改为 `true`，并补上 `extraResources`（`resources/session-store/bin` → `session-store`）。
+
+**格式与失效**：一文件一条目文件（`<sha1(path)>.table`），首行 header JSON（`version`/`path`/`size`/`mtimeMs`/`endsWithNewline`/`entryCount`/`oversizedLines`），其后每行一个 `displayEntry` JSON（复用 Go 的 `json` 标签，不引入二进制定长记录：可选字段十几个，编码代码量与漂移风险都不划算）。版本键与内存缓存同口径：`size + mtimeMs` 都相等才整表复用；只是变长且上次停在换行边界 → 复用旧条目 + 只解析尾部（`scanTableFrom(start)`）；变短/损坏/版本不符 → 单文件全量重扫。目录上限 `maxTableFiles = 256` / `maxTableDirBytes = 512MiB`，按 mtime 淘汰最旧；单表上限 32MB。写盘走 `.tmp` + `os.Rename`，失败只 log。
+
+**实测（本机，同一批真实会话，`get-index` 全程经协议子进程）**
+
+| 文件 | 大小 | 条目 | 冷（boot + 解析） | 重启后磁盘命中 #1 | #2 |
+|---|---|---|---|---|---|
+| `.pi/sessions/2026-10-04T01-36-54-875Z_…jsonl` | 31.1 MiB | 1386 | 15 + 421 = **436 ms** | **17 ms** | 20 ms |
+| `.pi/sessions/2026-10-10T13-16-06-843Z_…jsonl` | 29.2 MiB | 644 | 8 + 409 = **417 ms** | **14 ms** | 14 ms |
+
+对照 §8.10：TS 冷建表 99–188ms、sidecar 内存命中 0ms（重启即失效）。**磁盘命中 14–20ms（含进程 boot 8–15ms）比 TS 冷建表快 5–12×**，且不随会话大小线性增长（只是读几百 KB 条目文件 + JSON 解码）。这满足 §8.8-Q3「证明收益再接线」的判据，故默认开启。
+
+**门禁**：`native/session-store/tablepersist_test.go` 8 个用例（跨实例复用——用「同长度改写 + 还原 mtime」证明真读了磁盘、尾部增量、残行不增量、损坏回退、截短重扫、无目录退化内存模式、目录淘汰保留最新与当前）；`tests/sessionStoreService.test.mjs` 18 项（含 argv 带 `tablesDir`）；`tests/sessionStoreIndexParity.test.mjs` 4 项 parity；`go -C native/session-store test ./...` 全绿。
+
+**仍未做**：条目表尚未与 `state.bin` 合并（两套持久化并存，Wave 4 收敛）；`list-summaries`（Wave 3）因 TS 侧摘要缓存已足够快被判定不做（§8.10 后的实测结论）；`usage-rollup` 未动。

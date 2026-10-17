@@ -48,6 +48,7 @@ function createService(overrides = {}) {
 	const spawnCalls = [];
 	const service = new SessionStoreService({
 		statePath: overrides.statePath ?? "/fake/session-store/state.bin",
+		tablesDir: overrides.tablesDir,
 		resolveBinaryPath: overrides.resolveBinaryPath ?? (() => "/fake/session-store"),
 		spawnFn: (command, args, options) => {
 			spawnCalls.push({ command, args, options });
@@ -83,7 +84,15 @@ async function startedService(overrides = {}) {
 	return { ...harness, pending };
 }
 
-test("listFiles：spawn 参数只有 statePath，握手后按请求 id 配对返回文件状态", async () => {
+test("配置 tablesDir 时第二个 spawn 参数是条目表目录（Wave 2b 落盘）", async () => {
+	const { spawnCalls } = await startedService({ tablesDir: "/fake/session-store/tables" });
+	assert.equal(spawnCalls.length, 1);
+	assert.equal(spawnCalls[0].args.length, 2);
+	assert.equal(spawnCalls[0].args[0], "/fake/session-store/state.bin");
+	assert.equal(spawnCalls[0].args[1], "/fake/session-store/tables");
+});
+
+test("listFiles：未配 tablesDir 时 spawn 参数只有 statePath，握手后按请求 id 配对返回文件状态", async () => {
 	const { service, spawnCalls, harnesses, pending } = await startedService();
 	assert.equal(spawnCalls.length, 1);
 	assert.equal(spawnCalls[0].command, "/fake/session-store");

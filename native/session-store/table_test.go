@@ -319,7 +319,7 @@ func TestScanTableEmptyFileHasNoTrailingNewline(t *testing.T) {
 }
 
 func TestTableCacheHitAndVersionChange(t *testing.T) {
-	cache := newTableCache()
+	cache := newTableCache("")
 	cache.put(table{Path: "/a.jsonl", Size: 10, MtimeMs: 1.5, Entries: make([]displayEntry, 3)})
 	if _, ok := cache.get("/a.jsonl", 10, 1.5); !ok {
 		t.Fatal("版本一致应命中")
@@ -337,7 +337,7 @@ func TestTableCacheHitAndVersionChange(t *testing.T) {
 }
 
 func TestTableCacheEvictsLeastRecentlyUsed(t *testing.T) {
-	cache := newTableCache()
+	cache := newTableCache("")
 	for index := 0; index < maxCachedTables; index++ {
 		path := "/session-" + strings.Repeat("x", index%7+1) + string(rune('a'+index)) + ".jsonl"
 		cache.put(table{Path: path, Size: 1, MtimeMs: 1, Entries: make([]displayEntry, 1)})
