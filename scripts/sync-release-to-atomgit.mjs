@@ -148,6 +148,23 @@ export function pickReleaseStatus(isTargetLatest) {
 }
 
 /**
+ * OpenAPI latest 与 GitHub latest 不一致时，需要「touch」回哪个 tag（纯函数，可单测）。
+ *
+ * 2026-10 实测：AtomGit 的 `/releases/latest` 按最近一次编辑（updated_at）返回，
+ * **不看** release_status；而更新 feed（`releases/download/latest`）仍按 release_status。
+ * 因此给非 latest tag 补资产/改元数据后，OpenAPI latest 会悄悄指到旧 tag；
+ * macOS 手动更新检查读的正是 OpenAPI latest，会把预发布 tag 当成新版本提示用户。
+ * 返回空串表示无需处理（tag 一致、或 GitHub latest 不是应用版本 tag）。
+ */
+export function planLatestTouch(atomgitLatestTag, githubLatestTag) {
+	const target = String(githubLatestTag ?? "").trim();
+	if (!isAppVersionReleaseTag(target)) return "";
+	const current = String(atomgitLatestTag ?? "").trim();
+	if (!current || current === target) return "";
+	return target;
+}
+
+/**
  * 附件增量计划（纯函数，可单测）：内容感知去重。
  * @param {Array<{name:string,size:number}>} githubAssets GitHub 侧资产（name+size 必填）
  * @param {Array<{name:string,size:number|null}>} remoteAssets 远端已有附件（size 为
@@ -235,6 +252,11 @@ async function main() {
 			console.error(`   - [${f.tag}] ${f.name}: ${f.error}`);
 		}
 		process.exit(1);
+	}
+
+	// 无论本次同步的是哪个 tag，都把它可能抢走的 latest（feed 标记 + OpenAPI 排序）钉回去
+	if (githubLatestTag) {
+		await correctLatestFlag(githubLatestTag);
 	}
 
 	console.log(`\n✅ 全部同步完成。`);
@@ -619,10 +641,8 @@ async function syncOneRelease(targetTag, githubLatestTag, failedAssets) {
 	console.log(`成功上传: ${successCount} 个附件 | 跳过已有: ${skipCount} 个附件`);
 	console.log(`========================================`);
 
-	// 4. 收尾：本 tag 是 GitHub latest 时，确保 AtomGit 的 latest 标记最终落在它身上
-	if (isTargetLatest) {
-		await correctLatestFlag(targetTag);
-	}
+	// 4. 收尾：latest 标记与 OpenAPI latest 排序由 main 在全部 tag 同步后统一校正
+	// （同步任意 tag 都可能抢走 OpenAPI latest，不能只在同步 latest tag 时校正）
 }
 
 /** 单附件上传：申请 presigned URL → PUT 直传对象存储。返回空串表示成功，否则为错误信息。 */
@@ -744,7 +764,6 @@ async function correctLatestFlag(githubLatestTag) {
 		const plan = planLatestCorrection(releases, githubLatestTag);
 		if (plan.length === 0) {
 			console.log(`✅ latest 标记已是最新: ${githubLatestTag}`);
-			return;
 		}
 		for (const item of plan) {
 			const patchUrl = `${atomgitApiBase}/repos/${atomgitRepo}/releases/${encodeURIComponent(item.tag)}?access_token=${encodeURIComponent(token)}`;
@@ -762,11 +781,33 @@ async function correctLatestFlag(githubLatestTag) {
 				console.error(`⚠️ latest 校正 [${item.tag}] → ${item.release_status} 失败: HTTP ${patchRes.status} ${errText}（可在 AtomGit 网页端手动调整）`);
 			}
 		}
-		const feedCheck = await fetchWithTimeout(`${atomgitApiBase}/repos/${atomgitRepo}/releases/latest?access_token=${encodeURIComponent(token)}`);
-		if (feedCheck.ok) {
-			const latestRelease = await feedCheck.json();
-			console.log(`🔎 当前 AtomGit latest release: ${latestRelease.tag_name ?? latestRelease.name ?? "?"}`);
+		const feedCheckUrl = `${atomgitApiBase}/repos/${atomgitRepo}/releases/latest?access_token=${encodeURIComponent(token)}`;
+		const feedCheck = await fetchWithTimeout(feedCheckUrl);
+		const latestRelease = feedCheck.ok ? await feedCheck.json() : { tag_name: "" };
+		console.log(`🔎 当前 AtomGit latest release: ${latestRelease.tag_name ?? latestRelease.name ?? "?"}`);
+
+		const touchTag = planLatestTouch(latestRelease.tag_name, githubLatestTag);
+		if (!touchTag) return;
+		// 空更新真正的 latest release 把 updated_at 顶到最新，恢复 OpenAPI latest 指向。
+		// 语义不变：name/body 传现有值，release_status 不传（保持原有 latest 标记）。
+		let touchRelease = (releases || []).find((r) => r.tag_name === touchTag);
+		if (!touchRelease) {
+			const tagRes = await fetchWithTimeout(`${atomgitApiBase}/repos/${atomgitRepo}/releases/tags/${encodeURIComponent(touchTag)}?access_token=${encodeURIComponent(token)}`);
+			if (tagRes.ok) touchRelease = await tagRes.json();
 		}
+		const touchRes = await fetchWithTimeout(`${atomgitApiBase}/repos/${atomgitRepo}/releases/${encodeURIComponent(touchTag)}?access_token=${encodeURIComponent(token)}`, {
+			method: "PATCH",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ name: touchRelease?.name ?? touchTag, body: touchRelease?.body ?? "" }),
+		});
+		if (!touchRes.ok) {
+			const errText = await touchRes.text().catch(() => "");
+			console.error(`⚠️ OpenAPI latest 钉回 [${touchTag}] 失败: HTTP ${touchRes.status} ${errText}（macOS 手动更新检查可能读到旧 tag）`);
+			return;
+		}
+		const verifyRes = await fetchWithTimeout(feedCheckUrl);
+		const verified = verifyRes.ok ? await verifyRes.json() : { tag_name: "" };
+		console.log(`✅ OpenAPI latest 已钉回 ${verified.tag_name ?? "?"}（touch ${touchTag}）`);
 	} catch (err) {
 		console.error(`⚠️ latest 校正异常（不阻塞主流程）:`, err.message);
 	}
