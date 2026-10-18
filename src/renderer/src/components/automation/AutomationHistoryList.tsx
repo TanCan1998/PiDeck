@@ -134,16 +134,22 @@ export function AutomationHistoryList({ projectId, onViewSession }: AutomationHi
 		});
 	};
 
+	// 状态一律用 badge 的语义档（info/success/danger/warning/neutral），色值走 foundation
+	// 的 --color-* token，暗色与皮肤自动翻转；不再逐处重写 h-5 px-1.5 text-micro。
 	const renderStatusBadge = (status: AutomationRun["status"]) => {
 		switch (status) {
 			case "queued":
 			case "starting":
 			case "running":
-				return <Badge className="h-5 animate-pulse border-info/30 bg-info/15 px-1.5 text-micro font-normal text-info">{status === "queued" ? t("automation.status.queued") : status === "starting" ? t("automation.status.starting") : t("automation.status.running")}</Badge>;
+				return (
+					<Badge variant="info" size="sm" className="animate-pulse">
+						{status === "queued" ? t("automation.status.queued") : status === "starting" ? t("automation.status.starting") : t("automation.status.running")}
+					</Badge>
+				);
 			case "succeeded":
 				return (
-					<Badge className="h-5 border-success/30 bg-success/15 px-1.5 text-micro font-normal text-success">
-						<CheckCircle2 className="mr-1 size-3" />
+					<Badge variant="success" size="sm">
+						<CheckCircle2 className="size-3" />
 						{t("automation.status.succeeded")}
 					</Badge>
 				);
@@ -152,21 +158,21 @@ export function AutomationHistoryList({ projectId, onViewSession }: AutomationHi
 			case "budget-exhausted":
 			case "interrupted":
 				return (
-					<Badge className="h-5 border-destructive/30 bg-destructive/15 px-1.5 text-micro font-normal text-destructive">
-						<XCircle className="mr-1 size-3" />
+					<Badge variant="danger" size="sm">
+						<XCircle className="size-3" />
 						{status === "timed-out" ? t("automation.status.timedOut") : status === "interrupted" ? t("automation.status.interrupted") : t("automation.status.failed")}
 					</Badge>
 				);
 			case "aborted":
 				return (
-					<Badge className="h-5 border-warning/30 bg-warning/15 px-1.5 text-micro font-normal text-warning">
-						<AlertCircle className="mr-1 size-3" />
+					<Badge variant="warning" size="sm">
+						<AlertCircle className="size-3" />
 						{t("automation.status.aborted")}
 					</Badge>
 				);
 			case "skipped":
 				return (
-					<Badge variant="outline" className="h-5 px-1.5 text-micro font-normal text-muted-foreground">
+					<Badge variant="neutral" size="sm">
 						{t("automation.status.skipped")}
 					</Badge>
 				);
