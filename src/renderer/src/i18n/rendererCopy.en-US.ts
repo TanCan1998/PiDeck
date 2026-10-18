@@ -642,6 +642,7 @@ export const enUS: Record<TranslationKey, string> = {
 	"git.changes": "Changes",
 	"git.mergeChanges": "Merge Changes",
 	"git.stagedChanges": "Staged Changes",
+	"git.unstagedChanges": "Unstaged Changes",
 	"git.sourceControlGraph": "Source Control Graph",
 	"git.compareChanges": "Compare Changes",
 	"git.commit": "Commit",

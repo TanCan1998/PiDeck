@@ -1628,7 +1628,7 @@ export function GitPanel(props: GitPanelProps) {
 									)}
 									{workingChanges.length > 0 && (
 										<ResourceGroup
-											title={t("git.changes")}
+											title={t("git.unstagedChanges")}
 											count={workingChanges.length}
 											open={resourceOpen.changes}
 											onToggle={() => toggleResource("changes")}
