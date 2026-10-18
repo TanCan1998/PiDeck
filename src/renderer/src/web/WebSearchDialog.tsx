@@ -58,7 +58,7 @@ export function WebSearchDialog({ open, onOpenChange, messages, onJump }: { open
 										}}
 										className="w-full rounded-md border border-transparent px-2.5 py-2 text-left hover:border-border hover:bg-bg-active"
 									>
-										<span className={`mr-1.5 text-[10px] ${hit.role === "user" ? "text-primary" : "text-text-muted"}`}>{hit.role === "user" ? "≫" : "≪"}</span>
+										<span className={`mr-1.5 text-micro ${hit.role === "user" ? "text-primary" : "text-text-muted"}`}>{hit.role === "user" ? "≫" : "≪"}</span>
 										<span className="line-clamp-2 text-xs leading-relaxed">{hit.snippet}</span>
 									</button>
 								</li>

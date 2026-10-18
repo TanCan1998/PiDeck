@@ -131,7 +131,7 @@ export const ModuleVisibilitySection = memo(function ModuleVisibilitySection(pro
 								<span>{label}</span>
 								{/* 活动状态徽标：只在模块被隐藏时才有提醒价值，显示中的模块状态在它自己的页面里看 */}
 								{hidden && badgeKey ? (
-									<Badge variant="outline" className="h-5 px-1.5 text-[10px] font-normal text-muted-foreground">
+									<Badge variant="outline" className="h-5 px-1.5 text-micro font-normal text-muted-foreground">
 										{t(badgeKey)}
 									</Badge>
 								) : null}

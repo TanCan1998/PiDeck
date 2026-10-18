@@ -149,7 +149,8 @@ export function AuthTab(props: {
 					<Separator orientation="vertical" className="mx-0.5 h-5" />
 					<Button
 						size="sm"
-						variant="destructive"
+						variant="outline"
+						className="text-destructive hover:bg-destructive/10 hover:text-destructive"
 						onClick={() => {
 							if (batchMode) {
 								setBatchMode(false);

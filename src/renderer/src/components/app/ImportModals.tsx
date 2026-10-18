@@ -863,7 +863,7 @@ export function KimiWorkImportModal(props: {
 						)}
 					</div>
 					{/* 导入前知情：只读源不修改 Kimi Work 原文件；运行中导入可能缺最新条目；重复导入覆盖旧副本。 */}
-					<p className="flex items-start gap-1.5 text-[11px] leading-relaxed text-muted-foreground/80">
+					<p className="flex items-start gap-1.5 text-micro leading-relaxed text-muted-foreground/80">
 						<Info size={12} className="mt-px shrink-0" aria-hidden="true" />
 						<span>{t("kimiwork.impactNote")}</span>
 					</p>

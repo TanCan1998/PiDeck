@@ -103,7 +103,7 @@ export function ProviderUsageInline(props: {
 	return (
 		<span className={`flex flex-none items-center gap-1.5 whitespace-nowrap ${props.className ?? ""}`} data-testid="provider-usage-inline" data-provider={props.provider} data-enabled="true">
 			{time && segments && segments.length > 0 && (
-				<span className="inline-flex items-center gap-0.5 text-[10px] text-text-tertiary">
+				<span className="inline-flex items-center gap-0.5 text-micro text-text-tertiary">
 					<Clock size={10} aria-hidden="true" />
 					{t(time.key, time.params)}
 				</span>

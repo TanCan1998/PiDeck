@@ -191,7 +191,7 @@ export function SessionFindOverlay(props: SessionFindOverlayProps) {
 					) : (
 						matches.map((match, index) => (
 							<button key={match.messageId} type="button" data-find-index={index} className={`flex shrink-0 flex-col gap-0.5 border-b border-border/20 px-3 py-1.5 text-left text-xs hover:bg-accent/40${index === activeIndex ? " bg-accent/60" : ""}`} onClick={() => jumpTo(index)}>
-								<span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+								<span className="flex items-center gap-1.5 text-micro text-muted-foreground">
 									<span className="shrink-0">{match.role === "user" ? t("sessionFind.roleUser") : t("sessionFind.roleAssistant")}</span>
 									<span className="shrink-0 tabular-nums">{match.messageId}</span>
 								</span>
@@ -201,7 +201,7 @@ export function SessionFindOverlay(props: SessionFindOverlayProps) {
 					)}
 				</div>
 			)}
-			{unavailable && hasQuery && matches.length > 0 && <p className="shrink-0 border-t border-border/40 px-3 py-1 text-[11px] text-muted-foreground">{t("sessionFind.unavailable")}</p>}
+			{unavailable && hasQuery && matches.length > 0 && <p className="shrink-0 border-t border-border/40 px-3 py-1 text-micro text-muted-foreground">{t("sessionFind.unavailable")}</p>}
 		</div>,
 		document.body,
 	);

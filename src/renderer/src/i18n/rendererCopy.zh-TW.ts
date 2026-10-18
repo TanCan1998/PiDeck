@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: f3274abaf08b99607637c88068d74b9cab1e6dba335d295c3da2208bcac6d06a（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: 0af6f86e393f4abd7dd80e62a3e73844a13a6a41d6f0605c28ff7320d5f8926e（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -648,6 +648,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"git.changes": "更改",
 	"git.mergeChanges": "合併更改",
 	"git.stagedChanges": "暫存的更改",
+	"git.unstagedChanges": "未暫存的更改",
 	"git.sourceControlGraph": "原始碼管理圖",
 	"git.compareChanges": "比較更改",
 	"git.commit": "提交",

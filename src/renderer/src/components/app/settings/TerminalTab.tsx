@@ -170,7 +170,7 @@ export const TerminalTab = memo(function TerminalTab(props: TerminalTabProps) {
 						ariaLabel={t("settings.terminal.fontFamily")}
 					/>
 				</SettingRow>
-				{fontsFailed && <p className="px-1 pt-1 text-[11px] text-muted-foreground">{t("settings.terminal.fontFamilyLoadFailed")}</p>}
+				{fontsFailed && <p className="px-1 pt-1 text-micro text-muted-foreground">{t("settings.terminal.fontFamilyLoadFailed")}</p>}
 			</SettingsSection>
 
 			{/* 行为：滚动上限/光标/复制/关闭确认 */}

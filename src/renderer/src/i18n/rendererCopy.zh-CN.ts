@@ -641,6 +641,7 @@ export const zhCN = {
 	"git.changes": "更改",
 	"git.mergeChanges": "合并更改",
 	"git.stagedChanges": "暂存的更改",
+	"git.unstagedChanges": "未暂存的更改",
 	"git.sourceControlGraph": "源代码管理图",
 	"git.compareChanges": "比较更改",
 	"git.commit": "提交",

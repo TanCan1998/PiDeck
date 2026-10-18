@@ -176,23 +176,23 @@ export function ContentStoreUpdatePanel(props: { api: ContentStoreApiGroup; text
 				{/* shrink-0 + flex-wrap + justify-end：窄窗口下按钮换行而不是溢出被裁 */}
 				<div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
 					<Button variant="outline" size="sm" onClick={() => void handleCheck()} disabled={Boolean(busy)}>
-						<RefreshCw size={14} strokeWidth={1.8} className="mr-1.5" aria-hidden="true" />
+						<RefreshCw size={14} strokeWidth={1.8} aria-hidden="true" />
 						{busy === "check" ? t("config.contentStore.checking") : t("config.contentStore.check")}
 					</Button>
 					<Button variant="outline" size="sm" onClick={() => void handleUpdate()} disabled={Boolean(busy)}>
-						<UploadCloud size={14} strokeWidth={1.8} className="mr-1.5" aria-hidden="true" />
+						<UploadCloud size={14} strokeWidth={1.8} aria-hidden="true" />
 						{busy === "update" ? t("config.contentStore.updating") : t("config.contentStore.update")}
 					</Button>
 					{/* 还原入口只在确实存在覆盖层/备份时出现，避免普通用户看到无意义的按钮 */}
 					{overlayActive && (
 						<Button variant="ghost" size="sm" onClick={() => void handleRestore(false)} disabled={Boolean(busy)}>
-							<RotateCcw size={14} strokeWidth={1.8} className="mr-1.5" aria-hidden="true" />
+							<RotateCcw size={14} strokeWidth={1.8} aria-hidden="true" />
 							{t("config.contentStore.restore")}
 						</Button>
 					)}
 					{status?.hasBackup && (
 						<Button variant="ghost" size="sm" onClick={() => void handleRestore(true)} disabled={Boolean(busy)}>
-							<Undo2 size={14} strokeWidth={1.8} className="mr-1.5" aria-hidden="true" />
+							<Undo2 size={14} strokeWidth={1.8} aria-hidden="true" />
 							{t("config.contentStore.restorePrevious")}
 						</Button>
 					)}

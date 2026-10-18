@@ -251,7 +251,7 @@ export function ApprovalCard({
 								{currentStep + 1}/{questions.length}
 							</span>
 						) : (
-							<span className={cn("shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors", getStatusBadgeClass(status))}>{statusLabel}</span>
+							<span className={cn("shrink-0 rounded-full border px-2 py-0.5 text-micro font-medium transition-colors", getStatusBadgeClass(status))}>{statusLabel}</span>
 						)}
 						{onDismiss ? (
 							<button type="button" aria-label="Dismiss" onClick={onDismiss} className="grid size-5 shrink-0 place-items-center rounded-full text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">
