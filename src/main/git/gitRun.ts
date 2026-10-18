@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 // Node type stripping 直接加载，extensionless 相对 import 在 Node ESM 下解析不到。
 import { killProcessTree, runGit as spawnGit, type RunGitOptions } from "./gitProcess.ts";
 import { currentGitExecutable } from "./gitExecutable.ts";
-import { decodeWslGitStderr, decodeWslGitStdout, planGitSpawn, resolveWslGitTimeout, type GitSpawnPlan } from "./gitWsl.ts";
+import { decodeWslGitStderr, decodeWslGitStdout, planGitSpawn, resolveWslGitTarget, resolveWslGitTimeout, toHostGitOutputPath, type GitSpawnPlan } from "./gitWsl.ts";
 
 /**
  * git 子进程执行收口：GitService / WorktreeService / rewind checkpoint / gitIpc 的
@@ -52,6 +52,37 @@ export function runGitCommand(args: string[], options: RunGitOptions): Promise<{
 		return spawnGit(plan.args, { ...options, cwd: plan.cwd }, plan.command);
 	}
 	return runWslGit(plan, options);
+}
+
+/** toplevel 解析超时：它是加速通道的前置步骤，宁可早失败退化成轮询，也不能拖住订阅方。 */
+const GIT_TOPLEVEL_TIMEOUT_MS = 5000;
+
+/**
+ * 解析 cwd 所属仓库的 toplevel（宿主视角绝对路径）；不是仓库 / git 不可用 / 超时一律返回 null。
+ *
+ * 为什么需要它：GitRefsWatcher 只盯 <repo>/.git 下的 refs 文件，而订阅方给的是项目根——
+ * 项目根是仓库子目录（或项目根下才另有仓库）时，join(项目根, ".git") 根本不存在，签名恒为
+ * null、永不通告，文件树着色与 ahead/behind 角标退化成只靠 5 秒轮询。向上解析到 toplevel
+ * 才是 refs 真正所在的那一层。
+ *
+ * 两处必须复用既有能力、不能另写一套：
+ * 1) 走 execGit，WSL 仓库（UNC 路径）由它分流到发行版内 git——用宿主 git.exe 经 9P 会判
+ *    dubious ownership 并看到另一套索引；
+ * 2) `rev-parse --show-toplevel` 是「git 保证输出绝对路径」的字段，WSL 分支里给的是 Linux
+ *    路径（/home/...），必须经 toHostGitOutputPath 回译成宿主路径，否则后续 stat 全落空。
+ *
+ * 不抛异常：检测属加速手段，调用方（GitRefsWatcher）拿到 null 只记 warn 并退回轮询兜底。
+ */
+export async function resolveGitToplevel(cwd: string, timeoutMs: number = GIT_TOPLEVEL_TIMEOUT_MS): Promise<string | null> {
+	try {
+		const { stdout } = await execGit(["rev-parse", "--show-toplevel"], { cwd, timeoutMs });
+		// 只取首行：除结尾换行外，个别包装（git alias、告警前缀）还会带额外行
+		const toplevel = stdout.split(/\r?\n/)[0]?.trim() ?? "";
+		if (!toplevel) return null;
+		return toHostGitOutputPath(toplevel, resolveWslGitTarget(cwd));
+	} catch {
+		return null;
+	}
 }
 
 /**

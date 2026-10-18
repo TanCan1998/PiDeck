@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { AppLogger } from "../logging/AppLogger";
+import { resolveGitToplevel } from "./gitRun";
 
 /**
  * Git refs 变化检测（主进程侧）。
@@ -21,12 +22,14 @@ import type { AppLogger } from "../logging/AppLogger";
  *   代价是检测延迟等于轮询间隔。
  *
  * 设计取舍：
- * - **按仓库去重 + 订阅计数**：分屏或两个项目指向同一路径时共用一份轮询，计数归零才
- *   停掉该仓库；全部归零后停掉全局定时器。
+ * - **按仓库 toplevel 去重 + 订阅计数**：同一仓库被多个项目（项目根是仓库子目录、或项目根
+ *   下才另有仓库）订阅时共用一份轮询，计数归零才停掉该仓库；全部归零后停掉全局定时器。
+ *   toplevel 靠 `git rev-parse --show-toplevel` 异步解析（见 resolveGitToplevel），解析未完成
+ *   期间先按调用方 watchId 记账，完成后并进仓库条目（见 pending 的两段式登记）。
  * - **只在签名变化时通知**：一次 push 会连续改写多个 ref 文件，按间隔取样天然合并成
  *   一次通知；签名未变则完全不惊动渲染层。
- * - **失败静默降级**：非 git 目录、路径不存在、config 读不出来只记 warn——检测是加速
- *   手段，不是正确性的前提。
+ * - **失败静默降级**：非 git 目录、路径不存在、config 读不出来、toplevel 解析失败/超时
+ *   只记 warn——检测是加速手段，不是正确性的前提。
  */
 
 /** 默认轮询间隔：用户抱怨的是「5 秒太久」，1.5 秒足够让角标跟平，成本可忽略。 */
@@ -38,17 +41,35 @@ export type GitRefsWatcherDeps = {
 	intervalMs?: number;
 	/** 签名读取实现（测试注入点）；默认读真实文件。返回 null 表示该路径不是仓库。 */
 	readSignature?: (repoPath: string) => string | null;
+	/**
+	 * 仓库 toplevel 解析（测试注入点）；默认 `git rev-parse --show-toplevel`。
+	 * 返回 null / 抛错都表示解析失败——调用方会退回订阅时给的路径，绝不把异常抛出去。
+	 */
+	resolveRepoRoot?: (cwd: string) => Promise<string | null>;
 	/** 定时器注入点（测试用假定时器手动推进），默认真实 setInterval。 */
 	setTimer?: (handler: () => void, intervalMs: number) => unknown;
 	clearTimer?: (timer: unknown) => void;
 };
 
 type RepoWatch = {
+	/** 解析后的仓库 toplevel（解析失败时退回订阅时给的路径），refs 签名就按它采样。 */
 	repoPath: string;
-	/** 订阅计数：同一仓库被多个面板订阅时共用一份轮询。 */
+	/** 订阅计数：同一仓库被多个面板/多个项目根订阅时共用一份轮询。 */
 	refs: number;
-	/** 上一次采样到的签名；acquire 时先读一次做基线，避免第一次 tick 误报变化。 */
+	/** 上一次采样到的签名；登记时先读一次做基线，避免第一次 tick 误报变化。 */
 	signature: string | null;
+	/** 订阅该仓库的全部 watchId：一次变化要逐个通告，渲染层按自己的 id 过滤。 */
+	watchIds: Set<string>;
+};
+
+/**
+ * 解析中的登记：toplevel 还没拿到时先按调用方 watchId 记账（退订照样能立即生效），
+ * 解析完成后并进按 toplevel 去重的仓库条目。
+ */
+type PendingWatch = {
+	/** 订阅时给的 cwd：解析失败就退回它，行为与「不解析」时完全一致。 */
+	cwd: string;
+	refs: number;
 };
 
 /**
@@ -209,6 +230,15 @@ function buildWatchId(projectId: string, repoPath: string): string {
 	return `${projectId}::${repoPath}`;
 }
 
+/**
+ * 轮询键规范化：同一仓库的不同书写（结尾分隔符、Windows 盘符/大小写）必须归到同一份轮询，
+ * 否则项目根与 toplevel 写法不一致时会各起一份。仅用于去重比对，不用于目录访问。
+ */
+function normalizeRepoKey(repoPath: string): string {
+	const resolved = resolve(repoPath);
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
 function describeError(caught: unknown): string {
 	return caught instanceof Error ? caught.message : String(caught);
 }
@@ -217,10 +247,16 @@ export class GitRefsWatcher {
 	private readonly logger: Pick<AppLogger, "warn"> | undefined;
 	private readonly intervalMs: number;
 	private readonly readSignatureFn: (repoPath: string) => string | null;
+	private readonly resolveRepoRootFn: (cwd: string) => Promise<string | null>;
 	private readonly setTimer: (handler: () => void, intervalMs: number) => unknown;
 	private readonly clearTimer: (timer: unknown) => void;
 	private readonly listeners = new Set<(watchId: string) => void>();
+	/** 仓库条目：键是解析后的 toplevel（同一仓库的多个项目根共用一份）。 */
 	private readonly repos = new Map<string, RepoWatch>();
+	/** watchId → 仓库键：unwatch 只拿到调用方 watchId，靠它反查到具体轮询。 */
+	private readonly bindings = new Map<string, string>();
+	/** 解析尚未完成的登记：键是调用方 watchId（退订、重复订阅都在这里结算）。 */
+	private readonly pending = new Map<string, PendingWatch>();
 	private timer: unknown = null;
 	private polling = false;
 
@@ -228,6 +264,7 @@ export class GitRefsWatcher {
 		this.logger = deps.logger;
 		this.intervalMs = deps.intervalMs ?? DEFAULT_POLL_INTERVAL_MS;
 		this.readSignatureFn = deps.readSignature ?? readRefsSignature;
+		this.resolveRepoRootFn = deps.resolveRepoRoot ?? resolveGitToplevel;
 		this.setTimer = deps.setTimer ?? ((handler, intervalMs) => setInterval(handler, intervalMs));
 		this.clearTimer = deps.clearTimer ?? ((timer) => clearInterval(timer as NodeJS.Timeout));
 	}
@@ -245,31 +282,68 @@ export class GitRefsWatcher {
 		return this.repos.size;
 	}
 
+	/** 解析尚未完成的订阅数（诊断/测试用：退订必须让这个数字回落，否则是孤儿登记）。 */
+	get pendingRepoCount(): number {
+		return this.pending.size;
+	}
+
 	/**
-	 * 登记一个仓库订阅；同一 projectId + repoPath 复用同一个 watchId 并累加计数。
-	 * 非 git 目录也会返回 id（调用方不必分支处理），只是永远不会收到通知。
+	 * 登记一个仓库订阅，返回调用方 watchId（同一 projectId + repoPath 复用同一个 id 并累加计数）。
+	 *
+	 * 为什么是「两段式」：toplevel 解析是个异步子进程，而 IPC 不能把一个未定型的 id 给调用方、
+	 * 也不能等它——所以先按调用方 watchId 记账并立即返回（退订路径立刻可用），解析完成后再
+	 * 把计数并进按 toplevel 去重的仓库条目。非 git 目录同样返回 id，只是永远不会收到通知。
 	 */
 	acquire(projectId: string, repoPath: string): string {
 		const watchId = buildWatchId(projectId, repoPath);
-		const existing = this.repos.get(watchId);
-		if (existing) {
-			existing.refs += 1;
+		const repoKey = this.bindings.get(watchId);
+		if (repoKey !== undefined) {
+			const registered = this.repos.get(repoKey);
+			if (registered) {
+				registered.refs += 1;
+				return watchId;
+			}
+			// 绑定比仓库条目活得久（不应发生）：清掉陈旧绑定，走新登记
+			this.bindings.delete(watchId);
+		}
+		// 解析中的重复订阅（React 双挂载 / 分屏）共用同一次解析，计数累加
+		const pending = this.pending.get(watchId);
+		if (pending) {
+			pending.refs += 1;
 			return watchId;
 		}
-		const signature = this.sample(repoPath);
-		if (signature === null) this.warn("git refs watch skipped: not a git repository", { repoPath });
-		this.repos.set(watchId, { repoPath, refs: 1, signature });
-		this.startPolling();
+		const entry: PendingWatch = { cwd: repoPath, refs: 1 };
+		this.pending.set(watchId, entry);
+		// entry 本身就是代际令牌：退订会用同一个 watchId 重新登记，旧解析回调靠对象身份自我作废。
+		// 包一层 promise：解析实现（注入点）同步抛错时也走同一个结算入口，acquire 永不把异常抛给 IPC。
+		void new Promise<string | null>((settle) => settle(this.resolveRepoRootFn(repoPath))).then(
+			(root) => this.commit(watchId, entry, root, null),
+			(caught: unknown) => this.commit(watchId, entry, null, describeError(caught)),
+		);
 		return watchId;
 	}
 
 	/** 退订一次；计数归零才停掉该仓库。未知 id 静默忽略（重复退订必须安全）。 */
 	release(watchId: string): void {
-		const repo = this.repos.get(watchId);
-		if (!repo) return;
+		const pending = this.pending.get(watchId);
+		if (pending) {
+			pending.refs -= 1;
+			// 解析还没回来就退订：直接摘掉登记，迟到的解析回调对不上身份会自行作废
+			if (pending.refs <= 0) this.pending.delete(watchId);
+			return;
+		}
+		const repoKey = this.bindings.get(watchId);
+		if (repoKey === undefined) return;
+		const repo = this.repos.get(repoKey);
+		if (!repo) {
+			this.bindings.delete(watchId);
+			return;
+		}
 		repo.refs -= 1;
+		// 还有别的项目根/面板订阅同一仓库：保留绑定，它重新订阅时直接命中同一份轮询
 		if (repo.refs > 0) return;
-		this.repos.delete(watchId);
+		this.repos.delete(repoKey);
+		for (const boundId of repo.watchIds) this.bindings.delete(boundId);
 		if (this.repos.size === 0) this.stopPolling();
 	}
 
@@ -277,7 +351,38 @@ export class GitRefsWatcher {
 	disposeAll(): void {
 		this.stopPolling();
 		this.repos.clear();
+		this.bindings.clear();
+		// 清掉解析中的登记：在飞的解析回调回来时会因为找不到对应 entry 而安静退出
+		this.pending.clear();
 		this.listeners.clear();
+	}
+
+	/**
+	 * 解析结束后的落地登记：把 pending 计数并进按 toplevel 去重的仓库条目。
+	 *
+	 * 解析期间已退订 / 已 disposeAll / 已被新一代登记取代时什么都不做（对象身份不等），
+	 * 因此不会留下孤儿定时器或孤儿 map 条目——这是「异步解析 + 同步退订」的唯一收敛点。
+	 */
+	private commit(watchId: string, entry: PendingWatch, root: string | null, resolveError: string | null): void {
+		if (this.pending.get(watchId) !== entry) return;
+		this.pending.delete(watchId);
+		const repoPath = root ?? entry.cwd;
+		if (root === null) {
+			// 解析失败（非仓库 / 没装 git / 超时）不是错误，只是退回「盯着订阅路径」的老行为
+			this.warn("git refs watch: repo toplevel unresolved, falling back to the subscribed path", { repoPath, error: resolveError ?? "not a git work tree" });
+		}
+		const repoKey = normalizeRepoKey(repoPath);
+		const existing = this.repos.get(repoKey);
+		if (existing) {
+			existing.refs += entry.refs;
+			existing.watchIds.add(watchId);
+		} else {
+			const signature = this.sample(repoPath);
+			if (signature === null) this.warn("git refs watch skipped: not a git repository", { repoPath });
+			this.repos.set(repoKey, { repoPath, refs: entry.refs, signature, watchIds: new Set([watchId]) });
+			this.startPolling();
+		}
+		this.bindings.set(watchId, repoKey);
 	}
 
 	private startPolling(): void {
@@ -298,12 +403,13 @@ export class GitRefsWatcher {
 
 	/** 一轮采样：签名变化才通知（一次 push 的多文件改写按间隔天然合并成一次）。 */
 	private tick(): void {
-		for (const [watchId, repo] of this.repos) {
+		for (const repo of this.repos.values()) {
 			const next = this.sample(repo.repoPath);
 			if (next === repo.signature) continue;
 			// 先更新基线再通知：通知处理里若同步引发新的采样，也不会重复上报同一状态
 			repo.signature = next;
-			this.notify(watchId);
+			// 同一仓库可能被多个项目根/项目订阅：逐个通告，各自按自己的 watchId 过滤
+			for (const watchId of repo.watchIds) this.notify(watchId);
 		}
 	}
 
