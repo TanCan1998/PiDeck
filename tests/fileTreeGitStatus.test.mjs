@@ -311,21 +311,23 @@ test("着色类映射：洗淡档与实色档必须是不同的类名，洗淡�
 });
 
 test("接线契约：行组件把查表命中原样交给着色映射，目录递归透传查表函数", () => {
-	const surface = readSource("src/renderer/src/components/session/WorkspaceSurface.tsx");
+	// 行组件已从面板文件整块迁出（WorkspaceSurface > 600 行红线）：着色接线断言跟到行组件宿主文件
+	const rows = readSource("src/renderer/src/components/session/FileTreeRows.tsx");
 	// 命中对象必须整体传入：中间解构只剩 status 会把 muted 丢掉，洗淡档变成死代码（评审 P1-b）
-	const classCalls = surface.match(/fileTreeGitStatusClass\(\s*gitStatus\s*\)/g) ?? [];
+	const classCalls = rows.match(/fileTreeGitStatusClass\(\s*gitStatus\s*\)/g) ?? [];
 	assert.equal(classCalls.length, 2, "文件行与目录行都必须用完整命中（含 muted）取类");
-	const lookups = surface.match(/props\.gitStatusOf\?\.\(\s*node\.path\s*\)/g) ?? [];
+	const lookups = rows.match(/props\.gitStatusOf\?\.\(\s*node\.path\s*\)/g) ?? [];
 	assert.equal(lookups.length, 2, "两种行都按节点路径查表");
-	assert.doesNotMatch(surface, /fileTreeGitStatusClass\(\s*\{/, "不得手工拼命中对象（会写死档位）");
-	assert.doesNotMatch(surface, /muted\s*:\s*(?:true|false)/, "档位只能来自查表结果，行组件不得写死");
-	assert.match(surface, /gitStatusOf=\{\s*props\.gitStatusOf\s*\}/, "目录递归必须透传查表函数（缺了深层节点全失色）");
+	assert.doesNotMatch(rows, /fileTreeGitStatusClass\(\s*\{/, "不得手工拼命中对象（会写死档位）");
+	assert.doesNotMatch(rows, /muted\s*:\s*(?:true|false)/, "档位只能来自查表结果，行组件不得写死");
+	assert.match(rows, /gitStatusOf=\{\s*props\.gitStatusOf\s*\}/, "目录递归必须透传查表函数（缺了深层节点全失色）");
 });
 
 test("接线契约：文件行与目录行都叠着色类、查表函数接进树、着色重拉只由内容代次驱动", () => {
 	const surface = readSource("src/renderer/src/components/session/WorkspaceSurface.tsx");
-	// 行组件与面板在同一个文件里（行拆分在上游「分批渲染」重构中被合并回去），断言照旧按出现次数钉住
-	const row = surface;
+	// 行组件与面板已分居两个文件（行拆分在上游「分批渲染」重构中被合并回去，本轮再按 600 行红线迁出）：
+	// 断言照旧按出现次数钉住，只是行级断言读新宿主、面板级断言留在原文件。
+	const row = readSource("src/renderer/src/components/session/FileTreeRows.tsx");
 	// 出现次数而不是「有没有」：文件行 + 目录行各一处，删掉任何一种行都会红
 	const coloredRows = row.match(/cn\(\s*"file-node-name"\s*,\s*gitStatusClass\s*\)/g) ?? [];
 	assert.equal(coloredRows.length, 2, "文件行与目录行都必须按同一份着色类渲染");

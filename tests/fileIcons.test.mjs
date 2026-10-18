@@ -5,7 +5,9 @@ import { describe, test } from "node:test";
 const definitions = JSON.parse(readFileSync("src/renderer/src/vendor/seti-icons/definitions.json", "utf8"));
 const icons = JSON.parse(readFileSync("src/renderer/src/vendor/seti-icons/icons.json", "utf8"));
 const workspaceSurface = readFileSync("src/renderer/src/components/session/WorkspaceSurface.tsx", "utf8");
-const fileNode = readFileSync("src/renderer/src/components/session/WorkspaceSurface.tsx", "utf8");
+// 文件树行组件已从 WorkspaceSurface 整块迁到独立模块（> 600 行红线）：行级断言读新宿主。
+// 同一目录下，import 相对路径与拆分前完全一致，所以下面的 "../../fileIcons" 断言原样保留。
+const fileNode = readFileSync("src/renderer/src/components/session/FileTreeRows.tsx", "utf8");
 const surfaceFacade = readFileSync("src/renderer/src/components/session/SurfaceComponents.tsx", "utf8");
 const gitResourceTree = readFileSync("src/renderer/src/components/app/git/GitResourceTree.tsx", "utf8");
 

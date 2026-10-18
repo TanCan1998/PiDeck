@@ -19,29 +19,33 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { existsSync, readFileSync } from "node:fs";
 
+// 行组件域已从面板文件整块迁出（WorkspaceSurface > 600 行红线）：分批预算常量与行 memo 在新模块，
+// 根层窗口与面板接线仍在 WorkspaceSurface。两个文件合起来看才等价于拆分前的单文件断言。
 const surface = readFileSync("src/renderer/src/components/session/WorkspaceSurface.tsx", "utf8");
+const rows = readFileSync("src/renderer/src/components/session/FileTreeRows.tsx", "utf8");
 const app = readFileSync("src/renderer/src/App.tsx", "utf8");
 const outlineAtoms = readFileSync("src/renderer/src/atoms/session-outline-atoms.ts", "utf8");
 const gitResourceTree = readFileSync("src/renderer/src/components/app/git/GitResourceTree.tsx", "utf8");
 const gitPanel = readFileSync("src/renderer/src/components/app/GitPanel.tsx", "utf8");
 
 test("文件树行组件 memo 化，活跃文件 atom 只由面板订阅一次", () => {
-	assert.match(surface, /const\s+FILE_TREE_RENDER_BATCH\s*=\s*200\s*;/);
-	assert.match(surface, /const\s+FileRow\s*=\s*memo\(/, "文件行必须 memo：否则流式消息 flush 会重渲每一行");
-	assert.match(surface, /const\s+DirectoryRow\s*=\s*memo\(/, "目录行必须 memo");
-	assert.match(surface, /const\s+FileTreeNodeRow\s*=\s*memo\(/, "行分发器必须 memo");
-	const atomSubscriptions = surface.match(/useAtomValue\(\s*activeEditorFileAtom\s*\)/g) ?? [];
+	assert.match(rows, /const\s+FILE_TREE_RENDER_BATCH\s*=\s*200\s*;/);
+	assert.match(rows, /const\s+FileRow\s*=\s*memo\(/, "文件行必须 memo：否则流式消息 flush 会重渲每一行");
+	assert.match(rows, /const\s+DirectoryRow\s*=\s*memo\(/, "目录行必须 memo");
+	assert.match(rows, /const\s+FileTreeNodeRow\s*=\s*memo\(/, "行分发器必须 memo");
+	// 订阅次数按「面板 + 行组件」合计：拆文件后逐行订阅要照样能被抓到
+	const atomSubscriptions = `${surface}\n${rows}`.match(/useAtomValue\(\s*activeEditorFileAtom\s*\)/g) ?? [];
 	assert.equal(atomSubscriptions.length, 1, "activeEditorFileAtom 只能在 FilesPanel 订阅一次，行组件逐行订阅会让点一次文件全树重渲");
 });
 
 test("文件树根层与每个目录的 children 都走分批增量窗口", () => {
 	assert.match(surface, /useLazyListWindow\(\s*displayFiles\s*,\s*\{\s*pageSize:\s*FILE_TREE_RENDER_BATCH/, "根层必须分批挂载");
-	assert.match(surface, /useLazyListWindow<FileTreeNode>\(\s*node\.children\s*\?\?\s*EMPTY_FILE_TREE_CHILDREN\s*,\s*\{\s*pageSize:\s*FILE_TREE_RENDER_BATCH/, "展开目录的 children 必须分批挂载");
+	assert.match(rows, /useLazyListWindow<FileTreeNode>\(\s*node\.children\s*\?\?\s*EMPTY_FILE_TREE_CHILDREN\s*,\s*\{\s*pageSize:\s*FILE_TREE_RENDER_BATCH/, "展开目录的 children 必须分批挂载");
 	// 两个窗口都要渲染哨兵，否则永远只显示第一批
-	const sentinels = surface.match(/sentinelRef/g) ?? [];
+	const sentinels = `${surface}\n${rows}`.match(/sentinelRef/g) ?? [];
 	assert.ok(sentinels.length >= 2, "根层与目录层都要挂 IntersectionObserver 哨兵");
 	assert.match(surface, /rootWindow\.hasMore/);
-	assert.match(surface, /childWindow\.hasMore/);
+	assert.match(rows, /childWindow\.hasMore/);
 });
 
 test("App 根不再订阅逐条消息数组，修改文件清单用内容稳定投影", () => {

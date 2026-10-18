@@ -78,7 +78,8 @@ test("legacy spinner shells delegate rotation to the shared utility", () => {
 		// 全屏 loading 壳已从 AppParts 拆到 OverlayComponents（12066004 环境引导重构），
 		// 「用共享旋转工具」的契约随之跟到新宿主文件，类名不放宽。
 		["src/renderer/src/components/overlays/OverlayComponents.tsx", 'className="loader animate-pideck-spin"'],
-		["src/renderer/src/components/session/WorkspaceSurface.tsx", 'className="mini-loader animate-pideck-spin"'],
+		// 会话历史面板（含行内 copy/export/delete 的 mini-loader）已从 WorkspaceSurface 迁出
+		["src/renderer/src/components/session/SessionHistoryPanel.tsx", 'className="mini-loader animate-pideck-spin"'],
 		["src/renderer/src/components/feishu/FeishuLinkIndicator.tsx", 'className="feishu-link-spinner animate-pideck-spin"'],
 		["src/renderer/src/config/extensionsRecommendedPackages.tsx", 'className="skillhub-installing-dot animate-pideck-spin"'],
 		["src/renderer/src/web/WebTimeline.tsx", 'className="tool-card-spinner animate-pideck-spin"'],
