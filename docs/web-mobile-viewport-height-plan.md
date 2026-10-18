@@ -181,7 +181,7 @@ resolveHeaderHidden(previous: boolean, input): boolean
 |---|---|
 | 高度收益的实际数字 | **已实测**（Chromium 375×812，见「实测高度」）：折叠 +89px、顶栏收起 +55px、合计 +144px。真机与 iOS 仍未测 |
 | C1 折叠态隐藏模型 pill | **已确认可接受**（2026-10-18）。折叠态收益 ≈90px，聚焦后回落到 0 |
-| C1 漏改 `min-h-[7rem]` 导致折叠无效 | **已识别**，两处必须同改（见「移动端 min-height 的处理」）。验收标准：折叠态 `composer-box` 实测高度 ≈58px（textarea 56 + 边框 2） |
+| C1 漏改 `min-h-[7rem]` 导致折叠无效 | **已识别**，两处必须同改（见「移动端 min-height 的处理」）。验收标准：折叠态 `composer-box` 实测高度 ≈66px（textarea 56 + legacy 内边距 8 + 边框 2；草案按 58px 推算，偏低 8px） |
 | 顶栏收起态仍可 Tab 聚焦 | **已识别**。必须加 `inert` 或 `visibility: hidden`，否则是可访问性回归 |
 | C2（常驻单行 + BottomSheet）是否值得 | **暂不实施**。C1 已确认，C2 的「收益不受焦点状态影响」不构成实施理由 |
 | iOS Safari 表现 | **未验证**。`interactive-widget` 只有 Chromium 支持，iOS 的键盘处理走 `dvh` 自身；`grid-template-rows` 的 `fr` 过渡在旧版 Safari 的插值支持未确认，必要时降级为 `max-height` 过渡 |
@@ -219,7 +219,7 @@ resolveHeaderHidden(previous: boolean, input): boolean
 | 草案 | 实际 | 原因 |
 |---|---|---|
 | `--web-scroll-mt` CSS 变量注入 | `data-header-hidden="on"` + web.css 规则 | 避免在 JSX 里写 CSS 变量（仓库只有 3 处 `as CSSProperties` 先例）；`web.css` 是 unlayered，天然压过 `scroll-mt-24` |
-| 折叠态「只保留 textarea 与发送按钮」 | 发送钮绝对定位在 `composer-box` 右下，`textarea` 加 `pr-12` | 发送钮原本在操作行里，直接隐藏整行会把发送钮一起删掉；浮动后折叠高度才是 58px |
+| 折叠态「只保留 textarea 与发送按钮」 | 发送钮绝对定位在 `composer-box` 右下，`textarea` 加 `pr-12` | 发送钮原本在操作行里，直接隐藏整行会把发送钮一起删掉；浮动后折叠高度才是 66px |
 | 折叠条件含 `!focused` | 同，但失焦后**延迟 250ms** 收起，且两行 `onPointerDown` 阻止焦点转移 | 否则点工具行会先失焦、工具行在 `pointerup` 前被卸载，`click` 丢失（iOS 点按按钮不聚焦，`relatedTarget` 为 null，必须靠延迟兜底） |
 | 滚动回调直接用 delta | 首帧不采样；单次位移超过一屏视为程序化跳转，不参与判定 | 否则挂载/切会话/自动贴底会立刻把顶栏收掉（切会话必须露出标题） |
 | 折叠判定写在组件里 | 抽成 `resolveComposerCollapsed` 纯函数 | 仓库硬性要求「核心规则能离开 React 单独测绿」 |
@@ -230,7 +230,7 @@ resolveHeaderHidden(previous: boolean, input): boolean
 |---|---|---|
 | 类型检查 | `npm run typecheck` | 通过（rc=0） |
 | 格式 | `npm run check:format` | 通过（3032 文件） |
-| 新增单测 | `node --test tests/webHeaderAutoHide.test.mjs tests/webComposerCollapse.test.mjs` | 14/14 通过 |
+| 新增单测 | `node --test tests/webHeaderAutoHide.test.mjs tests/webComposerCollapse.test.mjs` | 25/25 通过（`step` 累计/翻转、折叠与收起规则、键盘/焦点恢复、接线契约） |
 | 相关既有单测 | `webLayout` / `webMessageActionsOptimistic` / `modelRowLabels` / `cssCascadeLayers` | 50/50 通过 |
 | 移动端 e2e | `npx playwright test e2e/web-mobile-ui.spec.ts` | **未跑通，属环境既有问题** |
 
@@ -259,7 +259,7 @@ e2e 说明（按 `AGENTS.md` 红名单流程核对）：
 
 结论（实测，非推算）：
 
-- 折叠收益 **+89px**（594 → 683），与草案的 ≈90px 一致；折叠态实测 66px，比推算的 58px 高 8px（textarea 的 legacy 内边距）。
+- 折叠收益 **+89px**（594 → 683），与草案的 ≈90px 一致；折叠态实测 66px（草案推算 58px，差值来自 textarea 的 legacy 内边距）。
 - 顶栏收起收益 **+55px**（683 → 738），与草案一致。
 - 两者叠加 **+144px**，超过「≥120px」目标。
 - 收起态 `inert` 生效：头部可聚焦控件从 2 个降到 0 个。
@@ -339,3 +339,15 @@ e2e 说明（按 `AGENTS.md` 红名单流程核对）：
 ```
 
 展开方向对称（slot 0→62 用 145ms，透明度 0→0.84 同步）。功能回归未变：贴底 683、收起后 812、上滑恢复 683。
+
+### 评审后按非阻塞项做的收口（2026-10-18）
+
+| 项 | 处理 |
+|---|---|
+| `web.css` 手写规则压 `scroll-mt-24` | 删掉，改成 `WebTimeline` 上的 `[[data-header-hidden=on]_&]:scroll-mt-0`（Tailwind 任意变体，仓库已有 `[[data-bg-image=on]_&]` 先例） |
+| 累计/方向翻转状态机塞在 1100 行组件里 | 抽 `stepHeaderAutoHide` 纯函数 + `useWebHeaderAutoHide` hook；`WebChatApp` 只拿 `{ hidden, reportScroll, reveal }`。新增 4 条 `step` 行为测试（累计、方向翻转清零、forceVisible、零位移） |
+| 契约测试正则不是空白容忍 | 9 处字面空格改成 `\s*`（`webHeaderAutoHide` / `webComposerCollapse` 两个文件） |
+| 「加载更多历史」前插的正位移误收顶栏 | 增加「内容驱动」判定：位移与 `scrollHeight` 变化量近似相等时视为锚定/前插/分组折叠，不上报 |
+| 顶栏收起后键盘/读屏无恢复路径 | 窄屏下监听 `keydown` + `focusin`（capture，配对清理）→ `revealHeader()` |
+| 8/24 非对称阈值理由只在文档里 | 在常量上方留一行说明（这是唯一「照着改成对称就会退化」的地方） |
+| doc 数字对不上 | 单测 25 条（定向集 61）、折叠态 66px，两处已改 |
