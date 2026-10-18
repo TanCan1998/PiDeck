@@ -26,6 +26,7 @@ const sandboxRequire = (spec) => (spec.includes("turnRenderWindow") ? turnRender
 	policy.resolveJumpPendingAction = module.exports.resolveJumpPendingAction;
 	policy.JUMP_MAX_LOAD_ATTEMPTS = module.exports.JUMP_MAX_LOAD_ATTEMPTS;
 	policy.JUMP_EXPAND_MAX_MULTIPLIER = module.exports.JUMP_EXPAND_MAX_MULTIPLIER;
+	policy.JUMP_MAX_EXPAND_ATTEMPTS = module.exports.JUMP_MAX_EXPAND_ATTEMPTS;
 	policy.estimateJumpExpandTurns = module.exports.estimateJumpExpandTurns;
 }
 
@@ -49,6 +50,27 @@ test("目标已加载未挂载：兜底扩窗步长指数收敛并封顶（3→6
 		turns.map((action) => action.turns),
 		[STEP, STEP * 2, STEP * 4, STEP * 8, STEP * 8],
 	);
+});
+
+test("目标在数据里却始终挂不出节点：扩窗到防呆上限后放弃，不无限空转", () => {
+	// 场景：命中被 context_edit 移出展示、或轮内节点不渲染 —— 数据里有、DOM 里永远没有。
+	// 旧策略对 targetInLoadedData 永远返回 expand，且窗口已够大时每次都是空转。
+	const below = policy.resolveJumpPendingAction({
+		targetInLoadedData: true,
+		hasMorePages: true,
+		isLoadingPage: false,
+		expandAttempts: policy.JUMP_MAX_EXPAND_ATTEMPTS - 1,
+		loadAttempts: 0,
+	});
+	assert.equal(below.kind, "expand");
+	const atCap = policy.resolveJumpPendingAction({
+		targetInLoadedData: true,
+		hasMorePages: true,
+		isLoadingPage: false,
+		expandAttempts: policy.JUMP_MAX_EXPAND_ATTEMPTS,
+		loadAttempts: 0,
+	});
+	assert.equal(atCap.kind, "give-up");
 });
 
 test("目标已加载时无视补页状态，始终走扩窗", () => {

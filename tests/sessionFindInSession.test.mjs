@@ -154,6 +154,16 @@ test("渠道与契约接线：IPC 常量、preload 白名单、主进程 handler
 	assert.match(pane, /id !== "findInSession"/);
 	assert.match(pane, /<SessionFindOverlay/);
 	assert.match(pane, /sessionId=\{record\?\.filePath \?\? sessionId\}/);
+	// 点击命中必须真的跳得过去：命中 id 是会话文件条目 id（meta.entryId），时间线节点
+	// 用的是投影 id，controller 必须先归一（否则查不到 DOM，点击毫无反应——2027-02 用户反馈）。
+	assert.match(pane, /onJump=\{\(messageId\) => \{[\s\S]{0,80}?sessionTimeline\.jumpToMessage\(messageId\)/);
+	const controller = read("src/renderer/src/hooks/useSessionTimelineController.ts");
+	assert.match(controller, /resolveJumpMessageIndex\(combinedMessages, messageId\)/);
+	assert.match(controller, /resolveJumpMessageIndex\(combinedMessages, pendingJump\.value\.messageId\)/);
+	assert.match(controller, /resolveJumpScrollTarget\(/);
+	const jumpTarget = read("src/renderer/src/components/session/timeline/jumpTarget.ts");
+	assert.match(jumpTarget, /readEntryId\(message\.meta\) === targetId/);
+
 	// 锚点必须是本栏消息区（时间线视口）：锚整栏聊天区会让图标落到窗口关闭键那一行
 	assert.match(pane, /anchorRef=\{sessionTimeline\.timelineRef\}/);
 	assert.doesNotMatch(pane, /layoutRefs\.chatPaneRef/);
@@ -200,10 +210,10 @@ test("浮层锚点：异常矩形被夹在视口内（负 right / 超出高度�
 });
 
 // ── 入口渲染（真实组件，portal 到 body）────────────────────────────────
-// 「会话内搜索在哪」的答案就是这个常驻放大镜按钮：它必须默认就出现在聊天区右上角，
-// 而不是等某个状态才挂载（否则用户永远找不到入口）。
+// 2027-02 用户反馈：消息区右上角那个常驻放大镜「默认不该展示、位置也不对」。
+// 现在收起态什么都不渲染，入口只有 Ctrl/Cmd+Shift+F（可发现性交给 sessionFeatureTips）。
 
-test("入口按钮真实渲染：默认常驻、portal 到 body、带可访问名称", async () => {
+test("默认不渲染任何常驻入口：没有 portal、没有可见按钮", async () => {
 	const { createElement } = await import("react");
 	const { renderToStaticMarkup } = await import("react-dom/server");
 	const portals = [];
@@ -223,12 +233,9 @@ test("入口按钮真实渲染：默认常驻、portal 到 body、带可访问�
 		},
 		globals: { window: { innerWidth: 1200, innerHeight: 900, addEventListener: () => undefined, removeEventListener: () => undefined }, document: { body: { tag: "body" } } },
 	});
-	renderToStaticMarkup(createElement(SessionFindOverlay, { sessionId: "C:/s/a.jsonl", anchorRef: { current: null }, openSignal: 0, onJump: () => undefined }));
-	assert.equal(portals.length, 1);
-	assert.equal(portals[0].container.tag, "body");
-	const html = renderToStaticMarkup(portals[0].children);
-	assert.match(html, /aria-label="sessionFind\.open"/);
-	assert.match(html, /title="sessionFind\.open"/);
+	const markup = renderToStaticMarkup(createElement(SessionFindOverlay, { sessionId: "C:/s/a.jsonl", anchorRef: { current: null }, openSignal: 0, onJump: () => undefined }));
+	assert.equal(markup, "", "收起态不得渲染入口按钮（只有快捷键能打开）");
+	assert.equal(portals.length, 0, "收起态不应挂任何 portal 节点");
 });
 
 // ── 弹出时机（2027-02 用户反馈「切换会话搜索框就自己弹出来搜」）─────────────
@@ -255,7 +262,7 @@ function overlayHarness() {
 			"../ui-shadcn/button": { Button: ({ children, ...rest }) => rest },
 			"../ui-shadcn/input": { Input: (props) => props },
 			"lucide-react": { Search: () => null, ChevronUp: () => null, ChevronDown: () => null, X: () => null },
-			// 浮层走 portal 到 body：这里直接吐出 children，方便读「当前是入口按钮还是面板」
+			// 浮层走 portal 到 body：这里直接吐出 children，方便读「收起（null）还是面板已展开」
 			"react-dom": { createPortal: (children) => children },
 		},
 		globals: {
@@ -264,17 +271,16 @@ function overlayHarness() {
 		},
 	});
 	const anchorRef = { current: null };
-	// 渲染结果就是 portal 里的元素：props.title = 收起态入口按钮，props.role = "dialog" = 面板已展开
+	// 渲染结果 = 收起态 null / 展开态面板元素（props.role = "dialog"）
 	const render = (openSignal, sessionPath = "C:/s/a.jsonl") => host.render(() => SessionFindOverlay({ sessionId: sessionPath, anchorRef, openSignal, onJump: () => undefined }));
 	return { host, render, searchCalls };
 }
 
 test("openSignal 只在变化时弹出：挂载时已有非零值不会把上一次按键重放成自动搜索", async () => {
 	const { host, render, searchCalls } = overlayHarness();
-	// 上一次按过快捷键（signal=1）后被卸载重挂：必须仍然是收起的入口按钮
+	// 上一次按过快捷键（signal=1）后被卸载重挂：必须仍然是收起态（什么都不画）
 	let node = render(1);
-	assert.equal(node.props.title, "sessionFind.open", "挂载时不得自动展开面板");
-	assert.equal(node.props.role, undefined);
+	assert.equal(node, null, "挂载时不得自动展开面板，也不得有常驻入口");
 	assert.equal(searchCalls.at(-1)?.open, false, "收起态不得触发会话内检索");
 	// 真正按下快捷键（1 → 2）才展开：宿主在 render 末尾 flush effect，需要再渲染一次读状态
 	render(2);
@@ -301,7 +307,7 @@ test("会话内查找浮层按会话隔离：单栏 pane 复用换会话时必�
 	host.unmount();
 	const fresh = overlayHarness();
 	const mountedAtSignalTwo = fresh.render(2, "C:/s/b.jsonl");
-	assert.equal(mountedAtSignalTwo.props.title, "sessionFind.open");
+	assert.equal(mountedAtSignalTwo, null, "新会话挂载时仍是收起态，不渲染任何入口");
 	assert.equal(fresh.searchCalls.at(-1)?.open, false, "新会话挂载时不得自动检索");
 	fresh.host.unmount();
 });

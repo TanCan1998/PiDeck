@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: 0af6f86e393f4abd7dd80e62a3e73844a13a6a41d6f0605c28ff7320d5f8926e（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: 32e180ce6e2d18fe8441e157ef281b0747b21eb641f8c34a64f3d9b62c597856（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -4153,6 +4153,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"sessionFind.placeholder": "在當前會話中查詢…",
 	"sessionFind.noResults": "沒有匹配",
 	"sessionFind.unavailable": "會話索引尚未就緒，稍候再試（首次建索引需要一會兒）",
+	"sessionFind.jumpFailed": "未能跳轉到這條命中：它可能在更早的歷史裡，或已被移出當前上下文",
 	"sessionFind.searching": "查詢中…",
 	"sessionFind.prev": "上一條命中",
 	"sessionFind.next": "下一條命中",
@@ -5524,6 +5525,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"agent.tips.storeInstall": "設定裡的商店能一鍵裝提示詞、技能和擴充套件，不用手寫配置",
 	"agent.tips.noticeHistory": "錯過的通知不會丟：設定 →「通知設定」裡有通知歷史",
 	"agent.tips.zoomShortcut": "按 {shortcut} 縮放整個介面，圖示與間距一起變大",
+	"agent.tips.findInSession": "按 {shortcut} 在當前會話裡查詢關鍵詞，可逐條跳轉",
 	"agent.tips.cycleModelShortcut": "按 {shortcut} 在收藏的模型之間迴圈切換",
 	"agent.tips.cycleThinkingShortcut": "按 {shortcut} 迴圈思考檔位（關閉 ↔ 最高）",
 	"agent.tips.cycleTabsShortcut": "按 {shortcut} 在開啟的會話標籤之間來回切",
