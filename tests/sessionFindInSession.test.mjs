@@ -153,6 +153,9 @@ test("渠道与契约接线：IPC 常量、preload 白名单、主进程 handler
 	assert.match(pane, /id !== "findInSession"/);
 	assert.match(pane, /<SessionFindOverlay/);
 	assert.match(pane, /sessionId=\{record\?\.filePath \?\? sessionId\}/);
+	// 锚点必须是本栏消息区（时间线视口）：锚整栏聊天区会让图标落到窗口关闭键那一行
+	assert.match(pane, /anchorRef=\{sessionTimeline\.timelineRef\}/);
+	assert.doesNotMatch(pane, /layoutRefs\.chatPaneRef/);
 	// Go 侧协议与单文件过滤
 	const goMain = read("native/session-index/main.go");
 	assert.match(goMain, /case "search-session":/);
@@ -172,10 +175,19 @@ test("浮层锚点：聊天区右侧有抽屉时贴聊天区右缘，而不是�
 	assert.deepEqual({ ...anchor }, { top: 60, right: 412 });
 });
 
-test("浮层锚点：锚点未就绪/宽度为 0 时退回视口右上角（永不落到屏幕外）", async () => {
-	const { resolveSessionFindAnchor } = loadTsCommonJs("src/renderer/src/components/session/sessionFindAnchor.ts");
-	assert.deepEqual({ ...resolveSessionFindAnchor(null, { width: 1200, height: 900 }) }, { top: 12, right: 12 });
-	assert.deepEqual({ ...resolveSessionFindAnchor({ top: 100, right: 800, width: 0 }, { width: 1200, height: 900 }) }, { top: 12, right: 12 });
+test("浮层锚点：锚点未就绪/宽度为 0 时退回视口右上角下方（永不落到屏幕外或压住窗口控件）", async () => {
+	const { resolveSessionFindAnchor, SESSION_FIND_TITLEBAR_MIN_TOP } = loadTsCommonJs("src/renderer/src/components/session/sessionFindAnchor.ts");
+	assert.deepEqual({ ...resolveSessionFindAnchor(null, { width: 1200, height: 900 }) }, { top: SESSION_FIND_TITLEBAR_MIN_TOP, right: 12 });
+	assert.deepEqual({ ...resolveSessionFindAnchor({ top: 100, right: 800, width: 0 }, { width: 1200, height: 900 }) }, { top: SESSION_FIND_TITLEBAR_MIN_TOP, right: 12 });
+});
+
+test("浮层锚点：聊天区顶到窗口上沿时也不落进窗口控件条（关闭键位置）", async () => {
+	const { resolveSessionFindAnchor, SESSION_FIND_TITLEBAR_MIN_TOP } = loadTsCommonJs("src/renderer/src/components/session/sessionFindAnchor.ts");
+	// 自定义标题栏下聊天区矩形 top=0、右缘=视口宽：旧实现在这里把搜索图标叠到关闭键上
+	const anchor = resolveSessionFindAnchor({ top: 0, right: 1600, width: 800 }, { width: 1600, height: 900 });
+	assert.equal(anchor.right, 12);
+	assert.equal(anchor.top, SESSION_FIND_TITLEBAR_MIN_TOP);
+	assert.ok(anchor.top >= 40, "必须落在 40px 高的窗口控件条之下");
 });
 
 test("浮层锚点：异常矩形被夹在视口内（负 right / 超出高度都不会出屏）", async () => {

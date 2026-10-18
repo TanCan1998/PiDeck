@@ -15,7 +15,7 @@ const FIND_LIST_MAX_HEIGHT = 260;
 
 type SessionFindOverlayProps = {
 	sessionId: string;
-	/** 锚点元素（聊天区容器）：浮层贴它的右上角，不参与会话栏的 flex/grid 布局。 */
+	/** 锚点元素（会话消息区 = 时间线滚动视口）：浮层贴它的右上角，不参与会话栏的 flex/grid 布局。 */
 	anchorRef: RefObject<HTMLElement | null>;
 	/** 跳到某条消息（由 ChatSessionPane 传入 sessionTimeline.jumpToMessage）。 */
 	onJump: (messageId: string) => void;
@@ -28,10 +28,11 @@ type SessionFindOverlayProps = {
  *
  * 为什么浮层走 portal + 固定定位：会话栏在单栏模式下是 `display: contents`
  * （自己的子节点直接成为 App 网格的子项），在栏内插一个绝对定位元素会多出一个
- * 网格项、挤坏布局。portal 到 body 并以聊天区矩形为锚点，布局零影响；
- * 位置随窗口尺寸/聊天区尺寸变化重算。
+ * 网格项、挤坏布局。portal 到 body 并以消息区矩形为锚点，布局零影响；
+ * 位置随窗口尺寸/消息区尺寸变化重算。锚点必须是消息区（时间线视口）而不是整栏聊天区：
+ * 自定义标题栏下聊天区顶到窗口上沿，其右上角就是窗口关闭键（见 sessionFindAnchor）。
  *
- * 收起状态下它只占右上角一个 24px 的图标按钮——这就是「会话内搜索在哪」的可见入口。
+ * 收起状态下它只占消息区右上角一个 24px 的图标按钮——这就是「会话内搜索在哪」的可见入口。
  */
 export function SessionFindOverlay(props: SessionFindOverlayProps) {
 	const [open, setOpen] = useState(false);
@@ -122,7 +123,8 @@ export function SessionFindOverlay(props: SessionFindOverlayProps) {
 			<Button
 				variant="ghost"
 				size="icon"
-				className="fixed z-40 shrink-0 text-muted-foreground"
+				// 浮在消息正文之上：必须自带底板/描边，否则正文长行贴边时图标会“消失”在文字里
+				className="fixed z-40 shrink-0 border border-border-subtle bg-bg-panel/90 text-muted-foreground shadow-sm backdrop-blur-sm transition-colors hover:border-border-strong hover:bg-bg-hover hover:text-foreground"
 				// 尺寸走内联：size="icon" 的 size-9 与 h-7/w-7 是同权重 utility，谁生效取决于生成顺序
 				style={{ top: anchorBox.top, right: anchorBox.right, width: 28, height: 28 }}
 				title={t("sessionFind.open")}

@@ -51,8 +51,8 @@ export function ChatSessionPane(props: ChatSessionPaneProps) {
 	const composerRef = focused ? layoutRefs.composerRef : localComposerRef;
 
 	// 会话内查找依赖 pi 会话 JSONL 索引：DSH/ACP 后端不走 sidecar，直接不挂入口
-	// （避免出现一个永远「没有匹配」的搜索框）。
-	const findSupported = !record?.backend || record.backend === "pi";
+	// （避免出现一个永远「没有匹配」的搜索框）；草稿会话还没落盘文件，同样不挂入口（否则图标悬在欢迎页上）。
+	const findSupported = (!record?.backend || record.backend === "pi") && Boolean(record?.filePath);
 
 	const activeQueuedPrompts = services.queuedPromptsBySession[sessionId] ?? [];
 
@@ -92,7 +92,9 @@ export function ChatSessionPane(props: ChatSessionPaneProps) {
 			{findSupported && (
 				<SessionFindOverlay
 					sessionId={record?.filePath ?? sessionId}
-					anchorRef={services.layoutRefs.chatPaneRef}
+					// 锚点是本栏消息区（时间线视口）而不是整栏聊天区：分屏时两栏各贴自己的右上角，
+					// 单栏时也不会落到窗口控件那一行（理由见 sessionFindAnchor）。
+					anchorRef={sessionTimeline.timelineRef}
 					openSignal={findSignal}
 					onJump={(messageId) => {
 						sessionTimeline.jumpToMessage(messageId);

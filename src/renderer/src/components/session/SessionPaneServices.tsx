@@ -100,8 +100,6 @@ export type SessionPaneServices = {
 	jumpToMessageRef: MutableRefObject<((messageId: string) => void) | null>;
 	layoutRefs: {
 		chatHeaderRef: RefObject<HTMLDivElement | null>;
-		/** 聊天区容器：会话内查找浮层按它定位（贴在右上角，不参与栏内布局）。 */
-		chatPaneRef: RefObject<HTMLElement | null>;
 		composerRef: RefObject<HTMLElement | null>;
 		composerOffsetHeight: number;
 		terminalRowHeight: number;
