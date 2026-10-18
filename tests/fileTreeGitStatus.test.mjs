@@ -316,8 +316,10 @@ test("接线契约：行组件把查表命中原样交给着色映射，目录�
 	// 命中对象必须整体传入：中间解构只剩 status 会把 muted 丢掉，洗淡档变成死代码（评审 P1-b）
 	const classCalls = rows.match(/fileTreeGitStatusClass\(\s*gitStatus\s*\)/g) ?? [];
 	assert.equal(classCalls.length, 2, "文件行与目录行都必须用完整命中（含 muted）取类");
-	const lookups = rows.match(/props\.gitStatusOf\?\.\(\s*node\.path\s*\)/g) ?? [];
-	assert.equal(lookups.length, 2, "两种行都按节点路径查表");
+	// 查表键：本机节点用 node.path；远端节点的 path 可能缺失，缺省回落到 relativePath
+	// （远端 FileTreeNode 只有相对路径，回落到 node.path 会让远端文件树整棵失色）。
+	const lookups = rows.match(/props\.gitStatusOf\?\.\(\s*node\.path\s*\?\?\s*node\.relativePath\s*\)|props\.gitStatusOf\?\.\(\s*nodeKey\s*\)/g) ?? [];
+	assert.equal(lookups.length, 2, "两种行都按节点路径查表（本机 path / 远端回落 relativePath / 目录用 fileTreeNodeKey）");
 	assert.doesNotMatch(rows, /fileTreeGitStatusClass\(\s*\{/, "不得手工拼命中对象（会写死档位）");
 	assert.doesNotMatch(rows, /muted\s*:\s*(?:true|false)/, "档位只能来自查表结果，行组件不得写死");
 	assert.match(rows, /gitStatusOf=\{\s*props\.gitStatusOf\s*\}/, "目录递归必须透传查表函数（缺了深层节点全失色）");

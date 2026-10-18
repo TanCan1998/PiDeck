@@ -80,3 +80,26 @@
 2. 13 项真机 e2e（`PIDECK_REMOTE_EXPERIMENTAL=1`，真实 Linux host 10.81.2.15）复跑；
 3. `npm run build` / 打包 smoke（Windows portable/unpacked）确认远端 UI/链路可用；
 4. 本地 merge commit（`chore(integration): merge origin/dev into remote feature branch`）；推送集成分支 → 由用户决定合入 dev / 开 PR。
+
+## 10. 第二轮 dev 同步（2026-10-18 深夜，45 commits / 193 文件）
+
+**结果**：merge commit `728366f70`，13 个冲突 / 22 处 hunk 全部解决，0 marker。
+
+**冲突批次**：
+| 文件 | 归属 | 解决方式 |
+|------|------|----------|
+| `src/main/settings/SettingsStore.ts` | 语义 | dev 把 `migrateComposerModesVisibility` 重命名为 `migrateRemovedComposerModesToggle`；采新名 + 保留远端 `remoteProjectTrust` 归一化 |
+| `src/main/ipc/gitIpc.ts` | 语义 | dev 的 watcher 自带 toplevel 解析（`acquire` 改同步）；保留远端 `repoPath?: unknown` 边界校验 + `await requireGitCwd` |
+| `src/renderer/src/utils/fileTreeLazy.ts` | 语义 | 采 dev 的 `touched` 引用稳定语义，键比较切到远端用的 `fileTreeNodeKey` |
+| `src/renderer/src/hooks/useProjectSync.ts` | 合并 | 两侧 import 都要（`isLocalProject/isRemoteProject` + `useFileTreeContentState`） |
+| `src/renderer/src/components/session/WorkspaceSurface.tsx` | 结构 | dev 把文件树行/会话历史拆出，采 dev 结构；保留远端 `ProjectFileTarget` 类型 |
+| `src/shared/api/consolidations.ts` · `docs/unified-api.md` · unifiedApi 三测 | 数字 | 743 通道 / 85 前缀 / 74 命名空间 / sessions 115 / git 59（已用探针实测确认） |
+| `tests/tabSwitchPerf` · `tests/workbenchContentHost` | 契约 | 采 dev 的空白容忍正则与新宿主路径，按远端 `fileActionTarget` 改断言 |
+| `rendererCopy.zh-TW.ts` | 生成物 | 改 zh-CN 后重跑 `genZhTwCopy.mjs`（四份词典全部重生成） |
+
+**第二轮新增的远端适配（关键）**：dev 在本轮把文件树整块迁到 `FileTreeRows.tsx` / `useProjectFileTreeController`，**新文件不含远端适配**，直接用会让远端文件树回归。已补回：
+- `FileTreeRows.tsx`：`fileActionTarget = node.target ?? node.path`（点击/双击打开）、活跃文件比较 `node.path ?? node.relativePath`、目录展开键与拖拽落点统一走 `fileTreeNodeKey`、子项 `key={fileTreeNodeKey(child)}`、Git 着色查表用 path/relativePath 而非裸 `node.path`。
+- `useFileTreeGitStatus.ts`：远端仓库条目可能没有 `path`，缺省时不再把 `undefined` 传给 `git:status`（按默认 scope 处理）。
+- `workbenchContentHost` 契约测试同步跟到新宿主并断言 `fileActionTarget`。
+
+**门禁**：typecheck 0、check:format 0、build:fast 0；unifiedApi 三测 23/23 绿；远端域测试 1653 例仅 9 红，全部落在 §7 既有红灯清单内（无合并专属失败）。
