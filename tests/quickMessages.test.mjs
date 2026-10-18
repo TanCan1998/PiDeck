@@ -299,9 +299,13 @@ test("底栏接线：安全控制位右侧渲染 props.quickMessagesControl，�
 	// 守卫分支内允许夹其它节点（分组竖线 Separator、按需渲染的置空前分隔符等），不锚死「<> 后紧跟第一个控制位」；
 	// 但三个控制位必须都在同一个守卫分支里、且自左向右保持原顺序——顺序错（快捷消息跑到安全等级左边）
 	// 与漏进守卫外（生图会话也露出入口）都要能被判红。
-	const guardedGroup = source.match(/isMediaComposer\s*\?\s*null\s*:\s*\(\s*<>([\s\S]*?)<\/>\s*\)/);
-	assert.ok(guardedGroup, "四个控制位必须整体挂在 isMediaComposer ? null 分支里");
-	const guardedProps = [...guardedGroup[1].matchAll(/\{(props\.(?:feishuIndicator|securityControl|quickMessagesControl))\s*\}/g)].map((match) => match[1]);
+	// 包裹节点本身不锚死：历史上是 <>…</>，显示层改版后可能是 <div className="…">…</div>（分组 gap-0 需要 flex 容器）。
+	// 只要求「isMediaComposer ? null : ( <某容器> … </某容器> )」，控制位仍必须在容器内。
+	// fragment 与带标签容器两种形态都认：<>…</> 没有标签名可回引，单独一条分支。
+	const guardedGroup = source.match(/isMediaComposer\s*\?\s*null\s*:\s*\(\s*(?:<>([\s\S]*?)<\/>|<([\w.]+)[^>]*>([\s\S]*?)<\/\2>)\s*\)/);
+	assert.ok(guardedGroup, "四个控制位必须整体挂在 isMediaComposer ? null 分支里（容器可以是 fragment 或 div）");
+	const guardedGroupInner = guardedGroup[1] ?? guardedGroup[3] ?? "";
+	const guardedProps = [...guardedGroupInner.matchAll(/\{(props\.(?:feishuIndicator|securityControl|quickMessagesControl))\s*\}/g)].map((match) => match[1]);
 	assert.deepEqual(guardedProps, ["props.feishuIndicator", "props.securityControl", "props.quickMessagesControl"], "守卫分支内必须依次渲染飞书/安全等级/快捷消息，且三个都在");
 	// 渲染点唯一：移到守卫外等于生图/生视频会话也露出快捷消息入口。
 	assert.equal(source.match(/\{props\.quickMessagesControl\}/g)?.length, 1, "props.quickMessagesControl 只允许在守卫分支内渲染一次");
