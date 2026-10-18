@@ -338,7 +338,7 @@
     padding-bottom: 8px;
   }
   .app.wechat-shell .composer-box {
-    min-height: 6rem;
+    min-height: 0;
     border-radius: 12px;
   }
 }

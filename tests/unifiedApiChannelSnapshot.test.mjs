@@ -17,6 +17,8 @@
  *   skillHubInstallProgress（技能商店安装进度：spawn 流式解析推送）
  * 2026-10-17 显式刷新（+1 通道，附领域正当理由）：
  *   filesSearchContent（工作区文件内容检索：Go file-index sidecar；未就绪/不可用返回 null）
+ * 2026-10-18 显式刷新（+1 通道，附领域正当理由）：
+ *   sessionsSearchInSession（会话内查找：session-index sidecar 的 search-session）
  * 刷新方式：entries.map(([k, v]) => `${k}=${v}`).sort().join("\n") 重算 sha256，写入 CHANNEL_DIGEST。
  */
 import assert from "node:assert/strict";

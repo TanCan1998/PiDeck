@@ -105,7 +105,7 @@ export function DefaultToolsInput(props: {
 												{enabled && <Check size={12} />}
 											</span>
 											<span className="font-mono text-control text-text-primary">{tool.name}</span>
-											{removed ? <span className="ml-auto font-mono text-[11px] text-text-tertiary">−{tool.name}</span> : null}
+											{removed ? <span className="ml-auto font-mono text-micro text-text-tertiary">−{tool.name}</span> : null}
 										</CommandItem>
 									);
 								})}

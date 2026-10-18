@@ -5,6 +5,7 @@ import { sessionRecordToSummary } from "../atoms/session-selectors";
 import { loadProjectFileTree } from "../utils/fileTreeLazy";
 import { createKeyedWatchdog } from "../utils/catalogLoadWatchdog";
 import { isLocalProject, isRemoteProject } from "../../../shared/projectLocation";
+import { useFileTreeContentState } from "./files/useFileTreeContentState";
 
 const SESSION_REFRESH_TIMEOUT_MS = 20_000;
 const SIDEBAR_PROJECT_CHILD_PAGE_SIZE = 5;
@@ -71,7 +72,8 @@ export function useProjectSync(input: UseProjectSyncInput) {
 	const { projects, activeProjectId, setProjects, setActiveProjectId, replaceProjectSessions, api, showToast, setSessionCatalogLoadState, t } = input;
 	const [worktreesByProject, setWorktreesByProject] = useState<Record<string, WorktreeEntry[]>>({});
 	const [branchByProject, setBranchByProject] = useState<Record<string, string | null>>({});
-	const [files, setFiles] = useState<FileTreeNode[]>([]);
+	// 文件树节点与内容代次同源：代次只在树内容真的变了时前进，供文件抽屉按内容防抖重拉 Git 着色。
+	const { files, fileTreeContentRevision, setFiles } = useFileTreeContentState();
 	const [gitInfo, setGitInfo] = useState<GitBranchInfo>({ current: null, branches: [] });
 	const [sessionLoadingByProject, setSessionLoadingByProject] = useState<Record<string, boolean>>({});
 	const [visibleProjectChildCountByProject, setVisibleProjectChildCountByProject] = useState<Record<string, number>>({});
@@ -368,7 +370,8 @@ export function useProjectSync(input: UseProjectSyncInput) {
 			const projectDirectoryMissing = message.includes("PROJECT_DIRECTORY_MISSING");
 			if (projectDirectoryMissing) {
 				// 目录被外部删除后先清掉陈旧文件树，再刷新项目 presence，让侧栏立即出现“目录不存在”。
-				setFiles([]);
+				// 已经是空树时复用原数组：内容没变就不推进内容代次（避免白跑一轮 Git 着色重拉）。
+				setFiles((current) => (current.length === 0 ? current : []));
 				void refreshProjects().catch(() => undefined);
 			}
 			showToast(tooLarge ? t("app.filesDirectoryTooLarge", { count: tooLarge[1], max: tooLarge[2] }) : projectDirectoryMissing ? t("app.projectDirectoryMissing") : t("app.filesRefreshFailed", { error: message }), 4000);
@@ -380,6 +383,7 @@ export function useProjectSync(input: UseProjectSyncInput) {
 		branchByProject,
 		setBranchByProject,
 		files,
+		fileTreeContentRevision,
 		setFiles,
 		gitInfo,
 		setGitInfo,

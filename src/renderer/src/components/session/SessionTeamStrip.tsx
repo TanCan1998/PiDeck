@@ -1,10 +1,11 @@
 import { useAtomValue } from "jotai";
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { ChevronDown, ChevronUp, Users } from "lucide-react";
 import { sessionRuntimeBySessionIdAtomFamily } from "../../atoms";
 import { t } from "../../i18n";
 import type { DshTeamMember, DshTeamState, DshTeamTask } from "../../../../shared/types/agent";
 import { ComposerWidgetFrame, useComposerWidgetCollapsed } from "./ComposerWidgetLayout";
+import { TEAM_WIDGET_KEY, readTeamCollapsedPreference, writeTeamCollapsedPreference } from "../../utils/sessionTeamCollapsePreference";
 
 /**
  * composer 上方的 Team 常驻条（agent-team 实验预设，P1 最小可用视图）。
@@ -59,7 +60,15 @@ export function hasTeamContent(team: DshTeamState | null | undefined): team is D
 
 export function SessionTeamStrip(props: { sessionId: string }) {
 	const runtime = useAtomValue(sessionRuntimeBySessionIdAtomFamily(props.sessionId));
-	const { collapsed, toggleCollapsed } = useComposerWidgetCollapsed(`team:${props.sessionId}`, false);
+	// Team 条的折叠偏好跨会话共享并落盘（默认展开）：内存 context map 会随面板重挂/切会话清空，
+	// 不能作为长期记忆。默认值每帧从存储读取，切到别的会话时按同一偏好解析。
+	const { collapsed, toggleCollapsed } = useComposerWidgetCollapsed(TEAM_WIDGET_KEY, readTeamCollapsedPreference());
+	const handleToggleCollapsed = useCallback(() => {
+		// 先落盘再走 composer 通道：下一次挂载（切会话/面板重挂）按新偏好解析；
+		// 反序会先按旧默认渲染一帧，出现「折叠后闪现展开」。
+		writeTeamCollapsedPreference(!collapsed);
+		toggleCollapsed();
+	}, [collapsed, toggleCollapsed]);
 
 	const team = runtime?.backend === "dsh" ? runtime.state?.dshTeam : undefined;
 	const members = useMemo(() => team?.members ?? [], [team]);
@@ -70,7 +79,7 @@ export function SessionTeamStrip(props: { sessionId: string }) {
 	return (
 		<ComposerWidgetFrame data-testid="session-team-strip" aria-label={t("sessionTeam.title")}>
 			<div className="flex h-9 w-full items-center gap-2.5 px-3">
-				<button type="button" className="flex min-w-0 flex-1 items-center gap-2.5 text-left" aria-expanded={!collapsed} onClick={toggleCollapsed}>
+				<button type="button" className="flex min-w-0 flex-1 items-center gap-2.5 text-left" aria-expanded={!collapsed} onClick={handleToggleCollapsed}>
 					<Users size={14} aria-hidden="true" className="shrink-0 text-text-tertiary" />
 					<span className="shrink-0 text-control font-medium leading-6 text-foreground">{t("sessionTeam.title")}</span>
 					<span className="min-w-0 flex-1 truncate text-control leading-5 text-text-tertiary">{teamSummaryLabel(team)}</span>

@@ -5,6 +5,9 @@ import { describe, test } from "node:test";
 const definitions = JSON.parse(readFileSync("src/renderer/src/vendor/seti-icons/definitions.json", "utf8"));
 const icons = JSON.parse(readFileSync("src/renderer/src/vendor/seti-icons/icons.json", "utf8"));
 const workspaceSurface = readFileSync("src/renderer/src/components/session/WorkspaceSurface.tsx", "utf8");
+// 文件树行组件已从 WorkspaceSurface 整块迁到独立模块（> 600 行红线）：行级断言读新宿主。
+// 同一目录下，import 相对路径与拆分前完全一致，所以下面的 "../../fileIcons" 断言原样保留。
+const fileNode = readFileSync("src/renderer/src/components/session/FileTreeRows.tsx", "utf8");
 const surfaceFacade = readFileSync("src/renderer/src/components/session/SurfaceComponents.tsx", "utf8");
 const gitResourceTree = readFileSync("src/renderer/src/components/app/git/GitResourceTree.tsx", "utf8");
 
@@ -43,7 +46,7 @@ describe("Seti file icon integration", () => {
 	});
 
 	test("file tree renders trusted Seti SVG and file type labels", () => {
-		const source = workspaceSurface;
+		const source = fileNode;
 		assert.match(source, /getFileIconSeti\(name\)/);
 		assert.match(source, /dangerouslySetInnerHTML=\{\{ __html: svg \}\}/);
 		assert.match(source, /aria-hidden="true"/);
@@ -53,7 +56,7 @@ describe("Seti file icon integration", () => {
 	});
 
 	test("Git panel and file tree share the same vendored Seti lookup and color mapping", () => {
-		const fileTree = workspaceSurface;
+		const fileTree = fileNode;
 		const gitPanel = gitResourceTree;
 		const sharedLookup = readFileSync("src/renderer/src/fileIcons.ts", "utf8");
 
@@ -94,10 +97,10 @@ describe("Seti file icon integration", () => {
 		// 文件抽屉：无顶栏；工具行压矮；缩进 8px/层；树行原生 button（不套 shadcn Button 抢 SVG 尺寸）
 		assert.match(workspaceSurface, /props\.panel !== "files" && title/);
 		assert.match(workspaceSurface, /panel-action-row flex h-7/);
-		assert.match(workspaceSurface, /depth \* 8/);
-		assert.match(workspaceSurface, /树行用原生 button/);
-		assert.doesNotMatch(workspaceSurface, /\[&_svg\]:!size-/);
-		assert.match(workspaceSurface, /FolderOpen\s+size=\{18\}/);
+		assert.match(fileNode, /depth \* 8/);
+		assert.match(fileNode, /树行用原生 button/);
+		assert.doesNotMatch(fileNode, /\[&_svg\]:!size-/);
+		assert.match(fileNode, /FolderOpen\s+size=\{18\}/);
 		// 滚动层上移到 DrawerSurface 的 LazyWrapper（overflow-y-auto）；files-panel 自身
 		// 只保留 overflow-x-hidden，避免滚动条占位导致的宽度摆动（见 DrawerSurface 注释）
 		assert.match(workspaceSurface, /files-panel[^"]*overflow-x-hidden/);

@@ -22,7 +22,7 @@ function RoleBadge({ role }: { role: TraceMessage["role"] }) {
 	const cls = role === "user" ? "bg-primary/15 text-primary" : role === "assistant" ? "bg-accent text-accent-foreground" : "bg-muted text-muted-foreground";
 	// 显式映射而非模板拼接 key：t() 的 key 联合类型不接受动态字符串
 	const labelKey = role === "user" ? "rpc.traceRoleUser" : role === "assistant" ? "rpc.traceRoleAssistant" : "rpc.traceRoleTool";
-	return <span className={`inline-flex h-5 shrink-0 items-center rounded px-1.5 text-[10px] font-medium ${cls}`}>{t(labelKey)}</span>;
+	return <span className={`inline-flex h-5 shrink-0 items-center rounded px-1.5 text-micro font-medium ${cls}`}>{t(labelKey)}</span>;
 }
 
 function TraceBlockView({ block }: { block: TraceBlock }) {
@@ -32,13 +32,13 @@ function TraceBlockView({ block }: { block: TraceBlock }) {
 		case "thinking":
 			return (
 				<div className={`border-l-2 border-border pl-2 text-xs italic leading-relaxed text-muted-foreground/80 ${BLOCK_MAX_H} overflow-y-auto`}>
-					<span className="mb-1 inline-flex items-center gap-1 text-[10px] not-italic">{t("rpc.traceThinking")}</span>
+					<span className="mb-1 inline-flex items-center gap-1 text-micro not-italic">{t("rpc.traceThinking")}</span>
 					{block.text}
 				</div>
 			);
 		case "image":
 			return (
-				<span className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+				<span className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-micro text-muted-foreground">
 					<ImageIcon className="size-3" aria-hidden="true" />
 					{t("rpc.traceImage")}
 				</span>
@@ -56,7 +56,7 @@ function TraceBlockView({ block }: { block: TraceBlock }) {
 		case "tool_result":
 			return (
 				<div className="rounded-md bg-muted/60 p-2">
-					<div className="mb-1 flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+					<div className="mb-1 flex items-center gap-1.5 text-micro uppercase tracking-wide text-muted-foreground">
 						{t("rpc.traceToolResult")}
 						{block.isError ? <span className="rounded bg-destructive/15 px-1 text-destructive">{t("rpc.traceToolError")}</span> : null}
 					</div>
@@ -72,11 +72,11 @@ function TraceMessageRow({ message, index }: { message: TraceMessage; index: num
 	return (
 		<div className="border-b border-border/40 last:border-b-0">
 			<button type="button" className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-accent-soft" onClick={() => setOpen((value) => !value)}>
-				<span className="shrink-0 tabular-nums text-[10px] text-muted-foreground/60">{index + 1}</span>
+				<span className="shrink-0 tabular-nums text-micro text-muted-foreground/60">{index + 1}</span>
 				{open ? <ChevronDown className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" /> : <ChevronRight className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />}
 				<RoleBadge role={message.role} />
 				<span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{summarizeTraceMessage(message)}</span>
-				<span className="shrink-0 tabular-nums text-[10px] text-muted-foreground/60">{t("rpc.traceChars", { n: message.chars })}</span>
+				<span className="shrink-0 tabular-nums text-micro text-muted-foreground/60">{t("rpc.traceChars", { n: message.chars })}</span>
 			</button>
 			{open && (
 				<div className="flex flex-col gap-2 px-2 pb-2 pl-9 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-fast">
@@ -97,7 +97,7 @@ function SectionHeader({ icon, label, meta, open, onToggle, children }: { icon: 
 				{open ? <ChevronDown className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" /> : <ChevronRight className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />}
 				{icon}
 				<span className="text-xs font-medium">{label}</span>
-				{meta ? <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground/70">{meta}</span> : <span className="flex-1" />}
+				{meta ? <span className="min-w-0 flex-1 truncate text-micro text-muted-foreground/70">{meta}</span> : <span className="flex-1" />}
 			</button>
 			{open && <div className="motion-safe:animate-in motion-safe:fade-in motion-safe:duration-fast">{children}</div>}
 		</div>
@@ -115,7 +115,7 @@ export function ModelTraceDetail({ payloadJson, summary }: { payloadJson: string
 	return (
 		<div className="flex flex-col gap-2 text-foreground">
 			{/* 指标行：全部来自条目摘要（采集时已算好），不重复扫描 payload */}
-			<div className="flex flex-wrap items-center gap-1.5 px-1 text-[10px] text-muted-foreground">
+			<div className="flex flex-wrap items-center gap-1.5 px-1 text-micro text-muted-foreground">
 				{summary.model ? <span className="rounded bg-muted px-1.5 py-0.5 font-medium text-foreground">{summary.model}</span> : null}
 				{summary.provider ? <span className="rounded bg-muted px-1.5 py-0.5">{summary.provider}</span> : null}
 				{showStructured ? (

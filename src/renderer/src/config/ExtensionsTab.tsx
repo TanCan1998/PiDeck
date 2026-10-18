@@ -1,4 +1,5 @@
 import { Button } from "../components/ui-shadcn/button";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../components/ui-shadcn/dialog";
 import { Input } from "../components/ui-shadcn/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui-shadcn/table";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
@@ -305,28 +306,16 @@ export function ExtensionsTab(props: {
 			) : (
 				<>
 					{showUpdateDialog && (
-						<div className="config-update-dialog-backdrop" role="dialog" aria-modal="true">
-							<div className="config-update-dialog">
-								<div className="config-update-dialog-header">
-									<strong>{t("settings.updateExtensionsAll")}</strong>
-									<Button
-										variant="ghost"
-										size="icon-sm"
-										className="size-7"
-										onClick={() => {
-											setShowUpdateDialog(false);
-											props.onRefresh();
-										}}
-										disabled={Boolean(updating)}
-									>
-										×
-									</Button>
-								</div>
-								<p className="config-im-form-hint">{updating ? t("settings.extensionsUpdatingDesc") : t("settings.extensionsUpdateResultHint")}</p>
+						<Dialog open onOpenChange={(next) => !next && !updating && setShowUpdateDialog(false)}>
+							<DialogContent className="max-w-2xl">
+								<DialogHeader>
+									<DialogTitle>{t("settings.updateExtensionsAll")}</DialogTitle>
+								</DialogHeader>
+								<p className="text-caption text-muted-foreground">{updating ? t("settings.extensionsUpdatingDesc") : t("settings.extensionsUpdateResultHint")}</p>
 								<pre className="setting-update-output">{updateResult ? `${updateResult.command}\n${updateResult.output}` : t("settings.extensionsUpdating")}</pre>
-								<div className="config-update-dialog-actions">
+								<DialogFooter>
 									<Button
-										variant="default"
+										variant="outline"
 										size="sm"
 										onClick={() => {
 											setShowUpdateDialog(false);
@@ -336,9 +325,9 @@ export function ExtensionsTab(props: {
 									>
 										{t("common.close")}
 									</Button>
-								</div>
-							</div>
-						</div>
+								</DialogFooter>
+							</DialogContent>
+						</Dialog>
 					)}
 					{false && <RecommendedPackagesPanel data={props.data} onRefresh={props.onRefresh} />}
 
@@ -357,11 +346,11 @@ export function ExtensionsTab(props: {
 									{/* 有查询词时显示「匹配数 / 总数」，否则维持原有总数计数 */}
 									<span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">{extensionQuery.trim().length > 0 ? t("config.extensionListResultCount", { matched: filteredExtensions.length, count: visibleExtensions.length }) : t("config.count.extensions", { count: visibleExtensions.length })}</span>
 								</div>
-								<small className="skills-restart-hint block text-caption text-muted-foreground">{t("config.extensionRestartHint")}</small>
+								<small className="block text-caption text-text-tertiary">{t("config.extensionRestartHint")}</small>
 							</div>
 							{/* 窄窗口下按钮换行而不是被裁掉：shrink-0 保证按钮不被压缩，
 				    flex-wrap + justify-end 让溢出部分落到第二行右对齐 */}
-							<div className="skills-toolbar-actions flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+							<div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
 								{props.scope === "global" ? (
 									<>
 										{/* 工具栏统一 size=sm，与设置页/会话顶栏控件高度对齐 */}

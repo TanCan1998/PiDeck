@@ -14,6 +14,7 @@ import { MIN_PI_VERSION_FOR_EXTENSION_WHITELIST, parsePiVersion, piVersionAtLeas
 import { redactForReport, truncateText } from "../health/redact";
 import { PiSelfUpdateRunner, supportsPiSelfUpdate } from "../pi/piSelfUpdateRunner";
 import { PiExtensionCatalog, type ExtensionNativeState } from "./piExtensionCatalog";
+import { isPackageSource, isPathLikePackageSource } from "../../shared/piPackageSource";
 
 export { BUILT_IN_EXTENSIONS } from "./builtInExtensions";
 // 目录/版本查询域已抽到 piExtensionCatalog.ts（拆分 Wave 3）；以下是外部契约，原样再导出。
@@ -21,6 +22,16 @@ export { BUILT_IN_CONFLICT_KEYWORDS, extensionNameMatches, FILTERED_SUFFIX, type
 
 type SettingsProvider = () => AppSettings;
 type ExtensionCopy = (key: MainProcessTranslationKey, params?: Record<string, string | number>) => string;
+
+/**
+ * 本地文件扩展判定（纯函数，导出供单测）：只有「裸文件名」才是 ~/.pi/agent/extensions 下
+ * 自动发现的本地文件（卸载 = 删文件）；协议源与路径型 source（盘符 / UNC / POSIX 绝对 / ./ ../）
+ * 都是 pi 的 packages 条目，必须交给 `pi remove`。
+ * 判据来自 shared/piPackageSource，与「整包开关 / 项目资源」共用同一套识别，避免两处漂移。
+ */
+export function isLocalFileExtensionSource(source: string): boolean {
+	return !isPackageSource(source);
+}
 
 /**
  * 通过 pi CLI 管理已安装扩展，避免桌面端直接改写 pi settings 导致和 CLI 行为不一致。
@@ -119,10 +130,13 @@ export class ExtensionManager {
 
 	/**
 	 * 判断是否为本地文件扩展（~/.pi/agent/extensions 下自动发现的 .ts/目录）。
-	 * pi list 的包源都带 npm:/file:/github: 等协议前缀；裸文件名只能走文件系统删除。
+	 *
+	 * 只有「裸文件名」（`orca-agent-status.ts`、`my-extension`）才是这里的本地文件：
+	 * 协议源（npm:/file:/git:...）与路径型 source（`F:\pkg`、`./pkg`、`/opt/pkg`、UNC）都是
+	 * pi 的 packages 条目，不属于 extensions 目录。判定收口在 isLocalFileExtensionSource。
 	 */
 	private isLocalFileExtension(source: string): boolean {
-		return !/^(?:npm|file|github|git|https?):/i.test(source);
+		return isLocalFileExtensionSource(source);
 	}
 
 	/**
@@ -279,11 +293,14 @@ export class ExtensionManager {
 		if (isBuiltInExtensionName(normalized)) {
 			throw new Error(this.translate("mainExtension.builtInCannotUninstall"));
 		}
-		// 本地 .ts/目录扩展不在 pi package 列表里，pi remove 会报 No matching package；
+		// 裸文件名的本地 .ts/目录扩展不在 pi package 列表里，pi remove 会报 No matching package；
 		// 例如 orca-agent-status.ts 只能直接删文件。
 		if (this.isLocalFileExtension(normalized)) {
 			await this.removeLocalExtension(normalized);
 		} else {
+			// 协议源与路径型 source（pi install <本地目录>）都登记在 pi 的 packages 里，统一交给
+			// pi remove：路径型 source 绝不能落进 removeLocalExtension——那里会把 basename 拼到
+			// ~/.pi/agent/extensions 下删除，等于去删一个不存在的文件（必然失败且报告误导）。
 			// 项目层 remove 与 install 同一信任路径：带项目 cwd + projectInstall（不推 --no-approve）。
 			// --no-approve 下 pi 视项目为不信任直接拒改本地 packages（"Project is not trusted"），且无 cwd 会删错目录。
 			await this.runPi(["remove", normalized, ...(scope === "project" ? ["-l"] : [])], 30_000, options.projectRoot ? { cwd: options.projectRoot, projectInstall: true } : {});
@@ -334,11 +351,22 @@ export class ExtensionManager {
 		}
 	}
 
-	/** 更新单个扩展：`pi update <source>`，source 与 list 输出一致（如 npm:context-mode）。 */
+	/**
+	 * 更新单个扩展：`pi update <source>`，source 与 list 输出一致（如 npm:context-mode）。
+	 *
+	 * 路径型 source（`pi install <本地目录>`）没有稳定的单包更新语义：`pi update <path>` 在不同
+	 * pi 版本下会报 No matching package 或静默退回整包更新，UI 无法判断结果。统一改走
+	 * updateExtensions()（即 `pi update --extensions`，缓存失效与输出脱敏一并复用）；
+	 * 返回结果里的 command 如实展示实际执行的命令，用户不会被日志误导。
+	 */
 	async updateExtension(source: string): Promise<PiCliUpdateResult> {
+		const normalized = source.trim();
+		if (isPathLikePackageSource(normalized)) {
+			return this.updateExtensions();
+		}
 		try {
-			const output = await this.runPi(["update", source], 120_000, { offline: false });
-			return this.toUpdateResult(`pi update ${source}`, output, true);
+			const output = await this.runPi(["update", normalized], 120_000, { offline: false });
+			return this.toUpdateResult(`pi update ${normalized}`, output, true);
 		} finally {
 			this.invalidateListCache();
 		}

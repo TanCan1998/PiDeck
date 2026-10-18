@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: f031a694c303b5996fe76565b1b925d64f28709560e320eeb6cba9138f133753（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: 2bda39e70db076dff44e1de5bdfba12f71757ecd3c90280d3bfb1ddb77e81839（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -597,8 +597,10 @@ export const zhTW: Record<TranslationKey, string> = {
 	"app.composerModeNormalDesc": "直接執行，適合日常修改和確認過的任務",
 	"app.composerModeSelectLabel": "切換模式",
 	"app.composerModePlan": "計劃模式",
+	"app.composerModePlanShort": "計劃",
 	"app.composerModePlanDesc": "先只讀分析並生成計劃，需要你確認後再執行",
 	"app.composerModeGoal": "目標模式",
+	"app.composerModeGoalShort": "目標",
 	"app.composerModeGoalDesc": "圍繞一條目標自動連續推進，直到完成、阻塞或你暫停",
 	"app.composerModeImagegen": "生圖模式",
 	"app.composerModeVideogen": "生影片模式",
@@ -660,6 +662,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"git.changes": "更改",
 	"git.mergeChanges": "合併更改",
 	"git.stagedChanges": "暫存的更改",
+	"git.unstagedChanges": "未暫存的更改",
 	"git.sourceControlGraph": "原始碼管理圖",
 	"git.compareChanges": "比較更改",
 	"git.commit": "提交",
@@ -2553,8 +2556,11 @@ export const zhTW: Record<TranslationKey, string> = {
 	"config.resourceManagedHint": "由包或設定項載入；在此僅只讀展示。",
 	"config.resourceGroup.project": "專案資源",
 	"config.resourceGroup.global": "全域資源",
+	"config.resourceGroup.discovered": "來自包或設定（只讀）",
 	"config.source.global": "全域",
 	"config.source.project": "專案",
+	"config.source.local": "本地",
+	"config.extensionLocalVersion": "本地版本 {version}",
 	"config.openExtensionLocation": "開啟檔案位置",
 	"config.promptDeleteFailed": "專案提示詞路徑無效。",
 	"config.process.refresh": "重新整理",
@@ -3956,6 +3962,10 @@ export const zhTW: Record<TranslationKey, string> = {
 	"drawer.gitChangedFiles": "Git 工作區修改",
 	"drawer.gitChangedFilesDesc": "顯示當前專案未提交到 Git 的工作區變動，提交後會清空",
 	"drawer.gitChangesNone": "工作區乾淨，無未提交變更",
+	"drawer.gitStatus.modified": "已修改",
+	"drawer.gitStatus.added": "已暫存",
+	"drawer.gitStatus.untracked": "未納入 Git",
+	"drawer.gitStatus.conflict": "有衝突",
 	"drawer.moreFiles": "還有 {count} 個",
 	"drawer.projectSessions": "{name} · 歷史會話",
 	"drawer.sessionActionCopying": "正在複製…",
@@ -4267,6 +4277,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"sessionFind.placeholder": "在當前會話中查詢…",
 	"sessionFind.noResults": "沒有匹配",
 	"sessionFind.unavailable": "會話索引尚未就緒，稍候再試（首次建索引需要一會兒）",
+	"sessionFind.jumpFailed": "未能跳轉到這條命中：它可能在更早的歷史裡，或已被移出當前上下文",
 	"sessionFind.searching": "查詢中…",
 	"sessionFind.prev": "上一條命中",
 	"sessionFind.next": "下一條命中",
@@ -5073,8 +5084,6 @@ export const zhTW: Record<TranslationKey, string> = {
 	"settings.modules.title": "功能模組",
 	"settings.composer.title": "輸入框功能顯示",
 	"settings.composer.sectionDesc": "關閉對應入口的顯示，不影響功能本身與快捷鍵；隨時可回這裡重新開啟。",
-	"settings.composer.modes": "模式選擇器",
-	"settings.composer.modesDesc": "輸入框底欄的普通/目標/規劃模式切換入口（進行中的特殊模式仍可退出）",
 	"settings.composer.security": "權限",
 	"settings.composer.quickMessages": "快捷訊息",
 	"settings.composer.gitBranch": "Git 分支",
@@ -5615,7 +5624,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"agent.tips.enhancePrompt": "輸入框底欄的 ✨ 能把草稿擴寫成完整提示詞",
 	"agent.tips.terminalDock": "會話「更多操作」選單裡可開終端、草稿本和外部編輯器",
 	"agent.tips.sessionMenu": "會話標籤的「更多操作」選單可匯出 HTML、複製會話或開啟會話檔案",
-	"agent.tips.composerModes": "底欄左側可切換計劃、目標、生圖等模式",
+	"agent.tips.composerModes": "「+」選單裡可切換計劃/目標模式，點底欄標籤上的 × 回到普通模式",
 	"agent.tips.multiSelect": "懸停自己的訊息可多選分享為文本 / Markdown / 圖片",
 	"agent.tips.settingsExtras": "設定裡有用量統計、桌面寵物、Web 服務與外部連線（飛書 / 微信）",
 	"agent.tips.sessionStatusPlacement": "設定 →「外觀設定」的會話狀態位置能把待辦、修改檔案、子代理挪到右側邊欄",
@@ -5644,6 +5653,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"agent.tips.storeInstall": "設定裡的商店能一鍵裝提示詞、技能和擴充套件，不用手寫配置",
 	"agent.tips.noticeHistory": "錯過的通知不會丟：設定 →「通知設定」裡有通知歷史",
 	"agent.tips.zoomShortcut": "按 {shortcut} 縮放整個介面，圖示與間距一起變大",
+	"agent.tips.findInSession": "按 {shortcut} 在當前會話裡查詢關鍵詞，可逐條跳轉",
 	"agent.tips.cycleModelShortcut": "按 {shortcut} 在收藏的模型之間迴圈切換",
 	"agent.tips.cycleThinkingShortcut": "按 {shortcut} 迴圈思考檔位（關閉 ↔ 最高）",
 	"agent.tips.cycleTabsShortcut": "按 {shortcut} 在開啟的會話標籤之間來回切",

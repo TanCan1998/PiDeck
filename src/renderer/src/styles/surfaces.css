@@ -776,42 +776,7 @@
   line-height: 1.55;
   white-space: pre-wrap;
 }
-.config-update-dialog-backdrop {
-  position: absolute;
-  inset: 0;
-  z-index: 90;
-  display: grid;
-  place-items: center;
-  padding: var(--space-5);
-  background: color-mix(in srgb, var(--color-bg-app) 62%, transparent);
-  backdrop-filter: blur(4px);
-  animation: fadeIn 160ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.config-update-dialog {
-  width: min(720px, 100%);
-  max-height: min(680px, 90vh);
-  display: grid;
-  gap: var(--space-3);
-  padding: var(--space-5);
-  border: 1px solid var(--color-border-subtle);
-  border-radius: var(--radius-lg);
-  background: var(--color-bg-panel);
-  box-shadow: var(--shadow-lg);
-  animation: dialogOverlayIn var(--transition-base) var(--ease-out);
-}
-
-.config-update-dialog-header,
-.config-update-dialog-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-
-.config-update-dialog .setting-update-output {
-  margin: 0;
-}.setting-path{
+.setting-path{
   word-break: break-all;
 }
 .setting-wsl-fields {
@@ -2261,14 +2226,6 @@ div.fixed.inset-0.z-50 {
 .skills-tab {
   display: grid;
   gap: var(--space-3);
-}
-.skills-restart-hint {
-  color: var(--color-text-tertiary);
-  font-size: var(--font-size-caption);
-}
-.skills-toolbar-actions {
-  display: flex;
-  gap: 8px;
 }
 .skill-badges {
   display: flex;

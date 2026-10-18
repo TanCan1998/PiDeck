@@ -80,6 +80,8 @@ export const SESSION_FEATURE_TIPS: readonly SessionFeatureTip[] = [
 	// 全局快捷键（看不到入口、只能靠知道的那几个；输入框聚焦时失效的 openSearch/openNewSession 不收，
 	// 提示正是在输入框聚焦时出现，写了等于教用户按一个当场没反应的键）
 	{ textKey: "agent.tips.zoomShortcut", shortcutId: "zoomIn" },
+	// 会话内查找没有常驻入口（收起态不渲染按钮，见 SessionFindOverlay），只能靠提示告诉用户键位
+	{ textKey: "agent.tips.findInSession", shortcutId: "findInSession" },
 	{ textKey: "agent.tips.remapShortcuts" },
 	{ textKey: "agent.tips.slashCompact" },
 	{ textKey: "agent.tips.slashLogin" },

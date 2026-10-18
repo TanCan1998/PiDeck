@@ -192,6 +192,11 @@ export type PiExtensionSummary = {
 	builtIn?: boolean;
 	/** 过滤式安装（pi list 的 "(filtered)" 标记）：包完整安装但只选择性加载指定资源 */
 	filtered?: boolean;
+	/**
+	 * pi list 的 source 是本地路径（`pi install <dir>` / `./pkg` / `/opt/pkg`）而非 npm/git 协议：
+	 * 这类包由用户目录直接加载，版本取自包自身 package.json，更新走 `pi update --extensions`。
+	 */
+	local?: boolean;
 	/** 是否启用（未在 disabledExtensions 列表中） */
 	enabled?: boolean;
 	currentVersion?: string;

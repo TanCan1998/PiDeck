@@ -14,7 +14,7 @@ import { Badge } from "../ui-shadcn/badge";
 export function PendingAskBadge({ count }: { count: number }) {
 	if (count <= 0) return null;
 	return (
-		<Badge variant="outline" className="h-4 shrink-0 gap-0.5 border-amber-500/40 bg-amber-500/15 px-1 py-0 text-[10px] font-medium leading-none text-amber-600 dark:text-amber-400" title={t("sidebar.pendingConfirmationHint", { count: String(count) })}>
+		<Badge variant="warning" className="h-4 shrink-0 gap-0.5 px-1 py-0 leading-none" title={t("sidebar.pendingConfirmationHint", { count: String(count) })}>
 			<HelpCircle className="size-2.5 shrink-0 animate-pulse" aria-hidden="true" />
 			<span>{count > 1 ? t("sidebar.pendingConfirmationCount", { count: String(count) }) : t("sidebar.pendingConfirmation")}</span>
 		</Badge>

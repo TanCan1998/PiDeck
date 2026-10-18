@@ -3043,18 +3043,18 @@ select:focus-visible {
 .message-list.message-list > * + * {
   margin-top: var(--space-4);
 }
-/* 会话定位跳转命中时的短暂高亮，帮助用户在长会话中识别落点。 */
+/* 跳转落位提示（会话内查找 / 刻度 / 大纲共用）：只在元素自身背景上铺一层极淡的强调色再淡出。
+   元素自己的圆角、边框、阴影一律不动。历史上这里是「3px box-shadow 外描边 + border-radius 覆盖」：
+   套在整条轮次行上就是一个巨大的绿框，还会改掉气泡原本的圆角（2027-02 用户反馈「边框效果太丑」）。
+   keyframes 只写 from：to 取元素自身的 background-color，所以有底色的用户气泡和透明的轮次行
+   都能平滑收回，不会在动画结尾踢掉底色。 */
 @keyframes messageJumpHighlight {
-  0% {
-    box-shadow: 0 0 0 3px var(--color-accent);
-  }
-  100% {
-    box-shadow: 0 0 0 0 transparent;
+  from {
+    background-color: color-mix(in srgb, var(--color-accent) 14%, transparent);
   }
 }
 .message-jump-highlight {
-  animation: messageJumpHighlight 2s ease-out;
-  border-radius: var(--radius-md);
+  animation: messageJumpHighlight 1.4s ease-out;
 }
 .terminal-dock {
   /* 终端主题变量唯一数据源在 renderer/src/terminalThemes.ts，由 TerminalDock 运行时

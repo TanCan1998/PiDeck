@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import type { AppSettings, PiExtensionListResult, PiExtensionSummary } from "../../shared/types";
+import { isPackageSource, isPathLikePackageSource } from "../../shared/piPackageSource";
 import type { MainProcessTranslationKey } from "../../shared/i18n/mainProcessCopy";
 import type { PiLocator } from "../pi/PiLocator";
 import { getAppLogger } from "../logging/sharedLogger";
@@ -29,6 +30,78 @@ export type PiExtensionCatalogTranslate = (key: MainProcessTranslationKey, param
  * 过滤状态存进 PiExtensionSummary.filtered，避免污染卸载/更新等以 source 为参数的命令。
  */
 export const FILTERED_SUFFIX = " (filtered)";
+
+/**
+ * 解析 `pi list` 原始输出（导出的纯函数：类内 parseListOutput 只是它的薄包装，便于单测）。
+ *
+ * 每个包占两行：source 行（较浅缩进）+ 落盘路径行（较深缩进）。source 有两种形态：
+ * - 协议源：`npm:` / `file:` / `github:` / `git:` / `http(s):`；
+ * - 本地目录包：`pi install <dir>` 后 pi list 直接打印裸路径（盘符 / UNC / POSIX 绝对 / `./` `../`），
+ *   不带任何协议前缀。旧实现只认协议前缀，本地包的整行被丢弃 → 扩展页永远看不到它。
+ *
+ * 为什么路径行靠缩进判定：本地包的 source 与 path 可能字面完全相同（`pi install F:\pkg` 后
+ * pi list 打印两行 `F:\pkg`），只能按 pi list 的排版区分（source 缩进 2 空格、path 缩进 4 空格）；
+ * 协议源行永远是新的包（既有行为不变），路径型行只有在缩进更深或与 pending.source 相同时才算路径。
+ */
+export function parsePiListOutput(raw: string): PiExtensionSummary[] {
+	const result: PiExtensionSummary[] = [];
+	let scope: PiExtensionSummary["scope"] = "unknown";
+	let pending: PiExtensionSummary | null = null;
+	/** pending 行自身的缩进：用来区分「本包的 path 行」与「下一个本地包 source」。 */
+	let pendingIndent = 0;
+
+	for (const line of raw.split(/\r?\n/)) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		if (/^User packages:/i.test(trimmed)) {
+			scope = "user";
+			pending = null;
+			continue;
+		}
+		if (/^Project packages:/i.test(trimmed)) {
+			scope = "project";
+			pending = null;
+			continue;
+		}
+
+		const indent = line.length - line.trimStart().length;
+		const pathLike = isPathLikePackageSource(trimmed);
+		const sourceLike = isPackageSource(trimmed);
+		if (pending && !pending.path) {
+			// 协议源行一定是新包（保持既有行为）；路径型行既可能是上一个包的落盘路径，
+			// 也可能是下一个本地包的 source，缩进更深（或与 source 字面相同）时按路径处理。
+			const isPathLine = !sourceLike || (pathLike && (indent > pendingIndent || trimmed === pending.source));
+			if (isPathLine) {
+				pending.path = trimmed;
+				continue;
+			}
+		}
+
+		if (sourceLike) {
+			// pi list 对「过滤式安装」的包在 source 后追加 " (filtered)" 标记
+			// （settings.json 里 packages 条目是对象形式，只选择性加载列出的资源）。
+			// source 必须剥离该后缀：卸载/更新/版本查询都以 source 为参数，
+			// 带后缀时 pi remove / pi update / npm view 都找不到目标。
+			// 显式标注：pending 的赋值与上面 pending.source 的读取在同一循环里，
+			// 缺标注时 TS 会因循环推断报 TS7022（隐式 any），与运行时行为无关。
+			const isFiltered: boolean = trimmed.endsWith(FILTERED_SUFFIX);
+			const source: string = isFiltered ? trimmed.slice(0, -FILTERED_SUFFIX.length) : trimmed;
+			pending = {
+				id: `${scope}:${source}`,
+				source,
+				scope,
+				// 路径型 source 是用户目录直装的本地包：标记出来供版本补全（读包自身 package.json）
+				// 与卸载/更新路由（pi remove / pi update --extensions）分流。
+				...(isPathLikePackageSource(source) ? { local: true } : {}),
+				...(isFiltered ? { filtered: true } : {}),
+			};
+			result.push(pending);
+			pendingIndent = indent;
+		}
+	}
+
+	return result;
+}
 
 /**
  * 原生投影结果：启用状态 +（可选的）「过滤式安装」标记。
@@ -369,13 +442,29 @@ export class PiExtensionCatalog {
 	}
 
 	/**
-	 * 补全 npm 扩展的已装/最新版本。
+	 * 补全扩展的已装/最新版本。
+	 *
+	 * npm 包：读已装 package.json + 查 registry；
+	 * 本地目录包（`pi install <dir>`）：registry 上没有「最新版本」这个概念，只读包自身
+	 * package.json 的 version，绝不查 npm view / registry，也不产生 hasUpdate——
+	 * 这类包更新走 `pi update --extensions` 整批刷新（见 ExtensionManager.updateExtension）。
+	 * 其它非 npm 源（git:/github:/https: 等）保持原样直接返回。
 	 *
 	 * 为什么两条查询各自 settle：registry 慢/断时把「当前版本」也一起吞掉会让整列变成
 	 * 「检查扩展版本失败」（2026-10 用户反馈）；读盘失败与查询失败分别留日志与提示。
 	 */
 	private async enrichExtensionVersion(extension: PiExtensionSummary, resolveLatestVersion: (packageName: string) => Promise<string | null>): Promise<PiExtensionSummary> {
-		if (!extension.source.toLowerCase().startsWith("npm:")) return extension;
+		if (!extension.source.toLowerCase().startsWith("npm:")) {
+			// local 标记来自 pi list 解析；source 形态兜底判定覆盖未经 parsePiListOutput
+			// 构造的条目（如测试/其它投影），避免本地包漏掉版本与更新语义。
+			if (extension.local !== true && !isPathLikePackageSource(extension.source)) return extension;
+			const installed = await this.settleQuery(this.readInstalledVersion(extension.path));
+			if (installed.error) {
+				getAppLogger()?.warn("extensions", "Local extension version unreadable", { source: extension.source, path: extension.path, error: describeError(installed.error) });
+			}
+			// 读不到（path 缺失/package.json 不存在）时原样返回，UI 显示「-」而不是报版本检查失败。
+			return installed.value === undefined ? extension : { ...extension, currentVersion: installed.value };
+		}
 		const packageName = extension.source.replace(/^npm:/i, "");
 		const [installed, latest] = await Promise.all([this.settleQuery(this.readInstalledVersion(extension.path)), this.settleQuery(resolveLatestVersion(packageName))]);
 		const currentVersion = installed.value;
@@ -483,47 +572,8 @@ export class PiExtensionCatalog {
 		});
 	}
 
+	/** 解析逻辑是模块级纯函数 parsePiListOutput（便于单测）；这里保留实例入口供既有调用方/测试使用。 */
 	private parseListOutput(raw: string): PiExtensionSummary[] {
-		const result: PiExtensionSummary[] = [];
-		let scope: PiExtensionSummary["scope"] = "unknown";
-		let pending: PiExtensionSummary | null = null;
-
-		for (const line of raw.split(/\r?\n/)) {
-			const trimmed = line.trim();
-			if (!trimmed) continue;
-			if (/^User packages:/i.test(trimmed)) {
-				scope = "user";
-				pending = null;
-				continue;
-			}
-			if (/^Project packages:/i.test(trimmed)) {
-				scope = "project";
-				pending = null;
-				continue;
-			}
-
-			if (/^(?:npm|file|github|git|https?):/i.test(trimmed)) {
-				// pi list 对「过滤式安装」的包在 source 后追加 " (filtered)" 标记
-				// （settings.json 里 packages 条目是对象形式，只选择性加载列出的资源）。
-				// source 必须剥离该后缀：卸载/更新/版本查询都以 source 为参数，
-				// 带后缀时 pi remove / pi update / npm view 都找不到目标。
-				const isFiltered = trimmed.endsWith(FILTERED_SUFFIX);
-				const source = isFiltered ? trimmed.slice(0, -FILTERED_SUFFIX.length) : trimmed;
-				pending = {
-					id: `${scope}:${source}`,
-					source,
-					scope,
-					...(isFiltered ? { filtered: true } : {}),
-				};
-				result.push(pending);
-				continue;
-			}
-
-			if (pending && !pending.path) {
-				pending.path = trimmed;
-			}
-		}
-
-		return result;
+		return parsePiListOutput(raw);
 	}
 }

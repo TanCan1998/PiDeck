@@ -52,6 +52,28 @@ export function isProjectDiscoverySource(sourceId: string): boolean {
 }
 
 /**
+ * 全局拥有的运行时发现来源：pi 全局 settings.json 里的 packages（package-user）与显式路径（settings-user）。
+ *
+ * 这两类条目的归属就是「用户全局」，与项目无关：全局设置页也必须能看到（此前只有项目作用域渲染发现行，
+ * 包提供的技能/提示词在全局页完全不出现）。项目来源（package-project/settings-project/ancestor-agents）
+ * 仍只在项目作用域渲染——随项目 settings.json 或祖先目录存在，全局页展示会指向别的项目。
+ */
+export function isGlobalDiscoverySource(sourceId: string): boolean {
+	return sourceId === "package-user" || sourceId === "settings-user";
+}
+
+/**
+ * discovery 行去重键：来源 + 名称（名称折叠大小写，跨平台目录名差异不产生重复行）。
+ *
+ * 只按 name 去重会让包/设置提供的条目被本地同名行吞掉：本地行属于自己的目录（pi-global/agents-global/
+ * project-*），并不代表包里的那一条，包资源因此在列表上消失。带上 sourceId 后，不同来源的同名条目都保留。
+ */
+export function discoveryRowKey(sourceId: string | undefined, name: string): string {
+	// sourceId 允许缺省：本地提示词模板的 scope 是可选字段，缺省按空来源参与键（不与任何发现来源相等）。
+	return `${sourceId ?? ""}\u0000${name.trim().toLowerCase()}`;
+}
+
+/**
  * package-project 发现行是否可操作（整包开关 + 卸载）：这类行的 source 就是包源（`npm:<name>` 等），
  * 后端 `setExtensionEnabled` 按 `isPackageSource` 分流到项目层 packages 条目（整包 `!`/`*` delta，
  * 与全局行同一回路）；卸载走 `pi remove <source> -l`。

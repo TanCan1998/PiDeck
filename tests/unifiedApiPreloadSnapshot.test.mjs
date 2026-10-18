@@ -7,8 +7,9 @@
  * 摘要来源：T7 只读探针实测（2026-10-14；2026-10-16 合并刷新随 dev 演进重算：
  * yaoPrompts 方法与 sessions.searchContent、skillHub.onInstallProgress 入场，命名空间数不变；
  * 2026-10-17 再刷新：files.searchContent（file-index 工作区文件内容检索）入场，命名空间/方法数锚点不变；
+ * 2026-10-18 再刷新：sessions.searchInSession（会话内查找）入场，sessions 111→112；
  * 2026-10-18 远端合并刷新：remoteHosts/probeRemoteModels/remoteTrust/remoteSessions 四命名空间
- * 与 sessions/git 的远端通道面入场，命名空间 70→74、sessions 111→115、git 38→59）。
+ * 与 sessions/git 的远端通道面入场，命名空间 70→74、sessions 112→115、git 38→59）。
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";

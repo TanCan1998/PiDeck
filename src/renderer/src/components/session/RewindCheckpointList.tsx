@@ -317,7 +317,7 @@ function CheckpointRow(props: {
 						</span>
 					</div>
 					<div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-micro text-text-tertiary">
-						<Badge variant="outline" className="h-4 px-1 text-[10px] font-normal">
+						<Badge variant="outline" size="sm" className="font-normal">
 							{t(TRIGGER_LABEL_KEY[cp.trigger])}
 						</Badge>
 						{showToolName && (
@@ -358,19 +358,19 @@ function CheckpointRow(props: {
 							<DropdownMenuItem onSelect={() => props.onRestore("files")}>
 								<span className="flex flex-col">
 									<span className="text-xs font-medium">{t("rewind.scope.files")}</span>
-									<span className="text-[10px] text-text-tertiary">{t("rewind.scopeFilesHint")}</span>
+									<span className="text-micro text-text-tertiary">{t("rewind.scopeFilesHint")}</span>
 								</span>
 							</DropdownMenuItem>
 							<DropdownMenuItem onSelect={() => props.onRestore("conversation")}>
 								<span className="flex flex-col">
 									<span className="text-xs font-medium">{t("rewind.scope.conversation")}</span>
-									<span className="text-[10px] text-text-tertiary">{t("rewind.scopeConversationHint")}</span>
+									<span className="text-micro text-text-tertiary">{t("rewind.scopeConversationHint")}</span>
 								</span>
 							</DropdownMenuItem>
 							<DropdownMenuItem onSelect={() => props.onRestore("all")}>
 								<span className="flex flex-col">
 									<span className="text-xs font-medium">{t("rewind.scope.all")}</span>
-									<span className="text-[10px] text-text-tertiary">{t("rewind.scopeAllHint")}</span>
+									<span className="text-micro text-text-tertiary">{t("rewind.scopeAllHint")}</span>
 								</span>
 							</DropdownMenuItem>
 						</DropdownMenuContent>
@@ -378,7 +378,7 @@ function CheckpointRow(props: {
 				</div>
 			</div>
 			{diffVisible && (
-				<div className="mt-1.5 max-h-40 overflow-auto rounded-md bg-muted/40 px-2 py-1.5 font-mono text-[10px] leading-4 text-text-secondary">
+				<div className="mt-1.5 max-h-40 overflow-auto rounded-md bg-muted/40 px-2 py-1.5 font-mono text-micro leading-4 text-text-secondary">
 					{props.diffLoading ? (
 						<span className="inline-flex items-center gap-1">
 							<Loader2 size={10} className="animate-pideck-spin" aria-hidden="true" />

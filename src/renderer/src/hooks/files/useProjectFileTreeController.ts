@@ -49,6 +49,40 @@ export function useProjectFileTreeController({ files, setFiles, refreshFiles, be
 	expandedDirsRef.current = expandedDirs;
 	// 手动刷新/增删改后仍只拉浅层 + 当前展开目录，避免再走整棵 12 层 IPC。
 	const refreshVisibleFiles = useCallback((projectId?: string, silent?: boolean) => refreshFiles(projectId, silent, expandedDirs), [expandedDirs, refreshFiles]);
+	// 订阅只挂一次（deps 只看项目），回调里必须经 ref 取最新的刷新函数：
+	// refreshVisibleFiles 的引用随展开目录变化，闭包旧版会按旧目录集重扫，
+	// 把新展开的目录落回「未加载」态（界面显示加载占位）。
+	const refreshVisibleFilesRef = useRef(refreshVisibleFiles);
+	refreshVisibleFilesRef.current = refreshVisibleFiles;
+
+	// git refs 变了（commit / checkout / reset / fetch）通常意味着工作区内容也换了：
+	// 顺手静默重载文件树，让它和文件树着色保持同一节奏——否则会出现「颜色已更新、
+	// 列表还列着旧分支文件」的错位（着色由文件树内容变化驱动）。
+	// 登记走主进程 GitRefsWatcher，按 (projectId, repoPath) 复用同一份签名轮询，
+	// 与 App 的分支徽标订阅共用计数，不额外 spawn git。
+	useEffect(() => {
+		const projectId = activeProjectId;
+		if (!projectId) return;
+		let stopped = false;
+		let watchId: string | null = null;
+		const offRefsChanged = api.git.onRefsChanged((changedWatchId) => {
+			if (stopped || changedWatchId !== watchId) return;
+			void refreshVisibleFilesRef.current(projectId, true);
+		});
+		// 订阅失败静默降级（非 git 项目 / git 未安装）：文件树照常可用，只是不跟随 refs。
+		const watchPromise = api.git.watchRefs(projectId).catch(() => null);
+		void watchPromise.then((id) => {
+			watchId = id;
+		});
+		return () => {
+			stopped = true;
+			offRefsChanged();
+			// 竞态安全：卸载时 watch 可能尚未 resolve，退订等它落地后执行。
+			void watchPromise.then((id) => {
+				if (id) void api.git.unwatchRefs(id);
+			});
+		};
+	}, [activeProjectId]);
 	// 文件树镜像：restoreExpandedDirs 等异步回调读取当前树，不依赖渲染闭包。
 	const filesRef = useRef(files);
 	filesRef.current = files;
@@ -219,24 +253,25 @@ export function useProjectFileTreeController({ files, setFiles, refreshFiles, be
 			void drillCompactChain(projectId, path);
 			return;
 		}
-		setFiles((current) => {
-			if (findLoadedDirectory(current, path)) return current;
-			void api.files
-				.list(projectId, { maxDepth: 0, directory: path })
-				.then((children) => {
-					if (activeProjectIdRef.current !== projectId) return;
-					setFiles((tree) => mergeFileTreeChildren(tree, path, children));
-				})
-				.catch((error) => {
-					// 拉取失败（目录被删/无权限/超上限）：不打标的话该目录会永远停在
-					// 「加载中...」占位。标记 hasChildren=false 让占位立刻消失；重新点开
-					// 目录时 findLoadedDirectory 未命中会再次拉取，形成重试入口。
-					console.error("[Files] expand failed", error);
-					if (activeProjectIdRef.current !== projectId) return;
-					setFiles((tree) => markFileTreeLoadFailed(tree, path));
-				});
-			return current;
-		});
+		// 「已加载就跳过」的判据必须在 updater 之外：updater 必须是纯函数（StrictMode 会跑两遍），
+		// 把判据 + IPC 写进 updater 会让 dev 下一次展开发两次 files:list。直接读当前树的 files
+		//（hook 每次渲染都拿到最新值）；拉取回来的 merge 本身幂等（无变化返回原数组）。
+		if (findLoadedDirectory(files, path)) return;
+		void api.files
+			.list(projectId, { maxDepth: 0, directory: path })
+			.then((children) => {
+				if (activeProjectIdRef.current !== projectId) return;
+				setFiles((tree) => mergeFileTreeChildren(tree, path, children));
+			})
+			.catch((error) => {
+				// 拉取失败（目录被删/无权限/超上限）：不打标的话该目录会永远停在
+				// 「加载中...」占位。标记 hasChildren=false 让占位立刻消失；重新点开
+				// 目录时 findLoadedDirectory 未命中会再次拉取，形成重试入口。
+				// console.error 在这里属于异步回调，不是 setState updater 副作用，保留。
+				console.error("[Files] expand failed", error);
+				if (activeProjectIdRef.current !== projectId) return;
+				setFiles((tree) => markFileTreeLoadFailed(tree, path));
+			});
 	}
 
 	function collapseAllDirectories() {

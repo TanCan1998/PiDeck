@@ -126,7 +126,7 @@ export function FeedbackDialog({ open, project, appInfo, onClose, onToast, onOpe
 							<TabsTrigger value="health">
 								{t("feedback.tab.health")}
 								{summary && summary.error > 0 ? (
-									<Badge variant="destructive" className="ml-1.5 h-4 px-1 text-[10px]">
+									<Badge variant="destructive" className="ml-1.5 h-4 px-1 text-micro">
 										{summary.error}
 									</Badge>
 								) : null}

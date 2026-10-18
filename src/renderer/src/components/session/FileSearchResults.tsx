@@ -106,7 +106,7 @@ function FileContentSection(props: { query: string; result: FileContentSearchRes
 	if (hits.length === 0 && !props.isSearching) return null;
 	return (
 		<div className="file-search-content mt-1 border-t border-border/40 pt-1">
-			<div className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-muted-foreground">
+			<div className="flex items-center gap-1.5 px-2 py-1 text-micro text-muted-foreground">
 				<FileText size={12} className="shrink-0" aria-hidden="true" />
 				<span className="uppercase tracking-wide">{t("drawer.fileSearchContentSection")}</span>
 				{props.isSearching && <span className="mini-loader animate-pideck-spin" aria-hidden="true" />}
@@ -142,9 +142,9 @@ function FileContentRow(props: { hit: FileContentSearchHit; onViewFile?: (path: 
 			<span className="flex w-full shrink-0 items-center gap-1.5">
 				<FileText size={13} className="shrink-0 text-muted-foreground" aria-hidden="true" />
 				<span className="truncate text-xs">{hit.relativePath}</span>
-				<span className="ml-auto shrink-0 text-[11px] tabular-nums text-muted-foreground">{hit.line}</span>
+				<span className="ml-auto shrink-0 text-micro tabular-nums text-muted-foreground">{hit.line}</span>
 			</span>
-			<span className="w-full shrink-0 truncate pl-[19px] text-[11px] text-muted-foreground">{hit.snippet}</span>
+			<span className="w-full shrink-0 truncate pl-[19px] text-micro text-muted-foreground">{hit.snippet}</span>
 		</button>
 	);
 }

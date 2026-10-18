@@ -106,7 +106,8 @@ test("接线：打开文件抽屉先自愈，无待修复目录才静默 refresh
 });
 
 test("接线：FileNode 占位独立成行并带 spinner，失败档不显示占位", () => {
-	const surface = readFileSync("src/renderer/src/components/session/WorkspaceSurface.tsx", "utf8");
+	// 行组件已从 WorkspaceSurface 整块迁到独立模块（> 600 行红线）：占位分支断言读新宿主
+	const surface = readFileSync("src/renderer/src/components/session/FileTreeRows.tsx", "utf8");
 	// 占位分支条件不变（hasChildren !== false 挡住失败档）。
 	assert.match(surface, /expanded && node\.hasChildren !== false && !node\.children/);
 	// 占位使用 spinner + 独立 flex 行，不再依赖外层文本容器（旧实现是纯文本 div）。

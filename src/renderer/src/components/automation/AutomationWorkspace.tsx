@@ -70,7 +70,7 @@ export function AutomationWorkspace(props: AutomationWorkspaceProps) {
 						<Clock className="size-5 shrink-0 text-[var(--color-accent)]" />
 						<h1 className="truncate text-base font-semibold text-foreground">{scopeTitle}</h1>
 						{scopedActiveRuns.length > 0 && (
-							<Badge className="h-5 gap-1 border-sky-500/30 bg-sky-500/15 px-1.5 text-micro font-normal text-sky-500 animate-pulse">
+							<Badge variant="info" size="sm" className="gap-1 animate-pulse">
 								<PlayCircle className="size-3" />
 								{t("automation.running")} ({scopedActiveRuns.length})
 							</Badge>

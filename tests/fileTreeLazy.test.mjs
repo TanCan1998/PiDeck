@@ -67,6 +67,9 @@ test("mergeFileTreeChildren leaves the tree unchanged when the directory is miss
 	const tree = [file("README.md", "/p/README.md")];
 	const next = mergeFileTreeChildren(tree, "/p/src", [file("App.tsx", "/p/src/App.tsx")]);
 	assert.deepEqual(next, tree);
+	// 同一引用是「内容没变」的判据（useFileTreeContentState 据此决定是否推进内容代次）：
+	// 返回新数组会把迟到/落空的 listing 误判成内容变化，白跑一轮 Git 着色重拉。
+	assert.equal(next, tree, "无变化时返回原数组引用");
 });
 
 test("hydrateExpandedFileTree loads shorter parent paths first", async () => {

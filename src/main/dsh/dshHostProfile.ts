@@ -6,6 +6,7 @@ import { load } from "js-yaml";
 import type { PatchOptions } from "@deepseek-ai/cordis-plugin-include";
 import type * as AppBoot from "@deepseek-ai/dsh-app-boot";
 import { pideckDshHome } from "./pideckDshHome";
+import { describePrunedProfileLinks, pruneStaleRuntimeLinks } from "./dshProfileLinkPrune";
 import { rewriteLoaderExprPackageResolves } from "./dshProfileExprRewrite";
 import { agentTeamPresetPatchPath, shippedPresetPatchPaths } from "./dshPresetComposition";
 import { dshProfileDir, dumpProfilePatches, initializeDshProfileSettings, isRecord } from "./dshProfileSettings";
@@ -77,6 +78,11 @@ export async function prepareDshHostProfile(home: string, runtimeRequire: Return
 		}
 	});
 	const dir = dshProfileDir(home);
+	// runtime 升级后 profile 可能残留指向上一个 runtime 的包链接（详见 dshProfileLinkPrune）：
+	// 不清掉会让 app-boot preflight 读到旧版 manifest 并禁用 preset 行。
+	const installAnchor = runtimeRequire.resolve("@deepseek-ai/dsh/package.json");
+	const prunedLinks = pruneStaleRuntimeLinks(dir, join(dirname(installAnchor), "..", ".."));
+	if (prunedLinks.length) console.error(`[dsh-host-profile] pruned stale runtime links: ${describePrunedProfileLinks(prunedLinks)}`);
 	const bundleDir = join(dir, "node_modules", "@pideck", "dsh-host-composition");
 	mkdirSync(bundleDir, { recursive: true });
 	writeFileSync(join(bundleDir, "package.json"), JSON.stringify({ name: BUNDLE_NAME, version: "1.0.0", dsh: { bundle: { patch: "./cordis.patch.yml" } } }));
@@ -87,7 +93,6 @@ export async function prepareDshHostProfile(home: string, runtimeRequire: Return
 		appBoot.composeEntries([composition]).map((row) => ({ id: row.id, config: row.config })),
 	);
 	appBoot.initProfile(dir, [BUNDLE_NAME]);
-	const installAnchor = runtimeRequire.resolve("@deepseek-ai/dsh/package.json");
 	const profile = appBoot.loadProfileDirectory("pideck-dsh", dir, installAnchor);
 	if (profile.skippedBundles.length) throw new Error(`DSH profile bundle unavailable: ${profile.skippedBundles.map((entry) => `${entry.packageName}: ${entry.reason}`).join("; ")}`);
 	const profileContext: AppBoot.ProfileContext = {

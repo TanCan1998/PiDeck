@@ -69,18 +69,19 @@ it("update 清洗渲染层 patch 并落盘；未知 id 原样保留", async () =
 	assert.deepEqual(plain(cleared.hiddenModules), []);
 });
 
-it("旧数据里的 composerModes 从 hiddenModules 迁到 hiddenComposerFeatures 并落盘", async () => {
+it("已删除的 composerModes 开关：旧数据从两份清单里清掉并落盘", async () => {
 	const { SettingsStore, userData } = makeStore();
-	// 模式选择器开关历史上存在 hiddenModules；升级后必须保住「已隐藏」状态，不能又冒出来
-	seed(userData, { hiddenModules: ["im", "composerModes"], hiddenComposerFeatures: ["voice"] });
+	// 该开关历史上先存在 hiddenModules，后搬到 hiddenComposerFeatures；2026-10 功能删除后两处都要清，
+	// 否则 settings.json 会永久携带一个没有 UI 的隐藏项。
+	seed(userData, { hiddenModules: ["im", "composerModes"], hiddenComposerFeatures: ["composerModes", "voice"] });
 	const store = new SettingsStore();
 	await store.load();
 	assert.deepEqual(plain(store.get().hiddenModules), ["im"], "旧 id 必须从 hiddenModules 清掉");
-	assert.deepEqual(plain(store.get().hiddenComposerFeatures).sort(), ["composerModes", "voice"], "隐藏状态搬入输入框功能清单且不覆盖已有项");
+	assert.deepEqual(plain(store.get().hiddenComposerFeatures), ["voice"], "新清单里的残留 id 也要清掉，其余隐藏项保留");
 
 	// load 里的迁移 save 是 fire-and-forget；跟一次 update 等在同一条 saveChain 上，确保迁移已落盘
 	await store.update({ hiddenModules: plain(store.get().hiddenModules) });
 	const persisted = JSON.parse(readFileSync(join(userData, "settings.json"), "utf8"));
 	assert.deepEqual(persisted.hiddenModules, ["im"]);
-	assert.deepEqual([...persisted.hiddenComposerFeatures].sort(), ["composerModes", "voice"]);
+	assert.deepEqual(persisted.hiddenComposerFeatures, ["voice"]);
 });

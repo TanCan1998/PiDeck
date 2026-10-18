@@ -71,7 +71,7 @@ export function AboutPopover(props: AboutPopoverProps) {
 						<VersionRow label="Pi CLI" value={info.piVersion} />
 						<VersionRow label={t("about.dshVersion")} value={info.dshRuntimeVersion} />
 						<VersionRow label={t("about.piAiVersion")} value={info.piAiVersion} />
-						<p className="font-mono text-[10px] tabular-nums text-muted-foreground/70">
+						<p className="font-mono text-micro tabular-nums text-muted-foreground/70">
 							{t("about.runtimeStack", {
 								electron: info.electronVersion ?? "—",
 								chromium: info.chromeVersion ?? "—",
@@ -116,7 +116,7 @@ export function AboutPopover(props: AboutPopoverProps) {
 
 /** 区块小标题（运行时 / 时间），大写跟踪线样式。 */
 function BlockLabel(props: { children: ReactNode }) {
-	return <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/70">{props.children}</div>;
+	return <div className="text-micro font-medium uppercase tracking-wider text-muted-foreground/70">{props.children}</div>;
 }
 
 /** 单行「标签 — 等宽值」：label 左对齐灰字，value 右侧等宽数字；值缺失显示 —。 */

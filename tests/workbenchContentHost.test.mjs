@@ -135,6 +135,8 @@ test("file tabs use preview/permanent strategy owned by useFileEditor", () => {
 	assert.match(viewer, /onClick=\{handleClose\}/);
 	assert.match(viewer, /aria-label=\{t\("common.close"\)\}/);
 
-	const surface = readFileSync("src/renderer/src/components/session/WorkspaceSurface.tsx", "utf8");
-	assert.match(surface, /if \(fileActionTarget\) props\.onViewFile\?\.\(fileActionTarget, "permanent"\)/);
+	// 行组件已迁到 FileTreeRows.tsx（WorkspaceSurface > 600 行红线）：双击常驻接线跟到新宿主。
+	// 远端节点没有本机 path：行内点击目标回落到 fileActionTarget（target ?? path）。
+	const surface = readFileSync("src/renderer/src/components/session/FileTreeRows.tsx", "utf8");
+	assert.match(surface, /onViewFile\?\.\(fileActionTarget, "permanent"\)/);
 });

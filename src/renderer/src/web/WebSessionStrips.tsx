@@ -85,7 +85,7 @@ function StripShell({ icon, title, count, children }: { icon: React.ReactNode; t
 			<button type="button" aria-expanded={open} onClick={() => setOpen((v) => !v)} className="flex min-h-8 w-full items-center gap-1.5 px-1 py-1 text-xs text-text-tertiary transition-colors hover:text-text-secondary">
 				<span className="text-text-tertiary">{icon}</span>
 				<span className="font-medium">{title}</span>
-				<span className="rounded-full bg-bg-muted px-1.5 py-px text-[10px] leading-4 tabular-nums text-text-secondary">{count}</span>
+				<span className="rounded-full bg-bg-muted px-1.5 py-px text-micro leading-4 tabular-nums text-text-secondary">{count}</span>
 				<ChevronDown className={`ml-auto size-3.5 transition-transform ${open ? "" : "-rotate-90"}`} />
 			</button>
 			{open ? <div className="px-1 pt-0.5 pb-2">{children}</div> : null}
@@ -107,7 +107,7 @@ function WebFileChangesStrip({ changes, onOpenFileChange }: { changes: SessionFi
 							className="flex items-center gap-1 rounded border border-border-subtle bg-bg-panel px-1.5 py-0.5 text-xs text-text-secondary transition-colors hover:bg-bg-hover"
 						>
 							<span className="max-w-44 truncate">{basename(change.path)}</span>
-							<span className="rounded bg-bg-muted px-1 text-[10px] tabular-nums text-text-tertiary">{change.count}</span>
+							<span className="rounded bg-bg-muted px-1 text-micro tabular-nums text-text-tertiary">{change.count}</span>
 						</button>
 					</li>
 				))}
@@ -127,11 +127,11 @@ function WebSubagentsStrip({ subagents }: { subagents: PiSubagentEntry[] }) {
 					return (
 						<li key={entry.id} className="shrink-0 rounded border border-border-subtle bg-bg-panel px-2 py-1 text-xs">
 							<div className="flex items-center gap-1.5">
-								<span className="shrink-0 rounded bg-primary/10 px-1 py-0.5 text-[10px] font-medium text-primary">{entry.type}</span>
+								<span className="shrink-0 rounded bg-primary/10 px-1 py-0.5 text-micro font-medium text-primary">{entry.type}</span>
 								<span className="min-w-0 flex-1 truncate text-text-tertiary" title={entry.description}>
 									{entry.description}
 								</span>
-								<span className={`shrink-0 text-[10px] ${SUB_STATUS_TONE[entry.status]}`}>{t(SUB_STATUS_LABEL[entry.status])}</span>
+								<span className={`shrink-0 text-micro ${SUB_STATUS_TONE[entry.status]}`}>{t(SUB_STATUS_LABEL[entry.status])}</span>
 								{(entry.result || entry.error) && (
 									<button type="button" aria-label={entry.description} onClick={() => setExpanded(isOpen ? null : entry.id)} className="shrink-0 rounded p-0.5 text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary">
 										<ChevronDown className={`size-3 transition-transform ${isOpen ? "rotate-180" : ""}`} />

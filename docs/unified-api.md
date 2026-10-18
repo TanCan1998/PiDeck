@@ -8,9 +8,9 @@ PiDeck 桌面能力面统一门面 `piDeckApi` 的契约文档。三层结构：
 - 聚合三式：`aggregate`（引用透传恒等，`piDeckApi.git === desktopApi.git`）、`consolidate`（按组 Pick 视图收口，如 sessions 四子域 / config 十子库）、`redline`（四例外通道只透传，禁止扩成通用桥）。
 - 主进程注册表装配：`registerAllDomains()` 在 `registerIpc()` 之后旁路调用，经 `registerDomain` / `registerImporter` 登记元数据后 `freeze()` 冻结；重复登记抛 `PIDECK_API_DUPLICATE_DOMAIN`，冻结后写路径抛 `PIDECK_API_REGISTRY_FROZEN`，非法条目抛 `PIDECK_API_INVALID_DOMAIN_ENTRY`。懒实例化，不改启动时序。
 - 快照守卫：tests/unifiedApi*.test.mjs 把 743 通道 / 85 前缀 / 74 命名空间 / sessions 115 / config 48 锚定为 sha256 快照，暴露面任何漂移显式红。
-- 2026-10-17 快照刷新：files:search-content（工作区文件内容检索，file-index sidecar）入场，通道 677→678；preload 方法清单摘要同步重算（命名空间/方法数锚点不变）。
-- 2026-10-18 远端合并刷新：远端开发面入场（SSH 主机/项目/文件/会话/信任/模型探测、远端 Git 读写、远端终端 ACK），通道 679→743、前缀 84→85、命名空间 70→74、sessions 111→115；目录补 `remote` 域行，现为 62 域 + 11 导入器。
-- 2026-10-16 合并刷新：随 dev 演进（ACP 全渠道、微信渠道、宿主插件、pideck-mcp、生视频、公告历史等）补 6 域行，目录现为 62 域 + 11 导入器。
+- 2026-10-17 快照刷新：files:search-content（工作区文件内容检索，file-index sidecar）入场，通道 677→678；2026-10-18 再刷新：sessions:search-in-session（会话内查找）入场，通道 678→679，sessions 111→112；preload 方法清单摘要同步重算（命名空间/方法数锚点不变）。
+- 2026-10-18 远端合并刷新：远端开发面入场（SSH 主机/项目/文件/会话/信任/模型探测、远端 Git 读写、远端终端 ACK），通道 679→743、前缀 84→85、命名空间 70→74、sessions 112→115；目录补 `remote` 域行，现为 62 域 + 11 导入器。
+- 2026-10-16 合并刷新：随 dev 演进（ACP 全渠道、微信渠道、宿主插件、pideck-mcp、生视频、公告历史等）补 6 域行，目录现为 61 域 + 11 导入器。
 
 ## 按域调用面
 

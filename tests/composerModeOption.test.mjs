@@ -57,11 +57,14 @@ test("底栏 SelectTrigger 保持 ghost 透明底（不被 shadcn 基底的实�
 	}
 });
 
-test("模式选择器隐藏自带 chevron，与后端选择器/「+」同族", () => {
+test("模式入口已收回「+」菜单：底栏不再有模式 Select，菜单项带稳定定位属性", () => {
 	const composer = readFileSync("src/renderer/src/components/session/ComposerComponents.tsx", "utf8");
-	const modeTrigger = composer.match(/className="composer-bar-btn[\s]+mode[^"]*"/)?.[0];
-	assert.ok(modeTrigger, "模式选择器应带 composer-bar-btn mode 语义 class（e2e 定位依赖）");
-	assert.ok(modeTrigger.includes("[&_[data-slot='select-icon']]:hidden"), `模式选择器需隐藏自带 chevron：${modeTrigger}`);
+	// 2026-10 产品决定：常驻底栏下拉换成「+」菜单分组 + 特殊模式 chip（见 ComposerModeChip），
+	// 普通模式不作为菜单项；底栏保留的 Select 只有后端/ACP 配置，不再有 mode。
+	assert.doesNotMatch(composer, /composer-bar-btn\s+mode/, "底栏模式 Select 触发器已移除");
+	assert.match(composer, /app\.composerAddMode/, "「+」菜单模式分组标题复用 composerAddMode");
+	assert.match(composer, /data-picker-value=\{mode\}/, "模式项带 data-picker-value 供 e2e 定位");
+	assert.match(composer, /data-testid="composer-add-menu"/, "「+」触发器带稳定 testid（e2e 先点这里再选模式）");
 });
 
 test("pi 全扩展可用：菜单只有 普通/目标/规划，不再出现生图", () => {
@@ -84,24 +87,32 @@ test("legacy 含生图消息的 pi 会话（isImageGen=true）：同样锁定为
 	assert.deepEqual(result, []);
 });
 
-// 2026-10 外移：模式选择器常驻底栏（不再藏「+」菜单）；隐藏开关 2026-11 从「功能模块」
-// 迁到「输入框功能显示」（composerFeatures.composerModes），隐藏时特殊模式仍由退出×兑底，
-// 不锁死用户。
-test("模式选择器已常驻底栏并可被输入框功能设置隐藏（源码形状）", () => {
+// 2026-10 收尾：模式入口不再挂「输入框功能显示」开关（用户反馈该行多余）。
+// 契约：入口只受可用性控制；atom / 设置行 / 可关清单 / 文案键全部移除；旧数据由 SettingsStore 清理。
+test("模式入口不挂显示开关：没有隐藏 gating，也没有残留 atom 与设置行", () => {
 	const composer = readFileSync("src/renderer/src/components/session/ComposerComponents.tsx", "utf8");
-	// 常驻条件：至少两个可选模式且未被隐藏（只剩 normal 的单选项下拉不渲染——
-	// ACP 会话无 pi 扩展/plan+goal 都被关时不占位，ACP 模式等价物走 configOptions）
-	assert.match(composer, /visibleModes\.length > 1 && !modesHidden/, "常驻条件：至少两个可选模式且未被隐藏");
-	assert.match(composer, /composerModesHiddenAtom/, "读取 composerModes 隐藏开关");
-	assert.match(composer, /aria-label=\{t\(MODE_LABEL\[props\.composerAgentMode\]\)\}/, "选择器 aria-label 携带当前模式全名（normal 态只显图标，可访问性靠它）");
-	assert.doesNotMatch(composer, /composerAddMode/, "「+」菜单不再承载模式分组");
-	// 存储归属：开关值存在 hiddenComposerFeatures，不再混在 hiddenModules 里
+	// 入口条件：至少一个可切换的特殊模式（plan/goal）；只剩 normal 时整个分组不渲染
+	// （ACP 会话无 pi 扩展 / plan+goal 都被关，ACP 模式等价物走 configOptions）
+	assert.match(composer, /const specialModes = visibleModes\.filter\(\(mode\) => mode === "plan" \|\| mode === "goal"\)/);
+	assert.match(composer, /modeSectionVisible = specialModes\.length > 0;/, "入口只受可用性控制");
+	assert.doesNotMatch(composer, /composerModesHiddenAtom|modesHidden/, "渲染层不再读取已删除的隐藏开关");
+	assert.doesNotMatch(composer, /modeSwitcherVisible/, "旧常驻下拉条件已删除");
+	// chip 的渲染条件只排除「点了也退不出去」的两种后端
+	assert.match(composer, /const chipMode: "plan" \| "goal" \| null/);
+
 	const atoms = readFileSync("src/renderer/src/atoms/app-ui-atoms.ts", "utf8");
-	assert.match(atoms, /composerModesHiddenAtom = atom\(\(get\) => isComposerFeatureHidden\(get\(hiddenComposerFeaturesAtom\), "composerModes"\)\)/, "模式选择器开关读输入框功能清单");
+	assert.doesNotMatch(atoms, /composerModesHiddenAtom/, "atom 已删除");
 	const composerFeatures = readFileSync("src/renderer/src/components/app/settings/ComposerFeaturesSection.tsx", "utf8");
-	assert.match(composerFeatures, /composerModes: "settings\.composer\.modes"/, "输入框功能显示设置页列出模式选择器开关");
+	assert.doesNotMatch(composerFeatures, /composerModes/, "设置页不再列出模式开关");
+	const sharedFeatures = readFileSync("src/shared/composerFeatures.ts", "utf8");
+	assert.doesNotMatch(sharedFeatures, /composerModes/, "可关清单移除 composerModes");
+	const zh = readFileSync("src/renderer/src/i18n/rendererCopy.zh-CN.ts", "utf8");
+	assert.doesNotMatch(zh, /settings\.composer\.modes/, "设置文案键一并删除");
+	// 旧 settings.json 里的残留 id（hiddenModules / hiddenComposerFeatures 两处）由迁移清理
+	const store = readFileSync("src/main/settings/SettingsStore.ts", "utf8");
+	assert.match(store, /migrateRemovedComposerModesToggle\(\)/, "存在旧 id 清理迁移");
 	const modules = readFileSync("src/renderer/src/components/app/settings/ModuleVisibilitySection.tsx", "utf8");
-	assert.doesNotMatch(modules, /composerModes/, "功能模块设置页不再重复列出模式选择器开关");
+	assert.doesNotMatch(modules, /composerModes/, "功能模块设置页也不得出现该开关");
 });
 
 // m01733：ACP 会话的模式选择器依赖 plan/goal 可用性回落到只剩 normal 才隐藏；

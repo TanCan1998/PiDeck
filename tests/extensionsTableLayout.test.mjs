@@ -44,7 +44,7 @@ test("built-in description is line-clamped and keeps the full text in title", ()
 
 test("extension tab toolbars wrap instead of clipping their right-most buttons", () => {
 	const tab = read("src/renderer/src/config/ExtensionsTab.tsx");
-	assert.match(tab, /skills-toolbar-actions[^"]*flex-wrap[^"]*justify-end/, "extensions toolbar action group must wrap (flex-wrap + justify-end)");
+	assert.match(tab, /flex shrink-0 flex-wrap items-center justify-end gap-1\.5/, "extensions toolbar action group must wrap (flex-wrap + justify-end)");
 	const panel = read("src/renderer/src/config/BuiltInExtensionsUpdatePanel.tsx");
 	assert.match(panel, /flex shrink-0 flex-wrap items-center justify-end gap-1\.5/, "built-in extensions panel actions must right-align when wrapped");
 });

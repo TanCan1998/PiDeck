@@ -54,7 +54,7 @@ export function Citation({ citationId, index, idPrefix, className }: CitationPro
 		<a
 			href={`#${citationTargetId(idPrefix, citationId)}`}
 			aria-label={`View citation ${index}`}
-			className={cn("mx-0.5 inline-flex min-w-4 -translate-y-0.5 items-center justify-center rounded-md bg-muted/60 px-1 py-0.5 text-[10px] font-semibold leading-none text-muted-foreground no-underline outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring", className)}
+			className={cn("mx-0.5 inline-flex min-w-4 -translate-y-0.5 items-center justify-center rounded-md bg-muted/60 px-1 py-0.5 text-micro font-semibold leading-none text-muted-foreground no-underline outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring", className)}
 		>
 			{index}
 		</a>
@@ -95,7 +95,7 @@ function CitationRow({ citation, index, idPrefix }: { citation: CitationItem; in
 				{citation.domain ? <span className="min-w-0 truncate text-xs text-muted-foreground/60">{citation.domain}</span> : null}
 			</span>
 			<span className="flex shrink-0 items-center gap-1.5">
-				<span className="grid size-5 place-items-center rounded-md bg-foreground/[0.05] text-[10px] font-semibold tabular-nums text-muted-foreground">{index}</span>
+				<span className="grid size-5 place-items-center rounded-md bg-foreground/[0.05] text-micro font-semibold tabular-nums text-muted-foreground">{index}</span>
 				{citation.url ? <ExternalLink className="size-3.5 text-muted-foreground/40 transition-colors group-hover/citation:text-muted-foreground" /> : null}
 			</span>
 		</>
@@ -173,7 +173,7 @@ export function Citations({ citations, title = "Sources", open, defaultOpen = fa
 			>
 				<BookOpenText className="size-4" />
 				<span className="font-medium">{title}</span>
-				<span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-semibold tabular-nums">{citations.length}</span>
+				<span className="rounded-full bg-muted px-1.5 py-0.5 text-micro font-semibold tabular-nums">{citations.length}</span>
 				<motion.span aria-hidden="true" animate={{ rotate: currentOpen ? 180 : 0 }} transition={reduce ? { duration: 0 } : SPRING_SWAP} className="text-muted-foreground/60">
 					<ChevronDown className="size-3.5" />
 				</motion.span>

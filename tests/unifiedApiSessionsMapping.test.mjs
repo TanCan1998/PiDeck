@@ -17,7 +17,7 @@ import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 const PRELOAD_SOURCE = readFileSync("src/preload/index.ts", "utf8");
 const CONSOLIDATIONS_SOURCE = readFileSync("src/shared/api/consolidations.ts", "utf8");
 const FACADE_SOURCE = readFileSync("src/shared/api/facadeTypes.ts", "utf8");
-/** TEST-PLAN §0 锚定数字：sessions 115（25+77+8+5 分桶；2026-10-18 远端合并刷新：catalog 组+4 个远端归档/会话内搜索方法）、config 48。 */
+/** TEST-PLAN §0 锚定数字：sessions 115（2026-10-18 远端合并且 dev 同步并入 searchInSession 后刷新）、config 48。 */
 const SESSIONS_METHOD_TOTAL = 115;
 const CONFIG_METHOD_TOTAL = 48;
 const SESSIONS_GROUP_KEYS = ["catalog", "import", "rewind", "runtime"];
