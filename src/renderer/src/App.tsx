@@ -115,7 +115,6 @@ import {
 	applySessionRuntimeEventAtom,
 	currentSessionAtom,
 	currentSessionIdAtom,
-	currentSessionMessagesAtom,
 	currentSessionRuntimeAtom,
 	projectInventoryAtom,
 	removeSessionComposerStateAtom,
@@ -131,6 +130,7 @@ import {
 	sessionCatalogLoadStateAtom,
 	sessionMessagesCacheAtom,
 	sessionSummariesByProjectIdAtomFamily,
+	modifiedFilesAtom,
 	promoteSessionComposerStateAtom,
 	promoteSessionMessagesCacheAtom,
 	setSessionAttachmentsAtom,
@@ -189,10 +189,10 @@ import { CuaApprovalDialog, useCuaApproval } from "./components/overlays/CuaAppr
 import { ImportOverlayHost } from "./components/overlays/ImportOverlayHost";
 import { EnvironmentOverlay } from "./components/overlays/EnvironmentOverlay";
 import { usePiEnvironmentGuide } from "./hooks/usePiEnvironmentGuide";
-import { EnvironmentDialog, FileContextMenu, ImagePreviewModal, type SessionModifiedFile } from "./components/app/AppParts";
+import { EnvironmentDialog, FileContextMenu, ImagePreviewModal } from "./components/app/AppParts";
 import { ExternalEditorOverlay } from "./components/workspace/ExternalEditorOverlay";
 import { navigateTo } from "./components/app/BrowserPanel";
-import { flattenFiles, fileNodeDragPayloadToRef, mergeCommands, getToolFilePath, getToolNewContent, getToolChangedLineCount } from "./components/app/AppUtils";
+import { flattenFiles, fileNodeDragPayloadToRef, mergeCommands } from "./components/app/AppUtils";
 // ProjectResourcesModal 仅在打开资源弹层时加载
 const ProjectResourcesModal = lazy(() => import("./components/app/ProjectResourcesModal").then((m) => ({ default: m.ProjectResourcesModal })));
 import { createDefaultAppSettings } from "../../shared/types";
@@ -252,9 +252,9 @@ export function App() {
 	useBootOverlayReady(currentSessionId !== undefined);
 	const currentSession = useAtomValue(currentSessionAtom);
 	// currentSessionRuntime / currentSessionRuntimeUi / currentSessionSendState: sync store.get() only.
-	// Streaming subscriptions are in SessionRuntimeInjector.
-	// Timeline 由各 ChatSessionPane 自持；大纲只读当前聚焦会话的消息缓存。
-	const activeMessages = useAtomValue(currentSessionMessagesAtom);
+	// Streaming subscriptions are in SessionRuntimeInjector. 修改文件清单走内容稳定投影 atom，
+	// 消息 flush 不改变清单内容时不会叫醒 App 根（否则文件抽屉等大树每 50ms 全量重渲）。
+	const modifiedFiles = useAtomValue(modifiedFilesAtom);
 	const projects = useAtomValue(projectInventoryAtom);
 	const agents = useAtomValue(agentInventoryAtom);
 	const setCurrentSessionId = useSetAtom(currentSessionIdAtom);
@@ -1042,37 +1042,6 @@ export function App() {
 		persistWidth: persistSidebarWidth,
 	});
 
-	/** 当前会话中 agent 修改过的文件(从 tool 消息 meta 中提取) */
-	// 优化:只在消息数量变化时才重新计算,减少不必要的遍历
-	const modifiedFiles = useMemo(() => {
-		const byPath = new Map<string, SessionModifiedFile>();
-		for (const msg of activeMessages) {
-			if (msg.role !== "tool") continue;
-			const toolName: string | undefined = msg.meta?.toolName as string | undefined;
-			// 工具入参只可能是字符串或参数对象（投影器写入 meta 的两路形态），先收窄再交给工具解析器
-			const argsRaw: unknown = msg.meta?.args;
-			const args = typeof argsRaw === "string" || (argsRaw && typeof argsRaw === "object") ? (argsRaw as string | Record<string, unknown>) : undefined;
-			const status: string = String(msg.meta?.status ?? "done");
-			// 只收集文件写入/编辑类的工具调用，作为右侧 Files 与会话结束摘要的统一数据源。
-			if (!toolName || !/write|edit|create|patch/i.test(toolName)) continue;
-			const filePath = getToolFilePath(args);
-			if (!filePath || !args) continue;
-			const previous = byPath.get(filePath);
-			// 同一路径再次被修改时移动到 Map 末尾，右侧修改清单才能按"最新修改"展示。
-			if (previous) byPath.delete(filePath);
-			// originalContent 不再存储到消息 meta 中（full file 会使会话体积过大）。
-			// diff 展示时使用工具参数（oldText/newText）显示变动区域。
-			byPath.set(filePath, {
-				path: filePath,
-				toolName,
-				status: status === "running" ? "running" : (previous?.status ?? status),
-				changedLines: (previous?.changedLines ?? 0) + getToolChangedLineCount(toolName, args),
-				originalContent: "",
-				content: getToolNewContent(toolName, args) ?? previous?.content,
-			});
-		}
-		return Array.from(byPath.values());
-	}, [activeMessages, activeAgentId]);
 	const flatFiles = useMemo(() => flattenFiles(files), [files]);
 	// === file editor hook ===
 	const {

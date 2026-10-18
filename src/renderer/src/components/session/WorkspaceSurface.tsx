@@ -1,6 +1,6 @@
 import { cn } from "../../lib/utils";
 import { useAtom, useAtomValue } from "jotai";
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode, type RefObject } from "react";
 import { ChevronDown, ChevronRight, ChevronsDownUp, FileText, Folder, FolderOpen, FolderTree, LoaderCircle, RefreshCw, X } from "lucide-react";
 import { normalizeSessionPathForCompare } from "../../agentListDisplay";
 import { SessionBackendMark, SessionChannelMark, SessionSourceBadge, SideTaskMark } from "./SessionSourceBadge";
@@ -24,6 +24,7 @@ import { PathTooltip } from "../ui-shadcn/PathTooltip";
 import { FileSearch, Search } from "lucide-react";
 import { useFileSearch } from "../../hooks/useFileSearch";
 import { useFileTreeStickyAppearance } from "../../hooks/files/useFileTreeStickyAppearance";
+import { useLazyListWindow } from "../../hooks/useLazyListWindow";
 import { FileSearchResults } from "./FileSearchResults";
 import { isEditableTarget, isFileSearchShortcut, isTypeToSearchKey } from "../../utils/fileSearchTrigger";
 
@@ -173,10 +174,26 @@ function FilesPanel(props: {
 	const sortedFiles = useMemo(() => sortFileNodes(props.files, sortMode, sortDirection), [props.files, sortMode, sortDirection]);
 	// 折叠中间包是排序之后的另一层纯展示变换：开启时把单子目录链压成一行。
 	const displayFiles = useMemo(() => (compactPackages ? compactMiddlePackages(sortedFiles) : sortedFiles), [sortedFiles, compactPackages]);
-	useFileTreeStickyAppearance(panelRef, displayFiles, props.expandedDirs, !searchOpen);
 	/** 拖入高亮的目标目录路径（null = 拖在面板空白区域） */
 	const [dragOverDir, setDragOverDir] = useState<string | null>(null);
 	const dragCountRef = useRef(0);
+	// 活跃编辑器文件高亮订阅上移到面板：行组件不再逐行订阅 atom，
+	// 否则每次点文件都会唤醒全部已挂载行（O(N) 重渲）。
+	const activeEditorFile = useAtomValue(activeEditorFileAtom);
+	// memo 行组件的回调必须引用稳定：App 消息 flush 会重渲整条抽屉链路，
+	// 若每帧重建回调，memo 全部失效（2000 行 × 每秒多次 = 持续卡顿）。用 ref 取最新 props。
+	const latestPropsRef = useRef(props);
+	latestPropsRef.current = props;
+	const stableToggleDirectory = useCallback((path: string) => latestPropsRef.current.onToggleDirectory(path), []);
+	const stableFileContextMenu = useCallback((node: FileTreeNode, x: number, y: number) => latestPropsRef.current.onFileContextMenu(node, x, y), []);
+	const stableOpenFile = useCallback((path: string) => latestPropsRef.current.onOpenFile?.(path), []);
+	const stableViewFile = useCallback((path: string, openMode?: "preview" | "permanent") => latestPropsRef.current.onViewFile?.(path, openMode), []);
+	const stableDropFiles = useCallback((targetDir: string, files: FileList) => latestPropsRef.current.onDropFiles?.(targetDir, files), []);
+	const stableMoveFiles = useCallback((sourcePaths: string[], targetDir: string) => latestPropsRef.current.onMoveFiles?.(sourcePaths, targetDir), []);
+	// 文件树渲染预算：首屏只挂一批，滚动到列表底部再追加。否则展开一个 2000 项目录
+	// 会在一次 commit 里同步挂满整棵子树（主进程单目录上限即 2000，见 shared/fileTree.ts）。
+	const rootWindow = useLazyListWindow(displayFiles, { pageSize: FILE_TREE_RENDER_BATCH, scrollRef: panelRef, resetKey: props.projectId });
+	useFileTreeStickyAppearance(panelRef, rootWindow.visible, props.expandedDirs, !searchOpen);
 
 	// 面板自身接受拖入：落在空白区域视为复制到项目根目录
 	const handlePanelDragOver = (event: React.DragEvent) => {
@@ -327,21 +344,27 @@ function FilesPanel(props: {
 					onClear={closeSearch}
 				/>
 			) : (
-				displayFiles.map((node) => (
-					<FileNode
-						key={node.path}
-						node={node}
-						expandedDirs={props.expandedDirs}
-						onToggleDirectory={props.onToggleDirectory}
-						onFileContextMenu={props.onFileContextMenu}
-						onOpenFile={props.onOpenFile}
-						onViewFile={props.onViewFile}
-						onDropFiles={props.onDropFiles}
-						onMoveFiles={props.onMoveFiles}
-						dragOverDir={dragOverDir}
-						onDragOverDirChange={setDragOverDir}
-					/>
-				))
+				<>
+					{rootWindow.visible.map((node) => (
+						<FileTreeNodeRow
+							key={node.path}
+							node={node}
+							depth={0}
+							expandedDirs={props.expandedDirs}
+							activeEditorFile={activeEditorFile}
+							onToggleDirectory={stableToggleDirectory}
+							onFileContextMenu={stableFileContextMenu}
+							onOpenFile={stableOpenFile}
+							onViewFile={stableViewFile}
+							onDropFiles={stableDropFiles}
+							onMoveFiles={stableMoveFiles}
+							dragOverDir={dragOverDir}
+							onDragOverDirChange={setDragOverDir}
+							scrollRef={panelRef}
+						/>
+					))}
+					{rootWindow.hasMore && <div ref={rootWindow.sentinelRef} aria-hidden="true" className="h-px shrink-0" />}
+				</>
 			)}
 		</div>
 	);
@@ -465,34 +488,61 @@ const FILE_TOOLBAR_HEIGHT_PX = 28;
 /* 最外层最多三行吸顶；缩进只放在行内，所有层的行盒都覆盖完整面板宽度。 */
 const FILE_STICKY_MAX_LEVELS = 3;
 
-function FileNode(props: {
+/** 文件树单批渲染行数：根层与每个目录各自独立窗口，滚动到底再追加。 */
+const FILE_TREE_RENDER_BATCH = 200;
+const EMPTY_FILE_TREE_CHILDREN: readonly FileTreeNode[] = [];
+
+type FileTreeRowProps = {
 	node: FileTreeNode;
+	depth: number;
 	expandedDirs: Set<string>;
+	/** 当前编辑器活跃文件：面板统一订阅后下发，行组件不再各自订阅 atom（否则点一次文件全树重渲）。 */
+	activeEditorFile: string | null;
 	onToggleDirectory: (path: string) => void;
 	onFileContextMenu: (node: FileTreeNode, x: number, y: number) => void;
 	onOpenFile?: (path: string) => void;
 	/** 单击默认预览；第二参 permanent = 双击常驻 */
 	onViewFile?: (path: string, openMode?: "preview" | "permanent") => void;
-	depth?: number;
 	/** 拖入文件（仅目录节点使用） */
 	onDropFiles?: (targetDir: string, files: FileList) => void;
 	/** 内部拖拽移动文件/目录 */
 	onMoveFiles?: (sourcePaths: string[], targetDir: string) => void;
-	dragOverDir?: string | null;
-	onDragOverDirChange?: (path: string | null) => void;
-}) {
-	const { node, expandedDirs, onToggleDirectory, depth = 0 } = props;
-	const expanded = expandedDirs.has(node.path);
-	/* 当前活跃编辑器文件高亮：单击预览即点亮，双击常驻、切换 tab 同步跟随（activeEditorFileAtom 由 useFileEditor 写入）。
-	   树行跨六层 props 链，订阅 atom 而非透传。 */
-	const activeEditorFile = useAtomValue(activeEditorFileAtom);
-	const isActiveFile = node.type === "file" && node.path === activeEditorFile;
-	const typeLabel = node.type === "file" ? getFileTypeLabel(node.name) : "";
-	// 对应 VS Code defaultIndent + depth × indent；外层不缩进，全宽背景保持不变。
-	const rowStyle: CSSProperties = {
+	dragOverDir: string | null;
+	onDragOverDirChange: (path: string | null) => void;
+	/** 文件树滚动容器：目录子项增量窗口的 IntersectionObserver root。 */
+	scrollRef: RefObject<HTMLDivElement | null>;
+};
+
+/** 树行内边距：对应 VS Code defaultIndent + depth × indent；外层不缩进，全宽背景保持不变。 */
+function fileRowStyle(depth: number): CSSProperties {
+	return {
 		paddingLeft: `calc(var(--space-2) + ${depth * 8}px)`,
 		paddingRight: "var(--space-2)",
 	};
+}
+
+/* 树行用原生 button，不用 shadcn Button：后者基类强制子 SVG size-4，
+   会压掉 Seti --file-type-icon-size 与 lucide size，靠 ! 反压是补丁。
+   2027-01：hover 高亮加与侧栏行同款的过渡动画（transition-[background-color,
+   border-color,box-shadow] duration-200），移入文件列表时背景平滑渐变而非瞬切。 */
+const FILE_ROW_BUTTON_CLASS =
+	"file-node-row flex h-[28px] min-h-0 w-full items-center justify-start gap-1.5 rounded-sm border-0 bg-transparent py-0 text-left text-body font-normal text-foreground transition-[background-color,border-color,box-shadow] duration-base hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset relative";
+
+/**
+ * 行分发器：文件走轻量 FileRow，目录走 DirectoryRow（各自 memo）。
+ * 拆开是为了让目录行安全调用增量窗口 hook（只有目录需要），并让文件行
+ * 在流式重渲染时只做一次 memo 比较，不重建 Seti 图标与缩进 guide。
+ */
+const FileTreeNodeRow = memo(function FileTreeNodeRow(props: FileTreeRowProps) {
+	if (props.node.type === "file") return <FileRow {...props} node={props.node} />;
+	return <DirectoryRow {...props} node={props.node} />;
+});
+
+const FileRow = memo(function FileRow(props: FileTreeRowProps) {
+	const { node, depth } = props;
+	const isActiveFile = props.activeEditorFile === node.path;
+	const typeLabel = getFileTypeLabel(node.name);
+	const rowStyle = fileRowStyle(depth);
 	const menu = (event: ReactMouseEvent) => {
 		event.preventDefault();
 		props.onFileContextMenu(node, event.clientX, event.clientY);
@@ -506,23 +556,66 @@ function FileNode(props: {
 		},
 		[node],
 	);
+	return (
+		<div className="file-node">
+			<button
+				type="button"
+				className={cn("file", FILE_ROW_BUTTON_CLASS, isActiveFile && "bg-accent text-accent-foreground hover:bg-accent")}
+				style={rowStyle}
+				title={`${node.relativePath}\n${typeLabel}`}
+				draggable
+				onDragStart={handleDragStart}
+				onClick={() => props.onViewFile?.(node.path)}
+				onDoubleClick={(event) => {
+					event.preventDefault();
+					props.onViewFile?.(node.path, "permanent");
+				}}
+				onContextMenu={menu}
+			>
+				<FileTreeIndentGuides depth={depth} />
+				{/* 文件也保留 16px twistie 槽位，确保与同级目录的图标和名称对齐。 */}
+				<span data-file-tree-twistie="" aria-hidden="true" className="h-full w-4 shrink-0" />
+				<span className="file-node-icon">{fileIconElement(node.name, false, false)}</span>
+				<span className="file-node-name">{node.name}</span>
+				<span className="file-node-type-label">{typeLabel}</span>
+			</button>
+		</div>
+	);
+});
+
+const DirectoryRow = memo(function DirectoryRow(props: FileTreeRowProps) {
+	const { node, depth, expandedDirs } = props;
+	const expanded = expandedDirs.has(node.path);
+	const rowStyle = fileRowStyle(depth);
+	const menu = (event: ReactMouseEvent) => {
+		event.preventDefault();
+		props.onFileContextMenu(node, event.clientX, event.clientY);
+	};
+	// 内部拖拽移动：dataTransfer 携带源路径，目录行是落点；OS 文件拖入则是复制
+	const handleDragStart = useCallback(
+		(event: React.DragEvent) => {
+			event.dataTransfer.effectAllowed = "copyMove";
+			writeFileNodeDragPayload(event.dataTransfer, node);
+		},
+		[node],
+	);
 	const handleDragOver = useCallback(
 		(event: React.DragEvent) => {
 			event.preventDefault();
 			event.stopPropagation();
 			event.dataTransfer.dropEffect = "move";
-			props.onDragOverDirChange?.(node.path);
+			props.onDragOverDirChange(node.path);
 		},
 		[node.path, props.onDragOverDirChange],
 	);
 	const handleDragLeave = useCallback(() => {
-		props.onDragOverDirChange?.(null);
+		props.onDragOverDirChange(null);
 	}, [props.onDragOverDirChange]);
 	const handleDrop = useCallback(
 		(event: React.DragEvent) => {
 			event.preventDefault();
 			event.stopPropagation();
-			props.onDragOverDirChange?.(null);
+			props.onDragOverDirChange(null);
 			// 内部拖拽移动：优先检查 pi-file-path
 			const sourcePath = event.dataTransfer.getData("text/pi-file-path");
 			if (sourcePath) {
@@ -539,51 +632,21 @@ function FileNode(props: {
 		[node.path, props.onDropFiles, props.onMoveFiles, props.onDragOverDirChange],
 	);
 	const isDragOver = props.dragOverDir === node.path;
-	/* 树行用原生 button，不用 shadcn Button：后者基类强制子 SVG size-4，
-	   会压掉 Seti --file-type-icon-size 与 lucide size，靠 ! 反压是补丁。
-	   2027-01：hover 高亮加与侧栏行同款的过渡动画（transition-[background-color,
-	   border-color,box-shadow] duration-200），移入文件列表时背景平滑渐变而非瞬切。 */
-	const fileRowButtonClass =
-		"file-node-row flex h-[28px] min-h-0 w-full items-center justify-start gap-1.5 rounded-sm border-0 bg-transparent py-0 text-left text-body font-normal text-foreground transition-[background-color,border-color,box-shadow] duration-base hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset relative";
-	if (node.type === "file")
-		return (
-			<div className="file-node">
-				<button
-					type="button"
-					className={cn("file", fileRowButtonClass, isActiveFile && "bg-accent text-accent-foreground hover:bg-accent")}
-					style={rowStyle}
-					title={`${node.relativePath}\n${typeLabel}`}
-					draggable
-					onDragStart={handleDragStart}
-					onClick={() => props.onViewFile?.(node.path)}
-					onDoubleClick={(event) => {
-						event.preventDefault();
-						props.onViewFile?.(node.path, "permanent");
-					}}
-					onContextMenu={menu}
-				>
-					<FileTreeIndentGuides depth={depth} />
-					{/* 文件也保留 16px twistie 槽位，确保与同级目录的图标和名称对齐。 */}
-					<span data-file-tree-twistie="" aria-hidden="true" className="h-full w-4 shrink-0" />
-					<span className="file-node-icon">{fileIconElement(node.name, false, false)}</span>
-					<span className="file-node-name">{node.name}</span>
-					<span className="file-node-type-label">{typeLabel}</span>
-				</button>
-			</div>
-		);
 	/* 吸顶沿用原行的事件与内容；全宽不透明背景负责遮住滚动内容。
 	   z-10 避免子树覆盖行，底部阴影只由几何 hook 标在真正吸顶的最后一行。
 	   注意：行必须是块级 flex（不是 inline-flex）——行内级盒会让 .file-node 容器多出
 	   行盒空隙（实测行距 33px > 行高 28px），相邻两行的引导线之间就裂出 5px 缝，
 	   吸顶行之间也会露出滚动内容。 */
 	const stickyRow = depth < FILE_STICKY_MAX_LEVELS;
+	// 子项增量渲染窗口：目录一次展开几千项时先挂一批，滚到底再追加（每个目录独立窗口）。
+	const childWindow = useLazyListWindow<FileTreeNode>(node.children ?? EMPTY_FILE_TREE_CHILDREN, { pageSize: FILE_TREE_RENDER_BATCH, scrollRef: props.scrollRef, resetKey: node.path });
 	return (
 		<div className="file-node">
-			<Collapsible open={expanded} onOpenChange={() => onToggleDirectory(node.path)}>
+			<Collapsible open={expanded} onOpenChange={() => props.onToggleDirectory(node.path)}>
 				<CollapsibleTrigger asChild>
 					<button
 						type="button"
-						className={cn("directory group", fileRowButtonClass, "rounded-none", stickyRow && "sticky z-10 bg-background data-[file-sticky-last=true]:shadow-sm", isDragOver && "bg-muted ring-1 ring-border")}
+						className={cn("directory group", FILE_ROW_BUTTON_CLASS, "rounded-none", stickyRow && "sticky z-10 bg-background data-[file-sticky-last=true]:shadow-sm", isDragOver && "bg-muted ring-1 ring-border")}
 						data-file-sticky-level={stickyRow ? depth : undefined}
 						style={stickyRow ? { ...rowStyle, top: `${FILE_TOOLBAR_HEIGHT_PX + depth * FILE_ROW_HEIGHT_PX}px` } : rowStyle}
 						title={node.relativePath}
@@ -627,12 +690,14 @@ function FileNode(props: {
 					)}
 					{node.children && node.children.length > 0 && (
 						<div className="file-children">
-							{node.children.map((child) => (
-								<FileNode
+							{childWindow.visible.map((child) => (
+								<FileTreeNodeRow
 									key={child.path}
 									node={child}
+									depth={depth + 1}
 									expandedDirs={expandedDirs}
-									onToggleDirectory={onToggleDirectory}
+									activeEditorFile={props.activeEditorFile}
+									onToggleDirectory={props.onToggleDirectory}
 									onFileContextMenu={props.onFileContextMenu}
 									onOpenFile={props.onOpenFile}
 									onViewFile={props.onViewFile}
@@ -640,16 +705,17 @@ function FileNode(props: {
 									onMoveFiles={props.onMoveFiles}
 									dragOverDir={props.dragOverDir}
 									onDragOverDirChange={props.onDragOverDirChange}
-									depth={depth + 1}
+									scrollRef={props.scrollRef}
 								/>
 							))}
+							{childWindow.hasMore && <div ref={childWindow.sentinelRef} aria-hidden="true" className="h-px" />}
 						</div>
 					)}
 				</CollapsibleContent>
 			</Collapsible>
 		</div>
 	);
-}
+});
 
 function SessionsPanel(props: {
 	sessions: SessionSummary[];

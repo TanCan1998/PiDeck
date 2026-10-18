@@ -2,7 +2,7 @@ import { useLayoutEffect, type RefObject } from "react";
 import type { FileTreeNode } from "../../../../shared/types";
 
 /** 只给真正吸顶的最后一行加底部阴影；普通目录行不出现卡片分隔。 */
-export function useFileTreeStickyAppearance(panelRef: RefObject<HTMLDivElement | null>, files: FileTreeNode[], expandedDirs: Set<string>, enabled: boolean) {
+export function useFileTreeStickyAppearance(panelRef: RefObject<HTMLDivElement | null>, files: readonly FileTreeNode[], expandedDirs: Set<string>, enabled: boolean) {
 	useLayoutEffect(() => {
 		const panel = panelRef.current;
 		if (!panel || !enabled) return;

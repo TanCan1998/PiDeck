@@ -981,6 +981,39 @@ export function GitPanel(props: GitPanelProps) {
 		}
 	};
 
+	// FileTree 是 memo 组件：commit composer 输入会让 GitPanel 每次按键重渲，
+	// 行内操作回调若每次重建，memo 失效 → 每敲一键都全量重建变更树行。
+	// act 本身每次 render 新建闭包（依赖 committing / mutationRunningRef 等），用 ref 转发保持回调引用稳定。
+	const actRef = useRef(act);
+	actRef.current = act;
+	const stageFile = useCallback(
+		(path: string) => {
+			void actRef.current(() => props.stageFiles(props.projectId, [path]));
+		},
+		[props.projectId, props.stageFiles],
+	);
+	const stageFiles = useCallback(
+		(paths: string[]) => {
+			void actRef.current(() => props.stageFiles(props.projectId, paths));
+		},
+		[props.projectId, props.stageFiles],
+	);
+	const unstageFile = useCallback(
+		(path: string) => {
+			void actRef.current(() => props.unstageFiles(props.projectId, [path]));
+		},
+		[props.projectId, props.unstageFiles],
+	);
+	const discardFile = useCallback((path: string, group: "workingTree" | "untracked") => {
+		setDiscardTarget({ group, path });
+	}, []);
+	const discardDir = useCallback((resources: Array<{ path: string; group: "workingTree" | "untracked" }>, label: string) => {
+		setDirectoryDiscardTarget({ resources, label });
+	}, []);
+	const deleteFile = useCallback((path: string) => {
+		setDeleteTarget(path);
+	}, []);
+
 	const runCommit = async (stageAll: boolean) => {
 		const message = commitMessage.trim();
 		if (!message || committing || mutating || hasUnresolvedConflicts || mutationRunningRef.current) return;
@@ -1582,8 +1615,8 @@ export function GitPanel(props: GitPanelProps) {
 												groupType="index"
 												onOpenWorkspaceFileDiff={props.onOpenWorkspaceFileDiff}
 												mutating={mutating || committing}
-												unstageFile={(path) => act(() => props.unstageFiles(props.projectId, [path]))}
-												deleteFile={props.deleteFiles ? (path) => setDeleteTarget(path) : undefined}
+												unstageFile={unstageFile}
+												deleteFile={props.deleteFiles ? deleteFile : undefined}
 												onOpenFile={props.onOpenFile}
 												projectRoot={props.projectRoot}
 												viewMode={changesViewMode}
@@ -1614,17 +1647,17 @@ export function GitPanel(props: GitPanelProps) {
 												groupType="workingTree"
 												onOpenWorkspaceFileDiff={props.onOpenWorkspaceFileDiff}
 												mutating={mutating || committing}
-												stageFile={(path) => act(() => props.stageFiles(props.projectId, [path]))}
-												discardFile={(path, group) => setDiscardTarget({ group, path })}
-												deleteFile={props.deleteFiles ? (path) => setDeleteTarget(path) : undefined}
+												stageFile={stageFile}
+												discardFile={discardFile}
+												deleteFile={props.deleteFiles ? deleteFile : undefined}
 												onOpenFile={props.onOpenFile}
 												stagedPaths={stagedPathSet}
 												projectRoot={props.projectRoot}
 												viewMode={changesViewMode}
 												collapsedDirs={collapsedChangeDirs}
 												onToggleDir={toggleChangeDir}
-												stageDir={(paths) => act(() => props.stageFiles(props.projectId, paths))}
-												discardDir={(resources, label) => setDirectoryDiscardTarget({ resources, label })}
+												stageDir={stageFiles}
+												discardDir={discardDir}
 											/>
 										</ResourceGroup>
 									)}
