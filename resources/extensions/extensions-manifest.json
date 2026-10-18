@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "version": "1.0.1",
-  "bundleSha256": "c0d6c1734e56e3a7425e2c3f342a0cc881ae4015d65de168d292764a4f409763",
+  "bundleSha256": "2e23a67132a2b39fe2fc02953d768bba2303ae20b66d26d8c16bc710c29f3fdd",
   "fileCount": 26,
   "files": [
     {
@@ -16,8 +16,8 @@
     },
     {
       "name": "pi-deck-goal-mode.ts",
-      "sha256": "70add6da406c7d0e682a7eed63cdd771b854a6c721b57c7d3ad5c17576538a52",
-      "bytes": 12572
+      "sha256": "4f2bc59491c995da9ab60824d19f9ba9da3d399013e7c09a63f48c843eca3c9b",
+      "bytes": 14096
     },
     {
       "name": "pi-deck-gui-bridge-gui-spec.ts",
