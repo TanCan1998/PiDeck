@@ -46,7 +46,8 @@ export async function verifyRemoteGitCompare(input: { window: Page; credentials:
 
 	await test.step("打开 Git 面板与引用区（手动展开，无写入口）", async () => {
 		await remoteProjectRow(window, root.split("/").pop() ?? "")
-			.locator(".project-draggable")
+			.locator(".conversation-title")
+			.first()
 			.click();
 		await window.getByRole("button", { name: "打开右侧边栏", exact: true }).click();
 		await window.getByTestId("drawer-rail-git").click();

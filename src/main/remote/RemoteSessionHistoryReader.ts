@@ -41,6 +41,7 @@ import { randomBytes } from "node:crypto";
 // hostId 与 ssh 身份判据只允许有一份：与持久化边界共用 shared 的权威取值域。
 import { PROJECT_HOST_ID_PATTERN, readSshSessionLocator, type SshSessionLocator } from "../../shared/projectLocation";
 import { buildActiveBranchEntryIds } from "../pi/AgentMessageProjector";
+import { buildSessionProjection, type ProjectedSessionEntry } from "../pi/sessionContextProjection";
 import { isRoleMessageRole } from "../pi/sessionEntryIds";
 import type { ChatMessage, SessionMessagePage } from "../../shared/types";
 
@@ -403,6 +404,10 @@ function createReader(ports: RemoteSessionHistoryReaderPorts): RemoteSessionHist
  * - 只有 `type === "message"` 且 role 是角色消息的行进入投影输入，且必须能在**窗口内**的 parentId 链上
  *   走通（`buildActiveBranchEntryIds`，与本地显示分支同一份实现）：被 rewind/fork 甩掉的旧分支条目
  *   不会混进当页。
+ * - **必须用 `buildSessionProjection` 应用 `context_edit`**：远端编辑/删除是追加 context_edit（原文行
+ *   保留），只把消息行原样交给消息投影器会让编辑后的正文永远停在原文、删除的消息继续显示。这里复用
+ *   与本地/离线 Viewer 同一份投影纯函数，再按活动链把已生效的消息交给消息投影器；entryId 槽位同步
+ *   只包含实际投影的消息，避免被排除的消息让后续 meta.entryId 整体错位。
  */
 function parseWindowEntries(lines: readonly RemoteSessionHistoryLine[]): { rawMessages: unknown[]; activeEntryIds: string[] | undefined; corruptLines: number } {
 	const entries: ParsedEntry[] = [];
@@ -431,16 +436,31 @@ function parseWindowEntries(lines: readonly RemoteSessionHistoryLine[]): { rawMe
 	const leaf = entries[entries.length - 1];
 	const activeEntryIds = leaf === undefined ? undefined : buildActiveBranchEntryIds(entries, leaf.id);
 	const activeSet = activeEntryIds === undefined ? undefined : new Set(activeEntryIds);
+	// 窗口内叶节点的上下文投影：应用 context_edit（替换正文 / 移出时间线），与本地读同一套语义。
+	const projection =
+		leaf === undefined
+			? undefined
+			: buildSessionProjection(
+					entries.flatMap((entry) => (isRecord(entry.raw) ? [entry.raw] : [])),
+					leaf.id,
+				);
+	const projectedById = new Map<string, ProjectedSessionEntry>();
+	for (const projected of projection?.projectedEntries ?? []) projectedById.set(projected.entryId, projected);
 	const rawMessages: unknown[] = [];
+	const projectedEntryIds: string[] = [];
 	for (const entry of entries) {
 		if (entry.type !== "message") continue;
 		const role = entry.message?.role;
 		if (!isRoleMessageRole(role)) continue;
 		// 链上走不通（窗口外的祖先/失效分支）：不投影。宁可少显示一条，也不把分支归属编出来。
 		if (activeSet !== undefined && !activeSet.has(entry.id)) continue;
-		rawMessages.push(isRecord(entry.raw) ? entry.raw.message : undefined);
+		const projected = projectedById.get(entry.id);
+		// 被 context_edit 的 replacement:null 移出上下文（远端删除）、或已被压缩区间裁掉：不显示。
+		if (projected === undefined || projected.excluded || projected.messages.length === 0) continue;
+		rawMessages.push(projected.messages[0]);
+		projectedEntryIds.push(entry.id);
 	}
-	return { rawMessages, activeEntryIds, corruptLines };
+	return { rawMessages, activeEntryIds: projectedEntryIds, corruptLines };
 }
 
 /** 构造远端历史读取器（构造期校验端口，任何非法装配立刻抛出）。 */

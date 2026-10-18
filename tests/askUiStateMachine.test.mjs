@@ -94,10 +94,14 @@ test("shouldAutoAdvanceBatchAnswer: 多题批次的单值选择才自动前进",
 	// multi_select 需多次勾选，editor 每次击键都写答案（会打字即跳题），都不能自动跳
 	assert.equal(shouldAutoAdvanceBatchAnswer({ type: "multi_select", total: 3 }), false);
 	assert.equal(shouldAutoAdvanceBatchAnswer({ type: "editor", total: 3 }), false);
-	// 单题批次不自动：卡片本身就是确认卡，点选项即提交等于删掉确认步骤，误触无法反悔。
-	assert.equal(shouldAutoAdvanceBatchAnswer({ type: "select", total: 1 }), false);
-	assert.equal(shouldAutoAdvanceBatchAnswer({ type: "confirm", total: 1 }), false);
-	assert.equal(shouldAutoAdvanceBatchAnswer({ type: "select", total: 0 }), false);
+	// 单题批次（total === 1）同样一步提交：末题即直接提交全部，与单卡 select 点击即提交
+	// 的行为对齐（2026-01 用户反馈：点答案后还要再点一次提交很麻烦）。
+	assert.equal(shouldAutoAdvanceBatchAnswer({ type: "select", total: 1 }), true);
+	assert.equal(shouldAutoAdvanceBatchAnswer({ type: "confirm", total: 1 }), true);
+	// multi_select 单题批次仍不自动：多选需要多次勾选，末题提交按钮保留
+	assert.equal(shouldAutoAdvanceBatchAnswer({ type: "multi_select", total: 1 }), false);
+	// total = 0 时卡片不渲染（BatchAskInlineBar 对空批次 return null），策略结果无实际消费方
+	assert.equal(shouldAutoAdvanceBatchAnswer({ type: "select", total: 0 }), true);
 });
 
 test("classifyAskCardStatus: 明确回答视为 answered", () => {
@@ -323,32 +327,43 @@ test("Timeline 已清理死代码，安全卡在选项点击前调按压感知�
 });
 
 test("AgentManager/飞书 envelope 白名单接受 multi_select 批量问题", () => {
-	// multi_select 走批量 envelope，主进程与飞书两处同构解析都必须放行该类型
-	const agentManager = readFileSync("src/main/pi/AgentManager.ts", "utf8");
+	// multi_select 走批量 envelope，uiGate/飞书两处同构解析都必须放行该类型
+	// （uiGate 域已随 AgentManager 拆分 Wave 4B 迁入 src/main/pi/extensionUiGate.ts）。
+	const uiGate = readFileSync("src/main/pi/extensionUiGate.ts", "utf8");
 	const askCard = readFileSync("src/main/feishu/AskCard.ts", "utf8");
 	// 渲染端 toAgentUiRequest 白名单也必须同构放行，否则 multi_select 选项不渲染
 	// （2026-09 回归：主进程放行、渲染端过滤导致选项组件整体消失）。
 	const sessionAtoms = readFileSync("src/renderer/src/atoms/session-atoms.ts", "utf8");
 	const whiteList = /\["select", "multi_select", "confirm", "input", "editor"\]\.includes\(String\(typed\.type\)\)/;
-	assert.match(agentManager, whiteList);
+	assert.match(uiGate, whiteList);
 	assert.match(askCard, whiteList);
 	assert.match(sessionAtoms, whiteList);
 });
 
 test("AgentManager select 无选项降级为 input（不静默取消）", () => {
-	const source = readFileSync("src/main/pi/AgentManager.ts", "utf8");
+	// select 降级逻辑已随 AgentManager 拆分 Wave 4B 迁入 extensionUiGate.ts
+	const source = readFileSync("src/main/pi/extensionUiGate.ts", "utf8");
 	assert.match(source, /select 无有效选项时降级为 input/);
 	assert.match(source, /effectiveMethod/);
 	assert.doesNotMatch(source, /select 无选项时自动取消，不等用户响应/);
 });
 
-test("ask_question 扩展 schema 支持 multi_select 且强制走批量 envelope", () => {
+test("ask_question 扩展 schema 支持 multi_select 且一切提问统一走批量 envelope", () => {
 	const ext = readFileSync("resources/extensions/pi-deck-ask-question.ts", "utf8");
-	// 批量与单问题两处类型枚举都含 multi_select
+	// 2026-09 prompt 瘦身：schema 顶层单问题字段已删除，类型枚举只剩 QuestionSchema 一处
 	const enumOccurrences = ext.match(/StringEnum\(\["select", "multi_select", "confirm", "input", "editor"\]/g);
-	assert.ok(enumOccurrences && enumOccurrences.length >= 2);
-	// 单问题 multi_select 也强制走批量 envelope（RPC 单选无法表达多选）
-	assert.match(ext, /needsBatchEnvelope = isBatch \|\| questions\.some\(\(q\) => q\.type === "multi_select"\)/);
+	assert.ok(enumOccurrences && enumOccurrences.length === 1, `类型枚举应只剩 QuestionSchema 一处，实际: ${enumOccurrences?.length}`);
+	assert.doesNotMatch(ext, /questions is provided/, "顶层单问题字段（含其描述文案）应已从 schema 删除");
+	assert.doesNotMatch(ext, /single-question mode/, "单问题模式的 schema 描述应已删除");
+	// 运行时兼容保留：老模型直接传顶层字段仍能被 toQuestions 归一化
+	assert.match(ext, /params\.question \?\? ""/, "toQuestions 顶层回退应保留");
+	// 单一渲染形态（2026-09 收口）：不再有单问题弹框分支，execute 一律调 askBatch
+	assert.doesNotMatch(ext, /needsBatchEnvelope/, "单问题/批量双路径已废除，不应再按形态分流");
+	assert.doesNotMatch(ext, /async function askOne/, "askOne（原生弹框路径）应已删除");
+	assert.match(ext, /await askBatch\(questions, record\.review === true, ctx\)/);
+	// select 题自定义输入恒定显示：allowOther 不再读模型传值
+	assert.doesNotMatch(ext, /allowOther !== false/);
+	assert.match(ext, /allowOther: type === "select" \? true : undefined/);
 	// multi_select 空数组视为未作答
 	assert.match(ext, /!Array\.isArray\(value\) \|\| value\.length > 0/);
 });
@@ -359,4 +374,23 @@ test("渲染层不再用 find 取第一个 pending 请求", () => {
 	// 同代判定 + 当前请求解析统一走 askUi.resolveActiveAskRequest：
 	// 布局层（SessionRuntimeInjector）必须用同一份判据决定底栏 ask 是否占位。
 	assert.match(source, /resolveActiveAskRequest\(runtime, ui\)/);
+});
+
+test("单问题卡初始草稿注入 request.prefill（issue #285：首帧输入框不再空白）", () => {
+	const askUi = loadAskUi();
+	// 有预填：value 落位，选择态保持空
+	// 工厂对象来自 vm 沙箱（跨 realm prototype），先展开成宿主对象再比较
+	assert.deepEqual({ ...askUi.initialAskSingleDraft("默认答案") }, { selectedOption: "", value: "默认答案", expanded: true });
+	// 无预填 / 空串 / 非字符串：与空草稿一致，不抛错
+	assert.deepEqual({ ...askUi.initialAskSingleDraft() }, { ...askUi.emptyAskSingleDraft() });
+	assert.deepEqual({ ...askUi.initialAskSingleDraft("") }, { ...askUi.emptyAskSingleDraft() });
+	assert.deepEqual({ ...askUi.initialAskSingleDraft(undefined) }, { ...askUi.emptyAskSingleDraft() });
+});
+
+test("Overlay 的单问题草稿两处初始化都走 initialAskSingleDraft(prefill)", () => {
+	const overlay = readFileSync("src/renderer/src/components/overlays/SessionRuntimeUiOverlay.tsx", "utf8");
+	// 首帧渲染与后续 patch 共用同一入口，两处都注入 request.prefill，避免只修一处再漂移
+	assert.match(overlay, /draft\?\.single \?\? initialAskSingleDraft\(request\?\.prefill\)/);
+	assert.match(overlay, /current\?\.single \?\? initialAskSingleDraft\(request\?\.prefill\)/);
+	assert.doesNotMatch(overlay, /emptyAskSingleDraft\(\)/, "Overlay 不再直接用空草稿工厂（prefill 只能从 initial 工厂进入）");
 });

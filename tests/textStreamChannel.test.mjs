@@ -11,16 +11,19 @@ import test from "node:test";
 
 test("main process: textEmitter tracks and pushes streaming text", () => {
 	const agentManager = readFileSync("src/main/pi/AgentManager.ts", "utf8");
+	// 节流常量已随消息 emit 域迁入 MessageEmitBatcher（AgentManager 拆分 Wave 2）；
+	// 双通道状态机已随 Live 流域迁入 LiveStreamChannel（Wave 3）
+	const batcher = readFileSync("src/main/pi/messageEmitBatcher.ts", "utf8");
+	const liveStream = readFileSync("src/main/pi/liveStreamChannel.ts", "utf8");
 
-	assert.match(agentManager, /private readonly textEmitter = new LatestByKeyEmitter/);
-	assert.match(agentManager, /private static readonly MESSAGE_FLUSH_INTERVAL_MS = 50/);
-	assert.match(agentManager, /this\.streamingText\.set\(agentId, nextText\)/);
-	assert.match(agentManager, /this\.textEmitter\.push\(agentId, stripAnsi\(nextText\)\)/);
+	assert.match(liveStream, /readonly textEmitter = new LatestByKeyEmitter/);
+	assert.match(batcher, /MESSAGE_FLUSH_INTERVAL_MS = 50/);
+	assert.match(liveStream, /this\.streamingText\.set\(agentId, nextText\)/);
+	assert.match(liveStream, /this\.textEmitter\.push\(agentId, stripAnsi\(nextText\)\)/);
 
-	const cancelCount = agentManager.match(/this\.textEmitter\.cancel\(agentId\)/g)?.length ?? 0;
-	assert.ok(cancelCount >= 4, "textEmitter must cancel on end/settled/abort paths");
-	const deleteCount = agentManager.match(/this\.streamingText\.delete\(agentId\)/g)?.length ?? 0;
-	assert.ok(deleteCount >= 4, "streamingText must clear on end/settled/abort paths");
+	const cancelCount = agentManager.match(/this\.liveStream\.clearTextChannel\(agentId\)/g)?.length ?? 0;
+	assert.ok(cancelCount >= 4, "text channel must clear on end/settled/abort paths");
+	assert.match(liveStream, /clearTextChannel\(agentId: string\) \{[\s\S]*?textEmitter\.cancel\(agentId\);[\s\S]*?streamingText\.delete\(agentId\)/);
 });
 
 test("main process: top-level message_start creates empty skeleton", () => {
@@ -42,18 +45,19 @@ test("main process: top-level message_start creates empty skeleton", () => {
 	assert.ok(textDeltaIdx >= 0 && thinkingDeltaIdx > textDeltaIdx);
 	const textDeltaBlock = agentManager.slice(textDeltaIdx, thinkingDeltaIdx);
 	assert.doesNotMatch(textDeltaBlock, /this\.upsertAssistantMessage\(/);
-	assert.match(textDeltaBlock, /this\.textEmitter\.push\(/);
+	assert.match(textDeltaBlock, /this\.liveStream\.accumulateText\(/);
 
 	const thinkingEndIdx = agentManager.indexOf('if (eventType === "thinking_end")');
 	const thinkingDeltaBlock = agentManager.slice(thinkingDeltaIdx, thinkingEndIdx);
 	assert.doesNotMatch(thinkingDeltaBlock, /this\.upsertAssistantMessage\(/);
-	assert.match(thinkingDeltaBlock, /this\.thinkingEmitter\.push\(/);
+	assert.match(thinkingDeltaBlock, /this\.liveStream\.pushThinkingDelta\(/);
 });
 
 test("main process: message_end pushes final text with done flag", () => {
-	const agentManager = readFileSync("src/main/pi/AgentManager.ts", "utf8");
-	assert.match(agentManager, /this\.emitTextStreamNow\(agentId, finalText, true\)/);
-	assert.match(agentManager, /emitTextStreamNow\(agentId: string, text: string, done = false\)/);
+	// 双通道推送已随 Live 流域迁入 LiveStreamChannel（Wave 3）；终态推送在 finalizeText。
+	const liveStream = readFileSync("src/main/pi/liveStreamChannel.ts", "utf8");
+	assert.match(liveStream, /this\.emitTextStreamNow\(agentId, finalText, true\)/);
+	assert.match(liveStream, /emitTextStreamNow\(agentId: string, text: string, done = false\)/);
 });
 
 test("renderer: streamingTextByIdAtom updates from agents:text-stream without runtime bump", () => {

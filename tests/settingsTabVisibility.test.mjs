@@ -15,11 +15,11 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 
 // ── shared/hiddenModules.ts ─────────────────────────────────────────────
 
-test("可隐藏 tab 都是真实存在的设置 tab；dsh 是唯一的非 tab 模块", () => {
+test("可隐藏 tab 都是真实存在的设置 tab；dsh / respondingTips 是非 tab 模块（composerModes 已改归输入框功能清单）", () => {
 	for (const id of HIDEABLE_SETTINGS_TAB_IDS) {
 		assert.ok(SETTINGS_TAB_IDS.includes(id), `${id} 不是 SETTINGS_TAB_IDS 里的 tab`);
 	}
-	assert.deepEqual(plain(HIDEABLE_MODULE_IDS), [...plain(HIDEABLE_SETTINGS_TAB_IDS), "dsh"]);
+	assert.deepEqual(plain(HIDEABLE_MODULE_IDS), [...plain(HIDEABLE_SETTINGS_TAB_IDS), "dsh", "respondingTips"]);
 	// 应用基础项不可隐藏（外观放着开关本身，隐藏后无法找回）
 	for (const id of ["common", "appearance", "shortcuts", "notification", "proxy", "dev", "storage", "backup", "editors"]) {
 		assert.equal(HIDEABLE_SETTINGS_TAB_IDS.includes(id), false, `${id} 不应可隐藏`);
@@ -76,7 +76,8 @@ test("隐藏簇首项时分割线顺延到该簇下一个可见项", () => {
 });
 
 test("整簇隐藏时该簇分割线消失，不留连续两条线", () => {
-	const visible = resolveVisibleSettingsTabs(["im", "pet", "vision", "imagegen"], new Set());
+	const visible = resolveVisibleSettingsTabs(["im", "pet", "vision", "imagegen", "videogen", "acp", "hostplugins"], new Set());
+	// 全簇隐藏后不残留分割线；仅隐部分成员时，分割线顺延到簇内下一个可见项（上一条测试）
 	assert.deepEqual(plain(visible.filter((e) => e.dividerBefore).map((e) => e.id)), ["web", "dev"]);
 });
 
@@ -100,4 +101,22 @@ test("初始 tab：深链优先（即使指向隐藏 tab）；记忆值被隐藏
 	assert.equal(resolveInitialSettingsTab(undefined, "im", ["im"]), "common");
 	assert.equal(resolveInitialSettingsTab(undefined, "dev", ["im"]), "dev");
 	assert.equal(resolveInitialSettingsTab(undefined, "im", []), "im");
+});
+
+// ── ACP 全渠道可用：不存在按构建通道硬隐藏的那一层 ────────────────────
+
+test("acp tab 只受用户隐藏影响：布局内存在、深链与记忆值照常生效", () => {
+	assert.ok(
+		SETTINGS_TAB_LAYOUT.some((entry) => entry.id === "acp"),
+		"ACP tab 必须在设置布局里",
+	);
+	// 未隐藏时深链/记忆值都停在 acp（旧 stable 通道会把两者都回退掉）
+	assert.equal(resolveInitialSettingsTab("acp", "dev", []), "acp");
+	assert.equal(resolveInitialSettingsTab(undefined, "acp", []), "acp");
+	// 只有用户显式隐藏才回退 common
+	assert.equal(resolveInitialSettingsTab(undefined, "acp", ["acp"]), "common");
+	assert.equal(
+		resolveVisibleSettingsTabs([], new Set()).some((entry) => entry.id === "acp"),
+		true,
+	);
 });

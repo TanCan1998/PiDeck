@@ -1,5 +1,5 @@
 import { expect, type Page, type TestInfo } from "@playwright/test";
-import { assertRemoteMutationMatchesLocal, freshRemoteTurn, historyEntries, historyMessages } from "./remoteHistoryAssertions";
+import { assertRemoteMutationMatchesLocal, effectiveHistoryMessages, freshRemoteTurn, historyEntries, historyMessages } from "./remoteHistoryAssertions";
 import { runRemoteCommand, test, type RemoteAcceptanceCredentials } from "./remote-fixtures";
 
 /** 仅操作当前 runId 的真实 pi 文件；所有写操作由真实界面触发，不直调 IPC 或手写远端结果。 */
@@ -49,7 +49,8 @@ export async function verifyRemoteHistoryMutations(input: { window: Page; creden
 		editedDocument = await readRemote();
 		await preserve("edit", before, editedDocument);
 		await assertRemoteMutationMatchesLocal({ before, after: editedDocument, operation: "edit", target, startedAt, newText: editedText });
-		expect(historyMessages(editedDocument, "assistant").find((message) => message.entryId === target.entryId)?.text).toBe(editedText);
+		// 合并后的写面契约：编辑追加 context_edit，原文行仍是旧正文；断言必须读投影后的有效正文。
+		expect(effectiveHistoryMessages(editedDocument, "assistant").find((message) => message.entryId === target.entryId)?.text).toBe(editedText);
 		await expect(timeline.locator(".assistant-text")).toHaveCount(1);
 		await expect(timeline.locator(".user-turn")).toHaveCount(1);
 		await assertSameSession();
@@ -58,7 +59,9 @@ export async function verifyRemoteHistoryMutations(input: { window: Page; creden
 
 	await test.step("远端并发冲突：上传期间外部追加必须保留，UI 提示重载且不自动覆盖", async () => {
 		const before = editedDocument;
-		const target = historyMessages(before, "assistant").at(-1);
+		// 合并后编辑只追加 context_edit：文件里 assistant 原文仍是旧正文，但时间线显示的是有效正文。
+		// 冲突注入的目标必须取投影后的有效消息（entryId 相同、text 是编辑后的），否则 hover 找不到这条回复。
+		const target = effectiveHistoryMessages(before, "assistant").at(-1);
 		if (!target) throw new Error("REMOTE_CONFLICT_TARGET_MISSING");
 		const lastId = historyEntries(before).at(-1)?.id;
 		expect(typeof lastId).toBe("string");
@@ -77,7 +80,8 @@ export async function verifyRemoteHistoryMutations(input: { window: Page; creden
 			"' | base64 -d >> '" +
 			evidenceFile +
 			"'; printf 'REMOTE_WRITE_CONFLICT_INJECTED'; exit 0; fi; i=$((i+1)); sleep 0.2; done; exit 1";
-		const reply = timeline.locator(".turn-row").filter({ hasText: target.text });
+		// 目标现在是编辑后的大段正文（context_edit 有效文本）；用稳定标记定位，避免 Markdown 换行归一导致整段不匹配。
+		const reply = timeline.locator(".turn-row").filter({ hasText: "远端编辑验收_BEGIN" });
 		await reply.hover();
 		await reply.getByTitle("编辑", { exact: true }).click();
 		// 足够多上传块让观察窗口确定可达，仍严格低于256KiB成本上界。
@@ -136,7 +140,8 @@ export async function verifyRemoteHistoryMutations(input: { window: Page; creden
 	await test.step("远端连续删除：先删 user 并保留重挂回复，再删回复；文件与重载界面同步且无重复", async () => {
 		let before = await readRemote();
 		const target = historyMessages(before, "user").find((message) => message.text === prompt);
-		const answer = historyMessages(before, "assistant").at(-1);
+		// 回复已被编辑（context_edit）：UI 显示的是有效正文，删除目标同样取投影后的消息。
+		const answer = effectiveHistoryMessages(before, "assistant").at(-1);
 		expect(target).toBeTruthy();
 		expect(answer).toBeTruthy();
 		if (!target || !answer) throw new Error("REMOTE_DELETE_TARGET_MISSING");
@@ -154,17 +159,25 @@ export async function verifyRemoteHistoryMutations(input: { window: Page; creden
 			.poll(
 				async () => {
 					after = await readRemote();
-					return historyEntries(after).find((entry) => entry.id === target.entryId)?.type;
+					// 删除 = 追加 context_edit(replacement:null) 把目标移出模型上下文（原文行保留）。
+					return effectiveHistoryMessages(after, "user").some((message) => message.entryId === target.entryId);
 				},
 				{ timeout: 30_000, intervals: [500], message: "本次实时 user 确实在文件中：删除不得因临时 ID 未命中而谎报 no-op" },
 			)
-			.toBe("deleted");
+			.toBe(false);
+		// 目标仍必须在文件里出现（追加了指向它的 context_edit），不能是「没写、只是看起来没了」。
+		const removals = historyEntries(after).filter((entry) => entry.type === "context_edit" && entry.targetId === target.entryId);
+		expect(removals.length, "删除必须追加指向目标条目的 context_edit").toBeGreaterThan(0);
+		expect(
+			removals.every((entry) => entry.replacement === null),
+			"删除的 context_edit 必须是 replacement:null",
+		).toBe(true);
 		await preserve("delete-user", before, after);
 		await assertRemoteMutationMatchesLocal({ before, after, operation: "delete", target, startedAt });
 		await expect(timeline.locator(".user-turn")).toHaveCount(0, { timeout: timeoutMs });
 		await expect(timeline.locator(".assistant-text")).toHaveCount(1, { timeout: timeoutMs });
 		await expect(timeline.locator(".assistant-text")).toContainText(answer.text);
-		expect(historyMessages(after, "assistant").map((message) => message.entryId)).toEqual([answer.entryId]);
+		expect(effectiveHistoryMessages(after, "assistant").map((message) => message.entryId)).toEqual([answer.entryId]);
 
 		before = after;
 		const remainingReply = timeline.locator(".turn-row").filter({ hasText: answer.text });
@@ -178,8 +191,8 @@ export async function verifyRemoteHistoryMutations(input: { window: Page; creden
 		after = await readRemote();
 		await preserve("delete-assistant", before, after);
 		await assertRemoteMutationMatchesLocal({ before, after, operation: "delete", target: answer, startedAt });
-		expect(historyMessages(after, "user")).toHaveLength(0);
-		expect(historyMessages(after, "assistant")).toHaveLength(0);
+		expect(effectiveHistoryMessages(after, "user")).toHaveLength(0);
+		expect(effectiveHistoryMessages(after, "assistant")).toHaveLength(0);
 		await assertSameSession();
 
 		await window.locator(".session-tabs-actions").getByRole("button", { name: "更多操作" }).click();

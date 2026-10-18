@@ -89,7 +89,8 @@ export async function verifyRemoteCodeEditing(input: { window: Page; credentials
 /** 双项目同名文件用不同正文作正对照；UI切换后不得沿用另一项目的保存目标。 */
 export async function verifyRemoteCodeIsolation(window: Page, credentials: RemoteAcceptanceCredentials, projectPath: string, neighborPath: string, timeoutMs: number): Promise<void> {
 	await remoteProjectRow(window, neighborPath.split("/").at(-1) ?? "")
-		.locator(".project-draggable")
+		.locator(".conversation-title")
+		.first()
 		.click();
 	await window.getByRole("button", { name: "calc.cjs", exact: false }).click();
 	const region = window.getByRole("region", { name: "远端文件编辑器" });
@@ -100,7 +101,8 @@ export async function verifyRemoteCodeIsolation(window: Page, credentials: Remot
 	expect((await runRemoteCommand(credentials, "cat -- '" + neighborPath + "/calc.cjs'", 60_000)).stdout).toBe("module.exports = { value: 102 };\n");
 	expect((await runRemoteCommand(credentials, "cat -- '" + projectPath + "/calc.cjs'", 60_000)).stdout).toBe(REMOTE_EDITED_CODE);
 	await remoteProjectRow(window, projectPath.split("/").at(-1) ?? "")
-		.locator(".project-draggable")
+		.locator(".conversation-title")
+		.first()
 		.click();
 	await window.getByRole("button", { name: "calc.cjs", exact: false }).click();
 	await expect(region.locator(".cm-content")).toContainText("value: 2", { timeout: timeoutMs });

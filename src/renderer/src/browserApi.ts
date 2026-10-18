@@ -7,7 +7,6 @@ type WebState = {
 	projects: Awaited<ReturnType<PiDesktopApi["projects"]["list"]>>;
 	sessions: SessionRecord[];
 	runtimes: SessionRuntimeInfo[];
-	messagesBySession: Record<string, ChatMessage[]>;
 };
 
 const base = createPreviewApi();
@@ -23,7 +22,6 @@ let state: WebState = {
 	projects: [],
 	sessions: [],
 	runtimes: [],
-	messagesBySession: {},
 };
 let connected = false;
 let polling = false;
@@ -39,7 +37,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 // Vite dev 会把未知 /api/* 回退到 index.html，写入状态前必须确认是真正的 Web 服务载荷。
 function isWebState(value: unknown): value is WebState {
 	if (!isRecord(value)) return false;
-	return Array.isArray(value.projects) && Array.isArray(value.sessions) && Array.isArray(value.runtimes) && isRecord(value.messagesBySession);
+	return Array.isArray(value.projects) && Array.isArray(value.sessions) && Array.isArray(value.runtimes);
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -102,7 +100,9 @@ async function refreshState() {
 				});
 			}
 		}
-		const messages = state.messagesBySession[runtime.sessionId] ?? [];
+		// P0 轮询瘦身：/api/state 不再内嵌全量消息，按会话拉有界窗口；失败跳过不阻断其它会话。
+		const messages = await fetchRuntimeMessages(runtime.sessionId);
+		if (!messages) continue;
 		const messageKey = `${runtime.agentId}:${runtime.runtimeGeneration}:${JSON.stringify(messages)}`;
 		if (lastSessionMessages.get(runtime.sessionId) !== messageKey) {
 			lastSessionMessages.set(runtime.sessionId, messageKey);
@@ -119,6 +119,15 @@ async function refreshState() {
 	}
 	lastRuntimeBySession = nextRuntimeBySession;
 	return state;
+}
+
+async function fetchRuntimeMessages(sessionId: string): Promise<ChatMessage[] | undefined> {
+	try {
+		const result = await request<{ messages: ChatMessage[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/messages`);
+		return Array.isArray(result.messages) ? result.messages : [];
+	} catch {
+		return undefined;
+	}
 }
 
 function ensurePolling() {
@@ -241,6 +250,10 @@ export function createBrowserApi(): PiDesktopApi {
 				ok: false as const,
 				error: { code: "SESSION_COMMAND_FAILED" as const, debugDetails: "catalog message mutation is desktop-only" },
 			}),
+			removeCatalogMessageImage: async () => ({
+				ok: false as const,
+				error: { code: "SESSION_COMMAND_FAILED" as const, debugDetails: "catalog image mutation is desktop-only" },
+			}),
 			deleteCatalogMessage: async () => ({
 				ok: false as const,
 				error: { code: "SESSION_COMMAND_FAILED" as const, debugDetails: "catalog message mutation is desktop-only" },
@@ -267,6 +280,9 @@ export function createBrowserApi(): PiDesktopApi {
 				return response.result;
 			},
 			onRuntimeEvent: (callback) => subscribe(runtimeListeners, callback),
+			// GUI 扩展桥：LAN Web 模式没有 Electron 主进程的桥端点，恒丢弃（形状完整即可）
+			sendBridgeEvent: async () => false,
+			requestBridgeResync: async () => false,
 			listRuntimes: async () => {
 				const result = await request<{ runtimes: SessionRuntimeInfo[] }>("/api/sessions/runtimes");
 				return result.runtimes;
@@ -290,6 +306,8 @@ export function createBrowserApi(): PiDesktopApi {
 			compactRuntime: (target, prompt) => sessionRuntimeCommand(target, "compact", { prompt }),
 			getRuntimeState: (target) => sessionRuntimeCommand(target, "state"),
 			listRuntimeCommands: (target) => sessionRuntimeCommand(target, "commands"),
+			// 浏览器模式无 standby 池访问能力，草稿命令预览回退本地发现。
+			draftCommands: async () => null,
 			listRuntimeModels: (target) => sessionRuntimeCommand(target, "models"),
 			exportRuntimeHtml: (target) => sessionRuntimeCommand(target, "export-html"),
 			editRuntimeMessage: (target, messageId, newText) => sessionRuntimeCommand(target, "edit-message", { messageId, newText }),
@@ -308,7 +326,6 @@ export function createBrowserApi(): PiDesktopApi {
 			discoverDshModels: async () => [],
 			listDshProviders: async () => [],
 			listDshAgentPresets: async () => [],
-			removeDshAgentPreset: async () => undefined,
 			getDshStatus: async () => ({
 				started: false,
 				homeDir: "",
@@ -330,6 +347,7 @@ export function createBrowserApi(): PiDesktopApi {
 			onDshRuntimeStatusChanged: () => () => {},
 			installDshRuntime: async () => ({ ok: false, error: "unavailable in browser" }),
 			importDshRuntimeFile: async () => ({ ok: false, error: "unavailable in browser" }),
+			importDshRuntimeDir: async () => ({ ok: false, error: "unavailable in browser" }),
 			uninstallDshRuntime: async () => ({ ok: false, error: "unavailable in browser" }),
 			onDshRuntimeInstallProgress: () => () => {},
 			describeDshSettings: async () => ({ writable: false, hasDocument: false, namespaces: [] }),

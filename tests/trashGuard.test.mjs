@@ -23,7 +23,7 @@ const { BUILT_IN_EXTENSIONS } = loadTsCommonJs("src/main/extensions/builtInExten
 
 // ── vm 加载扩展（真实 node 内置模块 + stub child_process / pi 模块） ──
 
-function compileExtension(fakeSpawn) {
+function compileExtension(fakeSpawn, platform = process.platform) {
 	const source = readFileSync("resources/extensions/pi-deck-trash-guard.ts", "utf8");
 	const output = ts.transpileModule(source, {
 		compilerOptions: {
@@ -44,7 +44,7 @@ function compileExtension(fakeSpawn) {
 				if (specifier === "@earendil-works/pi-coding-agent") return {};
 				return nodeRequire(specifier);
 			},
-			process,
+			process: { ...process, platform },
 			console,
 			Buffer,
 			setTimeout,
@@ -102,8 +102,9 @@ test("extractDeleteTargets 覆盖 rm/unlink/Windows del/Remove-Item 与标志、
 	assert.deepEqual(targets("sudo rm -rf x"), ["x"]);
 	assert.deepEqual(targets("/usr/bin/rm a.txt"), ["a.txt"]);
 	// Windows cmd 删除族：/ 前缀是标志
-	assert.deepEqual(targets('del /q /f "my file.txt"'), ["my file.txt"]);
-	assert.deepEqual(targets("rmdir /s /q build"), ["build"]);
+	const win = compileExtension(() => ({}), "win32");
+	assert.deepEqual([...win.extractDeleteTargets('del /q /f "my file.txt"')], ["my file.txt"]);
+	assert.deepEqual([...win.extractDeleteTargets("rmdir /s /q build")], ["build"]);
 	// PowerShell：- 前缀是标志；-Path 的值是目标；-Filter 的值丢弃
 	assert.deepEqual(targets("Remove-Item -Recurse -Force dist"), ["dist"]);
 	assert.deepEqual(targets("Remove-Item -Path foo.txt"), ["foo.txt"]);
@@ -112,6 +113,18 @@ test("extractDeleteTargets 覆盖 rm/unlink/Windows del/Remove-Item 与标志、
 	assert.deepEqual(targets("echo hi"), []);
 	assert.deepEqual(targets("git clean -fd"), []);
 	assert.deepEqual(targets("ls -la"), []);
+});
+
+test("rmdir 标志风格按平台判定：POSIX 绝对路径不被当作 Windows 标志漏管", () => {
+	// rmdir 在 POSIX(coreutils) 与 Windows cmd 同名。POSIX 下 `rmdir /tmp/x` 的
+	// `/tmp/x` 是绝对路径，按 Windows 族当标志会整个目标漏管（不进回收站 → 不可恢复）
+	const posix = compileExtension(() => ({}), "linux");
+	assert.deepEqual([...posix.extractDeleteTargets("rmdir /tmp/empty-dir")], ["/tmp/empty-dir"]);
+	assert.deepEqual([...posix.extractDeleteTargets("rmdir -p a/b")], ["a/b"]);
+	// Windows 下保持 cmd 语义
+	const win = compileExtension(() => ({}), "win32");
+	assert.deepEqual([...win.extractDeleteTargets("rmdir /s /q build")], ["build"]);
+	assert.deepEqual([...win.extractDeleteTargets("rd /s /q build")], ["build"]);
 });
 
 test("expandGlobTarget 只展开最后一段通配且遵循隐藏文件语义", () => {
@@ -162,7 +175,9 @@ test("trash-guard 扩展已注册进 BUILT_IN_EXTENSIONS", () => {
 
 test("tool_call: rm 前把副本送回收站（spawn 收到暂存路径），原文件不动", async () => {
 	const { calls, fakeSpawn } = makeFakeSpawn();
-	const ext = compileExtension(fakeSpawn);
+	// 默认导出走 moveToTrash → platformTrashKind(process.platform)：固定 win32 才能走到
+	// powershell EncodedCommand 分支（Linux/macOS 上会分别走 gio / osascript）。
+	const ext = compileExtension(fakeSpawn, "win32");
 	const dir = mkdtempSync(join(tmpdir(), "trash-guard-e2e-"));
 	const target = join(dir, "doomed.txt");
 	writeFileSync(target, "precious");

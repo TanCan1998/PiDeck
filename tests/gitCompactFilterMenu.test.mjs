@@ -41,7 +41,7 @@ test("Git compact filter keeps a compact trigger and accessible label", () => {
 test("Git pane header keeps the title fully visible beside compact actions", () => {
 	// 标题 shrink-0 + nowrap；筛选/刷新/计数在右侧 flex-1 justify-end，互不挤压
 	assert.match(controls, /shrink-0 items-center gap-1\.5 rounded-md/);
-	assert.match(controls, /whitespace-nowrap text-\[13px\] font-semibold/);
+	assert.match(controls, /whitespace-nowrap text-control font-semibold/);
 	assert.match(controls, /flex min-w-0 flex-1 items-center justify-end gap-0\.5/);
 	// 面板标题用项目 UI 字体，不用 mono（中文在 mono 回退栈上会很难看）
 	assert.doesNotMatch(controls, /font-mono text-\[13px\] font-semibold/);

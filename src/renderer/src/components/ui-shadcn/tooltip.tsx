@@ -5,7 +5,9 @@ import { Tooltip as TooltipPrimitive } from "radix-ui";
 
 import { cn } from "@/lib/utils";
 
-function TooltipProvider({ delayDuration = 0, ...props }: React.ComponentProps<typeof TooltipPrimitive.Provider>) {
+// 默认 350ms：悬停即弹（0ms）会让鼠标扫过工具条时 tooltip 连环闪现；
+// Radix skipDelayDuration=300ms 保证连续浏览时第二个起 0ms 跟随。需要更快/更慢的调用点自行覆盖。
+function TooltipProvider({ delayDuration = 350, ...props }: React.ComponentProps<typeof TooltipPrimitive.Provider>) {
 	return <TooltipPrimitive.Provider data-slot="tooltip-provider" delayDuration={delayDuration} {...props} />;
 }
 

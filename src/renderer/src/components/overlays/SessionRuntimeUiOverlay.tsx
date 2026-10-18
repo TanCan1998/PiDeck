@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, ClipboardList } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useAtom } from "jotai";
+import { EASE_OUT, SPRING_LAYOUT } from "../../lib/ease";
+import { DrawCheck } from "../motion/draw-check";
 import type { AgentUiBatchQuestion, AgentUiRequest, AgentUiResponse, SessionUiResponseInput } from "../../../../shared/types";
 import type { SessionRuntimeUiState, SessionRuntimeViewState } from "../../atoms/session-atoms";
 import { askDraftBySessionRequestAtomFamily, type AskInteractionDraft, type AskSingleDraft } from "../../atoms/ask-draft-atoms";
@@ -11,7 +14,7 @@ import {
 	buildAskResponse,
 	commitBatchAnswer,
 	emptyAskBatchDraft,
-	emptyAskSingleDraft,
+	initialAskSingleDraft,
 	formatAskTitle,
 	isComposingKeyboardEvent,
 	isSameAskDraftKey,
@@ -29,6 +32,7 @@ import { Button } from "../ui-shadcn/button";
 import { Input } from "../ui-shadcn/input";
 import { Textarea } from "../ui-shadcn/textarea";
 import { ApprovalCard } from "../ui-shadcn/approval-card";
+import { PromptTooltip } from "../ui-shadcn/prompt-tooltip";
 
 /**
  * ask 选项选中态的 utility 表达（锚点类 `selected` 保留，供测试与 DOM 查询使用）。
@@ -63,7 +67,16 @@ export type SessionRuntimeUiResponder = {
 	respond: (request: AgentUiRequest, response: AgentUiResponse) => Promise<boolean>;
 };
 
-export function createSessionRuntimeUiResponder(input: { binding: RuntimeUiBinding; readBinding: () => RuntimeUiBinding | undefined; claim: ResponseClaim; rollback: ResponseRollback; send: (input: SessionUiResponseInput) => Promise<void>; onError?: (error: unknown) => void }): SessionRuntimeUiResponder {
+export function createSessionRuntimeUiResponder(input: {
+	binding: RuntimeUiBinding;
+	readBinding: () => RuntimeUiBinding | undefined;
+	claim: ResponseClaim;
+	rollback: ResponseRollback;
+	send: (input: SessionUiResponseInput) => Promise<void>;
+	onError?: (error: unknown) => void;
+	/** 应答成功（host 已收到）后的旁路回调：DSH 回显等，不参与应答流程 */
+	onAccepted?: (request: AgentUiRequest, response: AgentUiResponse) => void;
+}): SessionRuntimeUiResponder {
 	return {
 		respond: async (request, response) => {
 			const start = input.readBinding();
@@ -78,6 +91,7 @@ export function createSessionRuntimeUiResponder(input: { binding: RuntimeUiBindi
 			}
 			try {
 				await input.send(envelope);
+				input.onAccepted?.(request, response);
 				return true;
 			} catch (error) {
 				input.rollback({ ...envelope, request });
@@ -144,6 +158,8 @@ function BatchAskInlineBar(props: {
 }) {
 	const questions = props.request.batchQuestions ?? [];
 	const total = questions.length;
+	// 动效降级开关：系统 prefers-reduced-motion 时所有借用自 beui 的过渡退化为无动画。
+	const reduce = useReducedMotion() ?? false;
 	const draftKey = props.requestKey;
 	const batch = props.draft?.batch ?? emptyAskBatchDraft();
 	const answers = batch.answers;
@@ -258,7 +274,8 @@ function BatchAskInlineBar(props: {
 		>
 			<div className="mb-2 flex min-w-0 items-center gap-2" aria-label={t("ask.batchProgress", { done: answeredCount, total })}>
 				<div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-bg-muted" role="progressbar" aria-valuemin={0} aria-valuemax={total} aria-valuenow={answeredCount}>
-					<div className="h-full rounded-full bg-[var(--color-success)] transition-[width] duration-200" style={{ width: `${total > 0 ? (answeredCount / total) * 100 : 0}%` }} />
+					{/* 进度宽度走弹簧（beui ProgressDots 同源 SPRING_LAYOUT）：逐题完成时比线性 width 过渡更有「落定」感；首帧不补间。 */}
+					<motion.div className="h-full rounded-full bg-[var(--color-success)]" initial={false} animate={{ width: `${total > 0 ? (answeredCount / total) * 100 : 0}%` }} transition={reduce ? { duration: 0 } : SPRING_LAYOUT} />
 				</div>
 				<span className="shrink-0 text-micro font-medium text-text-secondary">{t("ask.batchProgress", { done: answeredCount, total })}</span>
 			</div>
@@ -270,23 +287,21 @@ function BatchAskInlineBar(props: {
 					const answered = isBatchAnswered(answers[question.id]);
 					const active = index === currentTab;
 					return (
-						<Button
-							key={question.id}
-							variant="ghost"
-							role="tab"
-							aria-selected={active}
-							className={`ask-batch-tab inline-flex h-[24px] flex-none items-center gap-1 rounded-md border border-border-subtle bg-transparent px-1.5 font-sans text-micro whitespace-nowrap text-text-secondary transition-colors hover:border-border-strong hover:text-text-primary focus-visible:outline-[var(--focus-ring)] focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-55${answered ? ` ${ASK_TAB_ANSWERED_CLASS}` : ""}${active ? ` ${ASK_TAB_ACTIVE_CLASS}` : ""}`}
-							disabled={props.responding}
-							onClick={() => changeBatch((current) => ({ ...current, currentTab: index }))}
-						>
-							<span className="min-w-[14px] text-center font-mono font-semibold">{index + 1}</span>
-							{/* 单行截断：tab 只做摘要，完整问题在下方详情区展示；
-							    多行会突破胶囊固定高度溢出到下方内容（min-w-0 让 truncate 在 flex 里生效） */}
-							<span className="max-w-[14ch] min-w-0 truncate text-left" title={question.question}>
-								{question.question}
-							</span>
-							{answered ? <Check size={11} className="shrink-0 text-[var(--color-success)]" aria-hidden="true" /> : null}
-						</Button>
+						<PromptTooltip key={question.id} text={question.question}>
+							<Button
+								variant="ghost"
+								role="tab"
+								aria-selected={active}
+								className={`ask-batch-tab inline-flex h-[24px] flex-none items-center gap-1 rounded-md border border-border-subtle bg-transparent px-1.5 font-sans text-micro whitespace-nowrap text-text-secondary transition-colors hover:border-border-strong hover:text-text-primary focus-visible:outline-[var(--focus-ring)] focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-55${answered ? ` ${ASK_TAB_ANSWERED_CLASS}` : ""}${active ? ` ${ASK_TAB_ACTIVE_CLASS}` : ""}`}
+								disabled={props.responding}
+								onClick={() => changeBatch((current) => ({ ...current, currentTab: index }))}
+							>
+								<span className="min-w-[14px] text-center font-mono font-semibold">{index + 1}</span>
+								{/* 标签仍只占一行；整颗按钮悬停/聚焦都能看全文，不只文字区域生效。 */}
+								<span className="max-w-[14ch] min-w-0 truncate text-left">{question.question}</span>
+								{answered ? <Check size={11} className="shrink-0 text-[var(--color-success)]" aria-hidden="true" /> : null}
+							</Button>
+						</PromptTooltip>
 					);
 				})}
 				{props.request.batchReview ? (
@@ -304,9 +319,21 @@ function BatchAskInlineBar(props: {
 				) : null}
 			</div>
 
-			<div>
+			{/* 题干必须留在正常文档流：短标签滚动组件内部 nowrap + 测量宽度会覆盖外层换行，
+			    导致长问题被卡片裁切。这里只做整段淡入，保留换行与长路径断行，不改共享动效原语。 */}
+			{!reviewTab && currentQuestion ? (
+				<PromptTooltip key={currentQuestion.id} text={currentQuestion.question}>
+					<div tabIndex={0} className="mb-1.5 min-w-0 whitespace-pre-wrap text-control font-medium leading-[1.5] text-text-primary [overflow-wrap:anywhere] select-text focus-visible:outline-[var(--focus-ring)]">
+						<motion.div initial={reduce ? false : { opacity: 0, y: 3 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: reduce ? 0 : 0.16, ease: EASE_OUT }}>
+							{currentQuestion.question}
+						</motion.div>
+					</div>
+				</PromptTooltip>
+			) : null}
+
+			<AnimatePresence initial={false} mode="wait">
 				{reviewTab ? (
-					<div className="flex flex-col gap-1.5">
+					<motion.div key="ask-review" className="flex flex-col gap-1.5" initial={reduce ? { opacity: 1 } : { opacity: 0, x: 8 }} animate={{ opacity: 1, x: 0 }} exit={reduce ? { opacity: 0 } : { opacity: 0, x: -6 }} transition={{ duration: reduce ? 0 : 0.2, ease: EASE_OUT }}>
 						<div className="inline-flex items-center gap-1 text-control font-semibold text-text-primary">
 							<ClipboardList size={16} aria-hidden="true" />
 							<span>{t("ask.batchReviewTitle")}</span>
@@ -329,33 +356,35 @@ function BatchAskInlineBar(props: {
 						<Button className="w-full" variant="default" disabled={!allAnswered || props.responding} onClick={() => submitAnswers()}>
 							{t("ask.batchSubmitAll")}
 						</Button>
-					</div>
+					</motion.div>
 				) : currentQuestion ? (
-					<BatchQuestion
-						question={currentQuestion}
-						questionIndex={currentTab}
-						total={total}
-						answer={answers[currentQuestion.id]}
-						inputValue={inputValues[currentQuestion.id] ?? ""}
-						responding={props.responding}
-						onAnswer={(value, label, wasCustom) => answerAndAdvance(currentQuestion, value, label, wasCustom)}
-						onInputChange={(value) => changeBatch((current) => ({ ...current, inputValues: { ...current.inputValues, [currentQuestion.id]: value } }))}
-						onSubmitInput={() => submitText(currentQuestion)}
-						onPrevious={currentTab > 0 ? () => changeBatch((current) => ({ ...current, currentTab: currentTab - 1 })) : undefined}
-						onNext={() => {
-							if (!finalStep) {
-								changeBatch((current) => ({ ...current, currentTab: currentTab + 1 }));
-							} else if (props.request.batchReview) {
-								changeBatch((current) => ({ ...current, currentTab: total }));
-							} else {
-								submitAnswers();
-							}
-						}}
-						nextDisabled={finalStep && !props.request.batchReview && !allAnswered}
-						finalLabel={finalStep && !props.request.batchReview ? t("ask.batchSubmitAll") : undefined}
-					/>
+					<motion.div key={`ask-q-${currentQuestion.id}`} initial={reduce ? { opacity: 1 } : { opacity: 0, x: 8 }} animate={{ opacity: 1, x: 0 }} exit={reduce ? { opacity: 0 } : { opacity: 0, x: -6 }} transition={{ duration: reduce ? 0 : 0.2, ease: EASE_OUT }}>
+						<BatchQuestion
+							question={currentQuestion}
+							questionIndex={currentTab}
+							total={total}
+							answer={answers[currentQuestion.id]}
+							inputValue={inputValues[currentQuestion.id] ?? ""}
+							responding={props.responding}
+							onAnswer={(value, label, wasCustom) => answerAndAdvance(currentQuestion, value, label, wasCustom)}
+							onInputChange={(value) => changeBatch((current) => ({ ...current, inputValues: { ...current.inputValues, [currentQuestion.id]: value } }))}
+							onSubmitInput={() => submitText(currentQuestion)}
+							onPrevious={currentTab > 0 ? () => changeBatch((current) => ({ ...current, currentTab: currentTab - 1 })) : undefined}
+							onNext={() => {
+								if (!finalStep) {
+									changeBatch((current) => ({ ...current, currentTab: currentTab + 1 }));
+								} else if (props.request.batchReview) {
+									changeBatch((current) => ({ ...current, currentTab: total }));
+								} else {
+									submitAnswers();
+								}
+							}}
+							nextDisabled={finalStep && !props.request.batchReview && !allAnswered}
+							finalLabel={finalStep && !props.request.batchReview ? t("ask.batchSubmitAll") : undefined}
+						/>
+					</motion.div>
 				) : null}
-			</div>
+			</AnimatePresence>
 		</ApprovalCard>
 	);
 }
@@ -402,9 +431,11 @@ function BatchQuestion(props: {
 			onKeyDown={(event) => {
 				// 批量卡直接回车（策略见 askUi.resolveBatchAskDirectEnter）：
 				// 选项按钮上已作答回车 = 提交并推进；卡片空白处同理；未作答回车交原生 click 完成选中。
+				// multi_select 例外：勾一个不等于答完，回车不推进，避免少选就提交整卡。
 				if (event.key !== "Enter" || isComposingKeyboardEvent(event)) return;
 				const target = event.target as HTMLElement;
 				const action = resolveBatchAskDirectEnter({
+					type: question.type,
 					fromField: target.tagName === "INPUT" || target.tagName === "TEXTAREA",
 					fromButton: target.tagName === "BUTTON",
 					fromOptionButton: target.classList.contains("ask-inline-bar-option"),
@@ -417,7 +448,6 @@ function BatchQuestion(props: {
 				}
 			}}
 		>
-			<div className="mb-1.5 text-control font-medium leading-[1.5] break-words text-text-primary">{question.question}</div>
 			<div className="ask-batch-question-body">
 				{question.type === "confirm" ? (
 					<div className="flex gap-2">
@@ -433,7 +463,7 @@ function BatchQuestion(props: {
 							}}
 						>
 							{/* 选中态对勾：部分主题色 accent 对比度低，光靠变色难分辨已选项 */}
-							{props.answer === true ? <Check size={14} className="shrink-0 text-[var(--color-success)]" aria-hidden="true" /> : null}
+							{props.answer === true ? <DrawCheck className="shrink-0 text-[var(--color-success)]" /> : null}
 							{t("common.true")}
 						</Button>
 						<Button
@@ -445,7 +475,7 @@ function BatchQuestion(props: {
 								answer(false, t("common.false"));
 							}}
 						>
-							{props.answer === false ? <Check size={14} className="shrink-0 text-[var(--color-success)]" aria-hidden="true" /> : null}
+							{props.answer === false ? <DrawCheck className="shrink-0 text-[var(--color-success)]" /> : null}
 							{t("common.false")}
 						</Button>
 					</div>
@@ -472,7 +502,7 @@ function BatchQuestion(props: {
 										}}
 									>
 										{/* 选中态对勾标记：主题色 accent 对比度低时只靠边框/背景变色难分辨已选项 */}
-										{props.answer === value ? <Check size={14} className="shrink-0 text-[var(--color-success)]" aria-hidden="true" /> : null}
+										{props.answer === value ? <DrawCheck className="shrink-0 text-[var(--color-success)]" /> : null}
 										{/* 说明与标签同一行、同字号、空格分隔，只靠颜色区分（2026-12 用户反馈：
 										    说明别用小字、也别放第二行——小屏还好，大屏上又小又局限。 */}
 										<span className="min-w-0 flex-1 whitespace-normal break-words text-caption leading-[1.45]">
@@ -486,7 +516,7 @@ function BatchQuestion(props: {
 						{question.allowOther !== false ? (
 							<div className="mt-1 flex w-full min-w-0 items-center gap-1.5">
 								<Input
-									className="h-8 min-w-0 flex-1 rounded-sm border border-border-subtle bg-bg-panel px-2 text-caption text-text-primary outline-none transition-[border-color,box-shadow] duration-150 focus:border-[var(--color-accent)] focus:shadow-[var(--focus-ring)]"
+									className="h-8 min-w-0 flex-1 rounded-sm border border-border-subtle bg-bg-panel px-2 text-caption text-text-primary outline-none transition-[border-color,box-shadow] duration-fast focus:border-[var(--color-accent)] focus:shadow-[var(--focus-ring)]"
 									value={props.inputValue}
 									placeholder={question.placeholder || t("ask.customPlaceholder")}
 									disabled={props.responding}
@@ -531,7 +561,7 @@ function BatchQuestion(props: {
 										}}
 									>
 										{/* 选中态对勾标记：主题色 accent 对比度低时只靠边框/背景变色难分辨已选项 */}
-										{selected ? <Check size={14} className="shrink-0 text-[var(--color-success)]" aria-hidden="true" /> : null}
+										{selected ? <DrawCheck className="shrink-0 text-[var(--color-success)]" /> : null}
 										<span className="min-w-0 flex-1 whitespace-normal break-words text-caption leading-[1.45]">
 											<span className="text-text-primary">{label}</span>
 											{description ? <span className="text-text-tertiary">{` ${description}`}</span> : null}
@@ -544,7 +574,7 @@ function BatchQuestion(props: {
 					</>
 				) : question.type === "editor" ? (
 					<Textarea
-						className="h-auto min-h-[60px] w-full flex-1 resize-y rounded-sm border border-border-subtle bg-bg-panel p-2 text-caption leading-[1.5] text-text-primary outline-none transition-[border-color,box-shadow] duration-150 focus:border-[var(--color-accent)] focus:shadow-[var(--focus-ring)]"
+						className="h-auto min-h-[60px] w-full flex-1 resize-y rounded-sm border border-border-subtle bg-bg-panel p-2 text-caption leading-[1.5] text-text-primary outline-none transition-[border-color,box-shadow] duration-fast focus:border-[var(--color-accent)] focus:shadow-[var(--focus-ring)]"
 						value={props.inputValue}
 						placeholder={question.placeholder || t("ask.editorPlaceholder")}
 						disabled={props.responding}
@@ -565,7 +595,7 @@ function BatchQuestion(props: {
 				) : (
 					<div className="flex w-full items-center gap-2">
 						<Input
-							className="h-9 flex-1 rounded-sm border border-border-subtle bg-bg-panel px-2.5 text-control text-text-primary outline-none transition-[border-color,box-shadow] duration-150 focus:border-[var(--color-accent)] focus:shadow-[var(--focus-ring)]"
+							className="h-9 flex-1 rounded-sm border border-border-subtle bg-bg-panel px-2.5 text-control text-text-primary outline-none transition-[border-color,box-shadow] duration-fast focus:border-[var(--color-accent)] focus:shadow-[var(--focus-ring)]"
 							value={props.inputValue}
 							placeholder={question.placeholder || t("ask.inputPlaceholder")}
 							disabled={props.responding}
@@ -611,7 +641,7 @@ export function SessionRuntimeUiOverlay({ sessionId, runtime, ui, responder, onE
 	// 从 atom 原样恢复——选择是「用户进度」，不该随组件生命周期蒸发（详见 ask-draft-atoms.ts）。
 	const requestKey = request ? `${sessionId}:${request.agentId}:${ui?.runtimeGeneration}:${request.requestId}` : "";
 	const [draft, setDraft] = useAtom(askDraftBySessionRequestAtomFamily(requestKey));
-	const single = draft?.single ?? emptyAskSingleDraft();
+	const single = draft?.single ?? initialAskSingleDraft(request?.prefill);
 	const value = single.value;
 	const selectedOption = single.selectedOption;
 	const expanded = single.expanded;
@@ -633,7 +663,7 @@ export function SessionRuntimeUiOverlay({ sessionId, runtime, ui, responder, onE
 
 	/** 单问题卡草稿写盘：合并 single 侧字段，batch 侧原样保留。 */
 	function commitSingleDraft(patch: Partial<AskSingleDraft>) {
-		setDraft((current) => ({ ...(current ?? { key: requestKey }), key: requestKey, single: { ...(current?.single ?? emptyAskSingleDraft()), ...patch } }));
+		setDraft((current) => ({ ...(current ?? { key: requestKey }), key: requestKey, single: { ...(current?.single ?? initialAskSingleDraft(request?.prefill)), ...patch } }));
 	}
 
 	if (!request || !requestState) return null;
@@ -730,13 +760,16 @@ export function SessionRuntimeUiOverlay({ sessionId, runtime, ui, responder, onE
 									disabled={responding}
 									onClick={() => {
 										if (shouldSuppressAskClick()) return;
+										// 点击即提交（对齐 CLI select 与 confirm/批量卡）：先写高亮提供即时反馈，
+										// 应答失败 rollback 后高亮保留，改点其他选项或直接回车即可重发。
 										commitSingleDraft({ selectedOption: option });
+										submitValue(option);
 									}}
 									title={parsed.description || parsed.label}
 								>
 									{/* 选中态对勾：夜间模式下 accent 混色底 + 边框仍可能不够醒目，
 									    与批量卡一致再补一个非颜色线索（success 色，不跟随主题 accent）。 */}
-									{selectedOption === option ? <Check size={14} className="shrink-0 text-[var(--color-success)]" aria-hidden="true" /> : null}
+									{selectedOption === option ? <DrawCheck className="shrink-0 text-[var(--color-success)]" /> : null}
 									{/* 标签不缩不截：短标签（如「开始执行」）保证两枚按钮说明文案起点对齐；
 									    超长标签兜底 max-w 截断，避免挤压说明列。 */}
 									<span className="max-w-[45%] shrink-0 truncate text-caption font-medium leading-none text-text-primary">{parsed.label}</span>
@@ -747,7 +780,7 @@ export function SessionRuntimeUiOverlay({ sessionId, runtime, ui, responder, onE
 						{request.allowOther ? (
 							<div className="mt-1 flex w-full min-w-0 items-center gap-1.5">
 								<Input
-									className="h-8 min-w-0 flex-1 rounded-sm border border-border-subtle bg-bg-panel px-2 text-caption text-text-primary outline-none transition-[border-color,box-shadow] duration-150 focus:border-[var(--color-accent)] focus:shadow-[var(--focus-ring)]"
+									className="h-8 min-w-0 flex-1 rounded-sm border border-border-subtle bg-bg-panel px-2 text-caption text-text-primary outline-none transition-[border-color,box-shadow] duration-fast focus:border-[var(--color-accent)] focus:shadow-[var(--focus-ring)]"
 									value={value}
 									placeholder={t("ask.customPlaceholder")}
 									disabled={responding}
@@ -766,25 +799,6 @@ export function SessionRuntimeUiOverlay({ sessionId, runtime, ui, responder, onE
 						) : null}
 					</div>
 				) : null}
-				{selectedOption ? (
-					<div className="mt-1 flex w-full min-w-0 items-center gap-1.5">
-						<span className="min-w-0 flex-1 truncate text-caption text-text-secondary">
-							{t("ask.selectedPrefix")}
-							{splitAskOption(selectedOption).label}
-						</span>
-						<Button
-							variant="default"
-							disabled={responding}
-							onClick={() => {
-								submitValue(selectedOption);
-								// 提交后清除选中态：应答失败（rollback）或用户重复点击时，不会把上一轮的旧选择再发出去
-								commitSingleDraft({ selectedOption: "" });
-							}}
-						>
-							{t("ask.submit")}
-						</Button>
-					</div>
-				) : null}
 				{request.method === "confirm" ? (
 					<div className="flex gap-2">
 						<Button className="ask-inline-bar-option ask-inline-bar-option-yes" variant="outline" disabled={responding} onClick={() => submitValue(true, true)}>
@@ -798,7 +812,7 @@ export function SessionRuntimeUiOverlay({ sessionId, runtime, ui, responder, onE
 				{request.method === "input" ? (
 					<div className="flex w-full items-center gap-2">
 						<Input
-							className="h-9 flex-1 rounded-sm border border-border-subtle bg-bg-panel px-2.5 text-control text-text-primary outline-none transition-[border-color,box-shadow] duration-150 focus:border-[var(--color-accent)] focus:shadow-[var(--focus-ring)]"
+							className="h-9 flex-1 rounded-sm border border-border-subtle bg-bg-panel px-2.5 text-control text-text-primary outline-none transition-[border-color,box-shadow] duration-fast focus:border-[var(--color-accent)] focus:shadow-[var(--focus-ring)]"
 							autoFocus
 							value={value}
 							placeholder={request.placeholder || t("ask.inputPlaceholder")}
@@ -819,7 +833,7 @@ export function SessionRuntimeUiOverlay({ sessionId, runtime, ui, responder, onE
 				{request.method === "editor" ? (
 					<div className="flex w-full items-center gap-2">
 						<Textarea
-							className="h-auto min-h-[60px] w-full flex-1 resize-y rounded-sm border border-border-subtle bg-bg-panel p-2 text-caption leading-[1.5] text-text-primary outline-none transition-[border-color,box-shadow] duration-150 focus:border-[var(--color-accent)] focus:shadow-[var(--focus-ring)]"
+							className="h-auto min-h-[60px] w-full flex-1 resize-y rounded-sm border border-border-subtle bg-bg-panel p-2 text-caption leading-[1.5] text-text-primary outline-none transition-[border-color,box-shadow] duration-fast focus:border-[var(--color-accent)] focus:shadow-[var(--focus-ring)]"
 							autoFocus
 							value={value}
 							placeholder={request.placeholder || t("ask.editorPlaceholder")}

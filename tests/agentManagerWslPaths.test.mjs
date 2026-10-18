@@ -61,12 +61,9 @@ function loadAgentManager(existsPredicate = () => false) {
 		vm.runInNewContext(transpile("src/main/pi/streamGate.ts"), sandbox, { filename: "streamGate.ts" });
 		return sandbox.exports;
 	})();
-	// cacheHitStats：纯函数真实加载（getRuntimeState 读会话文件统计缓存命中率）
-	const cacheHitStats = (() => {
-		const sandbox = { exports: {}, require };
-		vm.runInNewContext(transpile("src/main/pi/cacheHitStats.ts"), sandbox, { filename: "cacheHitStats.ts" });
-		return sandbox.exports;
-	})();
+	// cacheHitStats：标准 loader 真实加载——该模块依赖 node:fs/promises 与 ../tokenEstimate，
+	// 裸 require 沙箱会把相对 specifier 按 tests/ 解析致 MODULE_NOT_FOUND（见 createTsSandbox 顶部注释）。
+	const cacheHitStats = loadTsCommonJs("src/main/pi/cacheHitStats.ts");
 	const sessionEntryIds = (() => {
 		const sandbox = { exports: {}, require };
 		vm.runInNewContext(transpile("src/main/pi/sessionEntryIds.ts"), sandbox, {
@@ -148,10 +145,14 @@ function loadAgentManager(existsPredicate = () => false) {
 									: // 会话 JSONL 流式行扫描器：真实加载，但注入被断言的 fs 替身（读到 host 路径）
 										id === "../sessions/jsonlLineStream"
 										? loadTsCommonJs("src/main/sessions/jsonlLineStream.ts", { stubs: { "node:fs/promises": fsPromises } })
-										: // 会话文件汇总纯函数：本测试不覆盖，空实现满足 AgentManager 依赖契约
-											id === "../../shared/fileChanges"
-											? { collectLatestTurnFileChanges: () => [] }
-											: require(id),
+										: // 有界历史分页（宿主插件投影 readBoundedEntryPage）：真实加载，
+											// 注入同一套 fs 替身——open 按 position 读 host 路径，路径断言依赖它
+											id === "../sessions/boundedEntryPage"
+											? loadTsCommonJs("src/main/sessions/boundedEntryPage.ts", { stubs: { "node:fs/promises": fsPromises } })
+											: // 会话文件汇总纯函数：本测试不覆盖，空实现满足 AgentManager 依赖契约
+												id === "../../shared/fileChanges"
+												? { collectLatestTurnFileChanges: () => [] }
+												: require(id),
 		},
 		{ filename: "SessionHistoryReader.ts" },
 	);
@@ -176,6 +177,23 @@ function loadAgentManager(existsPredicate = () => false) {
 		require: (id) => {
 			// 停止身份缓存（72fe93da 起 AgentManager 依赖）：真实加载保持身份核对行为
 			if (id === "./stoppedMessageIdentity") return loadTsCommonJs("src/main/pi/stoppedMessageIdentity.ts");
+			// 项目信任闸（Wave 4C 迁出）：真实加载，但注入被断言的 fs/path/os 替身与 WslPaths 沙箱实例
+			if (id === "./projectTrustGate") {
+				return loadTsCommonJs("src/main/pi/projectTrustGate.ts", {
+					stubs: {
+						"node:fs": {
+							existsSync: (filePath) => {
+								calls.existsSync.push(filePath);
+								return existsPredicate(filePath);
+							},
+						},
+						"node:path": path.win32,
+						"node:os": { homedir: () => "C:\\Users\\tester" },
+						"../../shared/ipc": { ipcChannels: {} },
+						"../wsl/WslPaths": wslPaths,
+					},
+				});
+			}
 			if (id === "electron") return { app: {}, Notification: class {} };
 			if (id === "node:fs/promises") return fsPromises;
 			if (id === "node:fs") {
@@ -374,7 +392,7 @@ test("project MCP files require an explicit trust decision", () => {
 	for (const suffix of [".mcp.json", ".pi\\mcp.json"]) {
 		const { AgentManager } = loadAgentManager((filePath) => filePath.endsWith(suffix));
 		const manager = createManager(AgentManager);
-		assert.equal(manager.hasTrustRequiringResources("C:\\project"), true, suffix);
+		assert.equal(manager.projectTrust.hasTrustRequiringResources("C:\\project"), true, suffix);
 	}
 });
 
@@ -388,7 +406,7 @@ test("uses host paths for trust resource checks and Linux paths for trust keys",
 	});
 	manager.configureWsl(wslPaths.createWslEnvironment("Ubuntu-24.04", "root", "/root"));
 
-	await manager.ensureProjectTrust({
+	await manager.projectTrust.ensureProjectTrust({
 		id: "project",
 		name: "ba_cli",
 		path: "//wsl.localhost/Ubuntu-24.04/root/ba_cli",

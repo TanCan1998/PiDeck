@@ -38,7 +38,7 @@ export function PromptSuggestions(props: {
 	// 阻止 mousedown 冒泡到 RichInput，避免点击面板时触发 blur 关闭面板，
 	// 但保留各按钮的 onClick 正常工作。
 	return (
-		<div className="fixed z-[100] flex w-[min(520px,calc(100vw-120px))] max-h-[380px] animate-in flex-col overflow-hidden rounded-lg border border-border-subtle bg-bg-panel shadow-[var(--shadow-popover)] fade-in-0 slide-in-from-bottom-2 duration-150" style={props.anchorStyle} onMouseDown={(e) => e.preventDefault()}>
+		<div className="fixed z-[100] flex w-[min(520px,calc(100vw-120px))] max-h-[380px] animate-in flex-col overflow-hidden rounded-lg border border-border-subtle bg-bg-panel shadow-[var(--shadow-popover)] fade-in-0 slide-in-from-bottom-2 duration-fast" style={props.anchorStyle} onMouseDown={(e) => e.preventDefault()}>
 			<div className="flex items-center justify-between border-b border-border-subtle px-[14px] py-[10px] text-caption font-medium text-text-secondary">
 				<span>{headerLabel}</span>
 				<Button variant="ghost" size="icon" className="h-6 w-6 text-text-tertiary hover:bg-bg-hover hover:text-text-secondary" aria-label={t("common.close")} title={t("common.close")} onClick={props.onClose}>

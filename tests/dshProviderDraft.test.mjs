@@ -30,3 +30,29 @@ test("draft normalization preserves explicit DSH model capabilities", () => {
 	assert.equal(result.name, "供应商 2");
 	assert.deepEqual(result.profile.models, [{ id: "model-a", contextWindow: 128000, maxTokens: 8000, reasoningEfforts: { high: "high" }, input: ["text"] }]);
 });
+
+test("draft preserves custom headers and legacy UA data without promising a runtime UA override", () => {
+	const result = plain(
+		buildDshProviderFromDraft(
+			draft({
+				headers: {
+					"User-Agent": "pi-coding-agent/0.86 (+https://github.com/badlogic/pi-mono)",
+					"x-opencode-session": "sess-abc-123",
+					"X-App-URL": "https://example.com",
+				},
+			}),
+		),
+	);
+	assert.deepEqual(result.profile.headers, {
+		"User-Agent": "pi-coding-agent/0.86 (+https://github.com/badlogic/pi-mono)",
+		"x-opencode-session": "sess-abc-123",
+		"X-App-URL": "https://example.com",
+	});
+});
+
+test("empty / blank / invalid headers do not add a profile override", () => {
+	for (const headers of [undefined, {}, { "  ": "x", badKey: 123 }]) {
+		const result = plain(buildDshProviderFromDraft(draft({ headers })));
+		assert.equal(Object.hasOwn(result.profile, "headers"), false, `headers should be omitted for ${JSON.stringify(headers)}`);
+	}
+});

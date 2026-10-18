@@ -27,10 +27,9 @@ const REQUIRED = [
 	"dsh-anonymous-user-id",
 	"dsh-atomic-write",
 	"dsh-bash-local",
-	"dsh-code-runtime",
+	"dsh-ptc-runtime-node",
 	"dsh-compaction",
 	"dsh-fs",
-	"dsh-invariants",
 	"dsh-output-retention",
 	"dsh-sandbox",
 	"dsh-scope",
@@ -38,7 +37,8 @@ const REQUIRED = [
 	"dsh-session-title-llm",
 	"dsh-shell",
 	"dsh-spill",
-	"dsh-subagent-in-process-driver",
+	"dsh-subagent-fork-in-process",
+	"dsh-subagent-spawn-in-process",
 	"dsh-subprocess",
 	"dsh-timeout",
 	"dsh-workflow",
@@ -47,7 +47,7 @@ const REQUIRED = [
 const ENTRY_PACKAGES = ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-app-boot", "@deepseek-ai/dsh-cmdline", "@deepseek-ai/dsh-client-connection", "@deepseek-ai/dsh-api-gateway", "@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-api-session-controller", "dsh-bill", "dsh-tool-pwsh-persistent"];
 
 /** 造一个「除目标包外全部合规」的最小 runtime 归档；withLib 控制事故复现与否。 */
-async function buildFixture({ withLib }) {
+async function buildFixture({ withLib, nestedKoffi = false, brokenKoffi = false }) {
 	const src = mkdtempSync(join(tmpdir(), "dsh-gate-src-"));
 	const writePkg = (name, extra = {}) => {
 		const dir = join(src, "node_modules", ...name.split("/"));
@@ -62,9 +62,11 @@ async function buildFixture({ withLib }) {
 		writePkg(name);
 	}
 	// 闸门钉死的关键文件（koffi 的 src 入口 + node-pty 存在性）
-	const koffiDir = join(src, "node_modules", "koffi", "src", "koffi");
-	mkdirSync(koffiDir, { recursive: true });
-	writeFileSync(join(koffiDir, "index.cjs"), "module.exports = {};");
+	const koffiRoot = join(src, "node_modules", ...(nestedKoffi ? ["@deepseek-ai", "dsh-shell", "node_modules"] : []), "koffi");
+	mkdirSync(join(koffiRoot, "src", "koffi"), { recursive: true });
+	writeFileSync(join(koffiRoot, "package.json"), JSON.stringify({ name: "koffi", main: "index.cjs" }));
+	writeFileSync(join(koffiRoot, "index.cjs"), 'module.exports = require("./src/koffi/index.cjs");');
+	if (!brokenKoffi) writeFileSync(join(koffiRoot, "src", "koffi", "index.cjs"), "module.exports = {};");
 	mkdirSync(join(src, "node_modules", "node-pty"), { recursive: true });
 	writeFileSync(join(src, "node_modules", "node-pty", "package.json"), JSON.stringify({ name: "node-pty" }));
 	// node-pty 的平台 prebuild 目录（win32 上 conpty.dll 是硬运行时依赖）
@@ -122,6 +124,27 @@ test("归档闸门：缺 lib/ 的 file: 本地包不能被 ./package.json 导出
 		assert.notEqual(status, 0, "缺 lib/index.js 的归档必须校验失败（旧实现被 ./package.json 骗过）");
 		// 归档条目路径前缀随 tar 输入形式变化（./node_modules → dsh-runtime/./…），只钉包名段
 		assert.match(stderr, /no resolvable entry: .*dsh-tool-pwsh-persistent \(main=lib\/index\.js/);
+	} finally {
+		cleanup();
+	}
+});
+
+test("归档闸门：合法嵌套 koffi 不依赖 npm 提升到顶层", async () => {
+	const { archivePath, cleanup } = await buildFixture({ withLib: true, nestedKoffi: true });
+	try {
+		assert.match(execFileSync(process.execPath, [checkScript, archivePath], { encoding: "utf8" }), /OK\s+/);
+	} finally {
+		cleanup();
+	}
+});
+
+test("归档闸门：嵌套 koffi 缺少间接 src 入口也必须失败", async () => {
+	const { archivePath, cleanup } = await buildFixture({ withLib: true, nestedKoffi: true, brokenKoffi: true });
+	try {
+		assert.throws(
+			() => execFileSync(process.execPath, [checkScript, archivePath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+			(error) => /missing critical file: .*koffi.*src\/koffi\/index\.cjs/.test(error.stderr),
+		);
 	} finally {
 		cleanup();
 	}

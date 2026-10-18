@@ -1,9 +1,19 @@
 import { atom } from "jotai";
 import { atomFamily, selectAtom } from "jotai/utils";
 import type { ComposerAgentMode, ImageContent } from "../../../shared/types";
+import type { EnhanceModelSelection } from "../../../shared/enhanceModelPreference";
 import type { ModelPending } from "../utils/modelPendingDisplay";
 import type { QuoteSnippet } from "../components/session/composer/quoteChip";
 import { currentSessionIdAtom } from "./session-atoms";
+
+/**
+ * 提示词增强的固定模型（settings.enhanceModel 镜像）：null = 跟随会话模型。
+ * App 首拉 settings 时水合；设置页保存后写穿，composer 点击增强时读取。
+ */
+export const enhanceModelAtom = atom<EnhanceModelSelection | null>(null);
+
+/** 显式选择后才发送会话正文，旧设置与引导页均默认为关闭。 */
+export const enhanceIncludeContextAtom = atom(false);
 
 /**
  * 粘贴大文本 → 落盘文件 chip 的元数据（内容只在主进程受管目录，此处仅存指针）。
@@ -42,6 +52,9 @@ export const sessionQuotesByIdAtom = atom<Record<string, SessionQuoteMap>>({});
 
 export const sessionComposerModeByIdAtom = atom<Record<string, SessionComposerMode>>({});
 export const sessionSendStateByIdAtom = atom<Record<string, SessionSendState>>({});
+/** 「停止响应」后排队消息抑制自动投递的会话集合（useQueuedPrompt 的 UI 投影：
+ *  逻辑真值在该 hook 的 ref 里，这里只供队列面板显示「已暂停自动发送」提示，避免 toast 瞬时易逝后无从得知队列不会自动发）。 */
+export const queueDrainSuppressedByIdAtom = atom<Record<string, true>>({});
 
 /**
  * 生成进行中切换模型：pi 不支持运行中 set_model，只写入会话记录；
@@ -239,6 +252,8 @@ export const promoteSessionComposerStateAtom = atom(null, (get, set, input: { fr
 	};
 	set(sessionDraftByIdAtom, move(get(sessionDraftByIdAtom)));
 	set(sessionAttachmentsByIdAtom, move(get(sessionAttachmentsByIdAtom)));
+	// 草稿中的引用 token 只是指针；首次提升与失败回退都必须携带全文快照。
+	set(sessionQuotesByIdAtom, move(get(sessionQuotesByIdAtom)));
 	set(sessionPasteFilesByIdAtom, move(get(sessionPasteFilesByIdAtom)));
 	set(sessionComposerModeByIdAtom, move(get(sessionComposerModeByIdAtom)));
 	set(sessionSendStateByIdAtom, move(get(sessionSendStateByIdAtom)));
@@ -260,7 +275,19 @@ export const removeSessionComposerStateAtom = atom(null, (get, set, sessionId: s
 	const sendStates = { ...get(sessionSendStateByIdAtom) };
 	delete sendStates[sessionId];
 	set(sessionSendStateByIdAtom, sendStates);
+	const quotes = { ...get(sessionQuotesByIdAtom) };
+	delete quotes[sessionId];
+	// 引用快照可能含大段全文（引用仓拷贝），漏清会让旧会话的全文永久驻留内存
+	set(sessionQuotesByIdAtom, quotes);
 	const modelPending = { ...get(modelPendingByIdAtom) };
 	delete modelPending[sessionId];
 	set(modelPendingByIdAtom, modelPending);
 });
+
+/**
+ * 语音配置版本号：设置页保存/安装/删除模型后自增，供 useVoiceTranscription 的
+ * 配置探测 effect 依赖。语音配置由主进程独立 store 持有（不在 AppSettings 里），
+ * 渲染层没有现成的「设置已变」信号；用这个轻量计数器把弹框里的改动即时推给
+ * 已挂载的输入框，避免「开了开关但要切会话/重启才出现按钮」。
+ */
+export const voiceConfigRevisionAtom = atom(0);

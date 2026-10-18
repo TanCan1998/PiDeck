@@ -11,6 +11,13 @@ export const TOOL_DETAIL_MAX_CHARS = 8000;
 
 export type ToolDetailTranslate = (key: MainProcessTranslationKey, params?: Record<string, string | number>) => string;
 
+/**
+ * detailText 里的状态段取真实运行态，而不是「有没有 isError」的二值：
+ * 工具运行中就烘焙「运行中」，否则 start→end 之间（子进程还没吐过 stdout 时无 update 事件）
+ * 展开区会一直印着「完成」，用户会把还在跑的长任务（如重定向到日志的 e2e）读成已结束（2026-10 实测误读）。
+ */
+export type ToolDetailStatus = "running" | "done" | "error";
+
 /** 投影器未注入 translate 时的兜底（中文）；装配层应传入当前主进程 locale。 */
 export function defaultToolDetailTranslate(key: MainProcessTranslationKey, params?: Record<string, string | number>): string {
 	return mainProcessT("zh-CN", key, params);
@@ -47,6 +54,47 @@ function extractToolDetails(result: unknown): unknown {
 	return (result as { details?: unknown }).details;
 }
 
+function extractRawCommand(args: unknown): string | undefined {
+	if (!args || typeof args !== "object" || !("command" in args)) return undefined;
+	const command = args.command;
+	return typeof command === "string" ? command : undefined;
+}
+
+/**
+ * pi 0.99 起工具结果自带截断信息（bash / powershell 输出 >1 MiB 时，pi 只给
+ * 模型保留尾部窗口）：result.details.truncation（truncatedBy / totalLines /
+ * totalBytes）与 result.details.fullOutputPath，模型可见文本尾部也带
+ * "[Showing lines X-Y of N ... Full output: <path>]"。
+ *
+ * PiDeck 把它单独下发（meta.resultTruncation），渲染层给出可操作的完整路径提示，
+ * 与自身展示层截断（meta.truncated → 「查看完整输出」读会话文件）区分开：
+ * 后者丢的只是展示字节，前者丢的是 pi 没进上下文的内容。
+ */
+export type PiToolTruncation = {
+	truncatedBy?: string;
+	totalLines?: number;
+	totalBytes?: number;
+	fullOutputPath?: string;
+};
+
+export function extractPiToolTruncation(result: unknown): PiToolTruncation | undefined {
+	if (!result || typeof result !== "object") return undefined;
+	// 运行期/历史投影的 result 都把原始 details 挂在 result.details；无 details 包装时
+	// （DSH 平铺结果）退回顶层查找，保持单一口径。
+	const details = (result as { details?: unknown }).details;
+	const source: Record<string, unknown> = details && typeof details === "object" ? (details as Record<string, unknown>) : (result as Record<string, unknown>);
+	const truncation = source.truncation;
+	if (!truncation || typeof truncation !== "object") return undefined;
+	const t = truncation as Record<string, unknown>;
+	const fullOutputPath = typeof source.fullOutputPath === "string" && source.fullOutputPath ? source.fullOutputPath : typeof t.fullOutputPath === "string" && t.fullOutputPath ? t.fullOutputPath : undefined;
+	return {
+		truncatedBy: typeof t.truncatedBy === "string" ? t.truncatedBy : undefined,
+		totalLines: typeof t.totalLines === "number" ? t.totalLines : undefined,
+		totalBytes: typeof t.totalBytes === "number" ? t.totalBytes : undefined,
+		...(fullOutputPath ? { fullOutputPath } : {}),
+	};
+}
+
 /** 对超长工具文本做首尾截断，保留头部和尾部以兼顾开头信息和错误堆栈。 */
 export function truncateForDetail(text: unknown, translate: ToolDetailTranslate, maxChars = TOOL_DETAIL_MAX_CHARS): string {
 	// safeJson/extractToolResultText 在某些输入下可能返回 undefined（如 JSON.stringify(undefined)），
@@ -79,7 +127,7 @@ export function truncateDetailWithMeta(text: string, translate: ToolDetailTransl
  * 把一次工具调用整理成工具卡展开区可读文案。
  * args 在 end/update 事件里可能已是序列化字符串，先反解再 stringify，避免二次编码。
  */
-export function formatToolDetail(toolName: string, args: unknown, result: unknown, isError: boolean, translate: ToolDetailTranslate): string {
+export function formatToolDetail(toolName: string, args: unknown, result: unknown, status: ToolDetailStatus, translate: ToolDetailTranslate): string {
 	const details = extractToolDetails(result);
 	let argsObj = args;
 	if (typeof args === "string" && args.trim()) {
@@ -90,15 +138,12 @@ export function formatToolDetail(toolName: string, args: unknown, result: unknow
 		}
 	}
 	const argsText = argsObj ? truncateForDetail(safeJson(argsObj), translate) : "";
+	const rawCommand = toolName.trim().toLowerCase() === "bash" ? extractRawCommand(argsObj) : undefined;
+	const commandText = rawCommand === undefined ? "" : truncateForDetail(rawCommand, translate);
 	const resultText = result ? truncateForDetail(extractToolResultText(result) || safeJson(result), translate) : "";
 	const detailsText = details ? truncateForDetail(safeJson(details), translate) : "";
-	const status = translate(isError ? "mainTool.failed" : "mainTool.done");
-	const sections = [
-		translate("mainTool.name", { name: toolName || "tool" }),
-		translate("mainTool.status", { status }),
-		args ? translate("mainTool.arguments", { value: argsText }) : "",
-		result ? translate("mainTool.result", { value: resultText }) : "",
-		details ? translate("mainTool.details", { value: detailsText }) : "",
-	].filter(Boolean);
+	const statusText = translate(status === "error" ? "mainTool.failed" : status === "running" ? "mainTool.running" : "mainTool.done");
+	const argsSection = args ? (rawCommand !== undefined ? translate("mainTool.command", { command: commandText }) : translate("mainTool.arguments", { value: argsText })) : "";
+	const sections = [translate("mainTool.name", { name: toolName || "tool" }), translate("mainTool.status", { status: statusText }), argsSection, result ? translate("mainTool.result", { value: resultText }) : "", details ? translate("mainTool.details", { value: detailsText }) : ""].filter(Boolean);
 	return sections.join("\n\n");
 }

@@ -11,7 +11,7 @@
  *    否则用户新配一个供应商就会看到它插在最前面，找不到刚配的东西。
  * 2. 顺序数组可能带着历史脏数据（重名、空串、已删除的供应商）：rank 只取首次出现的位置，
  *    未知名字直接忽略，函数永远返回输入的一个置换（不增不减，保持调用方 zip 安全）。
- * 3. 上移/下移以「可见列表里的邻居」当锚点，再在完整列表上执行移动：隐藏区里的供应商
+ * 3. 手柄方向键（↑/↓）以「可见列表里的邻居」当锚点，再在完整列表上执行移动：隐藏区里的供应商
  *    在完整顺序里的相对位置可能因此挪一位（用户看不到），但它不会打乱可见区的相对顺序。
  */
 
@@ -75,10 +75,10 @@ export function buildProviderOrderScope(groups: readonly (readonly string[])[], 
 
 /**
  * 把 fromKey 移动到锚点 anchorKey 的前/后，返回新的完整顺序。
- * 拖拽落点与上移/下移按钮都复用这一个入口，避免两套位移逻辑漂移：
+ * 拖拽落点与手柄方向键（↑/↓）都复用这一个入口，避免两套位移逻辑漂移：
  * - 拖拽：anchor = 悬停的卡片，position 由指针在卡片内的上下半区决定；
- * - 上移：anchor = 可见列表里的上一个供应商，position = "before"；
- * - 下移：anchor = 可见列表里的下一个供应商，position = "after"。
+ * - ↑ 键：anchor = 可见列表里的上一个供应商，position = "before"；
+ * - ↓ 键：anchor = 可见列表里的下一个供应商，position = "after"。
  * 无位移（同名、元素不存在）时返回原序副本，调用方可据此跳过持久化。
  */
 export function moveProviderRelative(names: readonly string[], fromKey: string, anchorKey: string, position: "before" | "after"): string[] {
@@ -102,7 +102,7 @@ export function neighborProvider(visibleNames: readonly string[], key: string, d
 }
 
 /**
- * 上移/下移按钮的完整实现：以可见邻居为锚点，在完整列表上执行一次移动。
+ * 手柄 ↑/↓ 键盘重排的完整实现（原上移/下移按钮的无障碍替代）：以可见邻居为锚点，在完整列表上执行一次移动。
  * 返回 null 表示已经在边界（调用方应保持原序，不要写盘）。
  */
 export function moveProviderByStep(fullNames: readonly string[], visibleNames: readonly string[], key: string, delta: -1 | 1): string[] | null {

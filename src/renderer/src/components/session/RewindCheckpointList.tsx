@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { FileDiff, RefreshCw, TriangleAlert, Undo2 } from "lucide-react";
+import { Loader2, FileDiff, RefreshCw, TriangleAlert, Undo2 } from "lucide-react";
 import { useAtomValue } from "jotai";
 import { t, type TranslationKey } from "../../i18n";
 import { sessionRuntimeBySessionIdAtomFamily } from "../../atoms/session-selectors";
@@ -214,7 +214,7 @@ export function RewindCheckpointList(props: { sessionId: string }) {
 			{/* 自动打点失败警示条：长期静默失败会让人以为有快照、真出事才发现没有
 			    可回滚点（2026-09-13 用户报告）——失败态必须可见。成功一次即消失。 */}
 			{health && health.consecutiveFailures > 0 && (
-				<div className="mb-1 flex items-start gap-1.5 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1.5 text-[11px] leading-4 text-destructive">
+				<div className="mb-1 flex items-start gap-1.5 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1.5 text-micro leading-4 text-destructive">
 					<TriangleAlert size={12} strokeWidth={2} className="mt-0.5 shrink-0" aria-hidden="true" />
 					<span className="min-w-0 break-words">
 						{health.lastErrorKind === "no-git"
@@ -240,7 +240,10 @@ export function RewindCheckpointList(props: { sessionId: string }) {
 				</Tooltip>
 			</div>
 			{loading && checkpoints.length === 0 ? (
-				<p className="px-1 py-2 text-xs text-text-tertiary">{t("common.loading")}</p>
+				<p className="flex items-center gap-1.5 px-1 py-2 text-xs text-text-tertiary">
+					<Loader2 size={12} className="animate-pideck-spin" aria-hidden="true" />
+					{t("common.loading")}
+				</p>
 			) : loadError ? (
 				<p className="px-1 py-2 text-xs text-destructive">{loadError}</p>
 			) : checkpoints.length === 0 ? (
@@ -309,11 +312,11 @@ function CheckpointRow(props: {
 						<p className="min-w-0 flex-1 truncate text-xs font-medium text-foreground" title={cp.description}>
 							{titleText}
 						</p>
-						<span className="shrink-0 text-[11px] tabular-nums text-text-tertiary" title={formatAbsoluteTime(cp.timestamp)}>
+						<span className="shrink-0 text-micro tabular-nums text-text-tertiary" title={formatAbsoluteTime(cp.timestamp)}>
 							{formatRelativeTime(cp.timestamp)}
 						</span>
 					</div>
-					<div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-text-tertiary">
+					<div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-micro text-text-tertiary">
 						<Badge variant="outline" className="h-4 px-1 text-[10px] font-normal">
 							{t(TRIGGER_LABEL_KEY[cp.trigger])}
 						</Badge>
@@ -375,7 +378,18 @@ function CheckpointRow(props: {
 				</div>
 			</div>
 			{diffVisible && (
-				<div className="mt-1.5 max-h-40 overflow-auto rounded-md bg-muted/40 px-2 py-1.5 font-mono text-[10px] leading-4 text-text-secondary">{props.diffLoading ? <span>{t("common.loading")}</span> : props.diff ? <pre className="whitespace-pre-wrap">{props.diff}</pre> : <span>{t("rewind.diffEmpty")}</span>}</div>
+				<div className="mt-1.5 max-h-40 overflow-auto rounded-md bg-muted/40 px-2 py-1.5 font-mono text-[10px] leading-4 text-text-secondary">
+					{props.diffLoading ? (
+						<span className="inline-flex items-center gap-1">
+							<Loader2 size={10} className="animate-pideck-spin" aria-hidden="true" />
+							{t("common.loading")}
+						</span>
+					) : props.diff ? (
+						<pre className="whitespace-pre-wrap">{props.diff}</pre>
+					) : (
+						<span>{t("rewind.diffEmpty")}</span>
+					)}
+				</div>
 			)}
 		</div>
 	);

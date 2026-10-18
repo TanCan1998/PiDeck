@@ -109,6 +109,10 @@ function createHarness() {
 		toolSwitches,
 		context,
 		getActiveTools: () => [...activeTools],
+		/** 模拟第三方扩展在 plan 期间异步注册工具：注册即进入活跃集合。 */
+		registerThirdPartyTool(name) {
+			if (!activeTools.includes(name)) activeTools.push(name);
+		},
 		/** 预设下一次 ui.select 的返回值（模拟点击选项；undefined = 关闭选单）。 */
 		queueSelectResponse(value) {
 			selectResponses.push(value);
@@ -121,8 +125,8 @@ function createHarness() {
 		async runInput(text) {
 			return handlers.get("input")({ text }, context);
 		},
-		async runBeforeAgentStart() {
-			return handlers.get("before_agent_start")({}, context);
+		async runBeforeAgentStart(event = {}) {
+			return handlers.get("before_agent_start")(event, context);
 		},
 		async runToolCall(toolName, input) {
 			return handlers.get("tool_call")({ toolName, input }, context);
@@ -162,6 +166,24 @@ test("/plan command keeps plan mode active for the next normal message", async (
 	// before_agent_start 注入只读计划上下文，模型才知道要产出 Plan:。
 	const contextResult = await harness.runBeforeAgentStart();
 	assert.ok(contextResult?.message?.content?.includes("[PLAN MODE ACTIVE]"));
+});
+
+test("before_agent_start 写系统提示 section，不再每轮复制模式文本（issue #365-09）", async () => {
+	const harness = createHarness();
+	await harness.runCommand("plan", "");
+
+	const sections = { pi_deck_earlier: "keep me" };
+	const result = await harness.runBeforeAgentStart({ systemPromptOptions: { sections } });
+
+	// 有 sections 通道时不得返回每轮 message：旧写法会把同一段 Plan 文本写进历史一遍又一遍。
+	assert.equal(result, undefined);
+	assert.match(sections.pi_deck_plan_mode, /^\[PLAN MODE ACTIVE\]/);
+	assert.ok(sections.pi_deck_plan_mode.includes("Plan:\n1. First concrete step"));
+	assert.equal(sections.pi_deck_earlier, "keep me", "前序扩展写入的 section 必须保留");
+
+	// 旧宿主（无 systemPromptOptions）仍走 message 回退，行为不变。
+	const legacy = await harness.runBeforeAgentStart();
+	assert.ok(legacy?.message?.content?.includes("[PLAN MODE ACTIVE]"));
 });
 
 test("/plan command still blocks non-read-only bash while active", async () => {
@@ -219,6 +241,51 @@ test("closing the plan menu after command activation exits plan mode", async () 
 		harness.notifications.some((n) => n.message.includes("已禁用")),
 		"closing the plan menu must exit plan mode",
 	);
+});
+
+test("restore keeps third-party tools registered after plan activation", async () => {
+	// issue #349：plan 激活早于第三方扩展异步注册时，旧快照全量覆盖会把后注册的工具整批删掉。
+	const harness = createHarness();
+	await harness.runCommand("plan", "");
+	await harness.runInput("任务消息");
+	// plan 期间第三方扩展（billion-context 压缩工具等）完成异步注册。
+	harness.registerThirdPartyTool("compress");
+	harness.registerThirdPartyTool("search_context");
+
+	harness.queueSelectResponse("开始执行|恢复写权限，按步骤改代码并勾进度");
+	await harness.runAgentEnd([assistantMessage("分析完成\n\nPlan:\n1. 读取现有实现\n2. 编写迁移脚本")]);
+
+	const tools = harness.getActiveTools();
+	assert.equal(tools.includes("edit"), true, "write tools must be restored on execute");
+	assert.equal(tools.includes("write"), true);
+	assert.equal(tools.includes("compress"), true, "tool registered during plan must survive restore");
+	assert.equal(tools.includes("search_context"), true);
+});
+
+test("re-entering plan mode keeps tools registered after the first snapshot", async () => {
+	// issue #349 镜像路径：enablePlanModeTools 若用旧快照重算，第二次进入 plan 时
+	// 会把快照之后注册的第三方工具当场删掉（/plan on 后再发 composer 计划消息即命中）。
+	const harness = createHarness();
+	await harness.runCommand("plan", "");
+	harness.registerThirdPartyTool("compress");
+
+	await harness.runCommand("plan", "on");
+
+	const tools = harness.getActiveTools();
+	assert.equal(tools.includes("compress"), true, "tool registered after the first snapshot must survive re-entering plan");
+	assert.equal(tools.includes("edit"), false, "plan mode must stay read-only");
+	assert.equal(tools.includes("write"), false);
+});
+
+test("/plan off keeps third-party tools registered after plan activation", async () => {
+	const harness = createHarness();
+	await harness.runCommand("plan", "");
+	harness.registerThirdPartyTool("acp_status");
+
+	await harness.runCommand("plan", "off");
+
+	const tools = harness.getActiveTools();
+	assert.deepEqual(tools.sort(), ["acp_status", "ask_question", "bash", "edit", "read", "write"]);
 });
 
 test("choosing execute from the menu restores write tools and sends execution prompt", async () => {

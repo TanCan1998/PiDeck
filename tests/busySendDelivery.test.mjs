@@ -37,6 +37,19 @@ describe("resolveBusySendDelivery", () => {
 	test("忙碌且未配置时回落 steer（与出厂默认一致）", () => {
 		assert.equal(resolveBusySendDelivery(true, undefined), "steer");
 	});
+	test("ACP 后端忙碌恒 followUp：协议无 steer 通道，设置项对它失效", () => {
+		assert.equal(resolveBusySendDelivery(true, "steer", "acp"), "followUp");
+		assert.equal(resolveBusySendDelivery(true, "followUp", "acp"), "followUp");
+		assert.equal(resolveBusySendDelivery(true, undefined, "acp"), "followUp");
+	});
+	test("ACP 后端空闲仍直发（无需队列语义）", () => {
+		assert.equal(resolveBusySendDelivery(false, "steer", "acp"), undefined);
+	});
+	test("其他后端不受影响：缺省 backend 按设置照常解析", () => {
+		assert.equal(resolveBusySendDelivery(true, "steer", "pi"), "steer");
+		assert.equal(resolveBusySendDelivery(true, "followUp", "dsh"), "followUp");
+		assert.equal(resolveBusySendDelivery(true, "steer"), "steer");
+	});
 });
 
 /**
@@ -47,6 +60,7 @@ describe("resolveBusySendDelivery", () => {
 describe("busy send delivery decision points", () => {
 	const composer = readFileSync("src/renderer/src/hooks/useSessionComposerController.ts", "utf8");
 	const appSource = readFileSync("src/renderer/src/App.tsx", "utf8");
+	const promptDispatchSource = readFileSync("src/renderer/src/hooks/session/useSessionPromptDispatch.ts", "utf8");
 
 	test("composer 发送入口消费 resolveBusySendDelivery，不再按后端分叉", () => {
 		assert.ok(composer.includes("resolveBusySendDelivery(isBusy"));
@@ -57,7 +71,8 @@ describe("busy send delivery decision points", () => {
 	});
 
 	test("App 入队兜底与非队列入口同样走设置，不读 backend", () => {
-		assert.ok(appSource.includes("resolveBusySendDelivery("));
+		// 非队列入口的投递语义解析随 submitPromptSnapshot 迁入 useSessionPromptDispatch。
+		assert.ok(promptDispatchSource.includes("resolveBusySendDelivery("));
 		assert.ok(appSource.includes("behavior: snapshot.behavior ?? store.get(busySendDeliveryAtom)"));
 		assert.doesNotMatch(appSource, /backend === "dsh"\s*\?\s*"followUp"\s*:\s*"steer"/);
 		// atom 与 settings 同步，设置保存后无需重挂载会话

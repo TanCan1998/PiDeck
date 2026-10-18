@@ -30,7 +30,12 @@ function write(relativePath, content) {
 
 before(() => {
 	// 只编译服务与共享类型，免完整 Electron 构建即可跑真实实现。
-	execFileSync(process.execPath, [resolve("node_modules/typescript/bin/tsc"), "src/main/git/GitService.ts", "src/shared/types.ts", "--module", "commonjs", "--target", "es2022", "--moduleResolution", "node", "--esModuleInterop", "--skipLibCheck", "--outDir", buildDir], { cwd: resolve("."), stdio: "pipe" });
+	// --rewriteRelativeImportExtensions：GitService 的依赖链（gitRun/gitWsl）本地 import
+	// 带 .ts 扩展名（Node type stripping 直跑测试的约定），CLI tsc 需在 emit 时重写为 .js。
+	execFileSync(process.execPath, [resolve("node_modules/typescript/bin/tsc"), "src/main/git/GitService.ts", "src/shared/types.ts", "--module", "commonjs", "--target", "es2022", "--moduleResolution", "node", "--esModuleInterop", "--skipLibCheck", "--rewriteRelativeImportExtensions", "--outDir", buildDir], {
+		cwd: resolve("."),
+		stdio: "pipe",
+	});
 	// GitService 依赖 ../fs/trash（懒加载 electron.shell.trashItem），纯 Node 测试
 	// 环境没有 electron，注入 stub 使 require 链可解析（本测试不触达 discard 路径）。
 	const stubElectronDir = join(buildDir, "node_modules", "electron");

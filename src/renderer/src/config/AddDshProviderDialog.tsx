@@ -10,6 +10,7 @@ import { ProviderEndpointFields } from "./ProviderEndpointFields";
 import { DshModelsEditor } from "./DshModelsEditor";
 import type { DshModelRow } from "./DshModelsTable";
 import { validateDshDeepseekModels } from "./dshModels";
+import { DshHeadersEditor } from "./DshHeadersEditor";
 import type { DshProviderDraft } from "./dshProviderDraft";
 
 /** 与 Pi 同款页内草稿：填写连接信息 → 获取/添加模型 → 统一保存；DSH 差异就地说明。 */
@@ -28,6 +29,7 @@ export function AddDshProviderDialog(props: {
 	const [baseUrl, setBaseUrl] = useState("");
 	const [api, setApi] = useState("openai-completions");
 	const [apiKey, setApiKey] = useState("");
+	const [headers, setHeaders] = useState<Record<string, string> | undefined>(undefined);
 	const [models, setModels] = useState<DshModelRow[]>([]);
 	const [saving, setSaving] = useState(false);
 	const [error, setError] = useState<string | null>(null);
@@ -39,7 +41,7 @@ export function AddDshProviderDialog(props: {
 	const candidates = (props.directory ?? []).filter((entry) => !entry.active && !entry.declared && !props.existingNames.includes(entry.provider));
 	const modelFailure = validateDshDeepseekModels(models.map((model) => ({ ...model, name: typeof model.name === "string" ? model.name.trim() || undefined : model.name })));
 	const canSubmit = props.writable && nameValid && !duplicate && !modelFailure && (catalogProvider || (Boolean(baseUrl.trim()) && Boolean(api.trim()) && models.length > 0));
-	const dirty = Boolean(name || baseUrl || apiKey || api !== "openai-completions" || models.length);
+	const dirty = Boolean(name || baseUrl || apiKey || api !== "openai-completions" || models.length || (headers && Object.keys(headers).length > 0));
 
 	useEffect(() => {
 		props.onDirtyChange(dirty);
@@ -54,14 +56,14 @@ export function AddDshProviderDialog(props: {
 		setSaving(true);
 		setError(null);
 		try {
-			return await props.onConfirm({ name: trimmedName, baseUrl, api, apiKey, models, catalogProvider });
+			return await props.onConfirm({ name: trimmedName, baseUrl, api, apiKey, models, catalogProvider, headers });
 		} catch (failure) {
 			setError(failure instanceof Error ? failure.message : String(failure));
 			return false;
 		} finally {
 			setSaving(false);
 		}
-	}, [saving, canSubmit, props.onConfirm, trimmedName, baseUrl, api, apiKey, models, catalogProvider]);
+	}, [saving, canSubmit, props.onConfirm, trimmedName, baseUrl, api, apiKey, models, catalogProvider, headers]);
 
 	useEffect(() => {
 		props.onRegisterSave(submit);
@@ -106,6 +108,8 @@ export function AddDshProviderDialog(props: {
 					</fieldset>
 				</div>
 				<DshModelsEditor models={models} writable={props.writable && !saving} settingsNs={props.settingsNs} providerKey={trimmedName} baseURL={baseUrl} api={catalogProvider ? undefined : api} apiKeyDraft={apiKey} onChange={setModels} />
+				{/* 新建期只保存自定义覆盖；动态 OpenCode 会话头由请求层补齐。 */}
+				<DshHeadersEditor value={headers} writable={props.writable && !saving} onChange={setHeaders} />
 				{(error || props.error) && (
 					<p role="alert" className="break-words text-caption text-destructive">
 						{error || props.error}

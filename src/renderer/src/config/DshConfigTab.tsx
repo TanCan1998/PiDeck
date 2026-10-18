@@ -1,6 +1,6 @@
 import { forwardRef, useCallback, useEffect, useId, useImperativeHandle, useMemo, useRef, useState, type ReactNode } from "react";
 import { useAtomValue } from "jotai";
-import { ArchiveRestore, ChevronDown, Cpu, FileCode2, FolderOpen, LayoutDashboard, LoaderCircle, Power, PowerOff, Puzzle, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
+import { Loader2, ArchiveRestore, ChevronDown, Cpu, FileCode2, FolderOpen, LayoutDashboard, LoaderCircle, Power, PowerOff, Puzzle, RefreshCw, ShieldCheck } from "lucide-react";
 import { desktopApi } from "../desktopApi";
 import { t, type TranslationKey } from "../i18n";
 import { showNotice } from "../utils/notice";
@@ -19,6 +19,7 @@ import { DshHomeSharingNotice } from "./DshHomeSharingNotice";
 import { dshRuntimeStatusAtom } from "../atoms/dsh-atoms";
 import { isDshPluginNamespace, dshPluginNamespaceTitleKey, dshPluginNamespaceDescriptionKey } from "./dshPluginNamespaces";
 import { DshPluginSection, PluginInventoryView } from "./DshPluginSection";
+import { DshPluginMarketSection } from "./DshPluginMarketSection";
 import { DeepseekRouteCard, PiAiProvidersCard } from "./DshProviderCards";
 import { collectCredentialRefsWithValue, normalizeDshSchema, type DshSectionApi } from "./dshSchema";
 import { presetDisplayDescription, presetDisplayName } from "./dshPresetDisplay";
@@ -26,6 +27,17 @@ import { credentialRefFor } from "./dshCredentialRef";
 import { managerArchivedDshLabel } from "../sessionManagerModel";
 import type { ArchivedDshSession } from "../../../shared/types";
 import type { DshHomeSharingState } from "../../../shared/types/dshHome";
+import { isDshManuallyStoppedErrorMessage } from "../../../shared/dshManualStop";
+
+/**
+ * DSH IPC 错误 → 展示文案：host 被手动停止时主进程以内部 sentinel reject，Electron
+ * 包装后会把 "Error invoking remote method 'dsh:...': ..." 原样漏到 banner；命中 sentinel
+ * 就映射成 i18n 引导文案（该状态不会自愈，报原始错误对用户没有诊断价值）。
+ */
+function dshConfigErrorMessage(error: unknown): string {
+	const raw = error instanceof Error ? error.message : String(error);
+	return isDshManuallyStoppedErrorMessage(raw) ? t("config.dsh.manuallyStoppedDesc") : raw;
+}
 
 type DshStatus = {
 	started: boolean;
@@ -283,7 +295,7 @@ export const DshConfigTab = forwardRef<
 				return settingsResult.namespaces;
 			} catch (err) {
 				if (background) throw err;
-				setError(err instanceof Error ? err.message : String(err));
+				setError(dshConfigErrorMessage(err));
 				// describe 失败说明 host boot 刚失败：同步刷新一次状态，让 bootError 详情
 				// （getStatus().bootError）尽早到位，错误 banner 能展示真实原因而不是只有笼统 IPC 消息。
 				void loadStatus();
@@ -539,10 +551,10 @@ export const DshConfigTab = forwardRef<
 									<div className="p-4">
 										<PresetsTab
 											writable={writable}
-											namespace={namespaces.find((ns) => ns.ns === "agent-presets")}
+											namespace={namespaces.find((ns) => ns.ns === "agent-preset-registry")}
 											onSave={async (id) => {
-												const view = namespaces.find((ns) => ns.ns === "agent-presets");
-												await desktopApi.sessions.updateDshSettings("agent-presets", { default: id }, view?.revision);
+												const view = namespaces.find((ns) => ns.ns === "agent-preset-registry");
+												await desktopApi.sessions.updateDshSettings("agent-preset-registry", { selectedDefault: id }, view?.revision);
 												await load();
 											}}
 											sectionApi={sectionApi}
@@ -582,6 +594,10 @@ export const DshConfigTab = forwardRef<
 									    与上方静态插件配置卡片分区：横线 + 间距隔开，避免两区视觉粘连。 */}
 											<div className="mt-6 border-t border-border/60 pt-4">
 												<DshPluginSection />
+											</div>
+											{/* 插件市场（搜索/安装/已安装列表）：与上方插件管理分区，同用横线隔开。 */}
+											<div className="mt-6 border-t border-border/60 pt-4">
+												<DshPluginMarketSection />
 											</div>
 										</div>
 										<div hidden={pluginPane !== "list"}>
@@ -890,7 +906,6 @@ function openDocument() {
 
 type DshAgentPreset = {
 	id: string;
-	trust: "system" | "user";
 	isDefault: boolean;
 	name?: string;
 	description?: string;
@@ -935,8 +950,8 @@ function PluginCard(props: {
 
 /**
  * 预设设置 tab（对齐 dsh-web 的 agent preset 选择/管理）：列出 host 可组合的会话
- * Agent 预设（standard/code/minimal/cordis 等），标记当前默认，并支持把任一预设
- * 设为新会话默认（写入 settings 文档的 agent-presets.default，与 dsh-web 的
+ * Agent 预设（standard/ptc/minimal/cordis 等），标记当前默认，并支持把任一预设
+ * 设为新会话默认（profile 中 agent-preset-registry.selectedDefault，与 dsh-web 的
  * General 设置行同一写入目标；仅对之后新建的会话生效，运行中会话保持原组合）。
  * 保存语义与 Pi 管理页一致：点击「设为默认」只暂存选择，由顶部统一保存提交。
  */
@@ -948,9 +963,33 @@ function PresetsTab(props: { writable: boolean; namespace?: DshNamespaceView; on
 	/** 暂存的新默认预设 id（未保存；顶部统一保存时提交）。 */
 	const [pendingDefault, setPendingDefault] = useState<string | null>(null);
 	const [saving, setSaving] = useState(false);
-	/** 正在等待确认删除的 user 预设（null = 无弹窗；确认后调 agentPreset.remove）。 */
-	const [removingPreset, setRemovingPreset] = useState<DshAgentPreset | null>(null);
-	const [deleting, setDeleting] = useState(false);
+	/** agent-team 实验预设（PiDeck 侧设置项，默认关）：即时写入不入统一保存；
+	 *  变更只影响之后 fork 的 host，运行中的 DSH 会话需重启才换到新组合。 */
+	const [agentTeam, setAgentTeam] = useState(false);
+	const [agentTeamLoaded, setAgentTeamLoaded] = useState(false);
+
+	useEffect(() => {
+		void desktopApi.settings
+			.get()
+			.then((settings) => {
+				setAgentTeam(settings.dshAgentTeamPreset === true);
+				setAgentTeamLoaded(true);
+			})
+			.catch(() => setAgentTeamLoaded(true));
+	}, []);
+
+	/** 切换 agent-team 预设：乐观更新 UI，写设置失败回滚；重启 host 后生效。 */
+	const toggleAgentTeam = async (checked: boolean) => {
+		const prev = agentTeam;
+		setAgentTeam(checked);
+		try {
+			await desktopApi.settings.update({ dshAgentTeamPreset: checked });
+			showNotice(t(checked ? "config.dsh.agentTeamPresetOn" : "config.dsh.agentTeamPresetOff"), 4000);
+		} catch (saveError) {
+			setAgentTeam(prev);
+			showNotice(saveError instanceof Error ? saveError.message : String(saveError), 4000);
+		}
+	};
 
 	const reload = useCallback(async () => {
 		try {
@@ -984,26 +1023,6 @@ function PresetsTab(props: { writable: boolean; namespace?: DshNamespaceView; on
 	const currentDefaultId = presets.find((preset) => preset.isDefault)?.id;
 	const dirty = pendingDefault !== null;
 
-	/**
-	 * 删除本地（user）预设：立即调 agentPreset.remove（host 拒绝 system 预设），
-	 * 成功后重拉名单。与「设为默认」的暂存语义不同——删除是独立破坏性操作，
-	 * 走 ConfirmDialog 确认后即时生效，不并入顶部统一保存。
-	 */
-	const deletePreset = async (preset: DshAgentPreset) => {
-		setDeleting(true);
-		try {
-			await desktopApi.sessions.removeDshAgentPreset(preset.id);
-			// 被删的是暂存的新默认时清掉待保存选择，避免保存一个已不存在的预设 id
-			setPendingDefault((prev) => (prev === preset.id ? null : prev));
-			setRemovingPreset(null);
-			showNotice(t("config.dsh.presetRemoved"), 3000);
-			await reload();
-		} catch (error) {
-			showNotice(error instanceof Error ? error.message : String(error), 4000);
-		} finally {
-			setDeleting(false);
-		}
-	};
 	useEffect(() => {
 		props.sectionApi?.onDirtyChange(instanceId, dirty);
 		// 卸载时清掉本实例的脏来源，避免收起/切换后残留黄点
@@ -1043,6 +1062,16 @@ function PresetsTab(props: { writable: boolean; namespace?: DshNamespaceView; on
 	return (
 		<div className="grid gap-4">
 			<p className="text-micro text-muted-foreground">{t("config.dsh.presetsHint")}</p>
+			{/* agent-team 实验预设（默认关）：PiDeck 侧开关，即时写入；组合变更需重启 host 生效 */}
+			<section className="rounded-md border border-border-subtle bg-bg-panel px-3.5 py-2.5">
+				<div className="flex items-center justify-between gap-4">
+					<div className="grid gap-0.5">
+						<span className="text-caption font-semibold text-foreground">{t("config.dsh.agentTeamPreset")}</span>
+						<p className="text-micro text-muted-foreground">{t("config.dsh.agentTeamPresetHint")}</p>
+					</div>
+					<Switch checked={agentTeam} disabled={!agentTeamLoaded} onCheckedChange={(checked) => void toggleAgentTeam(checked)} />
+				</div>
+			</section>
 			{presets.length === 0 ? (
 				<Empty text={t("config.dsh.presetsEmpty")} />
 			) : (
@@ -1057,7 +1086,6 @@ function PresetsTab(props: { writable: boolean; namespace?: DshNamespaceView; on
 							<div className="flex items-center gap-2">
 								<span className="min-w-0 flex-1 truncate font-mono text-control font-semibold text-foreground">{name}</span>
 								{isDefault && <span className="rounded-full border border-emerald-300/70 bg-emerald-500/10 px-2 py-0.5 text-micro font-medium text-emerald-700 dark:border-emerald-700/70 dark:text-emerald-300">{t("config.dsh.presetDefault")}</span>}
-								<span className={`rounded-full border border-border-subtle px-2 py-0.5 text-micro ${preset.trust === "user" ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"}`}>{t(preset.trust === "user" ? "config.dsh.presetUser" : "config.dsh.presetSystem")}</span>
 								{canSetDefault && (
 									<Button
 										type="button"
@@ -1074,13 +1102,6 @@ function PresetsTab(props: { writable: boolean; namespace?: DshNamespaceView; on
 										{isPending ? t("config.dsh.presetPending") : t("config.dsh.presetSetDefault")}
 									</Button>
 								)}
-								{/* 删除入口仅 user 预设（本地目录的组合行，含 broken 预设——host 契约
-								    要求必须可删）；system 预设是部署自带组合行，host 侧拒绝删除。 */}
-								{props.writable && preset.trust === "user" && (
-									<Button type="button" variant="ghost" size="sm" className="h-7 text-muted-foreground hover:text-danger" disabled={deleting} title={t("config.dsh.presetRemove")} aria-label={t("config.dsh.presetRemove")} onClick={() => setRemovingPreset(preset)}>
-										<Trash2 className="size-3.5" aria-hidden="true" />
-									</Button>
-								)}
 							</div>
 							{description && <p className="mt-1 text-micro text-muted-foreground">{description}</p>}
 							{preset.broken && <p className="mt-1 text-micro text-danger">{t("config.dsh.presetBroken", { reason: preset.broken })}</p>}
@@ -1089,7 +1110,6 @@ function PresetsTab(props: { writable: boolean; namespace?: DshNamespaceView; on
 					);
 				})
 			)}
-			{removingPreset && <ConfirmDialog title={t("common.deleteConfirm")} message={t("common.deleteConfirmMsg", { name: presetDisplayName(removingPreset, t) })} confirmLabel={t("common.delete")} danger onConfirm={() => void deletePreset(removingPreset)} onCancel={() => setRemovingPreset(null)} />}
 		</div>
 	);
 }
@@ -1155,7 +1175,7 @@ function SecurityTab(props: { namespace?: DshNamespaceView; writable: boolean; o
 			props.onChanged();
 			return true;
 		} catch (saveError) {
-			setError(saveError instanceof Error ? saveError.message : String(saveError));
+			setError(dshConfigErrorMessage(saveError));
 			return false;
 		} finally {
 			setSaving(false);
@@ -1187,7 +1207,7 @@ function SecurityTab(props: { namespace?: DshNamespaceView; writable: boolean; o
 				</div>
 				<div className="grid gap-3 p-4">
 					<Select value={selected ?? ""} disabled={!props.writable} onValueChange={(next) => setDraft(next === currentDefault ? null : next)}>
-						<SelectTrigger size="sm" className="h-8 w-72">
+						<SelectTrigger size="sm" className="w-72">
 							<SelectValue placeholder={t("config.dsh.selectPlaceholder")} />
 						</SelectTrigger>
 						<SelectContent>
@@ -1301,7 +1321,7 @@ function RawTab(props: { homeDir: string; sectionApi?: DshSectionApi; instanceKe
 		<div className="flex min-h-0 flex-1 flex-col gap-3">
 			<div className="flex shrink-0 items-center gap-2">
 				<Select value={fileName} onValueChange={setFileName}>
-					<SelectTrigger size="sm" className="h-8 w-48 font-mono">
+					<SelectTrigger size="sm" className="w-48 font-mono">
 						<SelectValue />
 					</SelectTrigger>
 					<SelectContent>
@@ -1327,7 +1347,10 @@ function RawTab(props: { homeDir: string; sectionApi?: DshSectionApi; instanceKe
 					}}
 				/>
 			) : (
-				<div className="flex h-72 items-center justify-center text-control text-muted-foreground">{t("common.loading")}</div>
+				<div className="flex h-72 items-center justify-center gap-2 text-control text-muted-foreground">
+					<LoaderCircle size={14} className="animate-pideck-spin" aria-hidden="true" />
+					{t("common.loading")}
+				</div>
 			)}
 			{/* 编辑位置说明：展示当前正在编辑的具体文件（随下拉切换），保存后由 DSH host 读取 */}
 			<div className="flex shrink-0 flex-col gap-1 rounded-md border border-border-subtle bg-bg-panel px-3 py-2">

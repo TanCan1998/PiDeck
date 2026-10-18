@@ -15,12 +15,14 @@ export type ParsedWslUncPath = {
 export type WslPathErrorCode = "WSL_DISTRO_MISMATCH" | "INVALID_WSL_PATH";
 
 export class WslPathError extends Error {
-	constructor(
-		readonly code: WslPathErrorCode,
-		message: string,
-	) {
+	/** 不用构造器参数属性：本模块经 gitWsl→gitRun→rewind checkpointCore 被
+	 *  tests/*.test.mjs 用 Node type stripping 直接加载，参数属性在 strip-only
+	 *  模式下是语法错误（ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX）。 */
+	readonly code: WslPathErrorCode;
+	constructor(code: WslPathErrorCode, message: string) {
 		super(`${code}: ${message}`);
 		this.name = "WslPathError";
+		this.code = code;
 	}
 }
 

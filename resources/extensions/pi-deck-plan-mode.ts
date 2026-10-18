@@ -21,6 +21,18 @@ const NORMAL_MODE_TOOLS = ["read", "bash", "edit", "write", "ask_question"];
 const PLAN_MODE_DISABLED_TOOLS = new Set<string>(["edit", "write"]);
 const PLAN_MANAGED_TOOLS = new Set<string>([...PLAN_MODE_TOOLS, ...NORMAL_MODE_TOOLS]);
 
+// 静态模式规则：pi 1.x 走系统提示 section，旧宿主仍作为 before_agent_start 消息注入。
+const PLAN_MODE_CONTEXT_TEXT = `[PLAN MODE ACTIVE]\nYou are in PiDeck Plan Mode.\n\nRules:\n- Only inspect and reason. Do not edit or write files.\n- Bash is restricted to read-only commands.\n- Ask the user with ask_question when a requirement is ambiguous.\n- Keep plan steps concise: one short sentence per step; avoid long clauses, parentheticals, or run-on requirements.\n- Put each step on its own numbered line (\"1. ...\", \"2. ...\"). Never nest or merge steps — the UI renders and tracks them line by line.\n- End your response with a numbered plan under an exact \"Plan:\" heading.\n\nPlan:\n1. First concrete step\n2. Second concrete step`;
+
+/**
+ * pi 1.x 的 before_agent_start 事件带可变 systemPromptOptions.sections；旧宿主没有该字段。
+ * 扩展必须自包含，所以这里与 security-gate/goal-mode 各自保留一份（不跨文件 import）。
+ */
+function readSystemPromptSections(event: { systemPromptOptions?: { sections?: Record<string, string> } }): Record<string, string> | undefined {
+	const sections = event.systemPromptOptions?.sections;
+	return sections && typeof sections === "object" ? sections : undefined;
+}
+
 interface TodoItem {
 	step: number;
 	text: string;
@@ -228,12 +240,22 @@ export default function piDeckPlanModeExtension(pi: ExtensionAPI): void {
 	}
 
 	function enablePlanModeTools(): void {
-		if (toolsBeforePlanMode === undefined) toolsBeforePlanMode = pi.getActiveTools();
-		pi.setActiveTools(getPlanModeTools(toolsBeforePlanMode));
+		// 快照只在首次进入 plan 时记录（退出时用它找回写权限），plan 模式的工具面以**当前**
+		// 注册表为准：重复进入 plan（/plan on 后发 composer 计划消息）时若用旧快照重算，
+		// 快照之后注册的第三方工具会在进入 plan 的一刻被覆盖删除（与退出路径同一类 bug，issue #349）。
+		const current = pi.getActiveTools();
+		if (toolsBeforePlanMode === undefined) toolsBeforePlanMode = current;
+		pi.setActiveTools(getPlanModeTools(current));
 	}
 
 	function restoreNormalModeTools(): void {
-		pi.setActiveTools(toolsBeforePlanMode ?? getNormalModeTools(pi.getActiveTools()));
+		// 增量恢复：快照只负责找回 plan 前的工具面（含 edit/write 写权限），
+		// plan 期间后注册的第三方工具（billion-context 压缩工具等异步注册）以当前注册表为准保留。
+		// 旧实现用快照全量覆盖 setActiveTools，会把 plan 激活后才注册的工具整批删掉（issue #349）。
+		const current = pi.getActiveTools();
+		const snapshot = toolsBeforePlanMode ?? getNormalModeTools(current);
+		const keepThirdParty = current.filter((name) => !PLAN_MANAGED_TOOLS.has(name));
+		pi.setActiveTools(uniqueToolNames([...snapshot, ...keepThirdParty]));
 		toolsBeforePlanMode = undefined;
 	}
 
@@ -330,12 +352,20 @@ export default function piDeckPlanModeExtension(pi: ExtensionAPI): void {
 		};
 	});
 
-	pi.on("before_agent_start", async () => {
+	pi.on("before_agent_start", async (event) => {
 		if (planModeEnabled) {
+			// 静态规则进系统提示 section 而不是每轮 message：后者会把同一段文字在会话历史里
+			// 复制一份又一份（实测单会话 22 条），既占 token 又污染历史（issue #365-09）。
+			// 旧宿主无 sections 时保留原路径。
+			const sections = readSystemPromptSections(event);
+			if (sections) {
+				sections["pi_deck_plan_mode"] = PLAN_MODE_CONTEXT_TEXT;
+				return undefined;
+			}
 			return {
 				message: {
 					customType: "pi-deck-plan-mode-context",
-					content: `[PLAN MODE ACTIVE]\nYou are in PiDeck Plan Mode.\n\nRules:\n- Only inspect and reason. Do not edit or write files.\n- Bash is restricted to read-only commands.\n- Ask the user with ask_question when a requirement is ambiguous.\n- Keep plan steps concise: one short sentence per step; avoid long clauses, parentheticals, or run-on requirements.\n- Put each step on its own numbered line (\"1. ...\", \"2. ...\"). Never nest or merge steps — the UI renders and tracks them line by line.\n- End your response with a numbered plan under an exact \"Plan:\" heading.\n\nPlan:\n1. First concrete step\n2. Second concrete step`,
+					content: PLAN_MODE_CONTEXT_TEXT,
 					display: false,
 				},
 			};

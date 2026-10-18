@@ -1,5 +1,6 @@
 import { ConfirmDialog } from "../../ui-shadcn/ConfirmDialog";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { Loader2 } from "lucide-react";
 import { t } from "../../../i18n";
 import { Button } from "../../ui-shadcn/button";
 import { SectionHeading } from "../../ui-shadcn/section-heading";
@@ -22,10 +23,20 @@ export function SettingsSection(props: {
 	divided?: boolean;
 	/** 二级内容是否入淡色框（默认 true；图表类内容传 false 直接铺开） */
 	boxed?: boolean;
+	/** 标题行右侧动作（如「全部展开」）：由分区统一排版，避免各页自己拼 flex 头部长出第二套视觉 */
+	action?: ReactNode;
 }) {
+	const heading = <SectionHeading className="settings-section-header pb-2" titleClassName="text-body font-bold text-foreground" title={props.title} description={props.description} />;
 	return (
 		<section id={props.id} className={props.divided ? "mt-2 border-t border-border-subtle pt-4" : "mt-4 first:mt-0"}>
-			<SectionHeading className="settings-section-header pb-2" titleClassName="text-body font-bold text-foreground" title={props.title} description={props.description} />
+			{props.action != null ? (
+				<div className="flex items-start justify-between gap-2">
+					{heading}
+					<div className="shrink-0">{props.action}</div>
+				</div>
+			) : (
+				heading
+			)}
 			{props.children != null ? props.boxed === false ? <div className="px-0.5 pb-1">{props.children}</div> : <SettingBox>{props.children}</SettingBox> : null}
 		</section>
 	);
@@ -35,8 +46,11 @@ export function StorageTab(props: { settings: AppSettings; onChange: (patch: Par
 	const [logsSize, setLogsSize] = useState<string>("");
 	const [rpcLogsSize, setRpcLogsSize] = useState<string>("");
 	const [pasteFilesSize, setPasteFilesSize] = useState<string>("");
+	const [noticeHistorySize, setNoticeHistorySize] = useState<string>("");
 	const [clearing, setClearing] = useState<string | null>(null);
 	const [feedback, setFeedback] = useState("");
+	/** 应用日志清空信号：递增即让下方的 LogViewer 重查（它挂在同一个 tab 里，但看不到清空动作） */
+	const [logsRefreshSignal, setLogsRefreshSignal] = useState(0);
 	const [confirmDialog, setConfirmDialog] = useState<{
 		title: string;
 		message: string;
@@ -44,13 +58,14 @@ export function StorageTab(props: { settings: AppSettings; onChange: (patch: Par
 	} | null>(null);
 
 	/**
-	 * 统一刷新三类占用统计（应用日志 / RPC 日志 / 粘贴文件）：
+	 * 统一刷新四类占用统计（应用日志 / RPC 日志 / 粘贴文件 / 通知历史）：
 	 * 被 5s 轮询与清理完成后共用，保证「清理后立刻看到新大小」。
 	 */
 	const refreshSizes = useCallback(() => {
 		void window.piDesktop.logs.getSize().then((bytes) => setLogsSize(formatBytes(bytes)));
 		void window.piDesktop.rpcLogs.getSize().then((bytes) => setRpcLogsSize(formatBytes(bytes)));
 		void window.piDesktop.pasteFiles.getSize().then((bytes) => setPasteFilesSize(formatBytes(bytes)));
+		void window.piDesktop.noticeHistory.getSize().then((bytes) => setNoticeHistorySize(formatBytes(bytes)));
 	}, []);
 
 	useEffect(() => {
@@ -70,10 +85,18 @@ export function StorageTab(props: { settings: AppSettings; onChange: (patch: Par
 			} else if (target === "paste") {
 				// 粘贴文件：清空 userData/paste-files 与各项目遗留的 .pideck-paste
 				await window.piDesktop.pasteFiles.clearAll();
+			} else if (target === "noticeHistory") {
+				// 通知历史：清空内存数组并删除落盘文件
+				await window.piDesktop.noticeHistory.clear();
 			} else {
 				await window.piDesktop.logs.clear();
 				await window.piDesktop.rpcLogs.clear();
 				await window.piDesktop.pasteFiles.clearAll();
+				await window.piDesktop.noticeHistory.clear();
+			}
+			if (target === "app" || target === "all") {
+				// 只递增、不重置：信号值必须单调变化，查看器的 effect 才认得出这是一次新清空
+				setLogsRefreshSignal((value) => value + 1);
 			}
 			setFeedback(t("settings.storage.clearSuccess"));
 		} catch (e) {
@@ -142,9 +165,9 @@ export function StorageTab(props: { settings: AppSettings; onChange: (patch: Par
 				<ConfirmDialog title={confirmDialog.title} message={confirmDialog.message} danger onConfirm={confirmDialog.onConfirm} onCancel={() => setConfirmDialog(null)} />
 			)}
 			{/* 操作（清理全部）放最上面，日志相关内容依次下移 */}
-			<SettingsSection title={t("settings.storage.actions")}>
+			<SettingsSection id="settings-section-storage-actions" title={t("settings.storage.actions")}>
 				<SettingRow level={1} title={<span>{t("settings.storage.clearAll")}</span>} description={t("settings.storage.clearAllDesc")}>
-					<Button variant="destructive" loading={clearing === "all"} disabled={clearing !== null} onClick={() => confirmClear("all", `${t("settings.storage.appLogs")} + ${t("settings.storage.rpcLogs")} + ${t("settings.storage.pasteFiles")}`)}>
+					<Button variant="destructive" loading={clearing === "all"} disabled={clearing !== null} onClick={() => confirmClear("all", `${t("settings.storage.appLogs")} + ${t("settings.storage.rpcLogs")} + ${t("settings.storage.pasteFiles")} + ${t("settings.storage.noticeHistory")}`)}>
 						{t("settings.storage.clearAllButton")}
 					</Button>
 				</SettingRow>
@@ -156,10 +179,16 @@ export function StorageTab(props: { settings: AppSettings; onChange: (patch: Par
 					</Button>
 				</SettingRow>
 			</SettingsSection>
-			<SettingsSection title={t("settings.storage.rpcLogs")}>
+			<SettingsSection id="settings-section-storage-rpc-logs" title={t("settings.storage.rpcLogs")}>
 				<div className="flex items-center justify-between gap-3 px-0.5 py-1.5">
 					<span className="text-caption text-muted-foreground">
-						{t("settings.storage.rpcLogsSize")}：{rpcLogsSize || t("common.loading")}
+						{t("settings.storage.rpcLogsSize")}：
+						{rpcLogsSize || (
+							<span className="inline-flex items-center gap-1">
+								<Loader2 size={11} className="animate-pideck-spin" aria-hidden="true" />
+								{t("common.loading")}
+							</span>
+						)}
 					</span>
 					<Button variant="secondary" loading={clearing === "rpc" || clearing === "all"} disabled={clearing !== null} onClick={() => confirmClear("rpc", t("settings.storage.rpcLogs"))}>
 						{t("common.delete")}
@@ -167,21 +196,50 @@ export function StorageTab(props: { settings: AppSettings; onChange: (patch: Par
 				</div>
 			</SettingsSection>
 			{/* 粘贴文件：输入框长文本自动转文件的落盘位置（userData/paste-files，另含各项目遗留 .pideck-paste） */}
-			<SettingsSection title={t("settings.storage.pasteFiles")} description={t("settings.storage.pasteFilesDesc")}>
+			<SettingsSection id="settings-section-storage-paste-files" title={t("settings.storage.pasteFiles")} description={t("settings.storage.pasteFilesDesc")}>
 				<div className="flex items-center justify-between gap-3 px-0.5 py-1.5">
 					<span className="text-caption text-muted-foreground">
-						{t("settings.storage.pasteFilesSize")}：{pasteFilesSize || t("common.loading")}
+						{t("settings.storage.pasteFilesSize")}：
+						{pasteFilesSize || (
+							<span className="inline-flex items-center gap-1">
+								<Loader2 size={11} className="animate-pideck-spin" aria-hidden="true" />
+								{t("common.loading")}
+							</span>
+						)}
 					</span>
 					<Button variant="secondary" loading={clearing === "paste" || clearing === "all"} disabled={clearing !== null} onClick={() => confirmClear("paste", t("settings.storage.pasteFiles"))}>
 						{t("common.delete")}
 					</Button>
 				</div>
 			</SettingsSection>
-			{/* 应用日志（最底部）：管理行 + 查看器；不套淡色框，避免日志多时在刷新区形成多余框边 */}
-			<SettingsSection title={t("settings.storage.appLogs")} boxed={false}>
+			{/* 通知历史：toast 落盘存档（userData/notice-history.json，重启后仍可在通知历史面板回看） */}
+			<SettingsSection id="settings-section-storage-notice-history" title={t("settings.storage.noticeHistory")} description={t("settings.storage.noticeHistoryDesc")}>
 				<div className="flex items-center justify-between gap-3 px-0.5 py-1.5">
 					<span className="text-caption text-muted-foreground">
-						{t("settings.storage.appLogsSize")}：{logsSize || t("common.loading")}
+						{t("settings.storage.noticeHistorySize")}：
+						{noticeHistorySize || (
+							<span className="inline-flex items-center gap-1">
+								<Loader2 size={11} className="animate-pideck-spin" aria-hidden="true" />
+								{t("common.loading")}
+							</span>
+						)}
+					</span>
+					<Button variant="secondary" loading={clearing === "noticeHistory" || clearing === "all"} disabled={clearing !== null} onClick={() => confirmClear("noticeHistory", t("settings.storage.noticeHistory"))}>
+						{t("common.delete")}
+					</Button>
+				</div>
+			</SettingsSection>
+			{/* 应用日志（最底部）：管理行 + 查看器；不套淡色框，避免日志多时在刷新区形成多余框边 */}
+			<SettingsSection id="settings-section-storage-app-logs" title={t("settings.storage.appLogs")} boxed={false}>
+				<div className="flex items-center justify-between gap-3 px-0.5 py-1.5">
+					<span className="text-caption text-muted-foreground">
+						{t("settings.storage.appLogsSize")}：
+						{logsSize || (
+							<span className="inline-flex items-center gap-1">
+								<Loader2 size={11} className="animate-pideck-spin" aria-hidden="true" />
+								{t("common.loading")}
+							</span>
+						)}
 					</span>
 					<div className="flex items-center gap-2">
 						<Button variant="secondary" onClick={handleOpenFolder}>
@@ -192,7 +250,7 @@ export function StorageTab(props: { settings: AppSettings; onChange: (patch: Par
 						</Button>
 					</div>
 				</div>
-				<LogViewer />
+				<LogViewer refreshSignal={logsRefreshSignal} />
 			</SettingsSection>
 			{feedback && (
 				<div className="px-0.5 pb-1 pt-2">

@@ -1,4 +1,4 @@
-import type { AgentUiBatchQuestion, AgentUiRequest, AgentUiResponse } from "../../../shared/types";
+import type { AgentUiBatchQuestion, AgentUiRequest, AgentUiResponse, ChatMessage } from "../../../shared/types";
 
 /**
  * Ask 提问 UI 的纯逻辑（与渲染解耦，便于单测与 E2E 断言）。
@@ -82,12 +82,12 @@ export function resolveActiveAskRequest(runtime: AskRuntimeBinding | undefined, 
  * - multi_select 要多次勾选，不能跳；
  * - editor 的 onChange 每次击键都会写入答案，绝不能自动前进（否则打第一个字就跳题）；
  * - input（点提交/回车）与 select 的自定义文本提交也算「一次提交完成本题」，同样自动；
- * - 单题批次（total <= 1）不自动：卡片本身就是确认卡，点选项即提交等于删掉确认步骤，
- *   误触后无法反悔；未题（total > 1）也自动，去向由调用方决定：
+ * - 单题批次（total === 1）同样自动：末题即直接提交全部（2026-01 用户反馈「点击了答案
+ *   还要再点一次提交」——confirm 卡与多题批次早已是一步提交，单题反向要求二次确认
+ *   既不一致也无必要；防误触由划选守卫与应答 rollback 兜底）。末题去向由调用方决定：
  *   非末题 → 下一题；末题 → 审阅页（review）或直接提交全部。
  */
 export function shouldAutoAdvanceBatchAnswer(input: { type: AgentUiBatchQuestion["type"]; total: number }): boolean {
-	if (input.total <= 1) return false;
 	return input.type === "select" || input.type === "confirm" || input.type === "input";
 }
 
@@ -199,6 +199,129 @@ export function formatSecurityConfirmSummary(info: SecurityConfirmInfo): string 
 }
 
 /**
+ * DSH 已作答回显（纯数据投影）。
+ *
+ * 背景：pi 的 ask 是 ask_question 工具调用，收口时主进程把问答写进工具消息
+ * meta._askCard，时间线留下静态卡；DSH 的审批/提问是带外 server-request，
+ * completed 事件不带答案值，应答后卡片直接消失（用户反馈「dsh 提交后的渲染没有做」）。
+ * 渲染层在 responder 应答 accepted 时用本函数把「请求 + 用户答案」投影成静态回显，
+ * 再经 injectAskEchoMessage 合成为 ask_question 工具消息插入时间线的应答位置
+ * （与 pi 的 meta._askCard 同一渲染路径），不落盘（DSH 历史由 host 折叠，
+ * 写进缓存的合成消息会被下次全量投影冲掉，所以只在渲染派生层注入）。
+ */
+export type AskEchoItem = {
+	question: string;
+	answer: BatchAnswerValue;
+	answered: boolean;
+};
+
+export type AskEcho = {
+	requestId: string;
+	/** 整单取消：标题显示「已取消」 */
+	cancelled: boolean;
+	items: AskEchoItem[];
+};
+
+/** batch 提交信封：serializeBatchAnswers 产出的 JSON（回显侧解码）。 */
+type BatchAnswerEnvelopeItem = { id?: unknown; value?: unknown; label?: unknown };
+
+function decodeBatchEnvelope(value: unknown): BatchAnswerEnvelopeItem[] | undefined {
+	if (typeof value !== "string") return undefined;
+	try {
+		const parsed = JSON.parse(value) as { answers?: unknown };
+		return Array.isArray(parsed?.answers) ? (parsed.answers as BatchAnswerEnvelopeItem[]) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * 把一次已接受的应答投影为回显数据；非 ask 方法或无法解读时返回 undefined（不显示回显）。
+ * - batch_ask：用 batchQuestions 逐题配对信封答案（信封解码失败退回整串原文）；
+ * - confirm：答案取 confirmed；select/input/editor：取 value；
+ * - 取消：列出原题、answered=false（与 pi _askCard 的取消语义一致）。
+ */
+export function buildAskEcho(request: AgentUiRequest, response: AgentUiResponse): AskEcho | undefined {
+	if (!["select", "confirm", "input", "editor", "batch_ask"].includes(request.method)) return undefined;
+	const cancelled = Boolean(response.cancelled);
+	const batchQuestions = request.batchQuestions ?? [];
+	if (request.method === "batch_ask" && batchQuestions.length > 0) {
+		const envelope = decodeBatchEnvelope(response.value);
+		const items: AskEchoItem[] = batchQuestions.map((question) => {
+			const answerItem = envelope?.find((entry) => entry?.id === question.id);
+			const raw = answerItem?.value;
+			const value: BatchAnswerValue = typeof raw === "string" || typeof raw === "boolean" || Array.isArray(raw) ? raw : null;
+			const label = typeof answerItem?.label === "string" ? answerItem.label : undefined;
+			return { question: formatAskTitle(question.question), answer: label ?? value, answered: !cancelled && value !== null };
+		});
+		if (!envelope && !cancelled && typeof response.value === "string") {
+			items.push({ question: formatAskTitle(request.title || ""), answer: response.value, answered: true });
+		}
+		return { requestId: request.requestId, cancelled, items };
+	}
+	const question = formatAskTitle(request.title || "");
+	if (request.method === "confirm") {
+		return { requestId: request.requestId, cancelled, items: [{ question, answer: cancelled ? null : Boolean(response.confirmed), answered: !cancelled }] };
+	}
+	return { requestId: request.requestId, cancelled, items: [{ question, answer: cancelled ? null : (response.value ?? null), answered: !cancelled }] };
+}
+
+/** 回显内联注入参数：应答时刻的快照（锚点 + 时间戳），由 ask-echo-atoms 记录。 */
+export type AskEchoPlacement = {
+	echo: AskEcho;
+	agentId: string;
+	/** 应答时刻时间线最后一条消息 id：回显合成消息插在其后（= 提问阻塞的工具调用位置） */
+	anchorMessageId?: string;
+	answeredAt: number;
+};
+
+/**
+ * 把回显投影为 pi 同款的 ask_question 工具消息（meta._askCard 走 ToolCallCard 的
+ * isAskCard 分支：行头「提问」+「已回答」徽标，展开区逐题列问答）。
+ * 批量时 questions 数组给展开列表，顶层 question/answered 供行头与徽标。
+ */
+export function askEchoToolMessage(placement: AskEchoPlacement): ChatMessage {
+	const items = placement.echo.items;
+	const questionCards = items.map((item) => ({
+		question: item.question,
+		answered: item.answered,
+		...(item.answer === null || item.answer === undefined ? {} : { answer: item.answer }),
+	}));
+	const askCard = {
+		...(questionCards[0] ?? {}),
+		answered: !placement.echo.cancelled && items.some((item) => item.answered),
+		...(questionCards.length > 1 ? { questions: questionCards } : {}),
+	};
+	return {
+		id: `dsh-ask-echo:${placement.echo.requestId}`,
+		agentId: placement.agentId,
+		role: "tool",
+		text: "",
+		timestamp: placement.answeredAt,
+		meta: { toolName: "ask_question", status: "done", _askCard: askCard },
+	};
+}
+
+/**
+ * 在派生消息列表中按锚点内联插入回显工具消息（不改动入参数组）。
+ * - 锚点缺失（应答时会话还没有消息）：插到列表头部（提问先于一切投影内容）；
+ * - 锚点找不到（历史被压缩/host 重投影改写）：放弃注入——错位的回显比没有更糟；
+ * - 已存在同 id（防重）：原样返回。
+ */
+export function injectAskEchoMessage(messages: ChatMessage[], placement: AskEchoPlacement | undefined): ChatMessage[] {
+	if (!placement) return messages;
+	const echoId = `dsh-ask-echo:${placement.echo.requestId}`;
+	if (messages.some((message) => message.id === echoId)) return messages;
+	const synthetic = askEchoToolMessage(placement);
+	if (!placement.anchorMessageId) return [synthetic, ...messages];
+	const anchorIndex = messages.findIndex((message) => message.id === placement.anchorMessageId);
+	if (anchorIndex < 0) return messages;
+	const next = messages.slice();
+	next.splice(anchorIndex + 1, 0, synthetic);
+	return next;
+}
+
+/**
  * 移除 Plan Mode / 安全确认给桌面端识别用的内部标题标记，兑底为人类可读内容。
  * - Plan Mode：[PI_DECK_PLAN_NEXT] 前缀剥掉，保留后面的计划内容；
  * - 安全确认：[PI_DECK_SECURITY_CONFIRM] + JSON 负载，换成「安全确认：<工具>」摘要。
@@ -269,7 +392,8 @@ export type AskDirectEnterAction =
 
 /**
  * 单问题卡直接回车策略。
- * - select 已选中：任意非输入框位置回车即提交（含焦点在选项按钮上——「选了再回车」主路径）；
+ * - select 已选中（应答失败 rollback 后的残留态）：任意非输入框位置回车即重发
+ *   （含焦点在选项按钮上）；正常路径下点击选项即提交，不再停留在此分支。
  *   未选中：选项按钮回车交给原生 click 完成选中；自定义输入的「提交」按钮交原生 click，
  *   避免把自定义文本提交误判为提交旧选项。
  * - confirm：是/否按钮交原生 click（取消按钮回车 = 拒绝），其余位置直接回车默认「确认」。
@@ -304,11 +428,16 @@ export function resolveSingleAskDirectEnter(state: {
 
 /**
  * 批量题卡直接回车策略（与「下一题」按钮同语义，但要求当前题已作答，防误触丢题）：
+ * - multi_select 一律不推进：勾一个选项就算「已作答」（isBatchAnswered 视非空数组为已作答），
+ *   回车会把它当成本题完成——末题无审阅时直接提交整卡，而本题通常还有多个待勾项。
+ *   与点击路径同口径（shouldAutoAdvanceBatchAnswer 同样排除 multi_select）：选项按钮上的
+ *   回车交原生 click 切换勾选，空白处回车不动作，完成走显式的「下一题/提交全部」按钮。
  * - 选项按钮：未作答回车 = 原生 click 选中/切换；已作答回车 = 提交当前答案并推进；
  * - 其他按钮（上一步/下一步/提交自定义/提交全部）：交原生 click，不拦截；
  * - 卡片空白处：已作答且「下一题」可用才推进；nextDisabled（末题未全部作答）时不动作。
  */
 export function resolveBatchAskDirectEnter(state: {
+	type: AgentUiBatchQuestion["type"];
 	fromField: boolean;
 	fromButton: boolean;
 	fromOptionButton: boolean;
@@ -316,6 +445,7 @@ export function resolveBatchAskDirectEnter(state: {
 	nextDisabled: boolean; // 与「下一题」按钮禁用态一致
 }): AskDirectEnterAction {
 	if (state.fromField) return { kind: "none" };
+	if (state.type === "multi_select") return { kind: "none" };
 	if (state.fromOptionButton) {
 		return state.answered && !state.nextDisabled ? { kind: "advance" } : { kind: "none" };
 	}
@@ -405,6 +535,15 @@ export function emptyAskBatchDraft(): AskBatchDraft {
 /** 单问题卡的交互草稿初始值。 */
 export function emptyAskSingleDraft() {
 	return { selectedOption: "", value: "", expanded: true };
+}
+
+/**
+ * 单问题卡的初始草稿（含 input 题预填）：request.prefill 只在纯输入题上有意义，
+ * 选项题忽略它。用工厂而不是让调用方手动拼：预填规则（undefined 容错）只活在这里，
+ * Overlay 的首帧与后续 patch 共用同一入口，避免两处初始化漂移（首帧丢了预填会直接表现为输入框空白）。
+ */
+export function initialAskSingleDraft(prefill?: string) {
+	return { ...emptyAskSingleDraft(), ...(typeof prefill === "string" && prefill ? { value: prefill } : {}) };
 }
 
 /**

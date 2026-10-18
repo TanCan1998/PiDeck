@@ -88,6 +88,10 @@ test("Git IPC and preload use repository targets without changing init/worktree 
 	assert.match(preload, /listRepos:/);
 	assert.match(preload, /branches: \(projectId: string, repoPath\?: ProjectFileTarget\)/);
 	assert.match(gitIpc, /gitBackendRouter\.forProject\(projectId\)\.listRepositories\(\{ projectId, relativePath: "" \}\)/);
+	// repo cwd 仍经统一解析：preload 传 ProjectFileTarget，主进程在 backend 边界解析成本机 cwd。
+	assert.match(gitIpc, /resolveGitCwd/);
+	// git init 收口到 gitService.init(context.projectRoot)（backend 已解析出项目根）；
+	// root 仍是项目宿主路径、不随 repoPath 变；windowsHide/wsl.exe 细节由执行层统一处理。
 	assert.match(gitIpc, /await gitService\.init\(context\.projectRoot\)/);
 	assert.match(gitIpc, /worktreeService\.list\(repository\.projectRoot\)/);
 });

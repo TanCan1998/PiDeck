@@ -1,7 +1,7 @@
-import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui-shadcn/button";
-import { X } from "lucide-react";
+import { Info, Loader2, X } from "lucide-react";
 import { Check, FolderOpen, RefreshCw, UploadCloud } from "lucide-react";
 import { t } from "../../i18n";
 import type { TranslationKey } from "../../i18n";
@@ -11,6 +11,8 @@ import type {
 	CodexImportReport,
 	ClaudeSessionSummary,
 	ClaudeImportReport,
+	QoderSessionSummary,
+	QoderImportReport,
 	OpenCodeSessionSummary,
 	OpenCodeImportReport,
 	ZCodeSessionSummary,
@@ -19,6 +21,14 @@ import type {
 	WorkBuddyImportReport,
 	CursorSessionSummary,
 	CursorImportReport,
+	KimiSessionSummary,
+	KimiImportReport,
+	KimiWorkSessionSummary,
+	KimiWorkImportReport,
+	KimiWorkShareRootInfo,
+	KimiWorkShareRootOrigin,
+	MinimaxSessionSummary,
+	MinimaxImportReport,
 	DirectorySessionSummary,
 	DirectorySessionSourceDir,
 	DirectorySourceKind,
@@ -26,6 +36,7 @@ import type {
 	Project,
 } from "../../../../shared/types";
 import { Checkbox } from "../ui-shadcn/checkbox";
+import { Input } from "../ui-shadcn/input";
 import { Label } from "../../components/ui-shadcn/label";
 import { DirectoryImportSourceList } from "./DirectoryImportSourceList";
 import { ImportListNoMatch, ImportListSearchRow, ImportListWindowFooter } from "./ImportListControls";
@@ -96,6 +107,12 @@ function formatClaudeStatus(status: ClaudeSessionSummary["status"]) {
 	if (status === "current") return t("claude.status.current");
 	if (status === "outdated") return t("claude.status.outdated");
 	return t("claude.status.new");
+}
+
+function formatQoderStatus(status: QoderSessionSummary["status"]) {
+	if (status === "current") return t("qoder.status.current");
+	if (status === "outdated") return t("qoder.status.outdated");
+	return t("qoder.status.new");
 }
 
 function formatOpenCodeStatus(status: OpenCodeSessionSummary["status"]) {
@@ -179,9 +196,7 @@ export function CodexImportModal(props: {
 						</Button>
 					</DialogClose>
 				</DialogHeader>
-				<div className="modal-header-sub">
-					<small>{props.project.name}</small>
-				</div>
+				<div className="px-4 pb-2 text-xs text-muted-foreground">{props.project.name}</div>
 				<div className="codex-import-toolbar">
 					<div>
 						<strong>{t("codex.importCount", { count: props.sessions.length })}</strong>
@@ -197,7 +212,7 @@ export function CodexImportModal(props: {
 							{allSelected ? t("codex.selectNone") : t("common.selectAll")}
 						</Button>
 						<Button variant="default" size="sm" className="primary-action h-7 px-2.5 text-xs shadow-none rounded-lg gap-1.5" onClick={props.onImport} disabled={props.importing || props.selectedPaths.length === 0}>
-							<UploadCloud size={14} />
+							{props.importing ? <Loader2 size={14} className="animate-pideck-spin" aria-hidden="true" /> : <UploadCloud size={14} />}
 							{props.importing
 								? t("codex.importing")
 								: t("codex.importSelected", {
@@ -290,6 +305,22 @@ export function ClaudeImportModal(props: {
 	onImport: () => void;
 }) {
 	return <SessionImportModal copyPrefix="claude" formatStatus={formatClaudeStatus} {...props} />;
+}
+
+export function QoderImportModal(props: {
+	project: Project;
+	sessions: QoderSessionSummary[];
+	selectedPaths: string[];
+	loading: boolean;
+	importing: boolean;
+	report: QoderImportReport | null;
+	onClose: () => void;
+	onRefresh: () => void;
+	onToggle: (sourcePath: string) => void;
+	onToggleAll: () => void;
+	onImport: () => void;
+}) {
+	return <SessionImportModal copyPrefix="qoder" formatStatus={formatQoderStatus} {...props} />;
 }
 
 export function OpenCodeImportModal(props: {
@@ -403,9 +434,7 @@ function SessionImportModal<T extends ImportSessionLike>(props: {
 						</Button>
 					</DialogClose>
 				</DialogHeader>
-				<div className="modal-header-sub">
-					<small>{props.headerSubtitle ?? props.project.name}</small>
-				</div>
+				<div className="px-4 pb-2 text-xs text-muted-foreground">{props.headerSubtitle ?? props.project.name}</div>
 				{props.headerExtra}
 				<div className="codex-import-toolbar">
 					<div>
@@ -424,7 +453,7 @@ function SessionImportModal<T extends ImportSessionLike>(props: {
 									{allSelected ? copy("selectNone") : t("common.selectAll")}
 								</Button>
 								<Button variant="default" size="sm" className="primary-action h-7 px-2.5 text-xs shadow-none rounded-lg gap-1.5" onClick={props.onImport} disabled={props.importing || props.selectedPaths.length === 0}>
-									<UploadCloud size={14} />
+									{props.importing ? <Loader2 size={14} className="animate-pideck-spin" aria-hidden="true" /> : <UploadCloud size={14} />}
 									{props.importing ? copy("importing") : copy("importSelected", { count: props.selectedPaths.length })}
 								</Button>
 							</>
@@ -679,4 +708,176 @@ export function CursorImportModal(props: {
 	onImport: () => void;
 }) {
 	return <SessionImportModal copyPrefix="cursor" formatStatus={formatCursorStatus} {...props} />;
+}
+
+function formatKimiStatus(status: KimiSessionSummary["status"]) {
+	if (status === "current") return t("kimi.status.current");
+	if (status === "outdated") return t("kimi.status.outdated");
+	return t("kimi.status.new");
+}
+
+export function KimiImportModal(props: {
+	project: Project;
+	sessions: KimiSessionSummary[];
+	selectedPaths: string[];
+	loading: boolean;
+	importing: boolean;
+	report: KimiImportReport | null;
+	onClose: () => void;
+	onRefresh: () => void;
+	onToggle: (sourcePath: string) => void;
+	onToggleAll: () => void;
+	onImport: () => void;
+}) {
+	return <SessionImportModal copyPrefix="kimi" formatStatus={formatKimiStatus} {...props} />;
+}
+
+function formatMinimaxStatus(status: MinimaxSessionSummary["status"]) {
+	if (status === "current") return t("minimax.status.current");
+	if (status === "outdated") return t("minimax.status.outdated");
+	return t("minimax.status.new");
+}
+
+/** MinimaxCode（CLI）会话导入弹窗：数据目录固定 ~/.minimax，与其它简单源同构。 */
+export function MinimaxImportModal(props: {
+	project: Project;
+	sessions: MinimaxSessionSummary[];
+	selectedPaths: string[];
+	loading: boolean;
+	importing: boolean;
+	report: MinimaxImportReport | null;
+	onClose: () => void;
+	onRefresh: () => void;
+	onToggle: (sourcePath: string) => void;
+	onToggleAll: () => void;
+	onImport: () => void;
+}) {
+	return <SessionImportModal copyPrefix="minimax" formatStatus={formatMinimaxStatus} {...props} />;
+}
+
+function formatKimiWorkStatus(status: KimiWorkSessionSummary["status"]) {
+	if (status === "current") return t("kimiwork.status.current");
+	if (status === "outdated") return t("kimiwork.status.outdated");
+	return t("kimiwork.status.new");
+}
+
+/** 数据目录来源标签：让用户知道这个位置是从哪得出的（手动指定 > Kimi 配置 > 默认安装位）。 */
+function kimiWorkOriginCopy(origin: KimiWorkShareRootOrigin) {
+	if (origin === "settings") return t("kimiwork.origin.settings");
+	if (origin === "app-config") return t("kimiwork.origin.appConfig");
+	return t("kimiwork.origin.default");
+}
+
+/**
+ * Kimi Work（kimi-desktop 桌面版）会话导入弹窗。
+ *
+ * 与 CLI 版（KimiImportModal）的差异：数据目录位置不固定——头部卡片展示主进程的探测结果
+ * （位置 + 来源徽标），「更改…」展开手动指定输入（写入 settings.kimiWorkShareRoot，优先级最高）；
+ * 探测明确失败时输入行自动展开。卡片下方固定一行「导入影响说明」（只读源/建议关闭 Kimi Work/覆盖语义），满足导入前知情。
+ */
+export function KimiWorkImportModal(props: {
+	project: Project;
+	sessions: KimiWorkSessionSummary[];
+	selectedPaths: string[];
+	loading: boolean;
+	importing: boolean;
+	report: KimiWorkImportReport | null;
+	/** 数据目录探测结果（null = 尚未探测完成）。 */
+	shareRoot: KimiWorkShareRootInfo | null;
+	/** settings 里手动指定的目录（空串 = 未指定，走探测链）。 */
+	customRoot: string;
+	/** 手动指定输入框草稿。 */
+	customRootDraft: string;
+	onSetCustomRootDraft: (value: string) => void;
+	onApplyCustomRoot: () => void;
+	onClearCustomRoot: () => void;
+	onClose: () => void;
+	onRefresh: () => void;
+	onToggle: (sourcePath: string) => void;
+	onToggleAll: () => void;
+	onImport: () => void;
+}) {
+	const found = props.shareRoot?.root ?? null;
+	// 手动指定输入默认收起（探测成功是主流路径，不需要看到输入框）；
+	// 探测明确失败（root 为空）时自动展开，引导用户手动填写。
+	const [customRootOpen, setCustomRootOpen] = useState(false);
+	useEffect(() => {
+		if (props.shareRoot && !props.shareRoot.root) setCustomRootOpen(true);
+	}, [props.shareRoot]);
+	return (
+		<SessionImportModal
+			copyPrefix="kimiwork"
+			formatStatus={formatKimiWorkStatus}
+			project={props.project}
+			sessions={props.sessions}
+			selectedPaths={props.selectedPaths}
+			loading={props.loading}
+			importing={props.importing}
+			report={props.report}
+			onClose={props.onClose}
+			onRefresh={props.onRefresh}
+			onToggle={props.onToggle}
+			onToggleAll={props.onToggleAll}
+			onImport={props.onImport}
+			headerSubtitle={
+				<span className="inline-flex min-w-0 items-baseline gap-1.5">
+					<strong className="shrink-0 font-medium text-foreground">{props.project.name}</strong>
+					<span className="min-w-0 truncate">{displayPath(props.project.path)}</span>
+				</span>
+			}
+			// 项目路径已并入副标题，工具栏左侧只留计数，不再重复路径。
+			toolbarCopy={{ title: t("kimiwork.importCount", { count: props.sessions.length }), hint: "" }}
+			headerExtra={
+				<div className="flex flex-col gap-1.5 px-4 pb-3">
+					{/* 数据目录卡片：探测结果 + 来源徽标 +「更改…」展开的手动指定（写入 settings.kimiWorkShareRoot，优先级最高） */}
+					<div className="rounded-lg border border-border bg-bg-muted/30 px-3 py-2 text-xs">
+						<div className="flex items-center gap-2">
+							<FolderOpen size={13} className="shrink-0 text-muted-foreground" aria-hidden="true" />
+							<span className="shrink-0 text-muted-foreground">{t("kimiwork.sourceLabel")}</span>
+							<code className="min-w-0 flex-1 truncate" title={found ?? undefined}>
+								{found ?? t("kimiwork.notFound")}
+							</code>
+							{found && props.shareRoot?.origin && <span className="shrink-0 rounded bg-surface-hover px-1.5 py-0.5 text-muted-foreground">{kimiWorkOriginCopy(props.shareRoot.origin)}</span>}
+							{found && props.shareRoot?.sessionsFound === false && (
+								<span className="shrink-0 text-warning" title={t("kimiwork.sessionsMissingHint")}>
+									{t("kimiwork.sessionsMissing")}
+								</span>
+							)}
+							<Button variant="ghost" size="sm" className="h-6 shrink-0 px-1.5 text-xs" onClick={() => setCustomRootOpen((open) => !open)} disabled={props.importing}>
+								{t("kimiwork.changeRoot")}
+							</Button>
+						</div>
+						{customRootOpen && (
+							<div className="mt-2 flex items-center gap-2">
+								<span className="shrink-0 text-muted-foreground">{t("kimiwork.customRootLabel")}</span>
+								<Input value={props.customRootDraft} onChange={(event) => props.onSetCustomRootDraft(event.target.value)} placeholder={t("kimiwork.customRootPlaceholder")} className="h-7 min-w-0 flex-1 text-xs" />
+								<Button variant="outline" size="sm" className="h-7 shrink-0 px-2.5 text-xs shadow-none rounded-lg" onClick={props.onApplyCustomRoot} disabled={props.importing || !props.customRootDraft.trim()}>
+									{t("kimiwork.applyCustomRoot")}
+								</Button>
+								{props.customRoot && (
+									<Button variant="ghost" size="sm" className="h-7 shrink-0 px-1.5 text-xs" onClick={props.onClearCustomRoot} disabled={props.importing}>
+										{t("kimiwork.clearCustomRoot")}
+									</Button>
+								)}
+							</div>
+						)}
+					</div>
+					{/* 导入前知情：只读源不修改 Kimi Work 原文件；运行中导入可能缺最新条目；重复导入覆盖旧副本。 */}
+					<p className="flex items-start gap-1.5 text-[11px] leading-relaxed text-muted-foreground/80">
+						<Info size={12} className="mt-px shrink-0" aria-hidden="true" />
+						<span>{t("kimiwork.impactNote")}</span>
+					</p>
+				</div>
+			}
+			emptyOverride={
+				!found && props.shareRoot ? (
+					// 未探测到数据目录：空列表的真正原因不是「没有会话」，引导手动指定位置。
+					<div className="codex-import-empty">
+						<strong>{t("kimiwork.missingRootTitle")}</strong>
+						<span>{t("kimiwork.missingRootDesc")}</span>
+					</div>
+				) : undefined
+			}
+		/>
+	);
 }

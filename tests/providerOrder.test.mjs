@@ -3,7 +3,7 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
-// 供应商卡片自定义顺序纯函数：应用顺序 / 拖拽落点 / 上移下移 / 边界
+// 供应商卡片自定义顺序纯函数：应用顺序 / 拖拽落点 / 手柄方向键 / 边界
 const { buildProviderRank, applyProviderOrder, buildProviderOrderScope, moveProviderRelative, neighborProvider, moveProviderByStep } = loadTsCommonJs("src/renderer/src/utils/providerOrder.ts");
 
 // vm 沙箱里「数组字面量 / 展开语法」产出的数组原型属于沙箱 realm，与宿主 realm 的数组
@@ -137,10 +137,15 @@ test("契约完整性：供应商排序在主进程设置、配置页两处、DS
 	// DSH 会话用 dshProviderOrder，Pi 会话用 providerOrder（同一入口三元切换，不能只传一个）
 	assert.ok(pickerHost.includes("providerOrder={preference.isDshSession ? preference.dshProviderOrder : preference.providerOrder}"));
 
-	// 拖拽手柄/上移/下移三个提示文案中英都要有（缺 key 会渲染成原始 key）
-	for (const key of ["config.dragProvider", "config.moveProviderUp", "config.moveProviderDown", "config.providerOrderHint", "config.providerOrderReset", "config.dsh.providerOrderHint"]) {
+	// 拖拽手柄与两条排序说明的中英文案都要有（缺 key 会渲染成原始 key）；上移/下移按钮已删，
+	// 相应文案 key 一并移除——若谁把按钮加回来，这里必须先把 key 和断言补回并说明理由。
+	for (const key of ["config.dragProvider", "config.providerOrderHint", "config.providerOrderReset", "config.dsh.providerOrderHint"]) {
 		assert.ok(zhCopy.includes(`"${key}"`), `zh-CN 缺少 ${key}`);
 		assert.ok(enCopy.includes(`"${key}"`), `en-US 缺少 ${key}`);
+	}
+	for (const removedKey of ["config.moveProviderUp", "config.moveProviderDown"]) {
+		assert.ok(!zhCopy.includes(`"${removedKey}"`), `zh-CN 不应再有已删按钮的 ${removedKey}`);
+		assert.ok(!enCopy.includes(`"${removedKey}"`), `en-US 不应再有已删按钮的 ${removedKey}`);
 	}
 });
 
@@ -194,4 +199,30 @@ test("契约完整性：排序提示与「恢复默认顺序」在四个页都�
 	// DSH 页要透传 scope 与重置回调，否则卡片上的排序入口会静默失效
 	assert.ok(dshTab.includes("providerOrderScope={props.providerOrderScope}"));
 	assert.ok(dshTab.includes("onResetProviders={props.onResetProviders}"));
+});
+
+test("契约完整性：上移/下移按钮已移除，排序收敛为拖拽 + 手柄方向键 + FLIP 落位动画", () => {
+	const read = (path) => readFileSync(path, "utf8");
+	const hook = read("src/renderer/src/hooks/useProviderReorder.ts");
+	const modelsTab = read("src/renderer/src/config/ModelsTab.tsx");
+	const authTab = read("src/renderer/src/config/AuthTab.tsx");
+	const dshCards = read("src/renderer/src/config/DshProviderCards.tsx");
+
+	// 三个页面都不再渲染上移/下移按钮（按钮回归 = 视觉噪音回归，别再加回来）
+	for (const [label, source] of [
+		["ModelsTab", modelsTab],
+		["AuthTab", authTab],
+		["DshProviderCards", dshCards],
+	]) {
+		assert.ok(!source.includes("config.moveProviderUp") && !source.includes("config.moveProviderDown"), `${label} 不应再渲染上移/下移按钮`);
+		assert.ok(!source.includes("providerReorder.canMove") && !source.includes("providerReorder.moveBy"), `${label} 不应再引用按钮专用的 canMove/moveBy`);
+	}
+	// 键盘可达性：手柄聚焦后 ↑/↓ 以可见邻居为锚点移动（纯键盘用户没有按钮也能排序）
+	assert.ok(hook.includes("moveProviderByStep("), "hook 缺少键盘重排（↑/↓ 以可见邻居为锚点）");
+	assert.ok(hook.includes("onKeyDown:"), "gripProps 缺少键盘接线");
+	// FLIP 落位动画：重排后卡片从旧位置滑到新位置而不是瞬间跳变，且跟随系统「减少动态效果」
+	assert.ok(hook.includes("rectsBeforeReorder") && hook.includes(".animate("), "hook 缺少 FLIP 位移动画");
+	assert.ok(hook.includes("prefers-reduced-motion"), "动画必须跟随系统「减少动态效果」设置");
+	// 拖拽影像：克隆卡头当拖拽影像（原生影像只是十几像素的手柄图标）
+	assert.ok(hook.includes("setDragImage"), "hook 缺少拖拽影像增强");
 });

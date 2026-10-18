@@ -5,6 +5,8 @@ import test from "node:test";
 const sessionView = readFileSync("src/renderer/src/components/session/SessionView.tsx", "utf8");
 const runtimeInjector = readFileSync("src/renderer/src/components/session/SessionRuntimeInjector.tsx", "utf8");
 const app = readFileSync("src/renderer/src/App.tsx", "utf8");
+// 运行控制域已迁入 useSessionRunControl（App 只保留装配与能力接线）
+const runControl = readFileSync("src/renderer/src/hooks/session/useSessionRunControl.ts", "utf8");
 const surfaces = readFileSync("src/renderer/src/styles/surfaces.css", "utf8");
 const foundation = readFileSync("src/renderer/src/styles/foundation.css", "utf8");
 
@@ -41,15 +43,15 @@ test("restart is offered for the current session, including an unbound session",
 	// 已关闭的会话同样能拿到「启动 Agent」入口。
 	assert.match(app, /runControl: currentSessionId\n\s*\? \{/);
 	assert.match(app, /capabilities: getSessionRunCapabilities\(currentSessionId\)/);
-	// 终止态 / 未启动会话的主控项在 App 分派层走 activateRuntime 或 restartRuntime。
-	assert.match(app, /async function restartSessionAnyState\(sessionId: string\)/);
-	assert.match(app, /await api\.sessions\.activateRuntime\(sessionId\)/);
+	// 终止态 / 未启动会话的主控项在 useSessionRunControl 分派层走 activateRuntime 或 restartRuntime。
+	assert.match(runControl, /async function restartSessionAnyState\(sessionId: string\)/);
+	assert.match(runControl, /await api\.sessions\.activateRuntime\(sessionId\)/);
 });
 
 test("model-picker restart must light the SessionView overlay via restartActiveAgent", () => {
 	// 用户可见症状：切新模型确认重启后，时间线应出现半透明 loader +「正在重启」。
 	// overlay 只认 isRestarting；该值来自 restartingAgentId === activeAgentId，
-	// 而 restartingAgentId 只在 App.restartActiveAgent 里置位。
+	// 而 restartingAgentId 只在 useSessionRunControl.restartRuntimeTarget 里置位。
 	const controller = readFileSync("src/renderer/src/hooks/useSessionRuntimeController.ts", "utf8");
 	// 重启入口在 controller（选择器与快捷键循环共用），组件只渲染确认框
 	const picker = [readFileSync("src/renderer/src/hooks/useSessionPreferenceState.ts", "utf8"), readFileSync("src/renderer/src/hooks/useSessionPreferenceController.ts", "utf8")].join("\n");
@@ -58,8 +60,9 @@ test("model-picker restart must light the SessionView overlay via restartActiveA
 	assert.match(surfaceStage, /t\("app\.restarting"\)/);
 	assert.match(runtimeInjector, /isRestarting=\{runtime\.isRestartingThisAgent\}/);
 	assert.match(controller, /isRestartingThisAgent = restartingAgentId === activeAgentId/);
-	assert.match(app, /setRestartingAgentId\(restartingAgent\.id\)/);
-	assert.match(picker, /await restartActiveAgent\(intent\.agentId\)/);
+	assert.match(runControl, /setRestartingAgentId\(restartingAgent\.id\)/);
+	assert.match(picker, /await restartActiveAgent\(intent\.handle\.agentId\)/);
+	// 564689b42 起 intent 携带 handle 封装（sessionId+agentId）并加了会话归属守卫：重启授权不得跨会话。
 	assert.doesNotMatch(picker, /desktopApi\.sessions\.restartRuntime/);
 });
 

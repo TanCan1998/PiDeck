@@ -68,6 +68,24 @@ test("浏览器/预览兜底 API 同步提供安装态方法（缺一则预览�
 	}
 });
 
+test("本地导入拆成归档 / 目录两个通道（Windows 单框 openFile+openDirectory 选不到 .tgz）", () => {
+	assert.match(ipc, /dshRuntimeInstallLocal:\s*"dsh-runtime:install-local"/);
+	assert.match(ipc, /dshRuntimeInstallLocalDir:\s*"dsh-runtime:install-local-dir"/);
+
+	const archiveBlock = sessionIpc.match(/ipcMain\.handle\(\s*ipcChannels\.dshRuntimeInstallLocal,[\s\S]*?\n[\t ]*\}\);/);
+	assert.ok(archiveBlock, "sessionIpc.ts 必须注册归档导入 handler");
+	assert.match(archiveBlock[0], /extensions:\s*\[\s*"tgz",\s*"gz"\s*\]/);
+	assert.match(archiveBlock[0], /properties:\s*\[\s*"openFile"\s*\]/, "归档入口只能选文件");
+
+	const dirBlock = sessionIpc.match(/ipcMain\.handle\(\s*ipcChannels\.dshRuntimeInstallLocalDir,[\s\S]*?\n[\t ]*\}\);/);
+	assert.ok(dirBlock, "sessionIpc.ts 必须注册目录导入 handler");
+	assert.match(dirBlock[0], /properties:\s*\[\s*"openDirectory"\s*\]/, "目录入口只能选目录");
+
+	// 关键回归：两者合并成一次对话框就是用户报的「只让选目录」。
+	assert.equal(/"openFile",\s*"openDirectory"/.test(sessionIpc), false, "不得再有 openFile+openDirectory 并存的导入对话框");
+	assert.match(preload, /importDshRuntimeDir:/);
+});
+
 // ── 派生 atom 行为测试（渲染层门控的真相源）──
 // 必须经 atoms/index 一次性加载：loadTsCommonJs 每次调用独立建缓存，
 // 分两次加载会得到两个不同的 dshRuntimeStatusAtom 对象，派生 atom 读不到写入值。

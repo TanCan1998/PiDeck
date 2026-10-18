@@ -8,6 +8,7 @@
  */
 
 import type { TerminalTarget } from "../../shared/types";
+import type { TerminalConfirmCloseMode } from "../../shared/types/settings";
 
 export type TerminalDockOwnerKind = "agent" | "project";
 
@@ -26,6 +27,25 @@ export type TerminalDockStateByOwner = Record<string, TerminalDockState>;
 
 export const TERMINAL_HEIGHT_STORAGE_KEY = "pid:terminal-dock-height";
 export const TERMINAL_HEIGHT_MIN = 120;
+
+/**
+ * 渲染层回放缓冲上界（字符数）：与主进程 MAX_TERMINAL_REPLAY_BUFFER
+ * （TerminalSessionManager.ts，200_000）对齐——主进程回放缓冲已按此截尾，
+ * 渲染层若不截尾，长跑终端会把整段历史在 buffersRef 里无限常驻。
+ * 同步修改时两侧必须一起改（tests/terminalDataBatching.test.mjs 有守卫）。
+ */
+export const TERMINAL_REPLAY_MAX_CHARS = 200_000;
+
+/**
+ * 渲染层回放缓冲追加（纯函数，可单测）：xterm 实例在切 tab / 折叠 / 主题切换时
+ * 销毁重建，buffersRef 是重建时的回放源。按字符上限截尾——重建后回放最近
+ * 200K 字符（约 2500 行，xterm scrollback 5000 行本来就装不下更早的内容，
+ * 且主进程 ensure() 快照同样只给最近 200K，行为两侧一致）。
+ */
+export function appendTerminalReplayBuffer(current: string, data: string): string {
+	const next = current + data;
+	return next.length > TERMINAL_REPLAY_MAX_CHARS ? next.slice(next.length - TERMINAL_REPLAY_MAX_CHARS) : next;
+}
 
 export function terminalOwnerKey(owner: TerminalDockOwner): string {
 	return `${owner.kind}:${owner.id}`;
@@ -240,4 +260,42 @@ export function saveTerminalHeight(height: number): void {
 	} catch {
 		// 配额/隐私模式失败时静默忽略；高度仍在本会话内存中有效
 	}
+}
+
+/** 各 shell 的默认前台进程名：node-pty 的 process 在空闲提示符下返回 shell 自己 */
+export const SHELL_DEFAULT_PROCESS: Record<string, string> = {
+	pwsh: "pwsh",
+	powershell: "powershell",
+	cmd: "cmd",
+	zsh: "zsh",
+	bash: "bash",
+	fish: "fish",
+	sh: "sh",
+	"git-bash": "bash",
+	wsl: "wsl",
+};
+
+/** 取进程名 basename 并小写、去 Windows 可执行后缀：兼容 `C:\Windows\System32\cmd.exe` 与 `/bin/zsh` 两种上报格式。 */
+function normalizeProcessName(value: string | undefined): string {
+	const name = (value ?? "").trim().toLowerCase();
+	if (!name) return "";
+	const base = name.split(/[\\/]/).pop() ?? name;
+	return base.replace(/\.(exe|cmd|bat|com)$/, "");
+}
+
+/**
+ * 关闭终端标签是否需要确认（纯函数，可单测）。
+ *
+ * - never：从不确认（用户明确要求不打断）；
+ * - always：总是确认；
+ * - running：仅「前台进程不是该 shell 自己」时确认。判定刻意宽松——
+ *   node-pty 的 process 在不同 shell/平台格式不一，宁可漏弹（不打断）也不要
+ *   在空闲提示符上误弹；空进程名同样不弹（拿不到证据就不拦）。
+ */
+export function shouldConfirmTerminalClose(mode: TerminalConfirmCloseMode, frontProcess: string | undefined, shell: string): boolean {
+	if (mode === "never") return false;
+	if (mode === "always") return true;
+	const name = normalizeProcessName(frontProcess);
+	if (!name) return false;
+	return name !== normalizeProcessName(SHELL_DEFAULT_PROCESS[shell] ?? shell);
 }

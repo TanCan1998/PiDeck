@@ -2,10 +2,50 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
-const { toDshAvailableModels, toDshFetchedModels, unwrapDshDiscoveryModels } = loadTsCommonJs("src/main/dsh/dshModels.ts");
+const { parseDshModelCatalog, resolveDshModelDirectory, toDshAvailableModels, toDshFetchedModels, unwrapDshDiscoveryModels } = loadTsCommonJs("src/main/dsh/dshModels.ts");
 
 /** 与 DSH host llm.models / session.models 实测一致的组形状。 */
 const group = (id, models) => ({ id, name: id, models });
+
+/** 0.2 的目录是 host 能力，当前模型另由会话投影提供。 */
+function catalog() {
+	return { default: { provider: "host", model: "default" }, routableProviders: ["host", "chosen"], groups: [group("host", [{ id: "default", name: "Default" }])], failures: [] };
+}
+
+test("0.2 model catalog validates the response instead of trusting a TypeScript assertion", () => {
+	const parsed = parseDshModelCatalog(catalog());
+	assert.equal(parsed.default.model, "default");
+	assert.equal(parsed.groups[0].models[0].name, "Default");
+	for (const input of [null, {}, { ...catalog(), default: undefined }, { ...catalog(), routableProviders: false }, { ...catalog(), routableProviders: [null] }, { ...catalog(), failures: [{ id: "p" }] }]) {
+		assert.throws(() => parseDshModelCatalog(input));
+	}
+});
+
+test("0.2 model catalog validates nested reasoning while allowing empty descriptions", () => {
+	const reasoning = { efforts: [{ id: "off", name: "Off", description: "" }], defaultEffort: "off" };
+	const input = { ...catalog(), groups: [group("host", [{ id: "default", name: "Default", description: "", reasoning }])] };
+	assert.equal(parseDshModelCatalog(input).groups[0].models[0].reasoning.defaultEffort, "off");
+	for (const invalid of [null, { efforts: {} }, { efforts: [null] }, { efforts: [{ id: "off" }] }, { efforts: [], defaultEffort: 1 }, { efforts: [{ id: "off", name: "Off", description: false }] }]) {
+		assert.throws(() => parseDshModelCatalog({ ...catalog(), groups: [group("host", [{ id: "default", name: "Default", reasoning: invalid }])] }), /Invalid DSH model catalog/);
+	}
+});
+
+test("0.2 model selection uses next, then lastUsed, then default only for an explicitly empty projection", () => {
+	const next = { provider: "chosen", model: "private", reasoningEffort: "high" };
+	const lastUsed = { provider: "missing", model: "previous" };
+	const projection = (modelSelection) => ({ asOfSeq: 2, values: { modelSelection } });
+	const pending = resolveDshModelDirectory(catalog(), projection({ next, lastUsed }));
+	assert.equal(pending.current.model, "private");
+	assert.equal(pending.current.reasoningEffort, "high");
+	assert.equal(pending.routable, true, "provider routing is independent of catalog membership");
+	const previous = resolveDshModelDirectory(catalog(), projection({ next: null, lastUsed }));
+	assert.equal(previous.current.model, "previous");
+	assert.equal(previous.routable, false);
+	assert.equal(resolveDshModelDirectory(catalog(), projection({ next: null, lastUsed: null })).current.model, "default");
+	for (const input of [null, {}, projection(undefined), projection({ next: {} }), projection({ next: { provider: "", model: "x" } }), projection({ next }), projection({ next, lastUsed: {} }), projection({ next: null })]) {
+		assert.throws(() => resolveDshModelDirectory(catalog(), input), /model selection projection/);
+	}
+});
 
 test("toDshFetchedModels preserves discovery metadata and drops malformed ids", () => {
 	const models = toDshFetchedModels([{ id: "  gateway-model ", name: "Gateway Model", contextWindow: 128000, maxTokens: 8192 }, { id: "" }]);

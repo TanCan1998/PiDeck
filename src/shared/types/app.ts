@@ -22,6 +22,47 @@ export type PiInstallStatus = {
 };
 
 /**
+ * pi 安装来源。用于「检测到多个安装时让用户自己选」：
+ * - managed：pi 官方安装器（curl install.sh / PowerShell install.ps1）的安装，
+ *   实体在 `<agentDir>/install/releases/<ver>`
+ * - package-manager：npm / pnpm / yarn / bun / volta / mise / asdf / nvm 等包管理器的全局 bin
+ * - portable：PiDeck 引导安装写进 `<userData>/pi-runtime/pi-global` 的便携副本
+ * - custom：用户在设置里自己指定的路径（不在上面任何已知落点）
+ * - path：其余来源（系统 PATH、`~/.local/bin`、/usr/local/bin 等）
+ */
+export type PiInstallationSource = "managed" | "package-manager" | "portable" | "custom" | "path";
+
+/** 一次探测到的 pi 安装；列表由主进程给出，渲染层只做展示与选择。 */
+export type PiInstallation = {
+	/** 可直接执行的入口（managed 安装是指向启动器脚本的软链，或启动器本身） */
+	path: string;
+	/** 解析软链后的真实入口；用于去重与诊断 */
+	realPath: string;
+	version?: string;
+	/** 版本探测失败原因（入口存在但跑不起来，例如残留的旧垫片） */
+	versionError?: string;
+	source: PiInstallationSource;
+	/** managed 安装的 install 根目录（含 managed-install.json） */
+	managedRoot?: string;
+	/** 当前 resolveCommand（含用户自定义路径）选中的就是它 */
+	isActive: boolean;
+	/** 用户在设置里自己添加的候选路径（可编辑/移除；自动发现的项不带此标记） */
+	userAdded?: boolean;
+	/**
+	 * 用户添加的路径当前不存在（文件被删/盘未挂载）。
+	 * 仍然列出来让用户能改或删，不静默从列表里消失。
+	 */
+	missing?: boolean;
+	/**
+	 * 用户交互式登录 shell 里 `command -v pi` 解析出的那份（终端里敲 pi 用的）。
+	 * 官方安装器只把 PATH 写进当前 shell 的 rc 文件，非交互探测读不到，因此单独反查。
+	 */
+	shellDefault?: boolean;
+	/** 多个安装中版本最高的那份（版本无法比较时不标记） */
+	isNewest?: boolean;
+};
+
+/**
  * 设置页「验证并保存」的 WSL 连接结果。
  * piVersion / piPath 由与 agent 启动同一条探测链路产出，避免「验证通过但启动失败」。
  */
@@ -39,6 +80,11 @@ export type PiInstallExecResult = {
 	exitCode: number | null;
 	stdout: string;
 	stderr: string;
+	/**
+	 * 引导安装被拦下时的现场：本机已经检测到这些 pi 安装，因此**没有再装第二份**。
+	 * 用户要求「已经有了就不要再安装」，这是最后一道硬约束（UI 不展示引导只是第一道）。
+	 */
+	alreadyInstalled?: PiInstallation[];
 };
 
 /** npm 可用性检测结果 */
@@ -122,6 +168,8 @@ export type ProjectResourceDiscoveryResult = {
 		physicalScope: "user" | "project";
 		enabled: boolean;
 		managed: boolean;
+		/** 包版本（package.json 就近向上查）；settings-* 行恒缺省。 */
+		version?: string;
 	}>;
 };
 
@@ -183,6 +231,10 @@ export type PiUpdateCheckResult = {
 	latestVersion?: string;
 	hasUpdate: boolean;
 	error?: string;
+	/** 当前选中的 pi 可执行路径（自更新分派用；未安装时无）。 */
+	command?: string;
+	/** pi.dev 版本接口返回的包名（改名迁移期可能与默认包名不同；自更新 spec 用）。 */
+	packageName?: string;
 };
 
 export type PiProxyTestResult = {
@@ -263,6 +315,54 @@ export type AppUpdateDownloadState = {
 	 */
 	errorKind?: "check" | "download";
 };
+
+/**
+ * 应用更新通道：dev 构建跟踪 dev 预发布，stable 构建跟踪正式版。
+ * 编译期由 __PIDECK_DEV_BUILD__ 决定，运行期不变（见 main/update/channelIdentity.ts）。
+ */
+export type UpdateChannel = "stable" | "dev";
+
+/** 当前更新通道与应用版本（update:get-channel 返回，通道相关下载源选择用）。 */
+export interface UpdateChannelInfo {
+	channel: UpdateChannel;
+	currentVersion: string;
+	/** 开发构建（未打包 npm run dev 或 dev 通道安装包）：仅用于呈现当前构建身份，不再作为功能入口门控。 */
+	devBuild: boolean;
+}
+
+/** 跨通道切换的目标发布（GitHub Release 经 selectTargetRelease 归一化后的形状）。 */
+export interface TargetChannelRelease {
+	version: string;
+	/** Release 说明截断摘要（300 字符）。 */
+	notesExcerpt: string;
+	/** 平台匹配的安装包下载直连（仅 https）。 */
+	assetUrl: string;
+	/** 安装包文件名（临时目录内落盘名，渲染层不得传入路径分隔符）。 */
+	assetName: string;
+	/** GitHub 资产 digest（形如 "sha256:hex"，可选字段；缺失则下载后跳过校验）。 */
+	digestSha256?: string;
+	/** 发布页地址（html_url，缺失回退仓库 releases 页），查询失败/未匹配时的退化入口。 */
+	releasePageUrl: string;
+}
+
+/** 通道切换全流程快照（query/download 状态机推送 + get-status 拉取，渲染层据此渲染切换向导）。 */
+export interface ChannelSwitchSnapshot {
+	phase: "idle" | "querying" | "available" | "up-to-date" | "downloading" | "ready" | "error";
+	target?: TargetChannelRelease;
+	/** up-to-date 阶段的目标通道（目标最新版不高于当前版本，无需切换）。 */
+	targetChannel?: UpdateChannel;
+	/** up-to-date 阶段的当前客户端版本（与 targetChannel 一起构成「已是最新版本」文案）。 */
+	currentVersion?: string;
+	/** 下载进度（0-100 整数，单调不减；无法取得 content-length 时只在开始/结束时出现）。 */
+	percent?: number;
+	/** ready 阶段的安装包落盘路径（仅限本服务临时目录内，launch 前缀校验用）。 */
+	installerPath?: string;
+	/** error 阶段的失败说明；查询类失败附 releases 页地址作手动下载退化入口。 */
+	error?: string;
+}
+
+/** 通道切换动作结果（query/download/launch 共用）：失败附 error，成功按动作带 release / installerPath。 */
+export type ChannelSwitchActionResult = { ok: true; release?: TargetChannelRelease; installerPath?: string } | { ok: false; error: string };
 
 /**
  * 主进程后台更新检查推送给渲染层的状态快照（齿轮角标 / toast / 设置页卡片用）。
@@ -371,4 +471,24 @@ export type ChangelogPayload = {
 	fromCache: boolean;
 	/** 网络失败退回旧缓存：内容可能不是最新，UI 应提示「刷新」取最新。 */
 	stale: boolean;
+};
+
+/**
+ * pi CLI 更新日志拉取结果（用户点「更新详情」时按需拉取，见 main/pi/PiChangelogService）。
+ * markdown 为 null 表示所有源都失败或内容校验不通过——UI 降级为「在浏览器打开」；
+ * pageUrl 始终有值，正是给降级路径用的。
+ */
+export type PiReleaseNotesPayload = {
+	/** (current, latest] 区间的 markdown 正文；失败或区间为空为 null。 */
+	markdown: string | null;
+	/** 实际取到内容的源；失败为 null。 */
+	source: "jsdelivr" | "unpkg" | "github" | null;
+	/** 区间内的版本条目数。 */
+	versionCount: number;
+	/** CHANGELOG 网页地址，供降级「在浏览器打开」。 */
+	pageUrl: string;
+	/** 内容抓取时间（ISO）；内存缓存命中为当时时间，无内容为 null。 */
+	fetchedAt: string | null;
+	/** 区间因条数/字符上限被截断（截在版本边界）。 */
+	truncated: boolean;
 };

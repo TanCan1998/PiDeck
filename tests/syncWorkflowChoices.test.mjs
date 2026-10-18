@@ -127,6 +127,11 @@ test("sync-workflow-choices: parseVersions 保留 v 前缀、滤掉 beta、去�
 	assert.deepEqual(parseVersions(changelog), ["v0.7.6", "v0.7.5"]);
 });
 
+test("sync-workflow-choices: parseVersions 跳过未发布（Unreleased）段", () => {
+	const changelog = ["# Changelog", "", "## v0.7.9 (Unreleased)", "", "- 未发布：不应进下拉", "", "## v0.7.8 - 2026-09-26", "", "- 正式版（横杠日期写法）", "", "## v0.7.7 (2026-09-17)", "", "- 正式版（括号日期写法）"].join("\n");
+	assert.deepEqual(parseVersions(changelog), ["v0.7.8", "v0.7.7"]);
+});
+
 test("sync-workflow-choices: rewriteOptions 保留哨兵值在首位，并把版本按传入顺序排列", () => {
 	// 哨兵值（auto）不能出现在版本序列里；反过来，若首项已是版本号则不应误认成哨兵。
 	const lines = ["      tag:", "        type: choice", "        default: auto", "        options:", "          - auto", "          - v0.7.6", "      tag_custom:", "        type: string"];

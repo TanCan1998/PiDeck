@@ -165,12 +165,12 @@ export function ExternalEditorOverlay(props: ExternalEditorOverlayProps) {
 			<div className="border-b border-border/60 px-3 pb-2 pt-2">
 				<p className="text-xs font-medium text-foreground">{t("app.openWithEditor")}</p>
 				{pathName ? (
-					<p className="mt-0.5 truncate text-[11px] leading-4 text-muted-foreground" title={props.projectPath ?? undefined}>
+					<p className="mt-0.5 truncate text-micro leading-4 text-muted-foreground" title={props.projectPath ?? undefined}>
 						{pathName}
 					</p>
 				) : (
 					// 未绑定项目目录：编辑器打开不可用；文件管理器回退主目录仍可用
-					<p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">{t("app.openWithEditorNoProject")}</p>
+					<p className="mt-0.5 text-micro leading-4 text-muted-foreground">{t("app.openWithEditorNoProject")}</p>
 				)}
 			</div>
 			<div className="max-h-60 overflow-y-auto p-1">

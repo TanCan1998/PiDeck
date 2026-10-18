@@ -1,9 +1,11 @@
 import { Button } from "../components/ui-shadcn/button";
+import { Switch } from "../components/ui-shadcn/switch";
+import { Badge } from "../components/ui-shadcn/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui-shadcn/table";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "../components/ui-shadcn/select";
 import { useEffect, useState, type ReactNode } from "react";
 import { ContentTabs } from "./ContentTabs";
-import { Check, FileEdit, Pencil, ShoppingBag, Sparkles, ToggleLeft, ToggleRight, Trash2, X, Store, Globe } from "lucide-react";
+import { Check, FileEdit, Pencil, ShoppingBag, Sparkles, Trash2, X, Store, Globe } from "lucide-react";
 import type { CreatePiSkillInput, PiSkillListResult, PiSkillLocation, PiSkillSummary, ProjectResourceOverrides } from "../../../shared/types";
 import { t } from "../i18n";
 import { SkillStoreTab } from "./SkillStoreTab";
@@ -13,8 +15,10 @@ import { desktopApi } from "../desktopApi";
 import { Input } from "../components/ui-shadcn/input";
 import { Textarea } from "../components/ui-shadcn/textarea";
 import { CreateResourceCard, CreateResourceField } from "./ConfigShared";
-import type { ResourceScope } from "./ResourceScopeSelector";
-import { globalSkillOverrideKey, isGlobalSkillSourceId } from "../../../shared/resourceIdentity";
+import type { ResourceScope } from "./resourceScopeModel";
+import { buildProjectOverrideKeyIndex, matchesProjectOverride } from "./projectOverrideKeys";
+import { useResourceTogglePending } from "../hooks/useResourceTogglePending";
+import { isGlobalSkillSourceId } from "../../../shared/resourceIdentity";
 import { ResourceImportDialog } from "./ResourceImportDialog";
 
 export function SkillsTab(props: {
@@ -51,18 +55,39 @@ export function SkillsTab(props: {
 	onChangeNewDescription: (value: string) => void;
 	onChangeNewLocation: (value: PiSkillLocation["id"]) => void;
 	onCreate: () => void;
-	onToggle: (skill: PiSkillSummary, enabled: boolean) => void;
+	onToggle: (skill: PiSkillSummary, enabled: boolean) => void | Promise<void>;
 	onDelete: (skill: PiSkillSummary) => void;
 	onEdit: (skill: PiSkillSummary) => void;
 	onRename: (skill: PiSkillSummary, newName: string) => Promise<void>;
 }) {
 	const { data } = props;
+	// 开关的乐观覆盖：点击立刻翻转显示，写盘 + 刷新结束后清掉（技能写盘很快，但刷新链路仍要等）。
+	const { begin, end, settle, shown } = useResourceTogglePending();
+	const handleSkillToggle = async (skill: PiSkillSummary, enabled: boolean) => {
+		if (!begin(skill.id, enabled)) return;
+		try {
+			await props.onToggle(skill, enabled);
+		} finally {
+			end(skill.id);
+		}
+	};
+	// 数据回落后结算乐观覆盖：真值等于目标值才清除（技能开关自身会 await 刷新，这里兜住时序差）。
+	useEffect(() => {
+		const disabledKeys = buildProjectOverrideKeyIndex(props.projectOverrides.disabledGlobalSkills);
+		const derived: Record<string, boolean | undefined> = {};
+		for (const skill of props.data.skills) {
+			// 与行上 effectiveEnabled 同一套算法：项目自有技能只看自身，全局技能再叠加项目级禁用。
+			const disabledHere = isGlobalSkillSourceId(skill.sourceId) ? matchesProjectOverride(disabledKeys, skill.path) : false;
+			derived[skill.id] = skill.enabled && !disabledHere;
+		}
+		settle(derived);
+	}, [props.data, props.projectOverrides, settle]);
 	const projects = props.projects ?? [];
 	// Project scope shows both sources grouped by ownership; global scope only shows global skills.
 	const visibleSkills = data.skills.filter((skill) => props.scope === "project" || skill.sourceId === "pi-global" || skill.sourceId === "agents-global");
 	const projectSkills = visibleSkills.filter((skill) => skill.sourceId === "project-pi" || skill.sourceId === "project-agents");
 	const globalSkills = visibleSkills.filter((skill) => skill.sourceId === "pi-global" || skill.sourceId === "agents-global");
-	const disabledGlobalKeys = new Set(props.projectOverrides.disabledGlobalSkills);
+	const disabledGlobalKeys = buildProjectOverrideKeyIndex(props.projectOverrides.disabledGlobalSkills);
 	const availableLocations = data.locations.filter((location) => (props.scope === "project" ? location.id === "project-pi" || location.id === "project-agents" : location.id === "pi-global" || location.id === "agents-global"));
 	// discovery 行去重：与本地列表同名的条目只保留本地行（带操作），列表只显示一次
 	const localSkillNames = new Set(visibleSkills.map((skill) => skill.name.toLowerCase()));
@@ -134,7 +159,7 @@ export function SkillsTab(props: {
 					/>
 					<div className="mb-3 flex items-center justify-between gap-3">
 						<div>
-							<span className="font-mono text-xs tabular-nums text-text-tertiary">{t("config.count.skills", { count: visibleSkills.length })}</span>
+							<span className="font-mono text-xs tabular-nums text-muted-foreground">{t("config.count.skills", { count: visibleSkills.length })}</span>
 							<small className="skills-restart-hint">{t("config.restartHint")}</small>
 						</div>
 						<div className="skills-toolbar-actions flex items-center gap-1.5">
@@ -215,7 +240,7 @@ export function SkillsTab(props: {
 											</TableCell>
 										</TableRow>
 									) : null}
-									{props.scope === "project" && projectSkills.map((skill) => <SkillTableRow key={skill.id} skill={skill} effectiveEnabled={skill.enabled} inherited={false} onToggle={props.onToggle} onDelete={props.onDelete} onEdit={props.onEdit} onRename={props.onRename} />)}
+									{props.scope === "project" && projectSkills.map((skill) => <SkillTableRow key={skill.id} skill={skill} effectiveEnabled={shown(skill.id, skill.enabled)} inherited={false} onToggle={handleSkillToggle} onDelete={props.onDelete} onEdit={props.onEdit} onRename={props.onRename} />)}
 									{props.scope === "project" && uniqueDiscoverySkills.filter((item) => isProjectDiscoverySource(item.sourceId)).map((item) => <DiscoveredSkillRow key={item.id} item={item} />)}
 									{props.scope === "project" && globalSkills.length > 0 ? (
 										<TableRow>
@@ -226,8 +251,8 @@ export function SkillsTab(props: {
 									) : null}
 									{globalSkills.map((skill) => {
 										const inherited = props.scope === "project";
-										const disabledHere = isGlobalSkillSourceId(skill.sourceId) ? disabledGlobalKeys.has(globalSkillOverrideKey(skill.sourceId, skill.name)) : false;
-										return <SkillTableRow key={skill.id} skill={skill} effectiveEnabled={skill.enabled && !disabledHere} inherited={inherited} onToggle={props.onToggle} onDelete={props.onDelete} onEdit={props.onEdit} onRename={props.onRename} />;
+										const disabledHere = isGlobalSkillSourceId(skill.sourceId) ? matchesProjectOverride(disabledGlobalKeys, skill.path) : false;
+										return <SkillTableRow key={skill.id} skill={skill} effectiveEnabled={shown(skill.id, skill.enabled && !disabledHere)} inherited={inherited} onToggle={handleSkillToggle} onDelete={props.onDelete} onEdit={props.onEdit} onRename={props.onRename} />;
 									})}
 									{props.scope === "project" && uniqueDiscoverySkills.filter((item) => !isProjectDiscoverySource(item.sourceId)).map((item) => <DiscoveredSkillRow key={item.id} item={item} />)}
 								</TableBody>
@@ -260,10 +285,12 @@ function DiscoveredSkillRow(props: {
 					<div className="flex min-w-0 items-center gap-2">
 						<Sparkles size={14} strokeWidth={1.8} className="shrink-0 text-text-tertiary" />
 						<strong className="truncate text-control font-medium text-foreground">{item.name}</strong>
-						<span className="skill-state" title={t("config.resourceManagedHint")}>
+						<Badge variant="outline" size="sm" title={t("config.resourceManagedHint")}>
 							{t("config.source.global")}
-						</span>
-						<span className={`skill-state ${item.enabled ? "enabled" : "disabled"}`}>{item.enabled ? t("common.enabled") : t("common.disabled")}</span>
+						</Badge>
+						<Badge variant={item.enabled ? "success" : "neutral"} size="sm">
+							{item.enabled ? t("common.enabled") : t("common.disabled")}
+						</Badge>
 					</div>
 					<span className="truncate font-mono text-caption text-muted-foreground">{item.sourceLabel}</span>
 				</div>
@@ -281,7 +308,15 @@ function isProjectDiscoverySource(sourceId: string): boolean {
 	return sourceId === "package-project" || sourceId === "settings-project" || sourceId === "ancestor-agents";
 }
 
-function SkillTableRow(props: { skill: PiSkillSummary; effectiveEnabled: boolean; inherited: boolean; onToggle: (skill: PiSkillSummary, enabled: boolean) => void; onDelete: (skill: PiSkillSummary) => void; onEdit: (skill: PiSkillSummary) => void; onRename: (skill: PiSkillSummary, newName: string) => Promise<void> }) {
+function SkillTableRow(props: {
+	skill: PiSkillSummary;
+	effectiveEnabled: boolean;
+	inherited: boolean;
+	onToggle: (skill: PiSkillSummary, enabled: boolean) => void | Promise<void>;
+	onDelete: (skill: PiSkillSummary) => void;
+	onEdit: (skill: PiSkillSummary) => void;
+	onRename: (skill: PiSkillSummary, newName: string) => Promise<void>;
+}) {
 	const { skill, effectiveEnabled, inherited } = props;
 	const [renaming, setRenaming] = useState(false);
 	const [renameValue, setRenameValue] = useState(skill.name);
@@ -342,8 +377,14 @@ function SkillTableRow(props: { skill: PiSkillSummary; effectiveEnabled: boolean
 							<Sparkles size={14} strokeWidth={1.8} className="shrink-0 text-text-tertiary" />
 							<strong className="truncate text-control font-medium text-foreground">{skill.name}</strong>
 							<div className="skill-badges">
-								<span className={`skill-state ${effectiveEnabled ? "enabled" : "disabled"}`}>{effectiveEnabled ? t("common.enabled") : t("common.disabled")}</span>
-								{!skill.valid && <span className="skill-state invalid">{t("config.needsFix")}</span>}
+								<Badge variant={effectiveEnabled ? "success" : "neutral"} size="sm">
+									{effectiveEnabled ? t("common.enabled") : t("common.disabled")}
+								</Badge>
+								{!skill.valid && (
+									<Badge variant="danger" size="sm">
+										{t("config.needsFix")}
+									</Badge>
+								)}
 							</div>
 						</div>
 						<span className="truncate font-mono text-caption text-muted-foreground">{skill.sourceLabel}</span>
@@ -367,9 +408,8 @@ function SkillTableRow(props: { skill: PiSkillSummary; effectiveEnabled: boolean
 			</TableCell>
 			<TableCell className="text-right">
 				<div className="flex justify-end gap-1">
-					<Button variant="ghost" size="icon-sm" className={`size-7${effectiveEnabled ? " text-primary" : ""}`} disabled={inherited && !skill.enabled} onClick={() => props.onToggle(skill, !effectiveEnabled)} title={effectiveEnabled ? t("common.disable") : t("common.enabled")}>
-						{effectiveEnabled ? <ToggleRight size={18} strokeWidth={1.8} /> : <ToggleLeft size={18} strokeWidth={1.8} />}
-					</Button>
+					{/* 启停开关：Switch 轨道着色区分启用/禁用（Toggle 图标两态几乎无视觉差，用户反馈看不出状态） */}
+					<Switch checked={effectiveEnabled} onCheckedChange={(checked) => props.onToggle(skill, checked)} disabled={inherited && !skill.enabled} title={effectiveEnabled ? t("common.disable") : t("common.enabled")} />
 					{!inherited ? (
 						<>
 							<Button variant="ghost" size="icon-sm" className="size-7" onClick={() => props.onEdit(skill)} title={t("common.edit")}>

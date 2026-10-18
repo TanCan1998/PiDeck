@@ -9,6 +9,11 @@ const OVERRIDE_FIELDS = {
 	prompt: "pideckDisabledGlobalPrompts",
 } as const;
 
+/** pi 原生 settings.json 里各类资源的数组字段名。 */
+const NATIVE_FIELDS = { extension: "extensions", skill: "skills", prompt: "prompts" } as const;
+/** 历史缺陷写入的身份键形态（`pi-global:<名>`）：pi 不认这种值，读回时必须忽略而不是当成已停用。 */
+const LEGACY_KEY_PREFIX = /^(?:pi-global|agents-global):/;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -24,11 +29,30 @@ function stringArray(value: unknown, normalize: (entry: string) => string = (ent
 	return [...seen];
 }
 
+/**
+ * 从 pi 原生数组解析「本层停用的继承资源」：精确 `-<值>` 规则即停用。
+ * 忽略历史缺陷写入的身份键形态（pi 不认，实际并未停用）。
+ */
+function nativeDisabledValues(settings: Record<string, unknown>, kind: keyof typeof NATIVE_FIELDS, normalize: (entry: string) => string): string[] {
+	const raw = settings[NATIVE_FIELDS[kind]];
+	const entries = Array.isArray(raw) ? raw.filter((entry): entry is string => typeof entry === "string") : [];
+	const disabled = new Set<string>();
+	for (const entry of entries) {
+		if (typeof entry !== "string") continue;
+		const value = entry.trim();
+		if (!value.startsWith("-") || LEGACY_KEY_PREFIX.test(value.slice(1))) continue;
+		const target = normalize(value.slice(1).trim());
+		if (target) disabled.add(target);
+	}
+	return [...disabled];
+}
+
 function overridesFromRecord(settings: Record<string, unknown>): ProjectResourceOverrides {
 	return {
-		disabledGlobalExtensions: stringArray(settings[OVERRIDE_FIELDS.extension]),
-		disabledGlobalSkills: stringArray(settings[OVERRIDE_FIELDS.skill], (entry) => entry.toLowerCase()),
-		disabledGlobalPrompts: stringArray(settings[OVERRIDE_FIELDS.prompt], (entry) => entry.toLowerCase()),
+		// 原生精确规则优先；pideckDisabledGlobal* 是原生规则改造前的私有字段，仅未迁移旧文件还有，读出来兑底。
+		disabledGlobalExtensions: [...nativeDisabledValues(settings, "extension", (entry) => entry), ...stringArray(settings[OVERRIDE_FIELDS.extension])],
+		disabledGlobalSkills: [...nativeDisabledValues(settings, "skill", (entry) => entry.toLowerCase()), ...stringArray(settings[OVERRIDE_FIELDS.skill], (entry) => entry.toLowerCase())],
+		disabledGlobalPrompts: [...nativeDisabledValues(settings, "prompt", (entry) => entry.toLowerCase()), ...stringArray(settings[OVERRIDE_FIELDS.prompt], (entry) => entry.toLowerCase())],
 	};
 }
 

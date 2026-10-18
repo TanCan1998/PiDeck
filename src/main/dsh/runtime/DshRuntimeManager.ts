@@ -33,8 +33,12 @@ export type DshRuntimeLayout = {
 	tempRoot: string;
 };
 
-/** 下载器：`onProgress(receivedBytes, totalBytes|undefined)`。 */
-export type DshRuntimeDownloader = (url: string, destPath: string, onProgress?: (received: number, total?: number) => void, signal?: AbortSignal) => Promise<void>;
+/**
+ * 下载器：`onProgress(receivedBytes, totalBytes|undefined)`。
+ * `options.resumeFromBytes`：目标文件已有的字节数，下载器据此带 Range 续传并在其后追加写；
+ * 服务端不支持 Range 时自行退回全量重下，调用方只需保证 destPath 是那个半截文件。
+ */
+export type DshRuntimeDownloader = (url: string, destPath: string, onProgress?: (received: number, total?: number) => void, signal?: AbortSignal, options?: { resumeFromBytes?: number }) => Promise<void>;
 
 /** 解压器：把 tarball 解到 destDir（destDir 由本模块创建并保证为空）。 */
 export type DshRuntimeExtractor = (archivePath: string, destDir: string) => Promise<void>;
@@ -88,6 +92,20 @@ function errorMessage(error: unknown): string {
 		if (typeof message === "string" && message.length > 0) return message;
 	}
 	return String(error);
+}
+
+/** rename 带线性退避重试：瞬时锁（EPERM/EBUSY，杀毒/资源管理器扫描）与 rm 的
+ *  maxRetries/retryDelay 同款节奏吸收；重试耗尽后抛原错误由调用方处理。 */
+async function renameWithRetry(from: string, to: string, attempts = 5, delayMs = 300): Promise<void> {
+	for (let attempt = 1; ; attempt += 1) {
+		try {
+			await rename(from, to);
+			return;
+		} catch (error) {
+			if (attempt >= attempts) throw error;
+			await new Promise((resolve) => setTimeout(resolve, delayMs));
+		}
+	}
 }
 
 /** 计算文件 sha256（小写 hex）。 */
@@ -280,11 +298,9 @@ export class DshRuntimeManager {
 
 			options.onPhase?.("finalizing");
 			const target = this.versionDir(sourceManifest.runtimeVersion);
-			// 同版本已存在：先清掉再 rename（rename 到非空目录在 Windows 会失败）。
-			// 与 installFromArchive 同款重试：占用多为瞬时锁（杀软/资源管理器）。
-			await rm(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
 			mkdirSync(this.deps.layout.runtimesRoot, { recursive: true });
-			await rename(staging, target);
+			// 同版本重装走换位落位：任意时刻崩溃 target 都不会是半空目录（见 swapRuntimeDirectory）。
+			await this.swapRuntimeDirectory(staging, target);
 			log("dsh-runtime", "runtime installed from directory", {
 				version: sourceManifest.runtimeVersion,
 			});
@@ -329,12 +345,9 @@ export class DshRuntimeManager {
 
 			options.onPhase?.("finalizing");
 			const target = this.versionDir(manifest.runtimeVersion);
-			// 同版本已存在：先清掉再 rename（rename 到非空目录在 Windows 会失败）。
-			// 目标目录可能被占用（host 未停时的 .node DLL 句柄、杀软扫描）：与 uninstall
-			// 同款线性退避重试吸收瞬时锁；持续锁由调用方在安装前停 host 释放。
-			await rm(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
 			mkdirSync(this.deps.layout.runtimesRoot, { recursive: true });
-			await rename(root, target);
+			// 同版本重装走换位落位：任意时刻崩溃 target 都不会是半空目录（见 swapRuntimeDirectory）。
+			await this.swapRuntimeDirectory(root, target);
 			log("dsh-runtime", "runtime installed", { version: manifest.runtimeVersion });
 			return { ok: true, dirName: manifest.runtimeVersion, manifest };
 		} catch (error) {
@@ -353,6 +366,8 @@ export class DshRuntimeManager {
 		const archivePath = join(this.deps.layout.tempRoot, `download-${Date.now()}.tgz`);
 		try {
 			options.onPhase?.("downloading");
+			// 记录安装来源 URL：运行时是外部下载的二进制，出问题时需能审计来源
+			this.deps.log?.("dsh-runtime", "runtime download started", { url });
 			await this.download(url, archivePath, options.onDownloadProgress, options.signal);
 			return await this.installFromArchive(archivePath, expectedSha256, options);
 		} catch (error) {
@@ -382,6 +397,45 @@ export class DshRuntimeManager {
 			this.deps.log?.("dsh-runtime", "runtime uninstall failed", { dirName, error: message });
 			// 抛带上下文的可读错误（含失败版本），不让裸 EPERM 跨 IPC 变成「未处理异常」。
 			throw new Error(`failed to remove runtime directory "${dirName}": ${message}`);
+		}
+	}
+
+	/**
+	 * 同卷换位落位：旧版本目录先 rename 进暂存区（瞬时操作），新目录再 rename 落位；
+	 * 落位失败把旧目录原样放回。相比「先 rm 旧目录再 rename」，任意时刻崩溃 target
+	 * 都不会是半空目录——要么旧完整、要么新完整。rename 遇瞬时锁（杀软/资源
+	 * 管理器/残留 DLL 句柄）与 rm 同款线性退避；旧目录清理失败仅记日志（残留在
+	 * tempRoot，不影响下次安装，也不阻塞本次安装成功）。
+	 */
+	private async swapRuntimeDirectory(stagingDir: string, target: string): Promise<void> {
+		const log = this.deps.log ?? (() => {});
+		const previous = existsSync(target) ? join(this.deps.layout.tempRoot, `previous-${Date.now()}`) : undefined;
+		let rollbackFailed = false;
+		try {
+			if (previous) await renameWithRetry(target, previous);
+			try {
+				await renameWithRetry(stagingDir, target);
+			} catch (error) {
+				// 落位失败：旧目录原样放回，不留半空 target；回滚也失败只能记日志
+				// （旧目录已安全在 tempRoot，用户数据未丢，下次安装可重试）。
+				if (previous) {
+					try {
+						await renameWithRetry(previous, target);
+					} catch (rollbackError) {
+						rollbackFailed = true;
+						log("dsh-runtime", "runtime swap rollback failed; keeping previous copy", {
+							error: errorMessage(rollbackError),
+							previous,
+						});
+					}
+				}
+				throw error;
+			}
+		} finally {
+			// 成功路径：previous 是被换下的旧版本垃圾，正常清理。
+			// 回滚失败时：previous 是旧运行时的唯一幸存副本，绝不能删——删了它，
+			// 用户已装运行时就彻底丢失（target 半空 + tempRoot 被清）。残留仅供找回。
+			if (previous && !rollbackFailed) await rm(previous, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 }).catch(() => {});
 		}
 	}
 

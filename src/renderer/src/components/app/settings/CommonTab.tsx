@@ -2,16 +2,19 @@ import { memo, useEffect, useState } from "react";
 import { useAtomValue } from "jotai";
 import type { AppSettings } from "../../../../../shared/types";
 import { dshUiVisibilityFor } from "../../../../../shared/types/dshRuntime";
+import { normalizeTpsDisplayMode } from "../../../../../shared/tps";
 import { dshRuntimeStatusAtom } from "../../../atoms";
 import { t } from "../../../i18n";
 import { desktopApi } from "../../../desktopApi";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../ui-shadcn/select";
 import { Input } from "../../ui-shadcn/input";
 import { SettingsSection } from "./SettingsStorageTab";
+import { PromptEnhanceSettingsSection } from "./PromptEnhanceSettingsSection";
 import { DirtyMarker, SettingBox, SettingRow, SettingSwitchRow } from "./SettingRows";
 import { VoiceTranscriptionSettingsSection } from "./VoiceTranscriptionSettingsSection";
 import { QuickTaskMenuSetting } from "./QuickTaskMenuSetting";
 import { QuickMessagesSetting } from "./QuickMessagesSetting";
+import { ReplyActionsSetting } from "./ReplyActionsSetting";
 
 type CommonTabProps = {
 	draft: AppSettings;
@@ -35,6 +38,7 @@ export const CommonTab = memo(function CommonTab(props: CommonTabProps) {
 	const languageOptions: SelectOption[] = [
 		{ value: "system", label: t("settings.languageSystem") },
 		{ value: "zh-CN", label: t("settings.languageZh") },
+		{ value: "zh-TW", label: t("settings.languageZhTW") },
 		{ value: "en-US", label: t("settings.languageEn") },
 		{ value: "pseudo", label: t("settings.languagePseudo") },
 	];
@@ -141,8 +145,11 @@ export const CommonTab = memo(function CommonTab(props: CommonTabProps) {
 
 			<VoiceTranscriptionSettingsSection />
 
+			{/* 提示词增强：固定模型（默认跟随会话模型） */}
+			<PromptEnhanceSettingsSection />
+
 			{/* 会话 */}
-			<SettingsSection title={t("settings.sectionSession")}>
+			<SettingsSection id="settings-section-common-session" title={t("settings.sectionSession")}>
 				<SettingRow
 					anchor="common-session-tab-open-mode"
 					title={
@@ -164,6 +171,27 @@ export const CommonTab = memo(function CommonTab(props: CommonTabProps) {
 					</Select>
 				</SettingRow>
 				<SettingSwitchRow anchor="common-auto-session-title" title={t("settings.autoSessionTitle")} description={t("settings.autoSessionTitleDesc")} checked={draft.autoSessionTitle ?? false} dirty={isDirty("autoSessionTitle")} onChange={(checked) => updateDraft({ autoSessionTitle: checked })} />
+				<SettingRow
+					anchor="common-tps-display-mode"
+					title={
+						<>
+							<span>{t("settings.tpsDisplayMode")}</span>
+							<DirtyMarker dirty={isDirty("tpsDisplayMode")} label={t("settings.tpsDisplayMode")} />
+						</>
+					}
+					description={t("settings.tpsDisplayModeDesc")}
+					alignEnd={false}
+				>
+					<Select value={normalizeTpsDisplayMode(draft.tpsDisplayMode)} onValueChange={(value) => updateDraft({ tpsDisplayMode: normalizeTpsDisplayMode(value) })}>
+						<SelectTrigger className="w-full">
+							<SelectValue />
+						</SelectTrigger>
+						<SelectContent>
+							<SelectItem value="streaming">{t("settings.tpsDisplayModeStreaming")}</SelectItem>
+							<SelectItem value="endToEnd">{t("settings.tpsDisplayModeEndToEnd")}</SelectItem>
+						</SelectContent>
+					</Select>
+				</SettingRow>
 				<SettingRow
 					anchor="common-send-shortcut"
 					title={
@@ -290,19 +318,31 @@ export const CommonTab = memo(function CommonTab(props: CommonTabProps) {
 				</SettingRow>
 				{/* 流式对话设置：中间过程与本轮修改文件的默认展示行为。 */}
 				<SettingSwitchRow anchor="common-expand-interim-during-stream" title={t("settings.expandInterimDuringStream")} description={t("settings.expandInterimDuringStreamDesc")} checked={draft.expandInterimDuringStream} onChange={(checked) => updateDraft({ expandInterimDuringStream: checked })} />
-				{/* 过程组显示（实验）：开启后连续思考/工具调用合并成过程组，关闭则保持平铺显示 */}
+				{/* 过程组显示：开启后连续思考/工具调用合并成过程组，关闭则保持平铺显示 */}
 				<SettingSwitchRow anchor="common-process-group-display" title={t("settings.processGroupDisplay")} description={t("settings.processGroupDisplayDesc")} checked={draft.processGroupDisplay} onChange={(checked) => updateDraft({ processGroupDisplay: checked })} />
-				<SettingSwitchRow anchor="common-collapse-prev-runs" title={t("settings.collapsePrevRunsOnNewTurn")} description={t("settings.collapsePrevRunsOnNewTurnDesc")} checked={draft.collapsePrevRunsOnNewTurn} onChange={(checked) => updateDraft({ collapsePrevRunsOnNewTurn: checked })} />
 			</SettingsSection>
 
 			{/* 快捷消息：数据在 userData/quick-messages.json，本区自持编辑状态并即时落盘（不参与全局草案/取消）。 */}
-			<SettingsSection title={t("settings.quickMessagesSection")} description={t("settings.quickMessagesSectionDesc")}>
+			<SettingsSection id="settings-section-common-quick-messages-section" title={t("settings.quickMessagesSection")} description={t("settings.quickMessagesSectionDesc")}>
 				<QuickMessagesSetting />
 			</SettingsSection>
 
+			{/* 回复快捷操作：规则在 userData/reply-actions.json，同样即时落盘（不参与全局草案/取消）。 */}
+			<SettingsSection id="settings-section-common-reply-actions-section" title={t("settings.replyActionsSection")} description={t("settings.replyActionsSectionDesc")}>
+				<ReplyActionsSetting />
+			</SettingsSection>
+
 			{/* 闲置 Agent 内存优化：自动释放长时间闲置的 agent 进程，降低多会话内存占用 */}
-			<SettingsSection title={t("settings.idleAgentSection")} description={t("settings.idleAgentSectionDesc")}>
+			<SettingsSection id="settings-section-common-idle-agent" title={t("settings.idleAgentSection")} description={t("settings.idleAgentSectionDesc")}>
 				<SettingSwitchRow anchor="common-idle-agent-auto-release" title={t("settings.idleAgentAutoRelease")} description={t("settings.idleAgentAutoReleaseDesc")} checked={draft.idleAgentAutoRelease ?? true} dirty={isDirty("idleAgentAutoRelease")} onChange={(checked) => updateDraft({ idleAgentAutoRelease: checked })} />
+				<SettingSwitchRow
+					anchor="common-standby-runtime-enabled"
+					title={t("settings.standbyRuntimeEnabled")}
+					description={t("settings.standbyRuntimeEnabledDesc")}
+					checked={draft.standbyRuntimeEnabled ?? true}
+					dirty={isDirty("standbyRuntimeEnabled")}
+					onChange={(checked) => updateDraft({ standbyRuntimeEnabled: checked })}
+				/>
 				<SettingRow
 					anchor="common-idle-agent-keep-count"
 					title={
@@ -359,9 +399,78 @@ export const CommonTab = memo(function CommonTab(props: CommonTabProps) {
 				</SettingRow>
 			</SettingsSection>
 
+			{/* 悬浮球：主窗口可隐藏为屏幕角落的 64px 常驻小圆点，点开展开小任务浮窗/工作台 */}
+			<SettingsSection id="settings-section-common-floating-ball" title={t("settings.floatingBallSection")} description={t("settings.floatingBallSectionDesc")}>
+				<SettingSwitchRow
+					anchor="common-floating-ball-enabled"
+					title={t("settings.floatingBallEnabled")}
+					description={t("settings.floatingBallEnabledDesc")}
+					checked={draft.floatingBallEnabled ?? false}
+					dirty={isDirty("floatingBallEnabled")}
+					onChange={(checked) => {
+						updateDraft({ floatingBallEnabled: checked });
+						void desktopApi.floatingBall.setEnabled(checked);
+					}}
+				/>
+				<SettingSwitchRow
+					anchor="common-floating-ball-always-on-top"
+					title={t("settings.floatingBallAlwaysOnTop")}
+					description={t("settings.floatingBallAlwaysOnTopDesc")}
+					checked={draft.floatingBallAlwaysOnTop ?? true}
+					disabled={!draft.floatingBallEnabled}
+					dirty={isDirty("floatingBallAlwaysOnTop")}
+					onChange={(checked) => updateDraft({ floatingBallAlwaysOnTop: checked })}
+				/>
+				<SettingSwitchRow
+					anchor="common-floating-ball-show-running-badge"
+					title={t("settings.floatingBallShowRunningBadge")}
+					description={t("settings.floatingBallShowRunningBadgeDesc")}
+					checked={draft.floatingBallShowRunningBadge ?? true}
+					disabled={!draft.floatingBallEnabled}
+					dirty={isDirty("floatingBallShowRunningBadge")}
+					onChange={(checked) => updateDraft({ floatingBallShowRunningBadge: checked })}
+				/>
+				<SettingSwitchRow
+					anchor="common-floating-ball-snap-to-edge"
+					title={t("settings.floatingBallSnapToEdge")}
+					description={t("settings.floatingBallSnapToEdgeDesc")}
+					checked={draft.floatingBallSnapToEdge ?? true}
+					disabled={!draft.floatingBallEnabled}
+					dirty={isDirty("floatingBallSnapToEdge")}
+					onChange={(checked) => updateDraft({ floatingBallSnapToEdge: checked })}
+				/>
+				<SettingRow
+					anchor="common-floating-ball-expand-target"
+					title={
+						<span className="inline-flex items-center gap-1.5">
+							<DirtyMarker dirty={isDirty("floatingBallExpandTarget")} label={t("settings.floatingBallExpandTarget")} />
+							{t("settings.floatingBallExpandTarget")}
+						</span>
+					}
+					description={t("settings.floatingBallExpandTargetDesc")}
+				>
+					<Select value={draft.floatingBallExpandTarget ?? "mini"} onValueChange={(value) => updateDraft({ floatingBallExpandTarget: value as "mini" | "compact" })} disabled={!draft.floatingBallEnabled}>
+						<SelectTrigger className="w-40">
+							<SelectValue />
+						</SelectTrigger>
+						<SelectContent>
+							<SelectItem value="mini">{t("settings.floatingBallExpandMini")}</SelectItem>
+							<SelectItem value="compact">{t("settings.floatingBallExpandCompact")}</SelectItem>
+						</SelectContent>
+					</Select>
+				</SettingRow>
+			</SettingsSection>
+
+			{/* CUA 桌面操作（实验性）：开启后才监听回环 MCP 端点并注册给 pi；自动审批默认开启，关闭后逐次确认。 */}
+			<SettingsSection id="settings-section-common-cua" title={t("settings.cuaSection")} description={t("settings.cuaSectionDesc")}>
+				<SettingSwitchRow anchor="common-cua-enabled" title={t("settings.cuaEnabled")} description={t("settings.cuaEnabledDesc")} checked={draft.cuaEnabled ?? false} dirty={isDirty("cuaEnabled")} onChange={(checked) => updateDraft({ cuaEnabled: checked })} />
+				{/* 免审批：依赖 CUA 主开关，主开关关闭时置灰；只绕过审批对话框，杀开关仍生效 */}
+				<SettingSwitchRow anchor="common-cua-auto-approve" title={t("settings.cuaAutoApprove")} description={t("settings.cuaAutoApproveDesc")} checked={draft.cuaAutoApprove ?? true} disabled={!draft.cuaEnabled} dirty={isDirty("cuaAutoApprove")} onChange={(checked) => updateDraft({ cuaAutoApprove: checked })} />
+			</SettingsSection>
+
 			{/* 文件资源管理器集成：注册「用 PiDeck 打开」右键菜单（目录与空白处），
           HKCU 写入即时生效；非 Windows 平台开关置灰并提示。 */}
-			<SettingsSection title={t("settings.shellContextMenuSection")} description={t("settings.shellContextMenuSectionDesc")}>
+			<SettingsSection id="settings-section-common-shell-integration" title={t("settings.shellContextMenuSection")} description={t("settings.shellContextMenuSectionDesc")}>
 				<SettingSwitchRow anchor="common-shell-context-menu" title={t("settings.shellContextMenu")} description={t("settings.shellContextMenuDesc")} checked={shellMenuState?.registered ?? false} disabled={!shellMenuState?.supported || shellMenuBusy} onChange={toggleShellMenu} />
 				<QuickTaskMenuSetting />
 				{!shellMenuState?.supported && <p className="px-4 pb-2 text-xs text-destructive">{t("settings.shellContextMenuUnsupported")}</p>}
@@ -369,7 +478,7 @@ export const CommonTab = memo(function CommonTab(props: CommonTabProps) {
 			</SettingsSection>
 
 			{/* 窗口 */}
-			<SettingsSection title={t("settings.sectionWindow")}>
+			<SettingsSection id="settings-section-common-window" title={t("settings.sectionWindow")}>
 				<SettingRow
 					title={
 						<>

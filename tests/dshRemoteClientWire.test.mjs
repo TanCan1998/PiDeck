@@ -97,6 +97,92 @@ test("subagentsHistory：同 session/page，地址为 subagent 形态", async ()
 	assert.equal(args.request.throughSeq, 7);
 });
 
+test("subagentsList：0.2 从父会话投影读取目录，不调用已删除端点", async () => {
+	const { endpoint, args } = await captureArgs((remote) => remote.subagentsList({ parentSessionId: "p1" }));
+	assert.equal(endpoint, "session/projections");
+	assert.deepEqual(args, { request: { sessionId: "p1" } });
+});
+
+test("subagentsList：映射 subagentCatalog 并保留模式；缺失目录视为空，不激活子代理", async () => {
+	const remote = new DshRemoteClient({
+		async call(endpoint) {
+			if (endpoint === "session/list")
+				return {
+					ok: true,
+					value: {
+						items: [
+							{ sessionId: "c1", running: true },
+							{ sessionId: "c2", parentSessionId: "c1", origin: "subagent" },
+						],
+					},
+				};
+			return {
+				ok: true,
+				value: {
+					asOfSeq: 3,
+					values: {
+						subagentCatalog: [
+							{ id: "c1", label: "child", mode: "continuable", createdAt: 1 },
+							{ id: "corrupt", mode: "unknown" },
+						],
+					},
+				},
+			};
+		},
+	});
+	const listed = await remote.subagentsList({ parentSessionId: "p1" });
+	assert.equal(listed.result.ok, true);
+	assert.equal(listed.result.value.entries[0].id, "c1");
+	assert.equal(listed.result.value.entries[0].mode, "continuable");
+	assert.equal(listed.result.value.entries[0].kind, "child");
+	assert.equal(listed.result.value.entries[0].activity, "running");
+	assert.equal(listed.result.value.entries[0].hasChildren, true);
+	assert.equal(listed.result.value.entries[1].kind, "diagnostic");
+	assert.equal(listed.result.value.entries[1].activity, "inactive");
+	const absent = new DshRemoteClient({
+		async call() {
+			return { ok: true, value: null };
+		},
+	});
+	assert.equal((await absent.subagentsList({ parentSessionId: "missing" })).result.value.entries.length, 0);
+	const failed = new DshRemoteClient({
+		async call() {
+			return { ok: false, error: { code: "gateway/unavailable" } };
+		},
+	});
+	assert.equal((await failed.subagentsList({ parentSessionId: "p1" })).result.error.code, "gateway/unavailable");
+	const malformed = new DshRemoteClient({
+		async call() {
+			return { ok: true, value: { values: {} } };
+		},
+	});
+	assert.equal((await malformed.subagentsList({ parentSessionId: "p1" })).result.ok, false);
+});
+
+test("session model catalog 和 projections 分开读取；目录结果在边界验证", async () => {
+	assert.deepEqual(await captureArgs((remote) => remote.sessionsModelCatalog()), { endpoint: "session/modelCatalog", args: {} });
+	assert.deepEqual(await captureArgs((remote) => remote.sessionsProjections({ sessionId: "s1" })), { endpoint: "session/projections", args: { request: { sessionId: "s1" } } });
+	const source = { default: { provider: "p", model: "m" }, routableProviders: ["p"], groups: [], failures: [] };
+	const valid = new DshRemoteClient({
+		async call() {
+			return { ok: true, value: source };
+		},
+	});
+	assert.equal((await valid.sessionsModelCatalog()).result.value.default.model, "m");
+	const malformed = new DshRemoteClient({
+		async call() {
+			return { ok: true, value: { current: source.default, routable: true } };
+		},
+	});
+	await assert.rejects(() => malformed.sessionsModelCatalog());
+	const failed = new DshRemoteClient({
+		async call() {
+			return { ok: false, error: { code: "gateway/unavailable", message: "offline" } };
+		},
+	});
+	assert.equal((await failed.sessionsModelCatalog()).result.error.code, "gateway/unavailable");
+});
+
 test("session/list：wire 名为 _request（非可选），空对象表示不带游标", async () => {
 	const { endpoint, args } = await captureArgs((remote) => remote.sessionsList());
 	assert.equal(endpoint, "session/list");

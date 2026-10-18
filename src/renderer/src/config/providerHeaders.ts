@@ -72,6 +72,31 @@ function getOverrideHeaders(modelOverrides: unknown, modelId: string): Record<st
 	return isPlainObject(entry) ? getProviderHeaders(entry.headers) : undefined;
 }
 
+/**
+ * 清掉 modelOverrides 里「模型 id 不在当前模型列表」的孤儿键（保存 models.json 前调用）。
+ * 入参是已收窄的映射（调用方用 readModelOverrides 转换）；无孤儿时原样返回入参（同一引用，
+ * 调用方可跳过改写），全部都是孤儿时返回 undefined（调用方据此删掉 provider.modelOverrides 字段）。
+ */
+export function pruneModelOverrides(overrides: Record<string, Record<string, unknown>>, modelIds: readonly string[]): Record<string, Record<string, unknown>> | undefined {
+	const known = new Set(modelIds);
+	const next: Record<string, Record<string, unknown>> = {};
+	let dropped = false;
+	for (const [modelId, value] of Object.entries(overrides)) {
+		if (known.has(modelId)) next[modelId] = value;
+		else dropped = true;
+	}
+	if (!dropped) return overrides;
+	return Object.keys(next).length > 0 ? next : undefined;
+}
+
+/**
+ * 收窄任意外部值为 provider.modelOverrides 形状（逐项过滤非对象项）。
+ * 导出给配置页：预填/草稿都要 `unknown → 可用映射` 的安全转换（项目禁止 as 强转）。
+ */
+export function readModelOverrides(value: unknown): Record<string, Record<string, unknown>> | undefined {
+	return asOverridesRecord(value);
+}
+
 function asOverridesRecord(value: unknown): Record<string, Record<string, unknown>> | undefined {
 	if (!isPlainObject(value)) return undefined;
 	// 逐项收窄：value 是 unknown，整体断言会绕过类型检查（项目禁止 as 强转）。
@@ -85,24 +110,41 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 // pi provider 的 api 字段必须使用官方 registry 名称；openai-completions 实际对应 Chat Completions。
 // 不再把历史别名 openai-chat-completions 作为预设暴露，避免测试通过但 pi 会话启动失败。
-export const PROVIDER_API_OPTIONS = ["openai-completions", "openai-responses", "openai-codex-responses", "anthropic-messages", "google-generative-ai", "mistral-conversations"];
+// 列表对齐 pi 1.0.4 pi-ai 的 BUILTIN_APIS（不含 image/classifier 专用协议：那些不是聊天协议，
+// 混进下拉会让用户给聊天 provider 选到不能聊天的协议）。
+export const PROVIDER_API_OPTIONS = ["openai-completions", "openai-responses", "openai-codex-responses", "azure-openai-responses", "anthropic-messages", "google-generative-ai", "google-vertex", "mistral-conversations", "bedrock-converse-stream", "pi-messages"];
+
+/**
+ * DSH（llm-pi-ai 适配器）只注册了三种协议（见 dsh 设置 schema 的 llm-pi-ai.api 联合：
+ * openai-completions / openai-responses / anthropic-messages）。它的表单与 pi 共用
+ * ApiTypeInput，所以必须单独给一份可选集，否则用户会选到 DSH 写不进配置的值。
+ */
+export const DSH_PROVIDER_API_OPTIONS = ["openai-completions", "openai-responses", "anthropic-messages"];
 
 export const API_TYPE_LABELS: Record<string, string> = {
 	"openai-completions": "OpenAI Chat Completions",
 	"openai-responses": "OpenAI Responses",
 	"openai-codex-responses": "OpenAI Codex Responses",
+	"azure-openai-responses": "Azure OpenAI Responses",
 	"anthropic-messages": "Anthropic Messages",
 	"google-generative-ai": "Google Generative AI",
+	"google-vertex": "Google Vertex AI",
 	"mistral-conversations": "Mistral Conversations",
+	"bedrock-converse-stream": "Amazon Bedrock Converse",
+	"pi-messages": "Pi Messages",
 };
 
 const API_TYPE_DESCRIPTION_KEYS: Record<string, TranslationKey> = {
 	"openai-completions": "config.apiTypeDescription.openaiCompletions",
 	"openai-responses": "config.apiTypeDescription.openaiResponses",
 	"openai-codex-responses": "config.apiTypeDescription.openaiCodexResponses",
+	"azure-openai-responses": "config.apiTypeDescription.azureOpenaiResponses",
 	"anthropic-messages": "config.apiTypeDescription.anthropicMessages",
 	"google-generative-ai": "config.apiTypeDescription.googleGenerativeAi",
+	"google-vertex": "config.apiTypeDescription.googleVertex",
 	"mistral-conversations": "config.apiTypeDescription.mistralConversations",
+	"bedrock-converse-stream": "config.apiTypeDescription.bedrockConverseStream",
+	"pi-messages": "config.apiTypeDescription.piMessages",
 };
 
 export function getApiTypeDescription(apiType: string): string {
@@ -128,8 +170,8 @@ export const KNOWN_PROVIDER_ENDPOINTS: Record<string, { baseUrl: string; apiType
 	together: { baseUrl: "https://api.together.xyz/v1", apiType: "openai-completions" },
 	fireworks: { baseUrl: "https://api.fireworks.ai/inference/v1", apiType: "openai-completions" },
 	huggingface: { baseUrl: "https://api-inference.huggingface.co/v1", apiType: "openai-completions" },
-	opencode: { baseUrl: "https://opencode.ai/zen/v1", apiType: "openai-completions" },
-	"opencode-go": { baseUrl: "https://opencode.ai/zen/go/v1", apiType: "openai-completions" },
+	opencode: { baseUrl: "https://opencode.ai/inference/v1", apiType: "openai-completions" },
+	"opencode-go": { baseUrl: "https://opencode.ai/inference/go/v1", apiType: "openai-completions" },
 	minimax: { baseUrl: "https://api.minimax.io/v1", apiType: "openai-completions" },
 	"minimax-cn": { baseUrl: "https://api.minimaxi.com/v1", apiType: "openai-completions" },
 	// TokenDance（词元跳动）：多模型/多供应商网关，OpenAI 兼容 base URL；模型拉取

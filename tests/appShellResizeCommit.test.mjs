@@ -27,8 +27,8 @@ test("viewport zoom/resize keeps sidebar and drawer widths in pixel mode", () =>
 
 test("programmatic layout changes do not overwrite persisted widths", () => {
 	// 缩放/窗口拉伸/程序化开合都不能走持久化 setter；只有用户交互才提交宽度。
-	assert.match(shell, /if \(!meta\.isUserInteraction\) return;/);
-	assert.match(shell, /if \(!meta\.isUserInteraction\) return;[\s\S]*?const drawerPanel[\s\S]*?const next = shouldCommitPanelPixels\(/);
+	assert.match(shell, /if \(!meta\.isUserInteraction\) \{/);
+	assert.match(shell, /if \(!meta\.isUserInteraction\) \{[\s\S]*?return;\s*\}[\s\S]*?const drawerPanel[\s\S]*?const next = shouldCommitPanelPixels\(/);
 	assert.match(shell, /shouldCommitPanelPixels/);
 });
 

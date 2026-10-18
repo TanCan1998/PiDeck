@@ -1,9 +1,10 @@
+import { t as i18nT } from "../i18n";
 import { useCallback } from "react";
 import type { ImageContent } from "../../../shared/types";
 
 export interface UseImagePasteInput {
 	showToast: (message: string, duration?: number) => void;
-	t: (...args: any[]) => string;
+	t: typeof i18nT;
 }
 
 export interface UseImagePasteOutput {

@@ -18,7 +18,7 @@
  * 见 parseAccelerator。纯函数实现，node --test 可直接单测，不依赖 electron 运行时。
  */
 
-export type ShortcutId = "openSettings" | "toggleDevTools" | "openNewSession" | "openSearch" | "openCommandPalette" | "cycleModel" | "cycleThinking" | "openQuickMessages";
+export type ShortcutId = "openSettings" | "toggleDevTools" | "openNewSession" | "openSearch" | "findInSession" | "openCommandPalette" | "cycleModel" | "cycleThinking" | "openQuickMessages" | "toggleVoiceRecording" | "cycleSessionTabs" | "cycleSessionTabsReverse" | "closeSessionTab" | "zoomIn" | "zoomOut";
 
 /** 设置页分组：general=通用（普通用户常用），dev=开发调试 */
 export type ShortcutGroupId = "general" | "dev";
@@ -63,6 +63,15 @@ export const SHORTCUT_DEFS: readonly ShortcutDef[] = [
 		defaultAccelerator: { darwin: "Cmd+F", other: "Ctrl+F" },
 	},
 	{
+		id: "findInSession",
+		group: "general",
+		labelKey: "settings.shortcuts.findInSessionLabel",
+		descriptionKey: "settings.shortcuts.findInSessionDesc",
+		// 会话内查找（当前会话逐条上一条/下一条）。刻意不复用 Ctrl+F——那是「搜索会话」
+		// （跨会话正文检索）；Shift 版是 VSCode 家族里最容易猜到的近邻键位。
+		defaultAccelerator: { darwin: "Cmd+Shift+F", other: "Ctrl+Shift+F" },
+	},
+	{
 		id: "openCommandPalette",
 		group: "general",
 		labelKey: "settings.shortcuts.openCommandPaletteLabel",
@@ -102,6 +111,60 @@ export const SHORTCUT_DEFS: readonly ShortcutDef[] = [
 		// 「打字打到一半插入口令」，而输入框正是常驻焦点；Ctrl/Cmd+Shift+M 在文本编辑
 		// 与浏览器里都没有既有含义（无「静音标签页」之类冲突），劫持它是安全的。
 		defaultAccelerator: { darwin: "Cmd+Shift+M", other: "Ctrl+Shift+M" },
+	},
+	{
+		id: "toggleVoiceRecording",
+		group: "general",
+		labelKey: "settings.shortcuts.toggleVoiceRecordingLabel",
+		descriptionKey: "settings.shortcuts.toggleVoiceRecordingDesc",
+		// 开始/停止语音录音（需先在设置里开启语音输入）。功能键可裸按且全平台无
+		// 文本编辑/浏览器既有含义，避让已占用区（Ctrl+M/T、Ctrl+Shift+M 等）。
+		defaultAccelerator: { darwin: "F9", other: "F9" },
+	},
+	{
+		id: "cycleSessionTabs",
+		group: "general",
+		labelKey: "settings.shortcuts.cycleSessionTabsLabel",
+		descriptionKey: "settings.shortcuts.cycleSessionTabsDesc",
+		// 浏览器/IDE 惯例：Ctrl+Tab 切到下一个会话标签页，到头回绕。macOS 的 ⌘Tab 被
+		// 系统（应用切换器）占用，跟随 Chromium 系惯例用 Control+Tab（⌃⇥）。输入框聚焦时
+		// 仍然生效：Ctrl+Tab 在文本编辑里无既有含义（Tab 本身的焦点移动不受影响，修饰键在）。
+		defaultAccelerator: { darwin: "Ctrl+Tab", other: "Ctrl+Tab" },
+	},
+	{
+		id: "cycleSessionTabsReverse",
+		group: "general",
+		labelKey: "settings.shortcuts.cycleSessionTabsReverseLabel",
+		descriptionKey: "settings.shortcuts.cycleSessionTabsReverseDesc",
+		// cycleSessionTabs 的反向（上一个标签页），与浏览器 Ctrl+Shift+Tab 惯例成对。
+		defaultAccelerator: { darwin: "Ctrl+Shift+Tab", other: "Ctrl+Shift+Tab" },
+	},
+	{
+		id: "closeSessionTab",
+		group: "general",
+		labelKey: "settings.shortcuts.closeSessionTabLabel",
+		descriptionKey: "settings.shortcuts.closeSessionTabDesc",
+		// 浏览器/IDE 惯例：Cmd/Ctrl+W 关闭当前标签页（Chrome 同款）。主窗口没有原生菜单
+		// （Menu=null），Chromium 默认不会因该组合关窗，可安全接管；AI 回答进行中由渲染层
+		// 弹确认框（确认 = 停止回答 + 关闭，取消 = 保持），主进程只命中广播。
+		defaultAccelerator: { darwin: "Cmd+W", other: "Ctrl+W" },
+	},
+	{
+		id: "zoomIn",
+		group: "general",
+		labelKey: "settings.shortcuts.zoomInLabel",
+		descriptionKey: "settings.shortcuts.zoomInDesc",
+		// 与浏览器/IDE 惯例一致：Cmd/Ctrl+= 放大整个窗口界面（含图标与间距）。
+		// 保持默认时还兼容 Ctrl+Shift+=（即 Ctrl++）与数字键盘 +，见 appShortcuts。
+		defaultAccelerator: { darwin: "Cmd+=", other: "Ctrl+=" },
+	},
+	{
+		id: "zoomOut",
+		group: "general",
+		labelKey: "settings.shortcuts.zoomOutLabel",
+		descriptionKey: "settings.shortcuts.zoomOutDesc",
+		// 与 zoomIn 对称：Cmd/Ctrl+- 缩小；默认时兼容数字键盘 -。
+		defaultAccelerator: { darwin: "Cmd+-", other: "Ctrl+-" },
 	},
 	{
 		id: "toggleDevTools",
@@ -245,6 +308,8 @@ export type ShortcutInput = {
 	alt?: boolean;
 	/** Electron Input.isComposing：输入法组合中的按键不命中，避免 IME 拼音触发快捷键 */
 	isComposing?: boolean;
+	/** Electron Input.isAutoRepeat：长按自动重复。缩放等需要写盘的快捷键据此跳过重复触发 */
+	isAutoRepeat?: boolean;
 };
 
 /** 把 Electron input.key 归一到规范化主键（" "→"space"、"ArrowUp"→"up"、"A"→"a"…）。 */

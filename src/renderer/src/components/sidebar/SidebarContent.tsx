@@ -1,8 +1,7 @@
 import { Activity, Bolt, CirclePlus, Clock, Folder, Globe, MessageSquare, Monitor, Moon, Search, Sun } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import type { AgentTab, AppThemeMode, ArchivedDshSession, ArchivedPiSession, Project, SessionRecord, SessionSummary, WorktreeEntry } from "../../../../shared/types";
-import { AgentContextMenu, DraftSessionContextMenu, ProjectContextMenu, SessionContextMenu, SessionManagerModal, SessionSourceFilterMenu, WorktreeCreateDialog, RpcLogOpenedDialog } from "./SidebarParts";
-import { RpcLogViewer } from "./RpcLogViewer";
+import type { AgentBackend, AgentTab, AppThemeMode, ArchivedDshSession, ArchivedPiSession, Project, SessionRecord, SessionSummary, WorktreeEntry } from "../../../../shared/types";
+import { AgentContextMenu, DraftSessionContextMenu, ProjectContextMenu, SessionContextMenu, SessionManagerModal, SessionSourceFilterMenu, WorktreeCreateDialog } from "./SidebarParts";
 import { sessionRecordToSummary } from "../../atoms";
 import { hasPendingUpdateAtom, pendingAppUpdateAtom, pendingCatalogUpdateAtom, pendingPiUpdateAtom, updateStatusAtom } from "../../atoms/update-atoms";
 import { useAtomValue } from "jotai";
@@ -11,10 +10,12 @@ import { t } from "../../i18n";
 import { cn } from "../../lib/utils";
 import { showNotice } from "../../utils/notice";
 import { resolveSessionRunState, sessionRunCapabilities, type SessionRunAction } from "../../utils/sessionCommands";
-import { getBoundSidebarRuntimeAgent, getBoundSidebarRuntimeAgentByAgentId, type SidebarController, type SidebarRpcLog } from "../../hooks/useSidebarController";
+import { getBoundSidebarRuntimeAgent, getBoundSidebarRuntimeAgentByAgentId, type SidebarController } from "../../hooks/useSidebarController";
+import type { RpcLogEntry } from "../../../../shared/types/rpcLog";
 import type { SidebarRunControl } from "./SidebarComponents";
 import { sessionDisplayName } from "../../utils/sessionDisplayName";
 import { DshSearchResults } from "./DshSearchResults";
+import { SessionContentSearchResults } from "./SessionContentSearchResults";
 import { ProjectTree } from "./ProjectTree";
 import { Button } from "../ui-shadcn/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui-shadcn/tooltip";
@@ -23,13 +24,17 @@ import { Dock, DockItem } from "../motion/dock";
 import { UpdateDotHint } from "./UpdateDotHint";
 import { AnnouncementCenter } from "./AnnouncementCenter";
 import { AutomationDockButton } from "../automation/AutomationDockButton";
+import { HostPluginDockButtons } from "../plugins/HostPluginDockButtons";
+import { BridgeGuiSlot } from "../bridge/BridgeSlot";
 import { MorphingSearch, type MorphingSearchItem } from "../motion/morphing-search";
 import { parseSidebarNavTab } from "../../utils/sidebarNavTab";
+import { pinyinKeys } from "../../utils/pinyinSearch";
 import { displayProjectDirectoryName, isChatProject } from "../../rendererUtils";
 import { isLocalProject } from "../../../../shared/projectLocation";
 import { formatAccelerator } from "../../../../shared/shortcuts";
 import { desktopApi } from "../../desktopApi";
 import { useShortcutBindings } from "../../hooks/useShortcutBindings";
+import { useRelativeTimeTicker } from "../../hooks/sidebar/useSessionActivityClock";
 
 export type SidebarActions = {
 	projects: {
@@ -38,10 +43,12 @@ export type SidebarActions = {
 		refresh: (projectId: string) => Promise<void>;
 		/** 重扫所有项目目录的存在性并刷新侧栏清单。 */
 		refreshAll: () => Promise<void>;
-		reorder: (sourceProjectId: string, targetProjectId: string) => Promise<void>;
+		reorder: (sourceProjectId: string, targetProjectId: string, position?: "before" | "after") => Promise<void>;
+		/** 置顶/取消置顶普通项目；聊天项目与 worktree 子项目由菜单层隐藏入口。 */
+		setPinned: (project: Project, pinned: boolean) => Promise<void>;
 		reveal: (project: Project) => Promise<void>;
 		openWithEditor: (project: Project) => void;
-		importSessions: (project: Project, source: "codex" | "claude" | "opencode" | "zcode" | "workbuddy" | "cursor") => void;
+		importSessions: (project: Project, source: "codex" | "claude" | "qoder" | "opencode" | "zcode" | "workbuddy" | "cursor" | "kimi" | "kimiwork" | "minimax") => void;
 		/** 导入其他目录的会话：源目录现选，用于目录移动/改名后找回历史。 */
 		importDirectorySessions: (project: Project) => void;
 		manageResources: (project: Project) => void;
@@ -55,7 +62,8 @@ export type SidebarActions = {
 		changeChatPath?: (project: Project) => Promise<void>;
 	};
 	sessions: {
-		/** 单击默认 preview；双击传 permanent。侧栏拖拽分屏也会走 open。 */
+		simpleNavigation?: boolean;
+		/** 单击模式由App决定；仅标签模式支持双击晋升常驻。 */
 		open: (projectId: string, sessionId: string, tabMode?: "preview" | "permanent") => Promise<void>;
 		/**
 		 * 按需预加载会话 catalog：活动页「最近会话」要跨项目数据，而 catalog 平时只在
@@ -66,6 +74,8 @@ export type SidebarActions = {
 		beginDrag?: (sessionId: string) => void;
 		endDrag?: () => void;
 		createDraft: (projectId: string) => Promise<void>;
+		/** 新建侧边任务：在该会话所属项目建一条带标记的会话，由右侧抽屉「侧边任务」面板承载。 */
+		createSideTask: (projectId: string, backend?: AgentBackend) => Promise<void>;
 		createAnonymous: (projectId: string) => Promise<void>;
 		/**
 		 * 远端会话登记成功后：显式重拉该项目的本地会话清单并选中新会话。
@@ -73,6 +83,8 @@ export type SidebarActions = {
 		 * 不创建任何会话、也不打开 Tab（选中 ≠ 呈现）。
 		 */
 		importRemoteSession: (projectId: string, sessionId: string) => Promise<void>;
+		/** 新建 ACP 工具会话(toolId → settings.acpTools 条目);后端固定 acp。 */
+		createAcp: (projectId: string, toolId: string) => Promise<void>;
 		deleteDraft: (session: SessionRecord) => Promise<void>;
 		rename: (projectId: string, session: SessionSummary) => void;
 		export: (projectId: string, session: SessionSummary) => Promise<void>;
@@ -123,11 +135,14 @@ export type SidebarActions = {
 	rpc: {
 		getLogging: (agentId: string) => Promise<boolean>;
 		setLogging: (agentId: string, enabled: boolean) => Promise<boolean>;
-		listLogs: (agentId: string) => Promise<SidebarRpcLog[]>;
+		listLogs: (agentId: string) => Promise<RpcLogEntry[]>;
+		/** 打开实时日志面板（右侧抽屉承载）；侧栏只发打开命令，不负责关闭 */
+		openViewer: (agentId: string) => void;
 	};
 };
 
 export type SidebarContentProps = {
+	simple?: boolean;
 	controller: SidebarController;
 	actions: SidebarActions;
 	currentProjectId?: string;
@@ -150,6 +165,9 @@ export type SidebarContentProps = {
 
 export function SidebarContent(props: SidebarContentProps) {
 	const { controller, actions } = props;
+	// 侧栏相对时间刷新节拍：会话静置时没有别的渲染源，「n分钟」也得自己往前走。
+	// 只在本组件挂一次，行组件订阅同一个 atom。
+	useRelativeTimeTicker();
 	const menu = controller.menu;
 	// 三个更新源 atom 必须无条件读取：不能用短路合并，否则任一更新源从 false 变 true
 	// 时会跳过后续 Hook，破坏 Hook 调用顺序。快照本体供角标 tooltip 清单取版本号。
@@ -181,8 +199,6 @@ export function SidebarContent(props: SidebarContentProps) {
 	// 注意不能拿 menuAgent.sessionId 直接查 runtimeBySessionId：AgentTab.sessionId
 	// 是 pi 自身会话 id，而 runtimeBySessionId 的 key 是会话记录 id，必须按 agentId 反查。
 	const menuAgentCanRpcLog = menuAgent !== undefined && getBoundSidebarRuntimeAgentByAgentId(controller.catalog, menuAgent.id) !== undefined;
-	// “RPC 日志已打开”提醒弹框的打开目标 agent id（null = 关闭）
-	const [rpcLogOpenedAgentId, setRpcLogOpenedAgentId] = useState<string | null>(null);
 	// 顶部「搜索」菜单项控制 MorphingSearch 命令面板的展开状态。
 	const [searchOpen, setSearchOpen] = useState(false);
 	// 生效快捷键绑定（用户设置可改），kbd 提示跟随真实键位；设置保存后自动刷新
@@ -212,6 +228,15 @@ export function SidebarContent(props: SidebarContentProps) {
 	const menuDraft = menu?.kind === "draft" ? controller.catalog.sessionsByProject[menu.projectId]?.find((session) => session.id === menu.sessionId) : undefined;
 	const menuSession = menuSessionRecord ? sessionRecordToSummary(menuSessionRecord) : undefined;
 	const menuSessionRuntimeAgent = menuSessionRecord ? getBoundSidebarRuntimeAgent(controller.catalog, menuSessionRecord.id) : undefined;
+	// 与上面 live 判据分开：error/closed 终态绑定不再是 live，但菜单必须保留「关闭 Agent」，
+	// 否则报错会话/草稿反而失去关闭出口（入口按「有 agentId 绑定」判定，不看状态）。
+	const boundAgentForSession = (sessionId: string | undefined) => {
+		if (!sessionId) return undefined;
+		const agentId = controller.catalog.runtimeBySessionId[sessionId]?.agentId;
+		return agentId ? controller.catalog.agents.find((agent) => agent.id === agentId) : undefined;
+	};
+	const menuSessionBoundAgent = menuSessionRecord ? boundAgentForSession(menuSessionRecord.id) : undefined;
+	const menuDraftBoundAgent = menuDraft ? boundAgentForSession(menuDraft.id) : undefined;
 
 	/**
 	 * 侧栏菜单的全状态运行控制（任意会话/agent 都有）。
@@ -238,12 +263,16 @@ export function SidebarContent(props: SidebarContentProps) {
 
 	// MorphingSearch 检索项：扁平化所有项目 + 会话，供命令面板跳转。
 	// 项目项用目录名（chat 用「Chat」），会话项用标题 + 预览；选中即打开/选中目标。
+	// pinyin：中文标题的首字母/全拼键（纯字母查询才能命中，键按标题缓存）。
 	const searchItems: MorphingSearchItem[] = [];
 	for (const project of controller.catalog.projects) {
+		const projectTitle = displayProjectDirectoryName(project);
 		searchItems.push({
 			id: `project:${project.id}`,
-			title: displayProjectDirectoryName(project),
+			title: projectTitle,
+			// 远端项目没有本机 path：描述用远端根路径，避免空串让搜索结果看起来没有位置。
 			description: isLocalProject(project) ? project.path : project.locator.remotePath,
+			pinyin: pinyinKeys(projectTitle),
 			icon: isChatProject(project) ? MessageSquare : Folder,
 			onSelect: () => {
 				actions.projects.select(project.id);
@@ -251,10 +280,12 @@ export function SidebarContent(props: SidebarContentProps) {
 			},
 		});
 		for (const session of controller.catalog.sessionsByProject[project.id] ?? []) {
+			const sessionTitle = sessionDisplayName(session.title, session.forked) ?? session.title;
 			searchItems.push({
 				id: `session:${session.id}`,
-				title: sessionDisplayName(session.title, session.forked) ?? session.title,
+				title: sessionTitle,
 				description: session.preview,
+				pinyin: pinyinKeys(sessionTitle),
 				icon: MessageSquare,
 				onSelect: () => {
 					void actions.sessions.open(project.id, session.id);
@@ -268,7 +299,7 @@ export function SidebarContent(props: SidebarContentProps) {
 			// 行操作按钮是 absolute 浮层：hover 时行文本通过 padding-right 压缩让位
 			// （pr 留出按钮空间 + 截断，三棵树统一策略，不再按侧栏宽度分断点），
 			// 宽度不用穿透到树组件
-			className="chat-list-pane v3-braun flex h-full min-w-0 flex-col overflow-hidden bg-sidebar text-sidebar-foreground"
+			className={cn("chat-list-pane v3-braun flex h-full min-w-0 flex-col overflow-hidden text-sidebar-foreground", props.simple ? "bg-(--simple-shell-surface)" : "bg-sidebar")}
 			aria-label={t("app.search")}
 		>
 			{/* 品牌区提到 body 外：贴侧栏顶边，不被 sidebar-body 的 px/py 顶开（logo 怼左上）。 */}
@@ -278,7 +309,7 @@ export function SidebarContent(props: SidebarContentProps) {
             新建会话 → 打开初始引导页（居中输入框 + 项目下拉切换后可直接对话）；
             搜索 → 打开 MorphingSearch 命令面板。把搜索从整行输入框收敛成单个动作项，
             消除与下方胶囊分段的样式重复。底部细分割线与下方分组区分，避免与分段栏粘连。 */}
-				<div className="flex shrink-0 flex-col gap-0.5 border-b border-border/40 pt-1 pb-2">
+				<div className={cn("flex shrink-0 flex-col gap-0.5 pt-1 pb-2", !props.simple && "border-b border-border/40")}>
 					<button type="button" className="group flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-body text-foreground transition-colors hover:bg-muted/60" aria-label={t("app.newSession")} title={t("app.newSession")} onClick={() => props.onOpenNewSession?.()}>
 						<CirclePlus className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
 						<span className="min-w-0 flex-1 truncate font-medium">{t("app.newSession")}</span>
@@ -294,6 +325,8 @@ export function SidebarContent(props: SidebarContentProps) {
 					</button>
 					{/* 定时任务入口：放在新建/搜索下面，避免藏在底栏 Dock 里不好找 */}
 					<AutomationDockButton />
+					{/* 宿主插件面板入口：与定时任务同区，无已启用面板时组件自身不渲染 */}
+					<HostPluginDockButtons projectId={props.currentProjectId} sessionId={props.currentSessionId} />
 				</div>
 
 				{/* MorphingSearch 命令面板：锚点固定定位到视口水平居中、垂直约 1/5 处，
@@ -327,29 +360,31 @@ export function SidebarContent(props: SidebarContentProps) {
             这层包层，包层自身仍是内容宽，所以侧栏拉宽时右侧会留一段空轨（下方 Dock 用
             w-full justify-between 分发才显得自适应）。用后代选择器把包层设为 flex-1，三档
             平分轨道；包层 min-w-0 + 文案 truncate 作窄侧栏/英文长标签的溢出兜底。 */}
-				<Tabs
-					value={controller.navTab}
-					onValueChange={(value) => {
-						const tab = parseSidebarNavTab(value);
-						if (tab) controller.setNavTab(tab);
-					}}
-					variant="pill"
-				>
-					<TabsList className="w-full rounded-full bg-muted/70 p-0.5 [&>div]:min-w-0 [&>div]:flex-1">
-						<TabsTrigger value="active" className={cn("w-full min-w-0 gap-1.5 overflow-hidden px-2 py-1.5 text-xs", controller.navTab === "active" && "text-foreground")} indicatorClassName="bg-background shadow-sm dark:bg-bg-active">
-							<Activity className="size-3.5 shrink-0" aria-hidden="true" />
-							<span className="truncate">{t("app.sidebarActive")}</span>
-						</TabsTrigger>
-						<TabsTrigger value="chats" className={cn("w-full min-w-0 gap-1.5 overflow-hidden px-2 py-1.5 text-xs", controller.navTab === "chats" && "text-foreground")} indicatorClassName="bg-background shadow-sm dark:bg-bg-active">
-							<MessageSquare className="size-3.5 shrink-0" aria-hidden="true" />
-							<span className="truncate">{t("app.sidebarChats")}</span>
-						</TabsTrigger>
-						<TabsTrigger value="projects" className={cn("w-full min-w-0 gap-1.5 overflow-hidden px-2 py-1.5 text-xs", controller.navTab === "projects" && "text-foreground")} indicatorClassName="bg-background shadow-sm dark:bg-bg-active">
-							<Folder className="size-3.5 shrink-0" aria-hidden="true" />
-							<span className="truncate">{t("app.sidebarProjects")}</span>
-						</TabsTrigger>
-					</TabsList>
-				</Tabs>
+				{!props.simple && (
+					<Tabs
+						value={controller.navTab}
+						onValueChange={(value) => {
+							const tab = parseSidebarNavTab(value);
+							if (tab) controller.setNavTab(tab);
+						}}
+						variant="pill"
+					>
+						<TabsList className="w-full rounded-full bg-muted/70 p-0.5 [&>div]:min-w-0 [&>div]:flex-1">
+							<TabsTrigger value="active" className={cn("w-full min-w-0 gap-1.5 overflow-hidden px-2 py-1.5 text-xs", controller.navTab === "active" && "text-foreground")} indicatorClassName="bg-background shadow-sm dark:bg-bg-active">
+								<Activity className="size-3.5 shrink-0" aria-hidden="true" />
+								<span className="truncate">{t("app.sidebarActive")}</span>
+							</TabsTrigger>
+							<TabsTrigger value="chats" className={cn("w-full min-w-0 gap-1.5 overflow-hidden px-2 py-1.5 text-xs", controller.navTab === "chats" && "text-foreground")} indicatorClassName="bg-background shadow-sm dark:bg-bg-active">
+								<MessageSquare className="size-3.5 shrink-0" aria-hidden="true" />
+								<span className="truncate">{t("app.sidebarChats")}</span>
+							</TabsTrigger>
+							<TabsTrigger value="projects" className={cn("w-full min-w-0 gap-1.5 overflow-hidden px-2 py-1.5 text-xs", controller.navTab === "projects" && "text-foreground")} indicatorClassName="bg-background shadow-sm dark:bg-bg-active">
+								<Folder className="size-3.5 shrink-0" aria-hidden="true" />
+								<span className="truncate">{t("app.sidebarProjects")}</span>
+							</TabsTrigger>
+						</TabsList>
+					</Tabs>
+				)}
 
 				{/* G9：DSH 全文搜索结果（搜索词非空时展示；结果按 dshSessionId 映射回 catalog） */}
 				{controller.search.trim() && (
@@ -360,11 +395,36 @@ export function SidebarContent(props: SidebarContentProps) {
 						}}
 					/>
 				)}
+				{/* 跨会话正文搜索（Go session-index sidecar）：命中会话跨项目展示，
+				    点击打开并定位到首个命中消息（pendingMessageJump 链路）；无 sidecar 时隐藏 */}
+				{controller.search.trim() && (
+					<SessionContentSearchResults
+						query={controller.search}
+						onOpen={(projectId, sessionId) => {
+							void actions.sessions.open(projectId, sessionId);
+						}}
+					/>
+				)}
 
 				{/* 单一滚动区承载项目与展开内容，避免项目导航/详情双滚动和重复标题。
             scrollbar-gutter: stable：滚动条出现/消失时列表宽度不跳变（与抽屉一致）。 */}
 				<section className="conversation-list min-h-0 flex-1 overflow-x-hidden overflow-y-auto [scrollbar-gutter:stable]">
-					<ProjectTree controller={controller} actions={actions} currentProjectId={currentRootProject?.id} currentSessionId={props.currentSessionId} worktreesByProject={props.worktreesByProject} branchByProject={props.branchByProject} removingWorktreeProjectIds={props.removingWorktreeProjectIds} />
+					<ProjectTree
+						simple={props.simple}
+						controller={controller}
+						actions={actions}
+						currentProjectId={currentRootProject?.id}
+						currentSessionId={props.currentSessionId}
+						worktreesByProject={props.worktreesByProject}
+						branchByProject={props.branchByProject}
+						removingWorktreeProjectIds={props.removingWorktreeProjectIds}
+					/>
+					{/* GUI 扩展桥：侧边栏面板/分区落点（ctx.gui.setSidebarPanel / setSidebarSection）。
+					    **旁插**在 ProjectTree 之后 —— 不改侧边栏原有结构（§7.4 只追加）。
+					    侧边栏是应用级 chrome，桥状态按「当前聚焦会话」取（桥的运行时状态本就是按
+					    runtimeGeneration 存的，detach 即清）；无贡献时返回 null，不占位。 */}
+					<BridgeGuiSlot sessionId={props.currentSessionId} slot="sidebar.panel" className="flex flex-col gap-2 px-2 py-2" />
+					<BridgeGuiSlot sessionId={props.currentSessionId} slot="sidebar.section" className="flex flex-col gap-2 px-2 py-2" />
 				</section>
 			</div>
 			{/* 底栏 dock（beUI Dock）：设置/公告/反馈/主题切换收进浮动卡片，铺满底栏宽度
@@ -406,7 +466,7 @@ export function SidebarContent(props: SidebarContentProps) {
 									</TooltipContent>
 								</Tooltip>
 								{/* 更新角标：PiDeck / Pi CLI / 模型目录任一有可提示更新时显示圆点 */}
-								{hasPendingUpdate && <span className="pointer-events-none absolute right-1 top-1 size-2 rounded-full bg-[var(--color-accent)]" aria-hidden="true" />}
+								{hasPendingUpdate && <span className="pointer-events-none absolute right-1 top-1 size-2 rounded-full bg-[var(--color-accent)] ring-2 ring-[var(--color-bg-sidebar)]" aria-hidden="true" />}
 							</div>
 						</DockItem>
 						{/* 公告中心入口：未读红点在组件内部按 atom 派生（单一 owner） */}
@@ -480,6 +540,10 @@ export function SidebarContent(props: SidebarContentProps) {
 						actions.projects.importSessions(menuProject, "claude");
 						controller.closeMenu();
 					}}
+					onImportQoderSessions={() => {
+						actions.projects.importSessions(menuProject, "qoder");
+						controller.closeMenu();
+					}}
 					onImportOpenCodeSessions={() => {
 						actions.projects.importSessions(menuProject, "opencode");
 						controller.closeMenu();
@@ -494,6 +558,18 @@ export function SidebarContent(props: SidebarContentProps) {
 					}}
 					onImportCursorSessions={() => {
 						actions.projects.importSessions(menuProject, "cursor");
+						controller.closeMenu();
+					}}
+					onImportKimiSessions={() => {
+						actions.projects.importSessions(menuProject, "kimi");
+						controller.closeMenu();
+					}}
+					onImportKimiWorkSessions={() => {
+						actions.projects.importSessions(menuProject, "kimiwork");
+						controller.closeMenu();
+					}}
+					onImportMinimaxSessions={() => {
+						actions.projects.importSessions(menuProject, "minimax");
 						controller.closeMenu();
 					}}
 					onImportDirectorySessions={() => {
@@ -532,6 +608,20 @@ export function SidebarContent(props: SidebarContentProps) {
 						actions.projects.rename(menuProject);
 						controller.closeMenu();
 					}}
+					isPinned={menuProject.pinned === true}
+					sessionSortMode={controller.sessionSortMode}
+					onSetSessionSortMode={(mode) => {
+						controller.setSessionSortMode(mode);
+						controller.closeMenu();
+					}}
+					onTogglePin={
+						menuProject.kind !== "chat" && !menuProject.worktreeParentId
+							? () => {
+									void actions.projects.setPinned(menuProject, !(menuProject.pinned === true));
+									controller.closeMenu();
+								}
+							: undefined
+					}
 					onRemoveWorktree={
 						menuProjectWorktreeParent && isLocalProject(menuProject)
 							? () => {
@@ -602,6 +692,14 @@ export function SidebarContent(props: SidebarContentProps) {
 								}
 							: undefined
 					}
+					onCreateSideTask={
+						menuAgent.projectId
+							? () => {
+									controller.closeMenu();
+									void actions.sessions.createSideTask(menuAgent.projectId, menuAgent.backend);
+								}
+							: undefined
+					}
 					onToggleRpcLogging={() => {
 						// 兜底：置灰的菜单项点击不触发 onSelect，这里防御 agent 状态在菜单打开期间变化的情况
 						if (!menuAgentCanRpcLog) {
@@ -615,7 +713,6 @@ export function SidebarContent(props: SidebarContentProps) {
 							void actions.rpc
 								.setLogging(menuAgent.id, false)
 								.then((enabled) => {
-									controller.setAgentRpcLogging(menuAgent.id, enabled);
 									showNotice(enabled ? t("rpc.loggingDisableFailed") : t("rpc.loggingDisabled"), 2500);
 								})
 								.catch(() => showNotice(t("rpc.loggingDisableFailed"), 2500));
@@ -624,13 +721,10 @@ export function SidebarContent(props: SidebarContentProps) {
 						void actions.rpc
 							.setLogging(menuAgent.id, true)
 							.then((enabled) => {
-								controller.setAgentRpcLogging(menuAgent.id, enabled);
-								if (enabled) {
-									// 开启成功弹提醒框（含“查看日志”入口），不再自动打开日志弹窗
-									setRpcLogOpenedAgentId(menuAgent.id);
-								} else {
-									showNotice(t("rpc.loggingEnableFailed"), 2500);
-								}
+								// 开启成功即自动打开日志面板：开记录的意图就是「现在要看」，省掉再点一次「查看日志」。
+								// 状态镜像由 App 层 rpc.setLogging 包装统一写入，这里只负责视图跳转与反馈。
+								if (enabled) controller.openRpcLogs(menuAgent.id);
+								showNotice(enabled ? t("rpc.loggingEnabled") : t("rpc.loggingEnableFailed"), 2500);
 							})
 							.catch(() => showNotice(t("rpc.loggingEnableFailed"), 2500));
 					}}
@@ -667,6 +761,14 @@ export function SidebarContent(props: SidebarContentProps) {
 					onClose={controller.closeMenu}
 					// 草稿会话同样给运行控制：不必先打开会话发消息就能启动 Agent
 					runControl={buildSidebarRunControl(menuDraft.id)}
+					onCloseAgent={
+						menuDraftBoundAgent
+							? () => {
+									void actions.agents.close(menuDraftBoundAgent);
+									controller.closeMenu();
+								}
+							: undefined
+					}
 					onDelete={() => {
 						void actions.sessions.deleteDraft(menuDraft);
 						controller.closeMenu();
@@ -693,6 +795,11 @@ export function SidebarContent(props: SidebarContentProps) {
 					onOpenProxySetting={() => {
 						controller.closeMenu();
 						actions.sessions.openProxySetting(menuSession.id);
+					}}
+					// 侧边任务：项目归属优先取会话自己的（分屏/worktree 栏可能与菜单所在项目不同）
+					onCreateSideTask={() => {
+						controller.closeMenu();
+						void actions.sessions.createSideTask(menuSession.projectId ?? menu.projectId, menuSession.backend);
 					}}
 					// 运行控制全状态：未启动的历史会话主控项即「启动 Agent」
 					runControl={buildSidebarRunControl(menuSession.id)}
@@ -732,7 +839,6 @@ export function SidebarContent(props: SidebarContentProps) {
 							void actions.rpc
 								.setLogging(menuSessionRuntimeAgent.id, false)
 								.then((enabled) => {
-									controller.setAgentRpcLogging(menuSessionRuntimeAgent.id, enabled);
 									showNotice(enabled ? t("rpc.loggingDisableFailed") : t("rpc.loggingDisabled"), 2500);
 								})
 								.catch(() => showNotice(t("rpc.loggingDisableFailed"), 2500));
@@ -741,12 +847,9 @@ export function SidebarContent(props: SidebarContentProps) {
 						void actions.rpc
 							.setLogging(menuSessionRuntimeAgent.id, true)
 							.then((enabled) => {
-								controller.setAgentRpcLogging(menuSessionRuntimeAgent.id, enabled);
-								if (enabled) {
-									setRpcLogOpenedAgentId(menuSessionRuntimeAgent.id);
-								} else {
-									showNotice(t("rpc.loggingEnableFailed"), 2500);
-								}
+								// 开启成功即自动打开日志面板（语义同 agent 菜单分支）；镜像状态由 App 层 rpc.setLogging 包装统一写 atom。
+								if (enabled) controller.openRpcLogs(menuSessionRuntimeAgent.id);
+								showNotice(enabled ? t("rpc.loggingEnabled") : t("rpc.loggingEnableFailed"), 2500);
 							})
 							.catch(() => showNotice(t("rpc.loggingEnableFailed"), 2500));
 					}}
@@ -754,6 +857,14 @@ export function SidebarContent(props: SidebarContentProps) {
 						if (menuSessionRuntimeAgent) controller.openRpcLogs(menuSessionRuntimeAgent.id);
 						controller.closeMenu();
 					}}
+					onCloseAgent={
+						menuSessionBoundAgent
+							? () => {
+									void actions.agents.close(menuSessionBoundAgent);
+									controller.closeMenu();
+								}
+							: undefined
+					}
 					onArchiveSession={() => {
 						void actions.sessions.archive(menu.projectId, menuSession);
 						controller.closeMenu();
@@ -797,17 +908,7 @@ export function SidebarContent(props: SidebarContentProps) {
 			{controller.worktreeCreateProjectId && (
 				<WorktreeCreateDialog projectId={controller.worktreeCreateProjectId} creating={Boolean(props.creatingWorktree)} onCreate={(branchName) => void actions.worktrees.create(controller.worktreeCreateProjectId!, branchName).then(controller.closeWorktreeCreate)} onClose={controller.closeWorktreeCreate} />
 			)}
-			{controller.rpcLogAgentId && <RpcLogViewer agentId={controller.rpcLogAgentId} loadHistory={actions.rpc.listLogs} getLogging={actions.rpc.getLogging} setLogging={actions.rpc.setLogging} onClose={controller.closeRpcLogs} />}
-			{/* “RPC 日志已打开”提醒：点击菜单后弹框，可直达日志查看弹窗 */}
-			{rpcLogOpenedAgentId && (
-				<RpcLogOpenedDialog
-					onView={() => {
-						controller.openRpcLogs(rpcLogOpenedAgentId);
-						setRpcLogOpenedAgentId(null);
-					}}
-					onClose={() => setRpcLogOpenedAgentId(null)}
-				/>
-			)}
+			{/* 实时日志面板挂在右侧工作区抽屉（App 层 rpcLog 面板），侧栏不再挂查看器 */}
 		</aside>
 	);
 }

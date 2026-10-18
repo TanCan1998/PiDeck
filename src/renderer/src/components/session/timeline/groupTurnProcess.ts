@@ -17,8 +17,9 @@
  */
 import type { ChatMessage } from "../../../../../shared/types";
 import { getToolName } from "../../../../../shared/fileChanges";
-import { activityCountsFromToolNames, type ActivityCount } from "./toolCategory";
+import { activityCountsFromToolNames, toolActivityCategory, type ActivityCount, type ToolActivityCategory } from "./toolCategory";
 import type { TurnDisplayItem, TurnProcessEntry } from "./types";
+import { cleanAnswerText } from "./answerText.ts";
 
 /**
  * 一级过程行只可能是「重试 / 错误诊断」两种（`isStandaloneEntry` 保证）。
@@ -29,8 +30,8 @@ export type TurnStandaloneEntry = Extract<TurnProcessEntry, { kind: "retry-entry
 /** 大折叠栏内的一个节点：中间回复 / 一级过程行 / 过程组。 */
 export type TurnProcessNode =
 	| { kind: "interim"; id: string; message: ChatMessage }
-	/** 一组连续的过程条目（思考 / 工具），组头显示 `counts` 摘要。 */
-	| { kind: "group"; id: string; members: TurnProcessEntry[]; counts: ActivityCount[]; toolCount: number; hasThinking: boolean }
+	/** 一组连续的过程条目（思考 / 工具 / 扩展输出），组头显示 `counts` 摘要。 */
+	| { kind: "group"; id: string; members: TurnProcessEntry[]; counts: ActivityCount[]; toolCount: number; hasThinking: boolean /** 组内扩展输出条目总数（appendEntry 投影卡）：组头摘要的扩展段，不入工具计数 */; extensionCount: number }
 	/** 与中间回复同级的一级过程行（重试 / 错误诊断），同时作为组边界。 */
 	| { kind: "entry"; id: string; entry: TurnStandaloneEntry };
 
@@ -45,6 +46,18 @@ export function toolNamesOfEntry(entry: TurnProcessEntry): string[] {
 	return names;
 }
 
+/**
+ * 组内**当前**活动类别只看最后一个成员；结束工具后若又进入思考，
+ * 不能沿用上一工具报「正在读取」——此时应显示「正在分析请求」。
+ * 工具类别也不能用整组摘要的最高频类别：搜索切到读取时应立即更新。
+ */
+export function lastToolCategory(members: readonly TurnProcessEntry[]): ToolActivityCategory | undefined {
+	const current = members[members.length - 1];
+	if (current?.kind !== "tool-entry") return undefined;
+	const message = current.group.messages[current.group.messages.length - 1];
+	return message ? toolActivityCategory(getToolName(message)) : undefined;
+}
+
 /** 重试 / 错误诊断：一级行 + 组边界。类型谓词，让调用处的 `entry` 收窄成 `TurnStandaloneEntry`。 */
 function isStandaloneEntry(entry: TurnProcessEntry): entry is TurnStandaloneEntry {
 	return entry.kind === "retry-entry" || entry.kind === "error-entry";
@@ -54,8 +67,10 @@ function flushGroup(members: TurnProcessEntry[], nodes: TurnProcessNode[]): void
 	if (members.length === 0) return;
 	const toolNames: string[] = [];
 	let hasThinking = false;
+	let extensionCount = 0;
 	for (const member of members) {
 		if (member.kind === "thinking-entry") hasThinking = true;
+		else if (member.kind === "extension-entry") extensionCount += member.messages.length;
 		else toolNames.push(...toolNamesOfEntry(member));
 	}
 	nodes.push({
@@ -67,6 +82,7 @@ function flushGroup(members: TurnProcessEntry[], nodes: TurnProcessNode[]): void
 		counts: activityCountsFromToolNames(toolNames),
 		toolCount: toolNames.length,
 		hasThinking,
+		extensionCount,
 	});
 }
 
@@ -75,11 +91,11 @@ function flushGroup(members: TurnProcessEntry[], nodes: TurnProcessNode[]): void
  *
  * 边界规则：
  * - `final-answer` 不参与分组（由 `FinalAnswer` 在大折叠栏外常驻渲染）；
- * - 有文本的中间回复 → 先 flush 当前组，再产出一条一级 `interim`；
- * - **空文本中间回复不作边界也不产出**（live 骨架挂载点 / 空 error 占位，产出一行会凭空多出空组头，
- *   `segmentSummary.ts:31-36` 已有同类防呆）；
+ * - 清理后有正文的中间回复 → 先 flush 当前组，再产出一条一级 `interim`；
+ * - **没有正文的中间回复不作边界也不产出**（live 骨架 / 空 error 占位 / 仅思考标签等，
+ *   与正文渲染和 `segmentSummary.ts` 的计数同口径，避免凭空拆出空行和多余组头）；
  * - 重试 / 错误 → 先 flush，再产出一条一级 `entry`；
- * - 其余过程条目（思考 / 工具）→ 并入当前组；工具类别变化**不拆组**。
+ * - 其余过程条目（思考 / 工具 / 扩展输出）→ 并入当前组；工具类别变化**不拆组**。
  */
 export function groupTurnProcess(items: readonly TurnDisplayItem[]): TurnProcessNode[] {
 	const nodes: TurnProcessNode[] = [];
@@ -88,8 +104,8 @@ export function groupTurnProcess(items: readonly TurnDisplayItem[]): TurnProcess
 	for (const item of items) {
 		if (item.kind === "final-answer") continue;
 		if (item.kind === "interim-answer") {
-			// 空文本：live 骨架 / 占位，不作边界也不产出
-			if (!item.message.text.trim()) continue;
+			// 原文非空不代表有正文；不可见消息不能切断相邻过程组。
+			if (!cleanAnswerText(item.message.text)) continue;
 			flushGroup(current, nodes);
 			current = [];
 			nodes.push({ kind: "interim", id: item.id, message: item.message });

@@ -34,7 +34,7 @@ const IMPORT_META_MAX_LINES = 16;
  * - 坏行跳过（头部截断可能切在行中间或多字节字符上，不影响在前几行找到标记）；
  * - 只读头部，**不 materialize 整个文件**。
  */
-export async function readImportMetaHead(targetPath: string, type: string): Promise<{ sourceMtime: number; sourceSize: number } | undefined> {
+export async function readImportMetaHead(targetPath: string, type: string): Promise<{ sourceMtime: number; sourceSize: number; version: number } | undefined> {
 	let handle;
 	try {
 		handle = await open(targetPath, "r");
@@ -56,6 +56,8 @@ export async function readImportMetaHead(targetPath: string, type: string): Prom
 				return {
 					sourceMtime: Number(entry.sourceMtime),
 					sourceSize: Number(entry.sourceSize),
+					// 转换器版本（缺省 0 = 老版本产物）：导入器据此把旧转换产物标 outdated 引导重导
+					version: Number(entry.version) || 0,
 				};
 			} catch {
 				// 坏行/截断行跳过，继续找标记

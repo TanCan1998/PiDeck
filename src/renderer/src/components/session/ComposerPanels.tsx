@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowUp, ChevronDown, ChevronUp, Clock, FileText, ListOrdered, LoaderCircle, Pencil, Split, Square, X, XCircle } from "lucide-react";
+import { AlertTriangle, ArrowUp, ChevronDown, ChevronUp, Clock, Copy, FileText, FolderOpen, ListOrdered, LoaderCircle, Pause, Pencil, Split, Square, X, XCircle } from "lucide-react";
 import { useId, type RefObject } from "react";
 import { useAtomValue, useStore } from "jotai";
 import type { ImageContent } from "../../../../shared/types";
@@ -11,11 +11,17 @@ import { resolveComposerSendButtonState } from "../../utils/composerSendButton";
 import { buildAskContextBlock } from "../../utils/askPanelContext";
 import { canChangeQueuedPromptBehavior, canDiscardQueuedPrompt, canRetractQueuedPromptToInput, discardControlHint, retractControlHint } from "../../utils/queuedPromptQueue";
 import { t } from "../../i18n";
+import { desktopApi } from "../../desktopApi";
+import { writeClipboard } from "../../utils/clipboard";
+import { showNotice } from "../../utils/notice";
 import { Button } from "../ui-shadcn/button";
+import { ButtonGroup } from "../ui-shadcn/button-group";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../ui-shadcn/dropdown-menu";
 import { sessionRecordByIdAtomFamily } from "../../atoms";
 import { sessionRuntimeBySessionIdAtomFamily } from "../../atoms/session-selectors";
 import { useAskPanel } from "../../hooks/useAskPanel";
 import { sessionMessageCacheBySessionIdAtomFamily } from "../../atoms/session-atoms";
+import { queueDrainSuppressedByIdAtom } from "../../atoms/composer-atoms";
 import { isSessionRuntimeBusy } from "../../hooks/useSessionTimelineController";
 import { ExtensionWidgetCard } from "./ComposerParts";
 import { ComposerWidgetFrame, useComposerWidgetCollapsed } from "./ComposerWidgetLayout";
@@ -53,6 +59,33 @@ export function ComposerAttachmentBar(props: {
 					<FileText size={14} strokeWidth={2} className="shrink-0" aria-hidden="true" />
 					<span className="paste-file-chip-name">{file.fileName}</span>
 					<span className="paste-file-chip-size">{formatBytes(file.bytes)}</span>
+					{/* 粘贴转文件此前只能删除：补「用系统默认程序打开」和「复制路径」两个出口（2026-10 用户反馈） */}
+					<Button
+						variant="ghost"
+						size="icon"
+						className="image-remove-btn paste-file-remove-btn"
+						aria-label={t("menu.defaultOpen")}
+						title={t("menu.defaultOpen")}
+						onClick={() => {
+							void desktopApi.files.open(file.path).catch((error) => showNotice(t("app.openFileFailed", { error: error instanceof Error ? error.message : String(error) })));
+						}}
+					>
+						<FolderOpen size={12} strokeWidth={2.4} aria-hidden="true" />
+					</Button>
+					<Button
+						variant="ghost"
+						size="icon"
+						className="image-remove-btn paste-file-remove-btn"
+						aria-label={t("menu.copyPath")}
+						title={t("menu.copyPath")}
+						onClick={() => {
+							void writeClipboard(file.path).then((ok) => {
+								if (ok) showNotice(t("copy.success"), 1200);
+							});
+						}}
+					>
+						<Copy size={12} strokeWidth={2.4} aria-hidden="true" />
+					</Button>
 					<Button variant="ghost" size="icon" className="image-remove-btn paste-file-remove-btn" aria-label={t("app.pasteFileRemove")} title={t("app.pasteFileRemove")} onClick={() => props.onRemovePasteFile?.(index)}>
 						<X size={12} strokeWidth={2.4} aria-hidden="true" />
 					</Button>
@@ -116,6 +149,8 @@ function QueuedPromptRow(props: {
 	showQueueGlyph: boolean;
 	sessionId: string;
 	agentBusy: boolean;
+	/** ACP 协议无 steer 通道：该后端的会话不提供「插入当前回合」切换（禁用 + 原因提示）。 */
+	steerSupported: boolean;
 	onRetract: (sessionId: string, prompt: QueuedPromptSnapshot) => void;
 	onDiscard: (sessionId: string, promptId: string) => void;
 	onChangeBehavior: (sessionId: string, promptId: string, behavior: "steer" | "followUp") => void;
@@ -134,7 +169,7 @@ function QueuedPromptRow(props: {
 	const canAsk = canChangeBehavior && Boolean((props.prompt.message || props.prompt.displayText).trim()) && !props.prompt.images?.length;
 	const retractTitle = [t("app.retractToInput"), !retractHint.disabled ? "" : retractHint.reason === "unknown" ? t("app.queuedRetractDisabledUnknown") : t("app.queuedRetractDisabledSending")].filter(Boolean).join("\n");
 	const discardTitle = discardHint.disabled ? [t("app.retractDiscard"), t("app.queuedDiscardDisabledSending")].filter(Boolean).join("\n") : t("app.retractDiscard");
-	const steerTitle = canChangeBehavior ? (props.agentBusy ? t("app.sendSteerTitle") : t("app.queuedSteerUnavailable")) : t("app.queuedBehaviorLocked");
+	const steerTitle = !props.steerSupported ? t("app.queuedSteerBackendUnsupported") : canChangeBehavior ? (props.agentBusy ? t("app.sendSteerTitle") : t("app.queuedSteerUnavailable")) : t("app.queuedBehaviorLocked");
 	const followUpTitle = canChangeBehavior ? t("app.sendFollowUpTitle") : t("app.queuedBehaviorLocked");
 	const askTitle = !canChangeBehavior ? t("app.queuedBehaviorLocked") : props.prompt.images?.length ? t("app.queuedAskUnsupported") : t("app.sendAskTitle");
 	const rowTitle = [t("app.queuedOrder", { n: props.index + 1 }), isSteer ? t("app.sendSteerTitle") : t("app.sendFollowUpTitle"), previewText, props.prompt.error, status === "unknown" ? t("app.queuedUnknown") : ""].filter(Boolean).join("\n");
@@ -143,7 +178,7 @@ function QueuedPromptRow(props: {
 	return (
 		<li className={`queued-row flex h-9 min-h-9 shrink-0 items-center gap-2.5 border-transparent px-3 transition-[border-color,background-color] duration-100 ${status} queued-behavior-${props.prompt.behavior}`} title={rowTitle}>
 			{props.showQueueGlyph ? <ListOrdered size={14} aria-hidden="true" className="shrink-0 text-text-tertiary" /> : <QueueStatusGlyph status={status} />}
-			<span className="min-w-0 flex-1 truncate text-[13px] leading-5 text-text-secondary">{previewText}</span>
+			<span className="min-w-0 flex-1 truncate text-control leading-5 text-text-secondary">{previewText}</span>
 			{props.prompt.images?.length ? <span className="shrink-0 font-mono text-micro leading-none text-text-tertiary">{t("app.queuedImageCount", { count: String(props.prompt.images.length) })}</span> : null}
 			{status === "sending" ? (
 				<span className="shrink-0 font-mono text-micro leading-none text-text-tertiary">{t("app.queuedSending")}</span>
@@ -155,7 +190,15 @@ function QueuedPromptRow(props: {
 				<span className="shrink-0 font-mono text-micro leading-none text-text-tertiary">{isSteer ? t("app.queuedBehaviorSteerShort") : t("app.queuedBehaviorFollowUpShort")}</span>
 			)}
 			<div className="inline-flex shrink-0 items-center gap-0.5">
-				<Button variant="ghost" size="icon-xs" className={`${actionClass}${isSteer ? " text-foreground" : ""}`} aria-label={t("app.sendSteerTitle")} title={steerTitle} disabled={!canChangeBehavior || !props.agentBusy} onClick={() => props.onChangeBehavior(props.sessionId, props.prompt.id, "steer")}>
+				<Button
+					variant="ghost"
+					size="icon-xs"
+					className={`${actionClass}${isSteer ? " text-foreground" : ""}`}
+					aria-label={t("app.sendSteerTitle")}
+					title={steerTitle}
+					disabled={!canChangeBehavior || !props.agentBusy || !props.steerSupported}
+					onClick={() => props.onChangeBehavior(props.sessionId, props.prompt.id, "steer")}
+				>
 					<ArrowUp size={14} strokeWidth={2} aria-hidden="true" />
 				</Button>
 				<Button variant="ghost" size="icon-xs" className={`${actionClass}${isFollowUp ? " text-foreground" : ""}`} aria-label={t("app.sendFollowUpTitle")} title={followUpTitle} disabled={!canChangeBehavior} onClick={() => props.onChangeBehavior(props.sessionId, props.prompt.id, "followUp")}>
@@ -211,9 +254,13 @@ export function QueuedPromptPanel(props: {
 	const { collapsed, toggleCollapsed } = useComposerWidgetCollapsed(`queue:${sessionId ?? "unbound"}`, true);
 	const runtime = useAtomValue(sessionRuntimeBySessionIdAtomFamily(sessionId ?? ""));
 	const sessionRecord = useAtomValue(sessionRecordByIdAtomFamily(sessionId ?? ""));
+	// 停止响应后的队列抑制（toast 瞬时易逝）：面板常驻提示用户队列不会自动发送，需再发一条消息恢复。
+	const drainSuspended = useAtomValue(queueDrainSuppressedByIdAtom)[sessionId ?? ""] === true;
 	const askPanel = useAskPanel();
 	const store = useStore();
 	const agentBusy = isSessionRuntimeBusy(runtime?.status, runtime?.state);
+	// runtime 优先于 record（record 未及回写时 runtime 已生效）；ACP 无 steer 通道。
+	const steerSupported = (runtime?.backend ?? sessionRecord?.backend) !== "acp";
 	if (!sessionId || !props.prompts.length) return null;
 
 	const multiple = props.prompts.length > 1;
@@ -250,16 +297,24 @@ export function QueuedPromptPanel(props: {
 			{multiple ? (
 				<button type="button" className="flex h-9 w-full items-center gap-2.5 px-3 text-left" aria-controls={listId} aria-expanded={listVisible} onClick={toggleCollapsed}>
 					<ListOrdered size={14} aria-hidden="true" className="shrink-0 text-text-tertiary" />
-					<span className="min-w-0 flex-1 truncate text-[13px] font-medium leading-6 text-foreground">{t("sessionQueue.count", { n: props.prompts.length })}</span>
+					<span className="min-w-0 flex-1 truncate text-control font-medium leading-6 text-foreground">{t("sessionQueue.count", { n: props.prompts.length })}</span>
 					<span className="shrink-0 text-text-tertiary" aria-hidden="true">
 						{listVisible ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
 					</span>
 				</button>
 			) : null}
+			{drainSuspended ? (
+				<div className="flex h-8 shrink-0 items-center gap-2 px-3" data-testid="queue-drain-suspended">
+					<Pause size={12} aria-hidden="true" className="shrink-0 text-text-tertiary" />
+					<span className="min-w-0 flex-1 truncate text-control leading-5 text-text-tertiary" title={t("app.queuedDrainSuspendedAfterStop")}>
+						{t("app.queueDrainPausedBadge")}
+					</span>
+				</div>
+			) : null}
 			{listVisible ? (
 				<ul id={listId} className={multiple ? "mb-1 flex max-h-[180px] flex-col overflow-y-auto overscroll-contain [contain:layout_paint]" : "flex flex-col"}>
 					{props.prompts.map((prompt, index) => (
-						<QueuedPromptRow key={prompt.id} prompt={prompt} index={index} showQueueGlyph={!multiple} sessionId={sessionId} agentBusy={agentBusy} onRetract={props.onRetract} onDiscard={props.onDiscard} onChangeBehavior={props.onChangeBehavior} onSendAsk={sendAsk} />
+						<QueuedPromptRow key={prompt.id} prompt={prompt} index={index} showQueueGlyph={!multiple} sessionId={sessionId} agentBusy={agentBusy} steerSupported={steerSupported} onRetract={props.onRetract} onDiscard={props.onDiscard} onChangeBehavior={props.onChangeBehavior} onSendAsk={sendAsk} />
 					))}
 				</ul>
 			) : null}
@@ -297,32 +352,93 @@ export function ComposerSendControls(props: {
 	isGeneratingImage?: boolean;
 	onSend: () => void;
 	onStop: () => void;
+	/** 拆分菜单：加入当前回合（steer）。仅忙碌时可用，由组件内部按 isAgentBusy 禁用。 */
+	onSendSteer?: () => void;
+	/** 拆分菜单：排队到下一轮（followUp）。 */
+	onSendFollowUp?: () => void;
+	/** 拆分菜单：并行发送（新建独立会话后台处理）。无图片附件时可用。 */
+	onSendParallel?: () => void;
+	/** 并行发送可用性（如有图片附件则置灰）。 */
+	canSendParallel?: boolean;
 }) {
 	// 主题色圆钮（随外观主题主色：经典=近黑、森系绿=鼠尾草绿）。
 	// 空闲发送；忙碌且输入框为空时才变停止（清空输入即回到停止）；
 	// 忙碌但有内容时保持发送（走 steer/followUp 投递，见 busySendDelivery）。
-	// 插入/排队/并行在排队行上选。
-	const primaryStops =
-		resolveComposerSendButtonState({
-			isAgentBusy: props.isAgentBusy,
-			hasContent: props.hasContent,
-			isGeneratingImage: props.isGeneratingImage,
-		}) === "stop";
+	// 主钮尺寸对齐底栏其余按钮（28px），避免「过大不统一」。
+	const buttonState = resolveComposerSendButtonState({
+		isAgentBusy: props.isAgentBusy,
+		hasContent: props.hasContent,
+		isGeneratingImage: props.isGeneratingImage,
+	});
+	const primaryStops = buttonState === "stop";
 	const label = primaryStops ? t("app.stop") : t("app.send");
 	const disabled = primaryStops ? false : props.isAgentStarting || props.isGeneratingImage || !props.canSend;
+	// 拆分菜单：把「加入当前回合 / 排队到下一轮 / 并行发送」从「发出后的队列行」前置到发送现场，
+	// 让用户在发送前就能发现这三种投递方式（此前只能发出去之后在队列面板里逐条切换）。
+	// 菜单项可用性按当前状态收口：加入当前回合仅忙碌时可用；并行要求无图片附件。
+	const hasSplitMenu = Boolean(props.onSendSteer || props.onSendFollowUp || props.onSendParallel);
+	const splitDisabled = props.isAgentStarting || props.isGeneratingImage || !props.canSend;
 	return (
-		<div className="composer-send-controls flex items-center">
+		// shadcn ButtonGroup 官方 split-button 形态：主钮 + caret 两段贴合成一颗圆角矩形
+		// （DropdownMenu 不产生 DOM 节点，trigger 按钮自然成为第二个成员，
+		// 由 ButtonGroup 收平相邻内侧角），中间以分隔线断口，与官方示例一致。
+		<ButtonGroup className="composer-send-controls">
 			<Button
 				variant="default"
 				size="icon-sm"
-				className="composer-send-primary size-8 rounded-full bg-[var(--color-accent)] text-[var(--color-text-inverse)] shadow-none hover:bg-[color:color-mix(in_srgb,var(--color-accent)_88%,black)] disabled:opacity-40"
+				className="composer-send-primary size-7 rounded-l-md bg-[var(--color-accent)] px-0 text-[var(--color-text-inverse)] shadow-none hover:bg-[color:color-mix(in_srgb,var(--color-accent)_88%,black)] disabled:opacity-40"
 				aria-label={label}
 				title={label}
 				disabled={disabled}
 				onClick={primaryStops ? props.onStop : props.onSend}
 			>
-				{props.isGeneratingImage ? <LoaderCircle size={15} strokeWidth={2.4} className="animate-pideck-spin" aria-hidden="true" /> : primaryStops ? <Square size={13} strokeWidth={0} fill="currentColor" aria-hidden="true" /> : <ArrowUp size={15} strokeWidth={2.4} aria-hidden="true" />}
+				{props.isGeneratingImage ? <LoaderCircle size={14} strokeWidth={2.4} className="animate-pideck-spin" aria-hidden="true" /> : primaryStops ? <Square size={12} strokeWidth={0} fill="currentColor" aria-hidden="true" /> : <ArrowUp size={14} strokeWidth={2.4} aria-hidden="true" />}
 			</Button>
-		</div>
+			{hasSplitMenu ? (
+				<DropdownMenu>
+					<DropdownMenuTrigger asChild>
+						<Button
+							variant="default"
+							size="icon-sm"
+							className="h-7 rounded-r-md bg-[var(--color-accent)] px-1.5 text-[var(--color-text-inverse)] shadow-none hover:bg-[color:color-mix(in_srgb,var(--color-accent)_88%,black)] disabled:opacity-40"
+							aria-label={t("app.sendBehaviorTitle")}
+							title={t("app.sendBehaviorTitle")}
+							disabled={splitDisabled}
+						>
+							<ChevronDown size={14} strokeWidth={2.4} aria-hidden="true" />
+						</Button>
+					</DropdownMenuTrigger>
+					<DropdownMenuContent align="end" side="top" sideOffset={6} className="min-w-52">
+						{props.onSendSteer ? (
+							<DropdownMenuItem disabled={!props.isAgentBusy} onSelect={() => props.onSendSteer?.()}>
+								<ArrowUp size={14} strokeWidth={2} aria-hidden="true" />
+								<span className="flex min-w-0 flex-1 flex-col">
+									<span>{t("app.sendSteerTitle")}</span>
+									<span className="truncate text-micro text-muted-foreground">{t("app.sendSteerDesc")}</span>
+								</span>
+							</DropdownMenuItem>
+						) : null}
+						{props.onSendFollowUp ? (
+							<DropdownMenuItem onSelect={() => props.onSendFollowUp?.()}>
+								<ListOrdered size={14} strokeWidth={2} aria-hidden="true" />
+								<span className="flex min-w-0 flex-1 flex-col">
+									<span>{t("app.sendFollowUpTitle")}</span>
+									<span className="truncate text-micro text-muted-foreground">{t("app.sendFollowUpDesc")}</span>
+								</span>
+							</DropdownMenuItem>
+						) : null}
+						{props.onSendParallel ? (
+							<DropdownMenuItem disabled={props.canSendParallel === false} onSelect={() => props.onSendParallel?.()}>
+								<Split size={14} strokeWidth={2} aria-hidden="true" />
+								<span className="flex min-w-0 flex-1 flex-col">
+									<span>{t("app.sendAskTitle")}</span>
+									<span className="truncate text-micro text-muted-foreground">{t("app.sendAskDesc")}</span>
+								</span>
+							</DropdownMenuItem>
+						) : null}
+					</DropdownMenuContent>
+				</DropdownMenu>
+			) : null}
+		</ButtonGroup>
 	);
 }

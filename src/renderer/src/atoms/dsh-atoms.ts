@@ -15,7 +15,6 @@ import type { DshRuntimeInstallPhase, DshRuntimeStatus } from "../../../shared/t
 /** agentPreset.list 名单行的身份字段（与 DshHost.listAgentPresets 返回子集一致）。 */
 export type DshAgentPresetIdentity = {
 	id: string;
-	trust: "system" | "user";
 	isDefault: boolean;
 	name?: string;
 	description?: string;

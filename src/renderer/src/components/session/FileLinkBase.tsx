@@ -8,6 +8,8 @@ type FileLinkBase = {
 	baseDir?: string;
 	projectRoot?: string;
 	scope?: ProjectFileAccessScope;
+	/** 会话身份：右键菜单里的系统动作要与左键点击走同一道安全等级门（会话级覆盖优先于全局默认） */
+	sessionId?: string;
 };
 
 /**
@@ -18,14 +20,15 @@ type FileLinkBase = {
  */
 const FileLinkBaseContext = createContext<FileLinkBase>({});
 
-export function FileLinkBaseProvider(props: { baseDir: string | undefined; projectRoot?: string; projectId?: string; children: ReactNode }) {
+export function FileLinkBaseProvider(props: { baseDir: string | undefined; projectRoot?: string; projectId?: string; sessionId?: string; children: ReactNode }) {
 	const value = useMemo<FileLinkBase>(
 		() => ({
 			baseDir: props.baseDir,
 			projectRoot: props.projectRoot,
 			scope: props.projectId ? { projectId: props.projectId } : undefined,
+			sessionId: props.sessionId,
 		}),
-		[props.baseDir, props.projectId, props.projectRoot],
+		[props.baseDir, props.projectId, props.projectRoot, props.sessionId],
 	);
 	return <FileLinkBaseContext.Provider value={value}>{props.children}</FileLinkBaseContext.Provider>;
 }
@@ -35,8 +38,9 @@ export function useFileLinkBaseDir(): string | undefined {
 }
 
 /**
- * 文件链接右键菜单等场景需要完整的解析上下文（baseDir/projectRoot/scope），
- * 与存在性校验共用同一份基准，保证「菜单里复制的路径」=「点击打开的路径」。
+ * 文件链接右键菜单等场景需要完整的解析上下文（baseDir/projectRoot/scope/sessionId），
+ * 与存在性校验共用同一份基准，保证「菜单里复制的路径」=「点击打开的路径」，
+ * 且菜单里的系统动作（默认应用 / 文件管理器）按同一会话的安全等级求值。
  */
 export function useFileLinkContext(): FileLinkBase {
 	return useContext(FileLinkBaseContext);

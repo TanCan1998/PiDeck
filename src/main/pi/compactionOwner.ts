@@ -114,9 +114,9 @@ export function collectPackageNames(packages: unknown): string[] {
 /**
  * 从「本次会话实际会加载的扩展入口路径」反推接管者。
  *
- * `resolveEnabledExtensionPaths()` 返回 null 表示没有白名单（全量加载）——此时无法从
- * 路径判断，返回 undefined 让调用方退回 packages 推导；否则**以路径为准**：PiDeck
- * 扩展管理里禁用的扩展不会出现在路径集合里，磁盘 packages 的残留记录不能算「已接管」。
+ * 路径列表缺失（null/undefined，如拿不到项目 cwd）时返回 undefined 让调用方退回
+ * packages 推导；否则**以路径为准**：被原生规则（或旧禁用记录）停用的扩展不会出现
+ * 在路径集合里，磁盘 packages 的残留记录不能算「已接管」。
  */
 export function ownerNamesLoadedInPaths(paths: string[] | null): string[] | undefined {
 	if (paths === null) return undefined;

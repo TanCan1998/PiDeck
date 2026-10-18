@@ -5,7 +5,8 @@ import { projectLocatorFromLegacy } from "../../shared/locationAdapters";
 import { ipcChannels } from "../../shared/ipc";
 import { FILE_TREE_ABSOLUTE_MAX_DEPTH } from "../../shared/fileTree";
 import type { ProjectFileAccessScope, ProjectFileTarget } from "../../shared/types/project";
-import type { FileSearchResult } from "../../shared/types";
+import type { FileContentSearchResult, FileSearchResult } from "../../shared/types";
+import type { FileIndexService } from "../files/FileIndexService";
 import { registerFilesSystemIpc } from "./filesSystemIpc";
 import { createProjectFileReadBoundary, resolveProjectFileReadPath, type ProjectFileReadBoundary } from "../files/projectFileAccess";
 import { parseProjectFileTarget, resolveLocalProjectFileTarget } from "../files/projectFileTarget";
@@ -18,10 +19,19 @@ import type { SettingsStore } from "../settings/SettingsStore";
 import type { AppLogger } from "../logging/AppLogger";
 import { parseWslUncPath, toWindowsHostPath } from "../wsl/WslPaths";
 
+/**
+ * filesReadBase64 未显式传 maxBytes 时的默认读取上限（64MB）。
+ * 文件抽屉二进制预览走的是无参调用，而 base64 + IPC 过桥会把体积放大约 1.33 倍且两侧各持
+ * 一份；上限必须在主进程侧兜底（渲染层输入不可信），防单点无界读把内存推到数百 MB。
+ */
+const MAX_BINARY_PREVIEW_BYTES = 64 * 1024 * 1024;
+
 export type FilesIpcDeps = {
 	fileSystemService: FileSystemService;
 	projectStore: ProjectStore;
 	settingsStore: SettingsStore;
+	/** 文件索引 sidecar（可选：未装配时文件名搜索直接走现有 BFS 扫盘）。 */
+	getFileIndexService?: () => FileIndexService | null;
 	appLogger: Pick<AppLogger, "info" | "error">;
 	openExternalUrl: (url: string, forceSystem?: boolean) => Promise<void>;
 };
@@ -57,7 +67,7 @@ function parseOptionalMaxBytes(value: unknown): number | undefined {
 	return value;
 }
 
-export function registerFilesIpc({ fileSystemService, projectStore, settingsStore, appLogger, openExternalUrl }: FilesIpcDeps): void {
+export function registerFilesIpc({ fileSystemService, projectStore, settingsStore, getFileIndexService, appLogger, openExternalUrl }: FilesIpcDeps): void {
 	registerFilesSystemIpc({ settingsStore, openExternalUrl });
 	// Windows Node / Electron 边界不能直接消费 WSL Linux 路径：统一走 WslPaths 转成当前发行版的主机 UNC。
 	// 已经是普通 Windows/非 WSL 网络盘的输入保持不变，避免误伤非 WSL 路径。
@@ -78,6 +88,23 @@ export function registerFilesIpc({ fileSystemService, projectStore, settingsStor
 	};
 	const localProjectFileBackend = new LocalProjectFileBackend({
 		fileSystemService,
+		resolveProjectRoot: (projectId) => {
+			const project = localProject(projectId);
+			if (!project) throw new Error("PROJECT_NOT_FOUND");
+			return toWindowsPath(project.path);
+		},
+	});
+	// 文件抽屉的 skipGeneratedDirs 需要透传到 FileSystemService.listTree 的第 4 个选项；
+	// 共享 ProjectFileBackend 契约暂不含 list options，这里用同一 local backend 的包装实例承接，
+	// 只有 list 路径用得到它（远端 backend 尚未实现该开关，路由仍先经 forProject 拒绝非本地）。
+	const localProjectFileBackendWithSkippedGeneratedDirs = new LocalProjectFileBackend({
+		fileSystemService: {
+			listTree: (root, maxDepth, directory) => fileSystemService.listTree(root, maxDepth, directory, { skipGeneratedDirs: true }),
+			searchNames: (root, query) => fileSystemService.searchNames(root, query),
+			create: (parentDir, name, type) => fileSystemService.create(parentDir, name, type),
+			delete: (targetPath, recursive) => fileSystemService.delete(targetPath, recursive),
+			rename: (targetPath, newName) => fileSystemService.rename(targetPath, newName),
+		},
 		resolveProjectRoot: (projectId) => {
 			const project = localProject(projectId);
 			if (!project) throw new Error("PROJECT_NOT_FOUND");
@@ -147,7 +174,8 @@ export function registerFilesIpc({ fileSystemService, projectStore, settingsStor
 		}
 		if (options !== undefined && !isRecord(options)) throw new Error("INVALID_FILE_LIST_OPTIONS");
 		const listOptions = options === undefined ? {} : options;
-		if (Object.keys(listOptions).some((key) => key !== "directory" && key !== "maxDepth")) throw new Error("INVALID_FILE_LIST_OPTIONS");
+		if (Object.keys(listOptions).some((key) => key !== "directory" && key !== "maxDepth" && key !== "skipGeneratedDirs")) throw new Error("INVALID_FILE_LIST_OPTIONS");
+		if ("skipGeneratedDirs" in listOptions && listOptions.skipGeneratedDirs !== undefined && typeof listOptions.skipGeneratedDirs !== "boolean") throw new Error("INVALID_FILE_LIST_OPTIONS");
 		if (target && "directory" in listOptions && listOptions.directory !== undefined) throw new Error("INVALID_FILE_LIST_OPTIONS");
 		const maxDepth = parseOptionalMaxDepth(listOptions.maxDepth);
 		if ("directory" in listOptions && listOptions.directory !== undefined && typeof listOptions.directory !== "string") {
@@ -155,7 +183,25 @@ export function registerFilesIpc({ fileSystemService, projectStore, settingsStor
 		}
 		const legacyDirectory = typeof listOptions.directory === "string" && listOptions.directory.trim() ? listOptions.directory.trim() : undefined;
 		const backend = projectFileBackendRouter.forProject(projectId);
-		if (target) return backend.list(target, maxDepth);
+		// skipGeneratedDirs 是 dev 文件抽屉的默认行为（node_modules/.git 等不展开）；
+		// 列表 backend 与 router 的同一性由包装实例保持，避免 list 走第二条解析路径。
+		const listBackend = listOptions.skipGeneratedDirs === true ? localProjectFileBackendWithSkippedGeneratedDirs : backend;
+		// 子目录 ENOENT 是常态竞态（pi-subagents 清理 artifacts/outputs 后，抽屉仍记住展开态）：
+		// dev 语义是返回空子树让节点自然落空；backend 只给稳定码，按「是否子目录」在这里翻译。
+		//
+		// 这里是**唯一**翻译点，且只对 list 成立：根目录缺失必须继续冒泡成 PROJECT_DIRECTORY_MISSING
+		// （useProjectSync/useProjectFileTreeController 靠它刷新项目 presence 并提示「目录不存在」）；
+		// 而 stat/read/write 等按文件操作命中已消失的子目录时，用户动作指向的对象确实不见了，
+		// 折叠成空在 UI 上会变成「静默成功」，因此不做同类翻译。
+		const listOrEmpty = async (request: ProjectFileTarget) => {
+			try {
+				return await listBackend.list(request, maxDepth);
+			} catch (error) {
+				if (request.relativePath !== "" && error instanceof Error && error.message === "PROJECT_DIRECTORY_MISSING") return [];
+				throw error;
+			}
+		};
+		if (target) return await listOrEmpty(target);
 		let relativePath = "";
 		if (legacyDirectory) {
 			const project = localProject(projectId);
@@ -164,7 +210,7 @@ export function registerFilesIpc({ fileSystemService, projectStore, settingsStor
 			const directory = await resolveProjectFileReadPath(boundary, toWindowsPath(legacyDirectory));
 			relativePath = relative(boundary.canonicalRoot, directory).replace(/\\/g, "/");
 		}
-		return backend.list({ projectId, relativePath }, maxDepth);
+		return await listOrEmpty({ projectId, relativePath });
 	});
 
 	// 渲染层不可信：查询词必须是有限长度的非空字符串；结果上限与共享常量对齐，防大包滥用。
@@ -175,11 +221,59 @@ export function registerFilesIpc({ fileSystemService, projectStore, settingsStor
 		return query;
 	};
 
+	// 文件索引 sidecar 的根：WSL 项目的根是 UNC 路径，宿主侧走 9p 扫盘既慢又容易踩权限，
+	// 直接返回空让搜索回退 BFS（与跨会话正文搜索的 WSL 口径一致）。
+	const indexRootsFor = (environment: string | undefined, windowsPath: string): string[] => (environment === "wsl" || !windowsPath ? [] : [windowsPath]);
+
 	ipcMain.handle(ipcChannels.filesSearch, async (_event, rawProjectId: unknown, query: unknown): Promise<FileSearchResult[]> => {
 		if (typeof rawProjectId !== "string" || !rawProjectId.trim() || rawProjectId.length > 256) throw new Error("INVALID_PROJECT_FILE_TARGET");
 		const normalizedQuery = parseFileSearchQuery(query);
+		const project = localProject(rawProjectId);
+		if (!project) throw new Error("PROJECT_NOT_FOUND");
+		const root = toWindowsPath(project.path);
+		// 索引就绪时走 Go sidecar（评分排序 + 路径段命中）；否则回退实时 BFS 扫盘（fail-open）。
+		const fileIndex = getFileIndexService?.() ?? null;
+		const roots = fileIndex ? indexRootsFor(project.environment, root) : [];
+		if (fileIndex && roots.length > 0) {
+			try {
+				if (fileIndex.isReady(roots)) {
+					const result = await fileIndex.searchNames(roots, normalizedQuery);
+					if (result.ok) {
+						return result.value.hits.map((hit) => ({ name: hit.name, path: hit.path, relativePath: hit.relativePath, type: hit.type }));
+					}
+				} else {
+					// 未就绪：这次先回退 BFS 保证有结果，同时后台建索引（下一次输入即走索引）。
+					fileIndex.warmup(roots);
+				}
+			} catch (error) {
+				void appLogger.error("file", "文件索引检索失败，已回退扫盘", error instanceof Error ? error.message : String(error));
+			}
+		}
 		const target = { projectId: rawProjectId, relativePath: "" };
 		return projectFileBackendRouter.forProject(rawProjectId).search(target, normalizedQuery);
+	});
+
+	ipcMain.handle(ipcChannels.filesSearchContent, async (_event, rawProjectId: unknown, query: unknown): Promise<FileContentSearchResult | null> => {
+		if (typeof rawProjectId !== "string" || !rawProjectId.trim() || rawProjectId.length > 256) throw new Error("INVALID_PROJECT_FILE_TARGET");
+		const normalizedQuery = parseFileSearchQuery(query);
+		const project = localProject(rawProjectId);
+		if (!project) throw new Error("PROJECT_NOT_FOUND");
+		const fileIndex = getFileIndexService?.() ?? null;
+		if (!fileIndex) return null;
+		const roots = indexRootsFor(project.environment, toWindowsPath(project.path));
+		if (roots.length === 0) return null;
+		// 未就绪同样返回 null：渲染层不展示内容分区，索引建好后下一次输入自然出现。
+		if (!fileIndex.isReady(roots)) {
+			fileIndex.warmup(roots);
+			return null;
+		}
+		try {
+			const result = await fileIndex.searchContent(roots, normalizedQuery);
+			return result.ok ? result.value : null;
+		} catch (error) {
+			void appLogger.error("file", "文件内容检索失败", error instanceof Error ? error.message : String(error));
+			return null;
+		}
 	});
 
 	ipcMain.handle(ipcChannels.filesOpen, async (_event, path: unknown, scope?: unknown) => {
@@ -203,18 +297,22 @@ export function registerFilesIpc({ fileSystemService, projectStore, settingsStor
 
 	ipcMain.handle(ipcChannels.filesReadContent, async (_event, path: unknown, maxBytes?: unknown, scope?: unknown) => {
 		const input = parseFilePathInput(path);
-		const limit = parseOptionalMaxBytes(maxBytes);
+		// 不传参也必须有上界（默认 16MiB；显式入参钳到 64MiB 天花板）。
+		// 本地上界与 backend 读取共用同一个 effectiveMax，避免远端/本地两条路出现不同的读取预算。
+		const MAX_DEFAULT_READ_BYTES = 16 * 1024 * 1024;
+		const MAX_READ_BYTES_CEILING = 64 * 1024 * 1024;
+		const requestedMax = typeof maxBytes === "number" && Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : MAX_DEFAULT_READ_BYTES;
+		const effectiveMax = Math.min(requestedMax, MAX_READ_BYTES_CEILING);
 		if (typeof input !== "string") {
 			if (scope !== undefined) throw new Error("INVALID_PROJECT_FILE_ACCESS_SCOPE");
-			return projectFileBackendRouter.forProject(input.projectId).readContent(input, limit);
+			return projectFileBackendRouter.forProject(input.projectId).readContent(input, effectiveMax);
 		}
 		try {
 			const boundary = await resolveProjectReadBoundary(scope);
 			const readablePath = await resolveReadablePath(input, boundary);
-			if (limit !== undefined) {
-				const fileStat = await stat(readablePath);
-				if (fileStat.size > limit) throw new Error(`FILE_TOO_LARGE:${fileStat.size}:${Math.floor(limit)}`);
-			}
+			const fileStat = await stat(readablePath);
+			// 结构化前缀供渲染层识别后走 i18n 文案；message 不直接展示给用户
+			if (fileStat.size > effectiveMax) throw new Error(`FILE_TOO_LARGE:${fileStat.size}:${Math.floor(effectiveMax)}`);
 			return await readFile(readablePath, "utf8");
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
@@ -306,17 +404,20 @@ export function registerFilesIpc({ fileSystemService, projectStore, settingsStor
 	ipcMain.handle(ipcChannels.filesReadBase64, async (_event, path: unknown, maxBytes?: unknown, scope?: unknown) => {
 		const input = parseFilePathInput(path);
 		const limit = parseOptionalMaxBytes(maxBytes);
+		// 二进制预览（图片/PDF 等）读为 base64 由渲染层转 Blob URL 显示。粘贴图片等场景传
+		// maxBytes 预检；未传时（文件抽屉预览）强制默认上限，两种都先 stat 拦截——base64 +
+		// IPC 过桥会放大约 1.33 倍且两侧各持一份，不能无界读。
+		const effectiveMaxBytes = limit ?? MAX_BINARY_PREVIEW_BYTES;
 		if (typeof input !== "string") {
 			if (scope !== undefined) throw new Error("INVALID_PROJECT_FILE_ACCESS_SCOPE");
-			return projectFileBackendRouter.forProject(input.projectId).readBase64(input, limit);
+			return projectFileBackendRouter.forProject(input.projectId).readBase64(input, effectiveMaxBytes);
 		}
 		try {
 			const boundary = await resolveProjectReadBoundary(scope);
 			const readablePath = await resolveReadablePath(input, boundary);
-			if (limit !== undefined) {
-				const fileStat = await stat(readablePath);
-				if (fileStat.size > limit) throw new Error(`FILE_TOO_LARGE:${fileStat.size}:${Math.floor(limit)}`);
-			}
+			const fileStat = await stat(readablePath);
+			if (fileStat.size > effectiveMaxBytes) throw new Error(`FILE_TOO_LARGE:${fileStat.size}:${Math.floor(effectiveMaxBytes)}`);
+			// 渲染层对空串（ENOENT）走「不支持」提示。
 			return (await readFile(readablePath)).toString("base64");
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";

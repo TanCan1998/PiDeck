@@ -1,14 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toggleTaskCheckbox as toggleTaskLine } from "../components/scratchPad/scratchPadLists";
-import type { DraftMeta, ScratchPadData } from "../../../shared/types";
+import type { DraftMeta } from "../../../shared/types";
+import type { WorkspaceDrawerPanel } from "./useWorkspacePanels";
 
 const AUTOSAVE_DELAY = 1500;
 
 type UseScratchPadMode = "edit" | "preview";
 
+type ScratchPadDrawerControls = {
+	drawer: WorkspaceDrawerPanel | null;
+	drawerCollapsed: boolean;
+	openDrawerForce: (panel: WorkspaceDrawerPanel) => void;
+	closeDrawer: () => void;
+};
+
 type UseScratchPadResult = {
 	isOpen: boolean;
-	isClosing: boolean;
 	drafts: DraftMeta[];
 	currentDraftPath: string | null;
 	content: string;
@@ -31,9 +38,9 @@ type UseScratchPadResult = {
 	deleteDraft: (draftPath: string) => Promise<void>;
 };
 
-export function useScratchPad(): UseScratchPadResult {
-	const [isOpen, setIsOpen] = useState(false);
-	const [isClosing, setIsClosing] = useState(false);
+/** 草稿内容常驻 App；可见性、切换与关闭动画由工作区抽屉单一管理。 */
+export function useScratchPad({ drawer, drawerCollapsed, openDrawerForce, closeDrawer }: ScratchPadDrawerControls): UseScratchPadResult {
+	const isOpen = drawer === "scratchPad" && !drawerCollapsed;
 	const [drafts, setDrafts] = useState<DraftMeta[]>([]);
 	const [currentDraftPath, setCurrentDraftPath] = useState<string | null>(null);
 	const [content, setContentState] = useState("");
@@ -117,6 +124,7 @@ export function useScratchPad(): UseScratchPadResult {
 
 	const setContent = useCallback(
 		(value: string) => {
+			contentRef.current = value;
 			setContentState(value);
 			setHasError(false);
 			if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
@@ -130,24 +138,10 @@ export function useScratchPad(): UseScratchPadResult {
 	);
 
 	const close = useCallback(() => {
-		if (isClosing) return;
-		setIsClosing(true);
-		if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-		const path = currentDraftPathRef.current;
-		const value = contentRef.current;
-		if (path) {
-			void flushSave(path, value);
-		}
-		setTimeout(() => {
-			setIsOpen(false);
-			setIsClosing(false);
-		}, 200);
-	}, [contentRef, flushSave, isClosing]);
+		if (drawer === "scratchPad") closeDrawer();
+	}, [drawer, closeDrawer]);
 
-	const open = useCallback(() => {
-		setIsClosing(false);
-		setIsOpen(true);
-	}, []);
+	const open = useCallback(() => openDrawerForce("scratchPad"), [openDrawerForce]);
 
 	const toggle = useCallback(() => {
 		if (isOpen) {
@@ -158,11 +152,44 @@ export function useScratchPad(): UseScratchPadResult {
 	}, [isOpen, open, close]);
 
 	const saveNow = useCallback(() => {
-		if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+		if (saveTimerRef.current) {
+			clearTimeout(saveTimerRef.current);
+			saveTimerRef.current = null;
+		}
 		const path = currentDraftPathRef.current;
 		if (!path) return Promise.resolve();
 		return flushSave(path, contentRef.current);
 	}, [flushSave]);
+
+	// 侧栏关闭、切到其他面板或切换项目都走同一可见性边界，不能只在 X 按钮保存。
+	const wasOpenRef = useRef(isOpen);
+	useEffect(() => {
+		if (wasOpenRef.current && !isOpen) void saveNow();
+		wasOpenRef.current = isOpen;
+	}, [isOpen, saveNow]);
+
+	// 快捷键常驻，不依赖草稿面板挂载；菜单已消费的 Escape 不再关闭整个侧栏。
+	useEffect(() => {
+		const handler = (event: KeyboardEvent) => {
+			if (event.defaultPrevented) return;
+			if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "s") {
+				event.preventDefault();
+				toggle();
+			} else if (event.key === "Escape" && isOpen) {
+				event.stopPropagation();
+				close();
+			}
+		};
+		window.addEventListener("keydown", handler);
+		return () => window.removeEventListener("keydown", handler);
+	}, [close, isOpen, toggle]);
+
+	useEffect(
+		() => () => {
+			if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+		},
+		[],
+	);
 
 	const exportFile = useCallback(async () => {
 		await saveNow();
@@ -253,7 +280,6 @@ export function useScratchPad(): UseScratchPadResult {
 
 	return {
 		isOpen,
-		isClosing,
 		drafts,
 		currentDraftPath,
 		content,

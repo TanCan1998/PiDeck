@@ -1,12 +1,13 @@
 import { memo, useEffect, useState } from "react";
-import { Play, Upload, Trash2 } from "lucide-react";
-import { createDefaultSoundAlertSettings, DEFAULT_SOUND_BY_KIND, SOUND_ALERT_PRESETS, parseSoundAlertRef, type AppSettings, type CustomSoundInfo, type SoundAlertKind, type SoundAlertSettings } from "../../../../../shared/types";
+import { Loader2, Play, Upload, Trash2 } from "lucide-react";
+import { createDefaultSoundAlertSettings, DEFAULT_SOUND_BY_KIND, SOUND_ALERT_PRESETS, TOAST_DURATION_STICKY_MS, parseSoundAlertRef, type AppSettings, type CustomSoundInfo, type SoundAlertKind, type SoundAlertSettings } from "../../../../../shared/types";
 import { t } from "../../../i18n";
 import { desktopApi } from "../../../desktopApi";
 import { resolveSoundUrl } from "../../../utils/soundUrls";
 import { Button } from "../../ui-shadcn/button";
 import { Switch } from "../../ui-shadcn/switch";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "../../ui-shadcn/select";
+import { openNoticeHistoryDialog } from "../../ui-shadcn/notice-history-dialog";
 import { SettingsSection } from "./SettingsStorageTab";
 import { DirtyMarker, SettingRow, SettingSwitchRow } from "./SettingRows";
 
@@ -16,6 +17,12 @@ type NotificationTabProps = {
 	/** 字段级脏检查（与其它 tab 同一 isDirty 回调），驱动标题旁黄点。 */
 	isDirty?: (field: keyof AppSettings) => boolean;
 };
+
+/**
+ * toast 展示时长档位（ms）：含 -1（常驻哨兵，见 shared TOAST_DURATION_STICKY_MS）。
+ * 与主进程 clampToastDurationMs 的合法区间（1000–60000）一致。
+ */
+const TOAST_DURATION_PRESETS = [1500, 2500, 4000, 6000, 10000, TOAST_DURATION_STICKY_MS] as const;
 
 /** 事件行：启用开关 + 音效下拉 + 试听。 */
 function SoundEventRow(props: { kind: SoundAlertKind; settings: SoundAlertSettings; customSounds: CustomSoundInfo[]; isDirty: (field: keyof AppSettings) => boolean; onChange: (config: SoundAlertSettings[SoundAlertKind]) => void }) {
@@ -57,7 +64,7 @@ function SoundEventRow(props: { kind: SoundAlertKind; settings: SoundAlertSettin
 			<div className="flex w-full items-center gap-2">
 				<Switch checked={config.enabled} disabled={!settings.enabled} aria-label={t(`settings.sound.${kind}Enable`)} onCheckedChange={(value) => onChange({ ...config, enabled: value })} />
 				<Select value={config.sound} disabled={!settings.enabled || !config.enabled} onValueChange={(value) => onChange({ ...config, sound: value })}>
-					<SelectTrigger className="h-9 min-w-0 flex-1" aria-label={t(`settings.sound.${kind}`)}>
+					<SelectTrigger className="min-w-0 flex-1" aria-label={t(`settings.sound.${kind}`)}>
 						<SelectValue placeholder={t("settings.sound.choose")} />
 					</SelectTrigger>
 					<SelectContent>
@@ -155,14 +162,39 @@ export const NotificationTab = memo(function NotificationTab(props: Notification
 	return (
 		<>
 			{/* 系统通知（原常用设置「通知」区）：会话完成/Ask 提问/Agent 数量提醒三个独立开关 */}
-			<SettingsSection title={t("settings.notificationSection")}>
+			<SettingsSection id="settings-section-notification-channels" title={t("settings.notificationSection")}>
 				<SettingSwitchRow anchor="notification-enable" title={t("settings.enableNotifications")} checked={draft.enableNotifications} onChange={(checked) => updateDraft({ enableNotifications: checked })} />
+				{/* 仅失焦提醒：按窗口焦点门控系统通知 + 提示音（应用内 toast 不受影响） */}
+				<SettingSwitchRow anchor="notification-unfocused-only" title={t("settings.alertOnlyWhenUnfocused")} description={t("settings.alertOnlyWhenUnfocusedDesc")} checked={draft.alertOnlyWhenUnfocused} onChange={(checked) => updateDraft({ alertOnlyWhenUnfocused: checked })} />
 				<SettingSwitchRow anchor="notification-ask" title={t("settings.askNotification")} description={t("settings.askNotificationDesc")} checked={draft.askNotificationEnabled} onChange={(checked) => updateDraft({ askNotificationEnabled: checked })} />
 				<SettingSwitchRow anchor="notification-agent-count" title={t("settings.agentCountReminder")} description={t("settings.agentCountReminderDesc")} checked={draft.agentCountReminderEnabled} onChange={(checked) => updateDraft({ agentCountReminderEnabled: checked })} />
 				<SettingSwitchRow anchor="notification-announcement" title={t("settings.announcementNotification")} description={t("settings.announcementNotificationDesc")} checked={draft.announcementNotificationEnabled} onChange={(checked) => updateDraft({ announcementNotificationEnabled: checked })} />
 			</SettingsSection>
 
-			<SettingsSection title={t("settings.sound.title")} description={t("settings.sound.sectionDesc")}>
+			{/* 应用内通知（toast）：展示时长全局可配 + 历史回看 */}
+			<SettingsSection id="settings-section-notification-in-app" title={t("settings.inAppNotificationSection")}>
+				<SettingRow anchor="notification-toast-duration" title={t("settings.toastDuration")} description={t("settings.toastDurationDesc")}>
+					<Select value={String(draft.toastDurationMs)} onValueChange={(value) => updateDraft({ toastDurationMs: Number(value) })}>
+						<SelectTrigger className="min-w-0" aria-label={t("settings.toastDuration")}>
+							<SelectValue />
+						</SelectTrigger>
+						<SelectContent>
+							{TOAST_DURATION_PRESETS.map((preset) => (
+								<SelectItem key={preset} value={String(preset)}>
+									{preset === TOAST_DURATION_STICKY_MS ? t("settings.toastDurationSticky") : t("settings.toastDurationSeconds", { seconds: Math.round(preset / 1000) })}
+								</SelectItem>
+							))}
+						</SelectContent>
+					</Select>
+				</SettingRow>
+				<SettingRow title={t("settings.toastHistory")} description={t("settings.toastHistoryDesc")}>
+					<Button variant="outline" size="sm" onClick={openNoticeHistoryDialog}>
+						{t("settings.toastHistoryOpen")}
+					</Button>
+				</SettingRow>
+			</SettingsSection>
+
+			<SettingsSection id="settings-section-notification-sound" title={t("settings.sound.title")} description={t("settings.sound.sectionDesc")}>
 				<SettingSwitchRow title={t("settings.sound.enabled")} description={t("settings.sound.enabledDesc")} checked={settings.enabled} dirty={isDirty("soundAlert")} onChange={(value) => updateSound({ enabled: value })} />
 				<SettingRow
 					title={
@@ -181,24 +213,24 @@ export const NotificationTab = memo(function NotificationTab(props: Notification
 			</SettingsSection>
 
 			{/* 三个事件行直接铺在 SettingsSection 外框里，不再套 SettingBox 内框。 */}
-			<SettingsSection title={t("settings.sound.eventsTitle")} description={t("settings.sound.eventsDesc")}>
+			<SettingsSection id="settings-section-notification-sound-events" title={t("settings.sound.eventsTitle")} description={t("settings.sound.eventsDesc")}>
 				{(["done", "error", "waiting"] as const).map((kind) => (
 					<SoundEventRow key={kind} kind={kind} settings={settings} customSounds={customSounds} isDirty={isDirty} onChange={(config) => updateEvent(kind, config)} />
 				))}
 			</SettingsSection>
 
-			<SettingsSection title={t("settings.sound.customTitle")} description={t("settings.sound.customDesc")}>
+			<SettingsSection id="settings-section-notification-sound-custom" title={t("settings.sound.customTitle")} description={t("settings.sound.customDesc")}>
 				<SettingRow title={t("settings.sound.import")} description={t("settings.sound.importDesc")}>
 					<div className="flex items-center gap-2">
 						{importError && <span className="text-xs text-destructive">{importError}</span>}
 						<Button variant="outline" size="sm" disabled={importing} onClick={() => void onImport()}>
-							<Upload className="size-4" />
+							{importing ? <Loader2 className="size-4 animate-pideck-spin" aria-hidden="true" /> : <Upload className="size-4" />}
 							{importing ? t("settings.sound.importing") : t("settings.sound.import")}
 						</Button>
 					</div>
 				</SettingRow>
 				{customSounds.map((sound) => (
-					<SettingRow key={sound.name} title={<span className="font-mono text-[13px]">{sound.name}</span>} description={`${(sound.size / 1024).toFixed(0)} KB`}>
+					<SettingRow key={sound.name} title={<span className="font-mono text-control">{sound.name}</span>} description={`${(sound.size / 1024).toFixed(0)} KB`}>
 						<Button variant="ghost" size="icon-sm" title={t("settings.sound.remove")} aria-label={t("settings.sound.remove")} onClick={() => void onRemove(sound.name)}>
 							<Trash2 className="size-4" />
 						</Button>

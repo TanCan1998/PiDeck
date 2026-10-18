@@ -190,7 +190,7 @@ function Field(props: { schema: DshSchema; ref: DshSchemaRef; path: string[]; va
 			return (
 				<Labeled name={path[path.length - 1] ?? ""} meta={meta}>
 					<Select value={current || undefined} disabled={!writable} onValueChange={(next) => onChange(path, next)}>
-						<SelectTrigger size="sm" className="h-8 w-full">
+						<SelectTrigger size="sm" className="w-full">
 							<SelectValue placeholder={t("config.dsh.selectPlaceholder")} />
 						</SelectTrigger>
 						<SelectContent>
@@ -239,7 +239,7 @@ function Field(props: { schema: DshSchema; ref: DshSchemaRef; path: string[]; va
 		const current = typeof value === "string" ? value : typeof value === "number" ? String(value) : "";
 		return (
 			<Labeled name={path[path.length - 1] ?? ""} meta={meta}>
-				<Input className="h-8" type="number" value={current} disabled={!writable} onChange={(event) => onChange(path, event.target.value)} />
+				<Input size="sm" type="number" value={current} disabled={!writable} onChange={(event) => onChange(path, event.target.value)} />
 			</Labeled>
 		);
 	}

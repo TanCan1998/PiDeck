@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { ImageGenConfigFile } from "../src/shared/types/imagegen";
 import { armStartupOverlayDismissal } from "./startupOverlays";
+import { ensureWindowsProfileSkeleton } from "./win-profile";
 
 /**
  * Mock pi fixture（#115 U6）：在隔离 userData 中预置 settings.json，
@@ -180,6 +181,9 @@ export const test = base.extend<
 			mkdirSync(trustDir, { recursive: true });
 			writeFileSync(join(trustDir, "trust.json"), JSON.stringify({ [tmpdir()]: true }));
 
+			// 重定向 USERPROFILE 后，shell 文件夹解析要求配置目录骨架存在
+			// （否则 app.getPath("appData") 抛错、主进程启动即崩，见 ./win-profile.ts）。
+			if (process.platform === "win32") ensureWindowsProfileSkeleton(userDataRoot);
 			const env = {
 				...process.env,
 				CI: "1",

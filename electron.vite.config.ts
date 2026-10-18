@@ -4,6 +4,37 @@ import tailwindcss from "@tailwindcss/vite";
 import { resolve } from "node:path";
 import type { Plugin } from "vite";
 import { readDevGitBranch, resolveDevVitePort } from "./src/main/devIsolation";
+import { readFile } from "node:fs/promises";
+import { transformWithEsbuild } from "vite";
+import { hostPluginPreloadPlugin } from "./scripts/hostPluginPreload";
+
+/**
+ * AudioWorklet 语音分段器内联插件。
+ *
+ * `src/renderer/src/utils/voicePcmSegmenter.ts` 是有单测覆盖的 TS 模块，但 AudioWorklet
+ * 作用域没有模块解析器，不能 import；同时 Vite 也没有 AudioWorklet 入口类型。
+ * 因此用 `?raw` 把源码当字符串内联，但这个插件必须把 TS 编译成 JS —— 否则 worklet
+ * 拿到的是带 type/interface 的 TS 源码，`addModule` 会 SyntaxError（只有真人点麦克风才暴露）。
+ *
+ * 只处理这一个明确路径：其它 `?raw` 导入（纯文本资源）不需要也不应该被转译。
+ */
+function audioWorkletSegmenterPlugin(): Plugin {
+	// 必须用路径后缀匹配：Vite 传进来的 id 是绝对路径，`startsWith` 相对路径在真实构建里恒为 false，
+	// 会被 Vite 内置的 ?raw 处理器抢先返回 TS 源码（addModule 直接 SyntaxError）。
+	const SEGMENTER_SUFFIX = "voicePcmSegmenter.ts?raw";
+
+	return {
+		name: "pideck-audio-worklet-segmenter",
+		// 必须早于 Vite 内置 asset/raw 插件，否则拿不到这个 id。
+		enforce: "pre",
+		async transform(_code, id) {
+			if (!id.replace(/\\/g, "/").endsWith(SEGMENTER_SUFFIX)) return;
+			const source = await readFile(id.replace(/\?.*$/, ""), "utf8");
+			const transpiled = await transformWithEsbuild(source, `${SEGMENTER_SUFFIX}.js`, { loader: "ts", target: "es2022", format: "esm" });
+			return { code: `export default ${JSON.stringify(transpiled.code)};`, map: null };
+		},
+	};
+}
 
 /**
  * 把裸导入 `shiki` 指到精细 bundle。
@@ -106,7 +137,7 @@ export default defineConfig({
     },
   },
   preload: {
-    plugins: [externalizeDepsPlugin()],
+    plugins: [externalizeDepsPlugin(), hostPluginPreloadPlugin()],
   },
   renderer: {
     // Windows 上 localhost 可能优先解析到 IPv6 ::1，Electron 加载 dev server 时会超时；固定 IPv4 保证本机访问稳定。
@@ -151,7 +182,7 @@ export default defineConfig({
         { find: /^shiki$/, replacement: resolve("src/renderer/src/shiki/bundle.ts") },
       ],
     },
-    plugins: [react(), tailwindcss(), katexWoff2OnlyPlugin(), shikiBundleAliasPlugin()],
+    plugins: [audioWorkletSegmenterPlugin(), react(), tailwindcss(), katexWoff2OnlyPlugin(), shikiBundleAliasPlugin()],
     worker: {
       // @pierre/diffs 的 worker 线程脚本是 ESM（含 import），
       // 必须用 ES 格式打包（iife 不支持 code-splitting），产物以 module worker 加载
@@ -171,6 +202,7 @@ export default defineConfig({
           index: resolve("src/renderer/index.html"),
           pet: resolve("src/renderer/pet.html"),
           web: resolve("src/renderer/web.html"),
+          floater: resolve("src/renderer/floater.html"),
         },
         output: {
           // 将大体积的第三方依赖拆分为独立 chunk，减少首屏需要加载和解析的 JS 体积。

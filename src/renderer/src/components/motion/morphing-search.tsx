@@ -9,6 +9,8 @@ import { EASE_OUT, SPRING_LAYOUT } from "@/lib/ease";
 import { useOnOpen } from "@/lib/hooks/use-on-open";
 import { useRowCursor } from "@/lib/hooks/use-row-cursor";
 import { cn } from "@/lib/utils";
+import { MORPHING_SEARCH_HEADER_HEIGHT, isPlausibleAnchorRect, resolveMorphingSearchGeometry } from "./morphingSearchGeometry";
+import { filterSearchItems } from "./morphingSearchFilter";
 
 // Keeps the Wallet Card feel with a little more time to read the morph.
 const SEARCH_MORPH: Transition = {
@@ -29,6 +31,12 @@ export type MorphingSearchItem = {
 	title: string;
 	description?: string;
 	keywords?: string[];
+	/**
+	 * 标题的拼音键（`src/renderer/src/utils/pinyinSearch.ts`）：给了就能被首字母/
+	 * 全拼命中（"ylcx" → 用量查询）。渲染层本地过滤拿不到 sidecar 索引，所以键
+	 * 由调用方算好（自带按标题缓存）。
+	 */
+	pinyin?: import("../../utils/pinyinSearch").PinyinKeys | null;
 	icon?: LucideIcon;
 	onSelect?: () => void;
 };
@@ -95,9 +103,12 @@ export function MorphingSearch({ items, placeholder = "Search", shortcut = "f", 
 		[controlled, onOpenChange],
 	);
 
+	// 锚点落在带 transform 的祖先里时（侧栏开合入场动画），fixed 锚点的视口坐标会被
+	// 整段平移，读出的落点会把面板推到窗口外；这类不可信测量直接丢弃，保留上一次
+	// 有效值，等动画结束后的事件或面板打开时的补测再刷新。
 	const measureAnchor = useCallback(() => {
 		const rect = anchorRef.current?.getBoundingClientRect();
-		if (!rect || rect.width === 0) return;
+		if (!rect || !isPlausibleAnchorRect(rect, { width: window.innerWidth, height: window.innerHeight })) return;
 		setAnchorRect({ top: rect.top, left: rect.left, width: rect.width });
 	}, []);
 
@@ -108,12 +119,7 @@ export function MorphingSearch({ items, placeholder = "Search", shortcut = "f", 
 		setOpen(true);
 	}, [measureAnchor, setOpen]);
 
-	const filteredItems = useMemo(() => {
-		const needle = query.trim().toLowerCase();
-		if (!needle) return items;
-
-		return items.filter((item) => [item.title, item.description ?? "", ...(item.keywords ?? [])].join(" ").toLowerCase().includes(needle));
-	}, [items, query]);
+	const filteredItems = useMemo(() => filterSearchItems(items, query), [items, query]);
 
 	const { activeIndex, moveTo, moveActive } = useRowCursor(filteredItems, query);
 
@@ -155,6 +161,13 @@ export function MorphingSearch({ items, placeholder = "Search", shortcut = "f", 
 			window.visualViewport?.removeEventListener("scroll", measureAnchor);
 		};
 	}, [measureAnchor]);
+
+	// 受控打开（侧栏「搜索会话」条目、Ctrl+F 广播）不走 openSearch()，落点会停在上一次
+	// 事件留下的旧值（窗口改过大小、上一次测量不可信）；这里在打开瞬间补测，layout
+	// effect 保证首帧就用新落点，不会先闪一下旧位置。
+	useLayoutEffect(() => {
+		if (open) measureAnchor();
+	}, [measureAnchor, open]);
 
 	useEffect(() => {
 		if (!backgroundScrollLocked) return;
@@ -288,9 +301,10 @@ export function MorphingSearch({ items, placeholder = "Search", shortcut = "f", 
 
 	const shellLayoutId = `${uid}-shell`;
 	const listboxId = `${uid}-results`;
-	const panelWidth = mounted ? Math.max(anchorRect.width, Math.min(maxWidth, window.innerWidth - anchorRect.left - 16)) : anchorRect.width;
-	const resultsHeight = mounted ? Math.max(96, Math.min(maxHeight, window.innerHeight - anchorRect.top - 80)) : maxHeight;
-	const collapsedContentClip = `inset(0px ${Math.max(0, panelWidth - anchorRect.width)}px ${resultsHeight}px 0px round 12px)`;
+	// 落点走纯函数：宽度不小于锚点、上限 maxWidth，并保证面板整块落在窗口内
+	// （陈旧/不可信落点也不能把面板送到窗口外）。首帧（未 mounted）直接用锚点值。
+	const geometry = useMemo(() => (mounted ? resolveMorphingSearchGeometry({ anchor: anchorRect, viewport: { width: window.innerWidth, height: window.innerHeight }, maxWidth, maxHeight }) : { ...anchorRect, resultsHeight: maxHeight }), [anchorRect, maxHeight, maxWidth, mounted]);
+	const collapsedContentClip = `inset(0px ${Math.max(0, geometry.width - anchorRect.width)}px ${geometry.resultsHeight}px 0px round 12px)`;
 	const expandedContentClip = "inset(0px 0px 0px 0px round 12px)";
 
 	// Neither grouping layer carries a box: they only hold `inert`/`aria-hidden`,
@@ -311,10 +325,10 @@ export function MorphingSearch({ items, placeholder = "Search", shortcut = "f", 
 									aria-hidden="true"
 									className="fixed z-10 rounded-xl bg-background/90 backdrop-blur-xl"
 									style={{
-										top: anchorRect.top,
-										left: anchorRect.left,
-										width: panelWidth,
-										height: 48 + resultsHeight,
+										top: geometry.top,
+										left: geometry.left,
+										width: geometry.width,
+										height: MORPHING_SEARCH_HEADER_HEIGHT + geometry.resultsHeight,
 										boxShadow: "inset 0 0 0 1px var(--color-border)",
 									}}
 									transition={morphTransition}
@@ -348,9 +362,9 @@ export function MorphingSearch({ items, placeholder = "Search", shortcut = "f", 
 									}
 									className="pointer-events-auto fixed z-20 overflow-hidden rounded-xl"
 									style={{
-										top: anchorRect.top,
-										left: anchorRect.left,
-										width: panelWidth,
+										top: geometry.top,
+										left: geometry.left,
+										width: geometry.width,
 									}}
 								>
 									<div className={cn("flex h-12 items-center gap-2.5 border-b border-border", iconOnly ? "px-4" : "px-3.5")}>
@@ -409,7 +423,7 @@ export function MorphingSearch({ items, placeholder = "Search", shortcut = "f", 
 										exit={reduce ? undefined : "closed"}
 										className="overscroll-contain overflow-y-auto p-2"
 										style={{
-											maxHeight: resultsHeight,
+											maxHeight: geometry.resultsHeight,
 										}}
 									>
 										{filteredItems.length > 0 ? (

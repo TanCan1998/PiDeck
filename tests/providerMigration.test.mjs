@@ -373,7 +373,7 @@ test("parseDshSettingsDocument 保留 compat，且丢弃未收窄字段", () => 
 	});
 });
 
-test("apply pi-to-dsh writes settings.yaml and credentials without starting host", async () => {
+test("apply pi-to-dsh writes profile settings and credentials without starting host", async () => {
 	const home = await mkdtemp(join(tmpdir(), "pideck-migrate-"));
 	await writeFile(join(home, "settings.yaml"), "ui-onboarding:\n  welcomeNoticeVersion: keep-me\n", "utf8");
 	const deps = {
@@ -416,7 +416,8 @@ test("apply pi-to-dsh writes settings.yaml and credentials without starting host
 	assert.equal(result.ok, true);
 	assert.equal(result.copiedKey, true);
 	assert.equal(result.wroteViaHost, false);
-	const yaml = await readFile(join(home, "settings.yaml"), "utf8");
+	assert.equal(await readFile(join(home, "settings.yaml"), "utf8"), "ui-onboarding:\n  welcomeNoticeVersion: keep-me\n");
+	const yaml = await readFile(join(home, ".pideck", "profile", "cordis.patch.yml"), "utf8");
 	assert.match(yaml, /welcomeNoticeVersion: keep-me/);
 	assert.match(yaml, /weishiair:/);
 	assert.match(yaml, /baseURL: https:\/\/api\.weishiair\.de\/v1/);

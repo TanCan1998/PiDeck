@@ -12,7 +12,10 @@
  * - JSONL / DSH 过程事件按墙钟落入最近 turn；轮内顺序对齐 dsh-web layout.ts：
  *   初始系统提示最先，其余按 seq，无 seq 退回墙钟。重试（llm/retry）是过程记录，
  *   不得因 timestamp=0 被插到轮首。
- * - 系统提示词 Pi 不落盘：可选的 extras.systemPrompt 仅作参考记录，不是当轮请求快照。
+ * - 系统提示词 Pi 不落盘：可选的 extras.systemPrompt 仅作参考记录，不是当轮请求快照
+ *   （有模型快照时 hook 层会用最近一次快照的真实 system 覆盖，见 useSessionTrajectorySource）。
+ * - 模型请求快照（extras.modelTraces）按请求时刻落入所在用户轮：时间点记录，
+ *   不伪造区间；检查器凭 modelTrace.traceId 回读完整请求体。
  */
 
 import type { ChatMessage } from "../../../../../shared/types";
@@ -24,7 +27,22 @@ export { compareTrajectoryRecords };
 
 export type TrajectoryLane = "input" | "model" | "tools" | "process";
 
-export type TrajectoryRecordKind = "user" | "assistant" | "thinking" | "tool" | "system" | "error" | "process" | "systemPrompt";
+export type TrajectoryRecordKind = "user" | "assistant" | "thinking" | "tool" | "system" | "error" | "process" | "systemPrompt" | "modelRequest";
+
+/** 模型请求快照摘要（rpcLogs direction:"model" 的 request 条目，hook 层拉取后传入）。 */
+export type TrajectoryModelTraceSummary = {
+	traceId: string;
+	/** 快照归属的 pi 子进程 agent（回读完整请求体需要；RpcLogEntry.agentId）。 */
+	agentId?: string;
+	/** 请求发起时刻（RpcLogEntry.time，毫秒墙钟）。 */
+	time: number;
+	model?: string;
+	provider?: string;
+	messageCount?: number;
+	toolCount?: number;
+	payloadBytes?: number;
+	truncated?: boolean;
+};
 
 export type TrajectoryRecord = {
 	id: string;
@@ -62,6 +80,8 @@ export type TrajectoryRecord = {
 	retryDelayMs?: number;
 	/** 本条 assistant 消息的 token 用量（DSH adapter 上报，存 meta.usage；pi 无此字段）。 */
 	usage?: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number };
+	/** modelRequest 记录的快照指针：检查器凭它回读完整请求体并展示体积/截断标记。 */
+	modelTrace?: { traceId: string; agentId?: string; messageCount?: number; toolCount?: number; payloadBytes?: number; truncated?: boolean };
 };
 
 export type TrajectoryTurn = {
@@ -86,6 +106,8 @@ export type TrajectoryBuildExtras = {
 	processEvents?: SessionProcessEvent[];
 	/** 内置/参考系统提示，不是 Pi 当轮真实请求体。 */
 	systemPrompt?: string;
+	/** 模型请求快照摘要（升序传入即可，内部按时间落轮）。 */
+	modelTraces?: TrajectoryModelTraceSummary[];
 };
 
 const SUMMARY_LIMIT = 96;
@@ -167,7 +189,7 @@ function flushTurn(turns: TrajectoryTurn[], records: TrajectoryRecord[], started
 }
 
 function isPointKind(kind: TrajectoryRecordKind): boolean {
-	return kind === "user" || kind === "process" || kind === "systemPrompt" || kind === "system" || kind === "error";
+	return kind === "user" || kind === "process" || kind === "systemPrompt" || kind === "system" || kind === "error" || kind === "modelRequest";
 }
 
 function recordAnchor(record: TrajectoryRecord): number {
@@ -247,6 +269,70 @@ function processRecord(event: SessionProcessEvent, turnIndex: number): Trajector
 		retryDelayMs: event.retryDelayMs,
 		status: event.tokensBefore !== undefined ? String(event.tokensBefore) : undefined,
 	};
+}
+
+/** 模型请求快照的体积标签（账本时长列与摘要共用）。 */
+export function traceSizeLabel(bytes: number | undefined): string {
+	if (bytes === undefined || bytes <= 0) return "";
+	if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+	return `${(bytes / 1024).toFixed(1)} KB`;
+}
+
+function modelRequestRecord(trace: TrajectoryModelTraceSummary, turnIndex: number): TrajectoryRecord {
+	const parts = [trace.model ?? "model"];
+	if (trace.messageCount !== undefined) parts.push(`${trace.messageCount} msgs`);
+	if (trace.toolCount !== undefined) parts.push(`${trace.toolCount} tools`);
+	const size = traceSizeLabel(trace.payloadBytes);
+	if (size) parts.push(size);
+	return {
+		id: `model:${trace.traceId}`,
+		kind: "modelRequest",
+		lane: "model",
+		turnIndex,
+		title: "modelRequest",
+		summary: parts.join(" · "),
+		startedAt: trace.time,
+		// 请求快照是时间点：起止同刻，不伪造区间（UI 时长列改显体积）。
+		endedAt: trace.time,
+		modelId: trace.model,
+		provider: trace.provider,
+		modelTrace: {
+			traceId: trace.traceId,
+			agentId: trace.agentId,
+			messageCount: trace.messageCount,
+			toolCount: trace.toolCount,
+			payloadBytes: trace.payloadBytes,
+			truncated: trace.truncated,
+		},
+	};
+}
+
+/** 按墙钟找墙钟时刻所属的用户轮（无 seq 的快照专用；轮列表按时间升序）。 */
+function turnIndexAtTime(turns: TrajectoryTurn[], at: number): number {
+	if (turns.length === 0) return -1;
+	if (!(at > 0)) return turns.length - 1;
+	if (at < turns[0].startedAt) return 0;
+	for (let index = 0; index < turns.length; index += 1) {
+		const nextStart = turns[index + 1]?.startedAt;
+		if (nextStart === undefined || at < nextStart) return index;
+	}
+	return turns.length - 1;
+}
+
+function insertModelTraces(turns: TrajectoryTurn[], traces: TrajectoryModelTraceSummary[]): void {
+	if (traces.length === 0) return;
+	const ordered = [...traces].sort((left, right) => left.time - right.time);
+	for (const trace of ordered) {
+		const target = turnIndexAtTime(turns, trace.time);
+		if (target < 0) {
+			// 无消息可归轮（纯快照视图）：单独成轮，保证账本不空。
+			const record = modelRequestRecord(trace, 0);
+			flushTurn(turns, [record], record.startedAt, record.id);
+			continue;
+		}
+		const turn = turns[target];
+		turn.records.push(modelRequestRecord(trace, turn.index));
+	}
 }
 
 /** 过程事件落轮：优先 seq（dsh-web 按 startSeq 挂 step），无 seq 再按墙钟。 */
@@ -449,6 +535,7 @@ export function buildTrajectory(messages: ChatMessage[], now = Date.now(), extra
 
 	if (current.length > 0) flushTurn(turns, current, turnStartedAt, turnId || current[0].id);
 	insertProcessEvents(turns, extras.processEvents ?? []);
+	insertModelTraces(turns, extras.modelTraces ?? []);
 
 	if (extras.systemPrompt?.trim()) {
 		const promptRecord: TrajectoryRecord = {

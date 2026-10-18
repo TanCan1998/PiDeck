@@ -19,7 +19,7 @@ function AlertDialogPortal({ ...props }: React.ComponentProps<typeof AlertDialog
 }
 
 function AlertDialogOverlay({ className, ...props }: React.ComponentProps<typeof AlertDialogPrimitive.Overlay>) {
-	return <AlertDialogPrimitive.Overlay data-slot="alert-dialog-overlay" className={cn("fixed inset-0 z-(--z-dialog) bg-black/50 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0", className)} {...props} />;
+	return <AlertDialogPrimitive.Overlay data-slot="alert-dialog-overlay" className={cn("fixed inset-0 z-(--z-dialog) bg-[var(--overlay-backdrop)] backdrop-blur-[2px] data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0", className)} {...props} />;
 }
 
 function AlertDialogContent({
@@ -36,7 +36,7 @@ function AlertDialogContent({
 				data-slot="alert-dialog-content"
 				data-size={size}
 				className={cn(
-					"group/alert-dialog-content fixed top-[50%] left-[50%] z-(--z-dialog) grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border bg-background p-6 shadow-lg outline-none duration-base ease-out-quint data-[size=sm]:max-w-xs data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=closed]:slide-out-to-bottom-2 data-[state=closed]:ease-in data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=open]:slide-in-from-bottom-2 data-[size=default]:sm:max-w-lg",
+					"group/alert-dialog-content fixed top-[50%] left-[50%] z-(--z-dialog) grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border bg-background p-6 shadow-[var(--shadow-modal)] outline-none duration-base ease-out-quint data-[size=sm]:max-w-xs data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=closed]:slide-out-to-bottom-2 data-[state=closed]:ease-in data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=open]:slide-in-from-bottom-2 data-[size=default]:sm:max-w-lg",
 					className,
 				)}
 				{...props}

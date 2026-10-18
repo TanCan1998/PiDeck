@@ -70,7 +70,8 @@ export async function verifyRemoteGitHistory(input: { window: Page; credentials:
 
 	await test.step("打开历史与引用区（手动展开，不轮询）", async () => {
 		await remoteProjectRow(window, root.split("/").pop() ?? "")
-			.locator(".project-draggable")
+			.locator(".conversation-title")
+			.first()
 			.click();
 		await window.getByRole("button", { name: "打开右侧边栏", exact: true }).click();
 		await window.getByTestId("drawer-rail-git").click();

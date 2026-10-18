@@ -69,16 +69,17 @@ if (!existsSync(archivePath)) {
 	process.exit(1);
 }
 
-/** 回归基线：原 asar 校验的 19 个顶层 dsh 依赖，缺一个 host 就起不来。 */
+/** 回归基线：原 asar 校验的 19 个顶层 dsh 依赖，缺一个 host 就起不来。
+ *  0.2.1：dsh-invariants 停发（原 36 个包的 peer），subagent-in-process-driver 拆成
+ *  spawn/fork-in-process 两个 provider 包（dsh-base patch 的直接入口）。 */
 const REQUIRED = [
 	"cordis-plugin-group",
 	"dsh-anonymous-user-id",
 	"dsh-atomic-write",
 	"dsh-bash-local",
-	"dsh-code-runtime",
+	"dsh-ptc-runtime-node",
 	"dsh-compaction",
 	"dsh-fs",
-	"dsh-invariants",
 	"dsh-output-retention",
 	"dsh-sandbox",
 	"dsh-scope",
@@ -86,7 +87,8 @@ const REQUIRED = [
 	"dsh-session-title-llm",
 	"dsh-shell",
 	"dsh-spill",
-	"dsh-subagent-in-process-driver",
+	"dsh-subagent-fork-in-process",
+	"dsh-subagent-spawn-in-process",
 	"dsh-subprocess",
 	"dsh-timeout",
 	"dsh-workflow",
@@ -95,7 +97,7 @@ const REQUIRED = [
 /** hostEntry 动态 resolve 的入口，外加两个作用域外的种子包。
  *  0.1.5：dsh-host-apiproxy 已废，传输半在 dsh-client-connection，
  *  网关/端点在 dsh-api-gateway / dsh-api-session-controller（见
- *  docs/dsh-0.1.5-typert-migration.md）。 */
+ *  docs/dsh-remote-contract.md）。 */
 const ENTRY_PACKAGES = ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-app-boot", "@deepseek-ai/dsh-cmdline", "@deepseek-ai/dsh-client-connection", "@deepseek-ai/dsh-api-gateway", "@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-api-session-controller", "dsh-bill", "dsh-tool-pwsh-persistent"];
 
 /**
@@ -104,7 +106,6 @@ const ENTRY_PACKAGES = ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-app-boot", "@
  * 入口解析校验看不到这一层间接引用，这里显式钉死。
  */
 const MUST_HAVE_FILES = [
-	"node_modules/koffi/src/koffi/index.cjs",
 	// node-pty 是 dsh-tool-pwsh-persistent 的运行时依赖；入口解析校验覆盖不到
 	// 「依赖包整个缺席」的场景（曾因 appOwnDeps 过滤被挡在归档外）。
 	"node_modules/node-pty/package.json",
@@ -248,6 +249,13 @@ for (const [dir, pkg] of pkgJsonByDir) {
 	if (resolvable.length === 0) {
 		failures.push(`no resolvable entry: ${pkgName} (main=${pkg.main ?? ""} exports=${JSON.stringify(pkg.exports ?? {})?.slice(0, 80)})`);
 	}
+}
+
+// koffi 可由 npm 嵌套安装；检查每一份的间接入口，不能要求顶层提升，也不能让一份好包掩盖坏副本。
+const koffiDirs = [...presentRelByDir.keys()].filter((dir) => dir.endsWith("/koffi"));
+if (!koffiDirs.length) failures.push("missing critical package: koffi");
+for (const dir of koffiDirs) {
+	if (!presentRelByDir.get(dir).has("src/koffi/index.cjs")) failures.push(`missing critical file: ${dir}/src/koffi/index.cjs`);
 }
 
 // 已知关键文件（见 MUST_HAVE_FILES 注释）

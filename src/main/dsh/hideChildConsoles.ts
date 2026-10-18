@@ -1,4 +1,4 @@
-import { createRequire } from "node:module";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import type * as childProcessModule from "node:child_process";
 
@@ -358,8 +358,8 @@ function rewriteRunnerExecutable(command: string, args: readonly string[]): { co
 
 /**
  * 安装补丁（win32 only；platform 可注入以便测试）。返回还原函数。
- * 必须在 DSH 各包动态 import 之前调用：dsh-subprocess-local 等模块加载时会捕获
- * child_process.spawn 的引用，补丁先于加载才覆盖得到。
+ * 在 DSH 各包动态 import 前安装，并同步内置模块 ESM 导出：其他宿主依赖可能
+ * 已提前加载 node:child_process，只改 CJS 会让 DSH 的 ESM spawn 继续绕过补丁。
  *
  * 行为：
  * - win32 一律注入 windowsHide（CREATE_NO_WINDOW：无窗口、可继承）。
@@ -368,8 +368,8 @@ function rewriteRunnerExecutable(command: string, args: readonly string[]): { co
  *
  * 注意：Node 24+ 的内置模块 CJS exports 是只读 getter（plain 赋值会抛
  * "Cannot set property ... which has only a getter"），必须用 defineProperty；
- * 该属性 configurable=true，且 ESM 侧 `import { spawn } from "node:child_process"`
- * 是 live binding——defineProperty 替换后，后续动态 import 的 dsh 包读到的就是补丁版。
+ * 该属性 configurable=true；ESM 命名导出需显式 syncBuiltinESMExports 才更新，
+ * 不能依赖 defineProperty 自动同步已加载的 builtin binding。
  */
 export function installHiddenConsolePatch(platform: NodeJS.Platform = process.platform, runnerPreloadPath: string = join(__dirname, "runnerConsolePreload.js")): () => void {
 	if (platform !== "win32") return () => undefined;
@@ -418,16 +418,10 @@ export function installHiddenConsolePatch(platform: NodeJS.Platform = process.pl
 	// spawn(command[, args][, options])：options 在第 2 位（无 args）或第 3 位。
 	replaceExport("spawn", ((command: string, argsOrOptions?: readonly string[] | SpawnOptions, maybeOptions?: SpawnOptions) => {
 		if (Array.isArray(argsOrOptions)) {
-			// pwsh 挂起兜底：改写 args（追加 exit）与 options（stdin ignore）。
-			// 沙箱 runner：-- 尾部的 pwsh -Command 也追加 exit——沙箱内 pwsh 由 ACL
-			// runner 用 CreateProcessAsUserW 直接拉起（绕过 child_process，补丁够不着
-			// 子进程本身），只能在 runner spawn 边界改写 argv，属尽力而为的兜底。
-			// 2026-09-12 进程树复核：沙箱命令挂满 120s 的**主因不是 pwsh**（挂起瞬间
-			// 进程表里没有 pwsh，命令行里的 exit 也已送达），而是 ACL runner 以 GUI
-			// electron.exe 形态运行、事件循环永不退出——见 installRunnerNodeModeEnv。
-			// 注意 stdio 不动：runner 可能用 stdin pipe 向受限命令传数据。
+			// 仅直连 pwsh 保留旧挂起兜底；runner 自己负责超时与进程回收，必须原样
+			// 传递命令和管道。追加 exit 会截断 Get-Location 等命令的延迟格式化输出。
 			const rewritten = rewriteRunnerExecutable(command, argsOrOptions);
-			const guarded = isPwshCommand(rewritten.command) ? withPwshHangGuard(rewritten.args, maybeOptions) : isRunnerSpawn(rewritten.command, rewritten.args) ? { args: withPwshExitAppend(rewritten.args), options: maybeOptions } : { args: rewritten.args, options: maybeOptions };
+			const guarded = isPwshCommand(rewritten.command) ? withPwshHangGuard(rewritten.args, maybeOptions) : { args: rewritten.args, options: maybeOptions };
 			const next = resolveSpawnOptions(rewritten.command, guarded.args, guarded.options);
 			return next === undefined ? originals.spawn(rewritten.command, guarded.args) : originals.spawn(rewritten.command, guarded.args, next);
 		}
@@ -435,11 +429,11 @@ export function installHiddenConsolePatch(platform: NodeJS.Platform = process.pl
 		return next === undefined ? originals.spawn(command) : originals.spawn(command, next);
 	}) as typeof childProcess.spawn);
 
-	// spawnSync 与 spawn 同形态（沙箱探测 spawnSync 也走 runner 分支，argv 改写无害）。
+	// spawnSync 与 spawn 同形态：runner argv 原样透传。
 	replaceExport("spawnSync", ((command: string, argsOrOptions?: readonly string[] | SpawnOptions, maybeOptions?: SpawnOptions) => {
 		if (Array.isArray(argsOrOptions)) {
 			const rewritten = rewriteRunnerExecutable(command, argsOrOptions);
-			const guarded = isPwshCommand(rewritten.command) ? withPwshHangGuard(rewritten.args, maybeOptions) : isRunnerSpawn(rewritten.command, rewritten.args) ? { args: withPwshExitAppend(rewritten.args), options: maybeOptions } : { args: rewritten.args, options: maybeOptions };
+			const guarded = isPwshCommand(rewritten.command) ? withPwshHangGuard(rewritten.args, maybeOptions) : { args: rewritten.args, options: maybeOptions };
 			const next = resolveSpawnOptions(rewritten.command, guarded.args, guarded.options);
 			return next === undefined ? originals.spawnSync(rewritten.command, guarded.args) : originals.spawnSync(rewritten.command, guarded.args, next);
 		}
@@ -500,9 +494,12 @@ export function installHiddenConsolePatch(platform: NodeJS.Platform = process.pl
 		return originals.execFileSync(file, next);
 	}) as typeof childProcess.execFileSync);
 
+	// builtin ESM 可能在补丁前已实例化；否则 runner 会漏掉 sidecar/preload 设置。
+	syncBuiltinESMExports();
 	return () => {
 		for (const [name, value] of Object.entries(originals) as Array<[keyof typeof originals, unknown]>) {
 			Object.defineProperty(childProcess, name, { value, writable: true, configurable: true });
 		}
+		syncBuiltinESMExports();
 	};
 }

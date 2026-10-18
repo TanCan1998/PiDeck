@@ -11,7 +11,7 @@
  * 行级移除只删目标行，其余字节保持原样。无法识别的形状（手写折叠/锚点等）明确报
  * 「请手动编辑」，宁可不做也不猜。
  */
-import { copyFileSync, existsSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { load as loadYamlRaw } from "js-yaml";
@@ -47,13 +47,19 @@ function loadYaml(text: string): unknown {
 export function normalizeModuleName(name: string): string {
 	let value = name.trim();
 	if (/^file:/i.test(value)) {
+		// loader 的绝对路径行会拼成 file:///C:/… 或 file:////tmp/…（POSIX 绝对路径再加一层）。
+		// 把多余的空 authority 斜杠折回再解析，否则 file:////tmp/x 会解成 //tmp/x。
 		try {
-			value = fileURLToPath(value);
+			value = fileURLToPath(value.replace(/^file:\/{3,}/i, "file:///"));
 		} catch {
 			value = value.replace(/^file:\/\//, "");
 		}
 	}
-	return value.replace(/\\/g, "/");
+	value = value.replace(/\\/g, "/");
+	// Windows 盘符路径：fileURLToPath("file:///C:/a") 会多出一个前导 "/"（/C:/a）。
+	// 去掉它，盘符路径才能与裸路径 / 其它 file URL 归一化到同一结果。
+	if (/^\/[a-zA-Z]:\//.test(value)) value = value.slice(1);
+	return value;
 }
 
 /** 解析用户补丁层的 insert 行；文件缺失 = 空名单，解析失败 = 空名单 + error。 */
@@ -196,6 +202,75 @@ export function removeUserPatchRow(text: string, target: RemoveRowTarget): Remov
 		}
 	}
 	return { text, removed: false, reason: "patch row not found in $DSH_HOME/cordis.patch.yml" };
+}
+
+/**
+ * 用户补丁层的 YAML 文档形状（只分三类：够我们判断要不要出手修复）。
+ * - array：顶层数组，dsh 认的合法形状。
+ * - empty：只有注释/全空白，js-yaml 解析为 null|undefined。
+ * - other：解析失败或顶层是映射/标量——形状由不得我们猜，不改写用户文件。
+ */
+function classifyUserPatchDocument(text: string): "array" | "empty" | "other" {
+	try {
+		const parsed = loadYaml(text);
+		if (Array.isArray(parsed)) return "array";
+		return parsed === null || parsed === undefined ? "empty" : "other";
+	} catch {
+		return "other";
+	}
+}
+
+/**
+ * 把「只有注释」的空文档补丁层补成合法的空数组文档（保留原注释与字节，只在末尾落一行 `[]`）。
+ *
+ * 为什么必须补：dsh 0.2.0-rc.2 起 `loadOptionalPatches` 硬性要求补丁文件是顶层 YAML 数组，
+ * 只有注释的文件解析成 null → 直接抛「must be a top-level YAML array of loader patch entries」，
+ * 整个 DSH host 起不来。而这种文件正是**我们自己**留下的：卸载最后一个用户插件时
+ * removeUserPatchRow 会连 `- insert:` 一起删干净，只剩表头注释。
+ * 非空数组/其它形状一律原样返回（不猜用户意图）。
+ */
+export function withArrayDocumentFallback(text: string): string {
+	if (classifyUserPatchDocument(text) !== "empty") return text;
+	return `${text.replace(/\s+$/, "")}\n[]\n`;
+}
+
+/**
+ * 摘掉顶层空数组占位行，供「追加 insert 块」的写入方使用。
+ *
+ * 为什么需要：`[]`（流式空数组文档）与 `- insert:`（块式序列）不能并存，混在一起
+ * js-yaml 直接解析失败。补丁层只剩注释时我们会补一行 `[]` 让 host 起得来，
+ * 而 `install-dsh-plugin.mjs --register` 正是在这种文件后面追加行——必须先占位摘掉。
+ * 只删整行恰好是 `[]` 的行，行内/缩进位置的内容（如 config 里的数组）不动。
+ */
+export function dropEmptyArrayMarker(text: string): string {
+	return text
+		.split("\n")
+		.filter((line) => !/^\s*\[\s*\]\s*$/.test(line))
+		.join("\n");
+}
+
+/**
+ * 就地修复已存在的用户补丁层（host fork 前的自愈路径，覆盖旧版本留下的历史文件）。
+ * 文件缺失是合法状态（dsh 按 optional 处理）；已是数组或形状可疑时不写盘。
+ * 返回是否发生了写入，调用方据此记日志。
+ */
+export function ensureUserPatchLayerIsArrayDocument(patchPath: string): boolean {
+	if (!existsSync(patchPath)) return false;
+	let text: string;
+	try {
+		text = readFileSync(patchPath, "utf8");
+	} catch {
+		return false;
+	}
+	const next = withArrayDocumentFallback(text);
+	if (next === text) return false;
+	try {
+		writeFileSync(patchPath, next, "utf8");
+		return true;
+	} catch {
+		// 写失败（只读/占用）不阻断启动：dsh 仍会给出它自己那条可读的补丁错误。
+		return false;
+	}
 }
 
 /**

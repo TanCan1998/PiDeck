@@ -1,78 +1,25 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import ts from "typescript";
-import vm from "node:vm";
-import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
+import { createTsSandbox } from "./helpers/createTsSandbox.mjs";
 
 const require = createRequire(import.meta.url);
 
-let builtInExtensionsModule = null;
-
-/**
- * builtInExtensions.ts 依赖 ./builtInExtensionsManifest（覆盖层清单校验），
- * 裸 require 解析不了无扩展名的 .ts 相对导入，统一交给 loadTsCommonJs；
- * 模块级缓存保证实例唯一（覆盖层可用性缓存住在模块内部）。
- */
-function loadBuiltInExtensionsModule() {
-	if (!builtInExtensionsModule) {
-		builtInExtensionsModule = loadTsCommonJs("src/main/extensions/builtInExtensions.ts");
-	}
-	return builtInExtensionsModule;
-}
-
-function transpile(filePath) {
-	return ts.transpileModule(readFileSync(filePath, "utf8"), {
-		compilerOptions: {
-			module: ts.ModuleKind.CommonJS,
-			target: ts.ScriptTarget.ES2022,
-		},
-	}).outputText;
-}
-
-function loadWslPaths() {
-	const sandbox = { exports: {}, require };
-	vm.runInNewContext(transpile("src/main/wsl/WslPaths.ts"), sandbox, { filename: "WslPaths.ts" });
-	return sandbox.exports;
-}
-
+/** Keep real WSL path semantics and resolve every production dependency from its source file. */
 function loadExtensionManager(fsOverrides = {}) {
-	const wslPaths = loadWslPaths();
-	const sandbox = {
-		exports: {},
-		require: (id) => {
-			if (id === "node:fs/promises") {
-				return { ...require(id), ...fsOverrides };
-			}
-			if (id === "../wsl/WslPaths") return wslPaths;
-			// 25fd516 起 ExtensionManager 依赖内置扩展清单模块；按真实模块透传（纯数据 + 纯函数）
-			if (id === "./extensionDiscovery") {
-				return require("../src/main/extensions/extensionDiscovery.ts");
-			}
-			if (id === "./builtInExtensions") {
-				return loadBuiltInExtensionsModule();
-			}
-			// 删除走系统回收站统一入口；本测试不触达删除路径，提供 noop stub 即可。
-			if (id === "../fs/trash") return { trashPath: async () => {} };
-			if (id === "../logging/sharedLogger") return { getAppLogger: () => null };
-			if (id === "./extensionVersionGate") {
-				return require("../src/main/extensions/extensionVersionGate.ts");
-			}
-			// ExtensionManager 依赖 ../utils/versionCompare 的 compareVersions；.ts 经 node 类型剥离可 require。
-			if (id === "../utils/versionCompare") {
-				return require("../src/main/utils/versionCompare.ts");
-			}
-			return require(id);
+	const load = createTsSandbox({
+		stubs: {
+			"node:fs/promises": { ...require("node:fs/promises"), ...fsOverrides },
+			"../fs/trash": { trashPath: async () => {} },
+			"../logging/sharedLogger": { getAppLogger: () => null },
+			"../pi/PiProcess": { PiProcess: { invalidateVersionCache: () => {} } },
 		},
-	};
-	vm.runInNewContext(transpile("src/main/extensions/ExtensionManager.ts"), sandbox, {
-		filename: "ExtensionManager.ts",
 	});
-	return { ...sandbox.exports, wslPaths };
+	return { ...load("src/main/extensions/ExtensionManager.ts"), wslPaths: load("src/main/wsl/WslPaths.ts") };
 }
 
 test("reads an installed WSL npm extension version through its canonical host path", async () => {
@@ -91,7 +38,7 @@ test("reads an installed WSL npm extension version through its canonical host pa
 		const manager = new ExtensionManager({}, () => ({}));
 		manager.configureWsl(wslPaths.createWslEnvironment("Ubuntu-24.04", "root", "/root"));
 
-		const version = await manager.readInstalledVersion("/root/.pi/agent/extensions/npm/fixture-extension");
+		const version = await manager.catalog.readInstalledVersion("/root/.pi/agent/extensions/npm/fixture-extension");
 
 		assert.equal(version, "1.2.3");
 		assert.equal(requestedPaths.length, 1);
@@ -191,31 +138,4 @@ test("setEnabled 允许达标版本的 pi 禁用扩展（白名单机制可用�
 			{ scope: "project", source: "npm:pi-web-access" },
 		]),
 	);
-});
-
-test("白名单总开关（禁用 -e 参数）默认关闭，可切换并持久化", async () => {
-	let pideckSettings = {};
-	const { ExtensionManager } = loadExtensionManager();
-	const manager = new ExtensionManager(
-		{},
-		() => ({}),
-		() => pideckSettings,
-		async (patch) => {
-			pideckSettings = { ...pideckSettings, ...patch };
-			return pideckSettings;
-		},
-	);
-
-	// 未设置时默认 false：白名单模式正常工作
-	assert.equal(manager.isWhitelistDisabled(), false);
-
-	// 开启总开关：写入 disableExtensionWhitelist=true
-	await manager.setWhitelistDisabled(true);
-	assert.equal(manager.isWhitelistDisabled(), true);
-	assert.equal(pideckSettings.disableExtensionWhitelist, true);
-
-	// 关闭恢复默认
-	await manager.setWhitelistDisabled(false);
-	assert.equal(manager.isWhitelistDisabled(), false);
-	assert.equal(pideckSettings.disableExtensionWhitelist, false);
 });

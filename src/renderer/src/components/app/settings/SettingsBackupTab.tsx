@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Loader2 } from "lucide-react";
 import { t, type TranslationKey } from "../../../i18n";
 import { showNotice } from "../../../utils/notice";
 import { Button } from "../../ui-shadcn/button";
@@ -183,7 +184,7 @@ export function BackupTab() {
 				}}
 			/>
 
-			<SettingsSection title={t("settings.backup.title")} description={t("settings.backup.desc")}>
+			<SettingsSection id="settings-section-backup-config" title={t("settings.backup.title")} description={t("settings.backup.desc")}>
 				<SettingRow level={1} title={<span>{t("settings.backup.createButton")}</span>} description={t("settings.backup.createDesc")}>
 					<Button variant="secondary" loading={busy === "action"} disabled={busy !== null} onClick={doCreate}>
 						{t("settings.backup.createButton")}
@@ -192,7 +193,7 @@ export function BackupTab() {
 				<p className="px-0.5 pb-1 text-caption text-muted-foreground">{t("settings.backup.hint")}</p>
 			</SettingsSection>
 
-			<SettingsSection title={t("settings.backup.listTitle")}>
+			<SettingsSection id="settings-section-backup-list" title={t("settings.backup.listTitle")}>
 				<div className="flex items-center justify-between gap-2 pb-1">
 					{backups && backups.length > 0 ? (
 						<label className="flex cursor-pointer select-none items-center gap-2 px-0.5 text-caption text-muted-foreground">
@@ -207,7 +208,10 @@ export function BackupTab() {
 					</Button>
 				</div>
 				{isLoading ? (
-					<p className="px-0.5 py-1 text-caption text-muted-foreground">{t("common.loading")}</p>
+					<p className="flex items-center gap-1.5 px-0.5 py-1 text-caption text-muted-foreground">
+						<Loader2 size={12} className="animate-pideck-spin" aria-hidden="true" />
+						{t("common.loading")}
+					</p>
 				) : backups.length === 0 ? (
 					<p className="px-0.5 py-1 text-caption text-muted-foreground">{t("settings.backup.empty")}</p>
 				) : (

@@ -39,7 +39,8 @@ test("loadProjectFileTree returns null when the request is superseded mid-flight
 
 test("project file tree refresh and expand drop stale listings", () => {
 	const sync = readFileSync("src/renderer/src/hooks/useProjectSync.ts", "utf8");
-	const app = readFileSync("src/renderer/src/App.tsx", "utf8");
+	// 切项目时的树清空/代次闸门已迁入 useProjectFileTreeController。
+	const app = readFileSync("src/renderer/src/hooks/files/useProjectFileTreeController.ts", "utf8");
 
 	// #159：切项目后旧 files:list 仍可能很晚返回，必须按代次/当前项目丢弃。
 	assert.match(sync, /loadProjectFileTree/);
@@ -52,13 +53,16 @@ test("project file tree refresh and expand drop stale listings", () => {
 
 test("missing project directories clear stale files and refresh project presence", () => {
 	const sync = readFileSync("src/renderer/src/hooks/useProjectSync.ts", "utf8");
-	const app = readFileSync("src/renderer/src/App.tsx", "utf8");
+	const app = readFileSync("src/renderer/src/hooks/files/useProjectFileTreeController.ts", "utf8");
 	const i18n = [readFileSync("src/renderer/src/i18n/rendererCopy.zh-CN.ts", "utf8"), readFileSync("src/renderer/src/i18n/rendererCopy.en-US.ts", "utf8")].join("\n");
 
 	assert.match(sync, /message\.includes\("PROJECT_DIRECTORY_MISSING"\)/);
 	assert.match(sync, /setFiles\(\[\]\);/);
 	assert.match(sync, /void refreshProjects\(\)\.catch\(\(\) => undefined\);/);
 	assert.match(app, /projectDirectoryMissing[\s\S]*?refreshProjects\(\)\.catch/);
+	// PROJECT_DIRECTORY_MISSING 的项目自愈/提示文案在文件树控制器里。
+	const controller = readFileSync("src/renderer/src/hooks/files/useProjectFileTreeController.ts", "utf8");
+	assert.match(controller, /projectDirectoryMissing[\s\S]*?refreshProjects\(\)\.catch/);
 	assert.match(i18n, /"app\.projectDirectoryMissing"/);
 });
 
@@ -74,7 +78,10 @@ test("file deletion failures are shown to the user instead of only logged", () =
 });
 
 test("project file tree effect does not retrigger on an unstable toast helper", () => {
-	const app = readFileSync("src/renderer/src/App.tsx", "utf8");
+	// 文件树切换 effect 已迁入 useProjectFileTreeController；showToast 由 App 的
+	// useCallback 传入，但 effect deps 仍不得包含它。
+	const app = readFileSync("src/renderer/src/hooks/files/useProjectFileTreeController.ts", "utf8");
+	const appShell = readFileSync("src/renderer/src/App.tsx", "utf8");
 	// 文件树 effect 只应跟当前项目走。showToast 若是每次 render 新建的函数
 	// 又写进 deps，会每帧 setFiles([]) 把 React 更新深度打满——点击会话后
 	// 设置/关窗点不动，正是 applog 里 Maximum update depth 的根因。
@@ -83,5 +90,5 @@ test("project file tree effect does not retrigger on an unstable toast helper", 
 	const deps = app.slice(effectStart, effectStart + 2500).match(/\}, \[activeProjectId[^\]]*\]\)/);
 	assert.ok(deps, "file-tree effect should keep an explicit dependency list");
 	assert.doesNotMatch(deps[0], /showToast|refreshProjects/);
-	assert.match(app, /const showToast = useCallback\(/);
+	assert.match(appShell, /const showToast = useCallback\(/);
 });

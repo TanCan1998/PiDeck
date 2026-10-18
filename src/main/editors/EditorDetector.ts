@@ -1,6 +1,7 @@
 import { access, readdir } from "node:fs/promises";
 import { basename, delimiter, dirname, extname, join } from "node:path";
 import { spawn } from "node:child_process";
+import { clearTimeout, setTimeout } from "node:timers";
 import { shell } from "electron";
 import { SUPPORTED_EXTERNAL_EDITORS, createDefaultExternalEditorSettings, type AppSettings, type ExternalEditor, type ExternalEditorId, type ExternalEditorSettings } from "../../shared/types";
 
@@ -157,12 +158,24 @@ function runRegQuery(key: string) {
 			stdio: ["ignore", "pipe", "ignore"],
 		});
 		let output = "";
+		let settled = false;
+		const finish = (value: string) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve(value);
+		};
+		// /s 全子树扫描在异常庞大的注册表树上可能长时间不返回；限时兕底防止启动期编辑器探测卡死。
+		const timer = setTimeout(() => {
+			child.kill();
+			finish(output);
+		}, 8000);
 		child.stdout.setEncoding("utf8");
 		child.stdout.on("data", (chunk) => {
 			output += chunk;
 		});
-		child.once("error", () => resolve(""));
-		child.once("close", () => resolve(output));
+		child.once("error", () => finish(""));
+		child.once("close", () => finish(output));
 	});
 }
 

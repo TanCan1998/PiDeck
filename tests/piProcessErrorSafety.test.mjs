@@ -34,6 +34,8 @@ function loadPiProcess(spawnImpl) {
 			},
 			"./PiRpcClient": { PiRpcClient: FakeRpcClient },
 			"./PiLocator": { PiLocator: FakePiLocator },
+			// 不触达真实 ~/.pi 扩展目录：停放/还原在本用例无断言对象。
+			"./piExtensionFilter": { parkBlockedExtensionsInDir: () => [], unparkBlockedExtensions: () => {} },
 			// 25fd516 起 PiProcess 引入内置扩展参数拼接；本测试只关心 spawn 错误转发，按原样透传。
 			"../extensions/builtInExtensions": { appendBuiltInExtensionArgs: (args) => [...args] },
 			// 日志共享实例未注册时返回 null，PiProcess 埋点静默跳过（避免测试里拉真实日志模块）。
@@ -104,7 +106,7 @@ test("AgentManager attaches lifecycle listeners before process.start", () => {
 	assert.match(source, /attachPiProcessLifecycle\(/);
 	assert.match(source, /buildStartupFailureMessage\(/);
 	// spawnAndGetState：先 attach，再 await process.start（create/reattach 共用握手）
-	const spawnBlock = source.slice(source.indexOf("private async spawnAndGetState"), source.indexOf("private notifyExtensionsDisabled"));
+	const spawnBlock = source.slice(source.indexOf("private async spawnAndGetState"), source.indexOf("private toSessionHostPath"));
 	const attachAt = spawnBlock.indexOf("this.attachPiProcessLifecycle");
 	const startAt = spawnBlock.indexOf("await process.start");
 	assert.ok(attachAt >= 0 && startAt > attachAt, "lifecycle must be attached before start()");

@@ -67,9 +67,21 @@ export function isStandaloneFileReference(value: string): boolean {
 	return /^[^\\/\s<>"'`|?*\[\](){}，。；：！？、（）【】《》「」『』“”‘’·…—～￥×÷→←↑↓⇒／]+\.[\p{L}\p{N}]+$/u.test(location.path);
 }
 
+/** remark mdast 节点的最小内部形状：remark 插件边界类型包未随包引入，字段按实际访问点声明；
+ * __segs/__fileLink 是本插件在 text/inlineCode 节点上挂载的私有载荷（父节点消费后整体替换并删除）。 */
+type MdNode = {
+	type: string;
+	value?: string;
+	url?: string;
+	children?: MdNode[];
+	__segs?: MdNode[];
+	__fileLink?: MdNode;
+	[key: string]: unknown;
+};
+
 export const remarkLinkifyPaths = () => {
-	return (tree: any) => {
-		const visit = (node: any) => {
+	return (tree: MdNode) => {
+		const visit = (node: MdNode) => {
 			if (!node || typeof node !== "object") return;
 			const type: string = node.type;
 			if (type === "code" || type === "link") return;
@@ -87,7 +99,7 @@ export const remarkLinkifyPaths = () => {
 				const text: string = node.value;
 				const matches = matchPlainFilePaths(text);
 				if (matches.length === 0) return;
-				const segs: any[] = [];
+				const segs: MdNode[] = [];
 				let last = 0;
 				for (const match of matches) {
 					if (match.start > last) segs.push({ type: "text", value: text.slice(last, match.start) });
@@ -110,18 +122,18 @@ export const remarkLinkifyPaths = () => {
 				node.__segs = segs;
 				return;
 			}
-			const children: any[] | undefined = node.children;
+			const children: MdNode[] | undefined = node.children;
 			if (Array.isArray(children)) {
-				const next: any[] = [];
+				const next: MdNode[] = [];
 				for (const child of children) {
 					visit(child);
-					if (child && (child as any).__segs) {
-						const segs = (child as any).__segs;
-						delete (child as any).__segs;
+					if (child && child.__segs) {
+						const segs = child.__segs;
+						delete child.__segs;
 						next.push(...segs);
-					} else if (child && (child as any).__fileLink) {
-						const fileLink = (child as any).__fileLink;
-						delete (child as any).__fileLink;
+					} else if (child && child.__fileLink) {
+						const fileLink = child.__fileLink;
+						delete child.__fileLink;
 						next.push(fileLink);
 					} else {
 						next.push(child);

@@ -49,7 +49,7 @@ export async function verifyRemoteGitSoak(input: { window: Page; app: ElectronAp
 	};
 	const select = async (root: string) => {
 		const project = remoteProjectRow(window, root.split("/").pop() ?? "");
-		await project.locator(".project-draggable").click();
+		await project.locator(".conversation-title").first().click();
 		if (!visited.has(root)) {
 			await window.getByRole("button", { name: "打开右侧边栏", exact: true }).click();
 			await window.getByTestId("drawer-rail-git").click();

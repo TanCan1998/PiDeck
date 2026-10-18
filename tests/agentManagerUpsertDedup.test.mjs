@@ -111,13 +111,13 @@ test("finalizeThinkingIntoMessage 终态：更新投影版不 append 副本", ()
 	const projected = seedProjectedMessages(manager, "<thinking>思考内容</thinking>");
 	manager.activeAssistantMessageIds.set("agent-1", "run-uuid-1");
 	// 重载后思考段仍登记（运行期段身份），终态写入时须命中投影版
-	manager.thinkingSegmentByAgent.set("agent-1", {
+	manager.liveStream.thinkingSegmentByAgent.set("agent-1", {
 		id: "msg-thinking-run-uuid-1",
 		assistantMessageId: "run-uuid-1",
 		startedAt: 500,
 		endedAt: 900,
 	});
-	manager.streamingThinking.set("agent-1", "思考内容");
+	manager.liveStream.streamingThinking.set("agent-1", "思考内容");
 
 	manager.finalizeThinkingIntoMessage("agent-1", assistantEvent("", "stop", "思考内容"));
 
@@ -147,7 +147,7 @@ test("rebindInFlightMessages：流式中间态重载后身份重定向到投影�
 		timestamp: 2_000,
 	};
 	manager.activeAssistantMessageIds.set("agent-1", "run-uuid-9");
-	manager.thinkingSegmentByAgent.set("agent-1", {
+	manager.liveStream.thinkingSegmentByAgent.set("agent-1", {
 		id: "msg-thinking-run-uuid-9",
 		assistantMessageId: "run-uuid-9",
 		startedAt: 800,
@@ -162,7 +162,7 @@ test("rebindInFlightMessages：流式中间态重载后身份重定向到投影�
 	assert.equal(next.length, 1, "骨架被移除，不残留双份");
 	assert.equal(next[0].id, projected.id, "保留投影版（位置正确、带 entryId）");
 	assert.equal(manager.activeAssistantMessageIds.get("agent-1"), projected.id, "后续 message_end 事件命中投影版，不再 append 副本");
-	const segment = manager.thinkingSegmentByAgent.get("agent-1");
+	const segment = manager.liveStream.thinkingSegmentByAgent.get("agent-1");
 	assert.equal(segment.assistantMessageId, projected.id, "思考段身份同步重定向");
 	assert.equal(segment.id, `msg-thinking-${projected.id}`);
 

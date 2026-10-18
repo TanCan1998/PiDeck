@@ -1,3 +1,4 @@
+import { hasPiProxyListFilter } from "../../shared/piProxyList";
 import type { AppSettings } from "../../shared/types";
 import type { SessionProxyMode, SessionProxyOverride } from "../../shared/types/session";
 
@@ -26,6 +27,9 @@ export const PROXY_BYPASS_ENV_KEYS = ["NO_PROXY", "no_proxy"] as const;
  * LLM 客户端用 globalThis.fetch，因此不设此开关时，PiDeck 注入的代理 env 对 DSH 完全无效。
  */
 export const NODE_USE_ENV_PROXY = "NODE_USE_ENV_PROXY";
+/** 标记当前 pi 进程的代理 env 由 PiDeck 注入；内置 shell 隔离扩展据此只剥离 agent 命令的代理。 */
+export const PIDECK_PI_PROXY_SCOPE = "PIDECK_PI_PROXY_SCOPE";
+export const PIDECK_PI_PROXY_SCOPE_MODEL_ONLY = "model-only";
 
 /**
  * DSH host fork env patch：set 为注入键值，unset 为从继承环境剥离的键。
@@ -97,9 +101,9 @@ export function resolveModelProxyMode(provider: string | undefined, modelId: str
  * 兼容性：只配置供应商名单（piProxyModels 为空）时行为与旧版完全一致。
  */
 export function resolveListedProxyMode(provider: string | undefined, modelId: string | undefined, piProxyProviders: ReadonlyArray<string> | undefined, piProxyModels: ReadonlyArray<string> | undefined): SessionProxyMode | undefined {
-	const providersEnabled = (piProxyProviders?.length ?? 0) > 0;
-	const modelsEnabled = (piProxyModels?.length ?? 0) > 0;
-	if (!providersEnabled && !modelsEnabled) return undefined;
+	// 名单是否启用的判断与设置页共用同一实现：名单非空时主开关完全失效（设置页据此置灰），
+	// 两边各写一份会在策略调整后静默失真。
+	if (!hasPiProxyListFilter(piProxyProviders, piProxyModels)) return undefined;
 	// 模型名单粒度更细，先于供应商名单判定（同模型不同 provider 的场景交给供应商名单兜底）。
 	const modelMode = resolveModelProxyMode(provider, modelId, piProxyModels);
 	if (modelMode === "on") return "on";
@@ -304,5 +308,8 @@ export function buildPiProxyEnvPatch(settings: (PiProxyModeSettings & { piProxyB
 		for (const key of PROXY_BYPASS_ENV_KEYS) patch[key] = bypass;
 	}
 	patch[NODE_USE_ENV_PROXY] = "1";
+	// 代理只为 pi 自身的模型/API 请求服务；内置 shell 隔离扩展用该标记
+	// 在每次 bash/PowerShell 工具执行时剥离代理，避免 agent 命令共用代理出口配额。
+	patch[PIDECK_PI_PROXY_SCOPE] = PIDECK_PI_PROXY_SCOPE_MODEL_ONLY;
 	return patch;
 }

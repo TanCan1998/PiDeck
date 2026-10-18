@@ -1,8 +1,9 @@
 import { atom } from "jotai";
-import { atomFamily } from "jotai/utils";
+import { atomFamily, selectAtom } from "jotai/utils";
 import type { SessionRecord, SessionSummary } from "../../../shared/types";
 import { sessionDisplayName } from "../utils/sessionDisplayName";
-import { sessionHistoryMutationOverlayByIdAtom, sessionIdsByProjectAtom, sessionRecordsAtom, sessionRuntimeByIdAtom, sessionRuntimeUiByIdAtom } from "./session-atoms";
+import { isDisplayableSessionRecord } from "../utils/sessionRecordDisplay";
+import { currentSessionIdAtom, sessionHistoryMutationOverlayByIdAtom, sessionIdsByProjectAtom, sessionRecordsAtom, sessionRuntimeByIdAtom, sessionRuntimeUiByIdAtom } from "./session-atoms";
 
 export function sessionRecordToSummary(session: SessionRecord): SessionSummary | undefined {
 	// DSH 会话没有 pi 会话文件（会话由 DSH host 持久化在 $DSH_HOME，catalog 只存映射记录），
@@ -10,8 +11,10 @@ export function sessionRecordToSummary(session: SessionRecord): SessionSummary |
 	// 空 filePath 在显示管线走 unkeyedSessions 分支
 	// （getSummaryKey 对空串归一化为 undefined），不会与其他会话折叠成一行；
 	// 右键菜单按 hasFilePath 隐藏「复制路径/打开文件」类文件操作。
+	// 判据与侧栏收集模型共用（utils/sessionRecordDisplay），两处不再各写一份。
 	// SSH 会话同样没有本机文件；用稳定 session id 展示，不可把 remotePath 塞进 filePath 来绕过过滤。
-	if (!session.filePath && session.locator?.kind !== "ssh" && session.backend !== "dsh" && session.backend !== "imagegen") return undefined;
+	// ssh locator 的可显示判定已收口进 isDisplayableSessionRecord（活动列表/最近列表共用同一判据）。
+	if (!isDisplayableSessionRecord(session)) return undefined;
 	return {
 		id: session.id,
 		filePath: session.filePath ?? "",
@@ -25,10 +28,17 @@ export function sessionRecordToSummary(session: SessionRecord): SessionSummary |
 		forked: session.forked,
 		preview: session.preview,
 		updatedAt: session.updatedAt,
+		// 创建时间排序用（settings.sessionSortMode=createdAt）；旧 catalog/扫描路径缺省时回退 updatedAt
+		createdAt: session.createdAt,
 		messageCount: session.messageCount,
 		source: session.source,
 		backend: session.backend,
+		// 外部连接渠道：侧栏/标题栏据此显示微信、飞书标志（catalog 记录写入，扫描摘要不带）
+		channel: session.channel,
+		// 侧边任务标志：侧栏列表照常收录，只多一枚徽标（面板归属由 catalog 记录决定）
+		sideTask: session.sideTask,
 		dshSessionId: session.dshSessionId,
+		acpToolId: session.acpToolId,
 		wsl: session.environment === "wsl" || session.wsl || undefined,
 		codexSessionId: session.codexSessionId,
 		codexThreadSource: session.codexThreadSource,
@@ -37,6 +47,9 @@ export function sessionRecordToSummary(session: SessionRecord): SessionSummary |
 		codexAgentNickname: session.codexAgentNickname,
 	};
 }
+
+/** 仅通知本栏焦点进入/离开，其他栏之间的焦点切换不唤醒非聚焦栏。 */
+export const sessionFocusedByIdAtomFamily = atomFamily((sessionId: string) => selectAtom(currentSessionIdAtom, (focusedId) => focusedId === sessionId, Object.is));
 
 export const sessionRecordByIdAtomFamily = atomFamily((sessionId: string) => atom((get) => get(sessionRecordsAtom)[sessionId]));
 
@@ -69,7 +82,14 @@ export const sessionIdByRuntimeAgentIdAtomFamily = atomFamily((agentId: string) 
 	),
 );
 
-export const sessionRuntimeUiBySessionIdAtomFamily = atomFamily((sessionId: string) => atom((get) => get(sessionRuntimeUiByIdAtom)[sessionId]));
+/**
+ * 按会话取 runtime UI 状态（含桥落点表）。
+ *
+ * `selectAtom` + `Object.is`：`sessionRuntimeUiByIdAtom` 的外层 map 在**任何**会话推帧时
+ * 都会整体重建，但其它会话条目的引用不变 → 本会话订阅者不会因为别的会话推帧而重渲
+ * （AGENTS.md「多实例必须按 session 订阅」）。
+ */
+export const sessionRuntimeUiBySessionIdAtomFamily = atomFamily((sessionId: string) => selectAtom(sessionRuntimeUiByIdAtom, (map) => map[sessionId], Object.is));
 
 /**
  * 这条会话是否要显示远端 trust 条（`RemoteSessionTrustNotice` 的渲染判据）。

@@ -11,6 +11,7 @@ import type { ResourceImportApplyInput, ResourceImportScanInput, ResourceImportS
 import { addUnique, hasErrorCode, isConflictError, isRecord, ResourceImportConflictError, SCAN_TTL_MS, safeMessage, targetKey, MAX_FILE_BYTES, redactSensitiveText } from "./common";
 import { copySkillDirectoryAtomic, findSkillDirs, normalizeSkillName, parseSkillFrontmatter } from "./skillImport";
 import { ResourceImportSourceScanner, type McpSourceSnapshot, type ResourceImportProject, type SkillSourceSnapshot } from "./ResourceImportSourceScanner";
+import { getAppLogger } from "../logging/sharedLogger";
 
 // Keep the helpers available to the existing focused tests and to other main-process callers.
 export { normalizeSkillName, parseSkillFrontmatter } from "./skillImport";
@@ -117,6 +118,8 @@ export class ResourceImportManager {
 				try {
 					if (scan.input.kind === "mcp") await this.applyMcp(candidate, input.target);
 					else await this.applySkill(candidate, input.target);
+					// 批量导入把外部资源写进用户配置/技能目录，属持久状态变更，逐条留痕
+					getAppLogger()?.info("resource-import", "Resource imported", { kind: scan.input.kind, name: redactSensitiveText(candidate.name), source: candidate.sourcePath, target: targetKey(input.target) });
 					results.push({
 						candidateId: candidate.candidateId,
 						name: redactSensitiveText(candidate.name),

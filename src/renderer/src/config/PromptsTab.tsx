@@ -1,8 +1,10 @@
 import { Button } from "../components/ui-shadcn/button";
+import { Switch } from "../components/ui-shadcn/switch";
+import { Badge } from "../components/ui-shadcn/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui-shadcn/table";
 import { showNotice } from "../utils/notice";
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { Check, FileEdit, FileText, Pencil, ShoppingBag, ToggleLeft, ToggleRight, Trash2, X } from "lucide-react";
+import { Loader2, Check, FileEdit, FileText, Pencil, ShoppingBag, Trash2, X } from "lucide-react";
 import type { PiPromptTemplateListResult, PiPromptTemplateSummary, ProjectResourceOverrides } from "../../../shared/types";
 import { t } from "../i18n";
 import { CodeMirrorEditor } from "../components/app/CodeMirrorEditor";
@@ -11,9 +13,10 @@ import { ContentTabs } from "./ContentTabs";
 import { Input } from "../components/ui-shadcn/input";
 import { Textarea } from "../components/ui-shadcn/textarea";
 import { CreateResourceCard, CreateResourceField } from "./ConfigShared";
-import type { ResourceScope } from "./ResourceScopeSelector";
-import { globalPromptOverrideKey } from "../../../shared/resourceIdentity";
-import { isProjectDiscoverySource } from "./resourceScopeModel";
+import { isGlobalSkillSourceId } from "../../../shared/resourceIdentity";
+import { isProjectDiscoverySource, type ResourceScope } from "./resourceScopeModel";
+import { buildProjectOverrideKeyIndex, matchesProjectOverride } from "./projectOverrideKeys";
+import { useResourceTogglePending } from "../hooks/useResourceTogglePending";
 
 /**
  * Runtime-discovered package/settings prompts are owned by pi/package settings,
@@ -39,10 +42,12 @@ function DiscoveredPromptRow(props: {
 					<div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
 						<FileText size={14} strokeWidth={1.8} className="shrink-0 text-text-tertiary" />
 						<strong className="min-w-0 flex-1 break-words whitespace-normal">/{item.name}</strong>
-						<span className="skill-state" title={t("config.resourceManagedHint")}>
+						<Badge variant="outline" size="sm" title={t("config.resourceManagedHint")}>
 							{t("config.source.global")}
-						</span>
-						<span className={`skill-state ${item.enabled ? "enabled" : "disabled"}`}>{item.enabled ? t("common.enabled") : t("common.disabled")}</span>
+						</Badge>
+						<Badge variant={item.enabled ? "success" : "neutral"} size="sm">
+							{item.enabled ? t("common.enabled") : t("common.disabled")}
+						</Badge>
 					</div>
 					<span className="truncate font-mono text-caption text-muted-foreground">{item.sourceLabel}</span>
 				</div>
@@ -95,18 +100,40 @@ export function PromptsTab(props: {
 	onDelete: (template: PiPromptTemplateSummary) => void;
 	onEdit: (template: PiPromptTemplateSummary) => void;
 	onRename: (template: PiPromptTemplateSummary, newName: string) => Promise<void>;
-	onToggle: (template: PiPromptTemplateSummary, enabled: boolean) => void;
+	onToggle: (template: PiPromptTemplateSummary, enabled: boolean) => void | Promise<void>;
 	onCancelEdit: () => void;
 	onQuickSave: () => void;
 	onChangeEditContent: (value: string) => void;
 	onSaveEdit: () => void;
 }) {
 	const { data } = props;
+	// 开关的乐观覆盖：点击立刻翻转显示，写盘 + 刷新结束后清掉（提示词写盘很快，但刷新链路仍要等）。
+	const { begin, end, settle, shown } = useResourceTogglePending();
+	const handlePromptToggle = async (template: PiPromptTemplateSummary, enabled: boolean) => {
+		if (!begin(template.path, enabled)) return;
+		try {
+			await props.onToggle(template, enabled);
+		} finally {
+			end(template.path);
+		}
+	};
+	// 数据回落后结算乐观覆盖：真值等于目标值才清除（提示词开关自身会 await 刷新，这里兜住时序差）。
+	useEffect(() => {
+		const disabledKeys = buildProjectOverrideKeyIndex(props.projectOverrides.disabledGlobalPrompts);
+		const derived: Record<string, boolean | undefined> = {};
+		for (const template of props.data.templates) {
+			// 与行上 effectiveEnabled 同一套算法：项目视图里继承来的全局模板再叠加项目级禁用。
+			const inherited = props.scope === "project" && template.scope !== "project";
+			const disabledHere = inherited && matchesProjectOverride(disabledKeys, template.path);
+			derived[template.path] = template.enabled !== false && !disabledHere;
+		}
+		settle(derived);
+	}, [props.data, props.scope, props.projectOverrides, settle]);
 	// Project scope renders project-owned templates first, then inherited global templates.
 	const visibleTemplates = data.templates.filter((template) => props.scope === "project" || template.scope !== "project").sort((left, right) => Number(right.scope === "project") - Number(left.scope === "project"));
 	const projectTemplates = visibleTemplates.filter((template) => template.scope === "project");
 	const globalTemplates = visibleTemplates.filter((template) => template.scope !== "project");
-	const disabledGlobalKeys = new Set(props.projectOverrides.disabledGlobalPrompts);
+	const disabledGlobalKeys = buildProjectOverrideKeyIndex(props.projectOverrides.disabledGlobalPrompts);
 	// discovery 行去重：与本地列表同名的条目只保留本地行（带操作），列表只显示一次
 	const localPromptNames = new Set(visibleTemplates.map((template) => template.name.toLowerCase()));
 	const uniqueDiscoveryPrompts = props.discoveryPrompts.filter((item) => !localPromptNames.has(item.name.toLowerCase()));
@@ -186,8 +213,8 @@ export function PromptsTab(props: {
 			}
 		};
 		const inherited = props.scope === "project" && template.scope !== "project";
-		const disabledHere = inherited && disabledGlobalKeys.has(globalPromptOverrideKey(template.name));
-		const effectiveEnabled = template.enabled !== false && !disabledHere;
+		const disabledHere = inherited && matchesProjectOverride(disabledGlobalKeys, template.path);
+		const effectiveEnabled = shown(template.path, template.enabled !== false && !disabledHere);
 		return (
 			<Fragment key={template.path}>
 				<TableRow key={`${template.path}-item`}>
@@ -216,7 +243,9 @@ export function PromptsTab(props: {
 								<span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
 									<FileText size={14} strokeWidth={1.8} className="shrink-0 text-text-tertiary" />
 									<strong className="min-w-0 flex-1 break-words whitespace-normal">/{template.name}</strong>
-									<span className={`skill-state ${effectiveEnabled ? "enabled" : "disabled"}`}>{effectiveEnabled ? t("common.enabled") : t("common.disabled")}</span>
+									<Badge variant={effectiveEnabled ? "success" : "neutral"} size="sm">
+										{effectiveEnabled ? t("common.enabled") : t("common.disabled")}
+									</Badge>
 								</span>
 							</button>
 						)}
@@ -226,9 +255,8 @@ export function PromptsTab(props: {
 					</TableCell>
 					<TableCell className="w-44 text-right">
 						<div className="flex min-w-max justify-end gap-1">
-							<Button variant="ghost" size="icon-sm" className={`size-7${effectiveEnabled ? " text-primary" : ""}`} disabled={inherited && template.enabled === false} onClick={() => props.onToggle(template, !effectiveEnabled)} title={effectiveEnabled ? t("common.disable") : t("common.enabled")}>
-								{effectiveEnabled ? <ToggleRight size={18} strokeWidth={1.8} /> : <ToggleLeft size={18} strokeWidth={1.8} />}
-							</Button>
+							{/* 启停开关：Switch 轨道着色区分启用/禁用，与扩展/技能页一致 */}
+							<Switch checked={effectiveEnabled} onCheckedChange={(checked) => void handlePromptToggle(template, checked)} disabled={inherited && template.enabled === false} title={effectiveEnabled ? t("common.disable") : t("common.enabled")} />
 							{!inherited ? (
 								<>
 									<Button variant="ghost" size="icon-sm" className="size-7" onClick={() => props.onEdit(template)} title={t("common.edit")}>
@@ -292,7 +320,7 @@ export function PromptsTab(props: {
 				<>
 					<div className="mb-3 flex items-center justify-between gap-3">
 						<div>
-							<span className="font-mono text-xs tabular-nums text-text-tertiary">{t("config.count.prompts", { count: visibleTemplateCount })}</span>
+							<span className="font-mono text-xs tabular-nums text-muted-foreground">{t("config.count.prompts", { count: visibleTemplateCount })}</span>
 							<small className="prompts-restart-hint">{t("config.restartHint")}</small>
 						</div>
 						<div className="prompts-toolbar-actions flex items-center gap-1.5">
@@ -309,6 +337,7 @@ export function PromptsTab(props: {
 						title={t("config.createPrompt")}
 						submit={
 							<Button size="sm" variant="default" disabled={!canCreate || props.creating} onClick={props.onCreate}>
+								{props.loading || props.creating ? <Loader2 size={14} className="animate-pideck-spin" aria-hidden="true" /> : null}
 								{props.loading || props.creating ? t("common.loading") : t("config.create")}
 							</Button>
 						}
@@ -375,7 +404,10 @@ export function PromptsTab(props: {
 									</div>
 								</div>
 								{props.editLoading ? (
-									<div className="py-12 text-center text-control text-text-tertiary">{t("common.loading")}</div>
+									<div className="flex items-center justify-center gap-2 py-12 text-control text-text-tertiary">
+										<Loader2 size={14} className="animate-pideck-spin" aria-hidden="true" />
+										{t("common.loading")}
+									</div>
 								) : (
 									<div className="prompts-monaco-wrap">
 										<CodeMirrorEditor value={props.editContent} onChange={props.onChangeEditContent} />

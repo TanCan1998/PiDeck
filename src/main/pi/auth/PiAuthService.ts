@@ -11,12 +11,12 @@
  *
  * 生命周期纪律（本文件是所有清理路径的唯一归属地）：
  * - 每次操作一个助手进程；拿到 result / 取消 / 超时 / 助手退出都会走到 `settle()`；
- * - `settle()` 统一 kill 子进程、关闭 readline、清定时器、唤醒等待者；
+ * - `settle()` 统一 kill 子进程、丢弃 stdout 行缓冲、清定时器、唤醒等待者；
  * - 应用退出时装配层调用 `dispose()`，同样走 `settle()`。
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createInterface, type Interface as ReadlineInterface } from "node:readline";
+import { StringDecoder } from "node:string_decoder";
 import type { PiAuthErrorKind, PiAuthFlowUpdate, PiAuthLoginRequest, PiAuthLoginResult, PiAuthLogoutResult, PiAuthProviderOption, PiAuthProviderList } from "../../../shared/types/piAuth";
 import type { AppLogger } from "../../logging/AppLogger";
 import type { PiAuthHostLaunch, PiAuthHostLaunchFailureReason } from "./piAuthHostLaunch";
@@ -31,6 +31,13 @@ const DEFAULT_SHORT_OPERATION_TIMEOUT_MS = 15_000;
  * 渲染层关掉弹框后若助手无响应，只靠 cancel 指令会留下一个常驻子进程。
  */
 const DEFAULT_LOGIN_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * 助手 stdout 单行缓冲硬上限（与 `PiRpcClient.MAX_RPC_LINE_BYTES` 同量级）。
+ * 助手协议帧都是小 JSON；超过上限说明 stdout 被无换行的脏输出污染，
+ * 继续累积只会吃内存，按协议错误结算比让调用方空等超时更可诊断。
+ */
+export const MAX_AUTH_HOST_LINE_CHARS = 8 * 1024 * 1024;
 
 /** 助手进程上报的供应商条目；比跨 IPC 契约多一个来源标记（可选：旧助手/判定不出时不带）。 */
 type HostAuthProviderOption = PiAuthProviderOption & { builtIn?: boolean };
@@ -54,6 +61,12 @@ export type PiAuthLogger = {
 	warn: (message: string) => void;
 	error: (message: string) => void;
 };
+
+/** 从原生 Error、跨 realm 错误或未知抛出值中提取稳定的可展示详情。 */
+function getErrorMessage(error: unknown): string {
+	if (typeof error === "object" && error !== null && "message" in error && typeof error.message === "string") return error.message;
+	return String(error);
+}
 
 /**
  * 只保留 pi 自己支持的认证供应商，滤掉 `models.json` 里用户自定义的供应商。
@@ -93,15 +106,17 @@ const LAUNCH_FAILURE_HINT: Record<PiAuthHostLaunchFailureReason, string> = {
  * 一次助手进程会话：负责消息泵、结算与清理。
  *
  * 消息泵的必要性：助手在 spawn 后可能立刻吐 `ready`/`fatal`（SDK 缺失时几乎瞬时），
- * 而调用方要等「拿到 session 之后」才注册等待——若此时才挂 `line` 监听，早期消息
- * 会被 readline 丢掉，表现为「明明有明确原因却报超时」。所以这里在 spawn 当场就
+ * 而调用方要等「拿到 session 之后」才注册等待——若此时才挂 stdout 监听，早期消息
+ * 会被丢掉，表现为「明明有明确原因却报超时」。所以这里在 spawn 当场就
  * 开始收集消息，等待者从队列取。
  */
 class AuthHostSession {
 	readonly child: ChildProcessWithoutNullStreams;
 	readonly done: Promise<void>;
 	private readonly logger?: PiAuthLogger;
-	private readonly readline: ReadlineInterface;
+	private readonly decoder = new StringDecoder("utf8");
+	/** stdout 行缓冲：助手协议是严格 NDJSON，手工按 LF 切分（理由见 `consumeStdout`）。 */
+	private buffer = "";
 	private readonly pending: HostMessage[] = [];
 	private readonly waiters: Array<(message: HostMessage | undefined) => void> = [];
 	private readonly timers: NodeJS.Timeout[] = [];
@@ -116,14 +131,8 @@ class AuthHostSession {
 		this.done = new Promise<void>((resolve) => {
 			this.resolveDone = resolve;
 		});
-		this.readline = createInterface({ input: child.stdout });
-		this.readline.on("line", (line) => {
-			const message = parseHostMessage(line);
-			if (!message) return;
-			const waiter = this.waiters.shift();
-			if (waiter) waiter(message);
-			else this.pending.push(message);
-		});
+		child.stdout.on("data", (chunk: Buffer) => this.consumeStdout(chunk));
+		child.stdout.on("end", () => this.flushTrailingLine());
 		child.stderr.on("data", (chunk: Buffer) => {
 			const text = chunk.toString("utf8").trimEnd();
 			if (!text) return;
@@ -131,6 +140,7 @@ class AuthHostSession {
 			this.stderrTail.push(text);
 			if (this.stderrTail.length > 20) this.stderrTail.shift();
 		});
+		child.stdin.on("error", (error: Error) => this.settle({ kind: "error", errorKind: "protocol", message: `认证助手输入管道错误：${error.message}` }));
 		child.on("error", (error) => this.settle({ kind: "error", errorKind: "spawn-failed", message: error.message }));
 		child.on("close", (code) => this.settle({ kind: "error", errorKind: "protocol", message: `认证助手意外退出（code ${code ?? "null"}）${this.stderrTail.at(-1) ? `：${this.stderrTail.at(-1)}` : ""}` }));
 	}
@@ -145,7 +155,11 @@ class AuthHostSession {
 	}
 	send(command: Record<string, unknown>): void {
 		if (this.settled || this.child.stdin.destroyed) return;
-		this.child.stdin.write(`${JSON.stringify(command)}\n`);
+		try {
+			this.child.stdin.write(`${JSON.stringify(command)}\n`);
+		} catch (error) {
+			this.settle({ kind: "error", errorKind: "protocol", message: `认证助手输入管道错误：${getErrorMessage(error)}` });
+		}
 	}
 
 	/** 取一条消息；会话结束时返回 undefined（等待者由 settle 统一唤醒）。 */
@@ -166,6 +180,7 @@ class AuthHostSession {
 
 	/** 注册超时定时器；结算时统一清理，避免遗留 timer 让主进程保持存活。 */
 	addTimeout(ms: number, onTimeout: () => void): void {
+		if (this.settled) return;
 		this.timers.push(setTimeout(onTimeout, ms));
 	}
 
@@ -179,10 +194,18 @@ class AuthHostSession {
 		this.settleOutcome = outcome;
 		for (const timer of this.timers) clearTimeout(timer);
 		this.timers.length = 0;
-		this.readline.close();
+		// stdout 是协议通道：结算后丢弃残余半帧，后续字节由下面的 removeAllListeners 摘除。
+		this.buffer = "";
 		this.child.stdout.removeAllListeners();
 		this.child.stderr.removeAllListeners();
+		this.child.stdin.removeAllListeners();
 		this.child.removeAllListeners();
+		// EventEmitter 对 `error` 有特殊语义：没有监听器时，旧助手在 kill 后迟到的
+		// error 会直接变成未处理异常，可能击穿主进程。保留一个终态吸收器，直到
+		// 子进程对象被回收；它不再改变已结算结果，也不会影响下一次会话。
+		this.child.on("error", () => {});
+		// stdin 也可能在 kill 后迟到 EPIPE；不能因移除业务监听而留下未处理 error。
+		this.child.stdin.on("error", () => {});
 		this.child.kill();
 		for (const waiter of this.waiters.splice(0)) waiter(undefined);
 		if (outcome.kind === "error") {
@@ -190,6 +213,53 @@ class AuthHostSession {
 			this.logger?.warn(`认证助手异常结束：${outcome.errorKind} ${outcome.message}${stderr ? ` | stderr: ${stderr}` : ""}`);
 		}
 		this.resolveDone();
+	}
+
+	// -----------------------------------------------------------------------
+	// stdout 分帧：助手协议是严格 NDJSON（一帧一行 JSON，以 LF 结尾）
+	// -----------------------------------------------------------------------
+
+	/**
+	 * 为什么不用 `node:readline`：它把 U+2028/U+2029 也当成行边界，而 `JSON.stringify`
+	 * 不转义这两个字符（它们不在必须转义的控制字符范围内），所以协议负载里一旦出现
+	 * 就会被切成两段——两段都不是合法 JSON，消息双双丢失，用户看到的是「助手明明回了
+	 * 结果却报超时」。这里手工按 LF 切分，规则与 `PiRpcClient` 完全一致：容忍 CRLF、
+	 * 行缓冲有上限、跨 chunk 的半帧继续累积。
+	 */
+	private consumeStdout(chunk: Buffer | string): void {
+		this.buffer += typeof chunk === "string" ? chunk : this.decoder.write(chunk);
+		if (this.buffer.length > MAX_AUTH_HOST_LINE_CHARS) {
+			const dropped = this.buffer.length;
+			this.buffer = "";
+			this.settle({ kind: "error", errorKind: "protocol", message: `认证助手 stdout 行缓冲溢出：丢弃 ${dropped} 字节无换行输出` });
+			return;
+		}
+		for (;;) {
+			const newlineIndex = this.buffer.indexOf("\n");
+			if (newlineIndex === -1) return;
+			let line = this.buffer.slice(0, newlineIndex);
+			this.buffer = this.buffer.slice(newlineIndex + 1);
+			if (line.endsWith("\r")) line = line.slice(0, -1);
+			this.dispatchLine(line);
+		}
+	}
+
+	/** stdout 结束时补发最后一帧：助手未以 LF 收尾时语义不能丢。 */
+	private flushTrailingLine(): void {
+		this.buffer += this.decoder.end();
+		if (!this.buffer) return;
+		const line = this.buffer.endsWith("\r") ? this.buffer.slice(0, -1) : this.buffer;
+		this.buffer = "";
+		this.dispatchLine(line);
+	}
+
+	/** 等待者优先，否则入队：spawn 后立刻到达的早期消息不能丢（见类注释）。 */
+	private dispatchLine(line: string): void {
+		const message = parseHostMessage(line);
+		if (!message) return;
+		const waiter = this.waiters.shift();
+		if (waiter) waiter(message);
+		else this.pending.push(message);
 	}
 }
 

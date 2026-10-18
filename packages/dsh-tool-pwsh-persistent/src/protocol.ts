@@ -66,18 +66,20 @@ export function wrapPwshCommand(command: string, marker: { start: string; end: s
 }
 
 /**
- * 从滚动缓冲提取命令结果：end marker 前的最后一个 start marker 起（命令回显行也含
- * start 文本，lastIndexOf 天然跳过回显）；返回文本 + 退出码。命令未完成返回 undefined。
+ * 从滚动缓冲提取命令结果：end marker 前的最后一个 start marker 起（排除命令回显）。
+ * ConPTY 会在 marker 中插入 ANSI 序列，也会把退出码的换行合并成紧随其后的 prompt；
+ * 先去控制序列，再以换行或完整 prompt 定界，不能把分块到达的半个数字当成最终退出码。
  */
 export function parsePwshCommandOutput(text: string, marker: { start: string; end: string }): { text: string; exitCode: number } | undefined {
-	const end = text.lastIndexOf(marker.end);
+	const clean = stripPwshControl(text);
+	const end = clean.lastIndexOf(marker.end);
 	if (end < 0) return undefined;
-	const status = /^\r?\n?(\d+)\r?\n/.exec(text.slice(end + marker.end.length))?.[1];
+	const status = new RegExp(`^\\r?\\n?(\\d+)(?:\\r?\\n|${SHELL_PROMPT})`).exec(clean.slice(end + marker.end.length))?.[1];
 	if (status === undefined) return undefined;
-	const startMarker = text.lastIndexOf(marker.start, end);
+	const startMarker = clean.lastIndexOf(marker.start, end);
 	const start = startMarker < 0 ? 0 : startMarker + marker.start.length;
 	return {
-		text: text.slice(start, end).replace(/^\r?\n/, "").replace(/\r?\n$/, "").replace(/\r\n/g, "\n"),
+		text: clean.slice(start, end).replace(/^\r?\n/, "").replace(/\r?\n$/, "").replace(/\r\n/g, "\n"),
 		exitCode: Number(status),
 	};
 }

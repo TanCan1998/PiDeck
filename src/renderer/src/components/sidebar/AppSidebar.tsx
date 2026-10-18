@@ -2,7 +2,7 @@ import React, { useRef } from "react";
 import { useSetAtom } from "jotai";
 import { PanelLeft } from "lucide-react";
 import { SidebarContent, type SidebarActions } from "./SidebarContent";
-import type { AppInfo, AppThemeMode, WorktreeEntry } from "../../../../shared/types";
+import type { AppInfo, AppThemeMode, SessionSortModeId, WorktreeEntry } from "../../../../shared/types";
 import { useSidebarController } from "../../hooks/useSidebarController";
 import type { SidebarNavTab } from "../../utils/sidebarNavTab";
 import { BrandLockup } from "../app/AppParts";
@@ -13,6 +13,7 @@ import { Button } from "../ui-shadcn/button";
 import { t } from "../../i18n";
 
 interface AppSidebarProps {
+	simple?: boolean;
 	actions: SidebarActions;
 	currentProjectId: string | undefined;
 	currentSessionId: string | undefined;
@@ -39,6 +40,8 @@ interface AppSidebarProps {
 	settingsNavTab?: SidebarNavTab;
 	/** settings.json 中已保存的稳定 SessionRecord 置顶 id。 */
 	settingsPinnedSessionIds?: readonly string[];
+	/** settings.json 中的会话排序模式（settings.sessionSortMode）。 */
+	settingsSessionSortMode?: SessionSortModeId;
 	/** 首次 settings.get 已完成，controller 可安全处理旧 key 迁移。 */
 	settingsLoaded: boolean;
 	/** 展开集合完成权威 hydration 后，允许 App 按它懒加载会话。 */
@@ -50,11 +53,14 @@ export function AppSidebar(props: AppSidebarProps) {
 	const expandedProjectsSaveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
 	const navTabSaveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
 	const pinnedSessionIdsSaveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+	const sessionSortModeSaveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
 	const controller = useSidebarController({
 		getRpcLogging: props.actions.rpc.getLogging,
+		openRpcLogViewer: props.actions.rpc.openViewer,
 		settingsExpandedProjectIds: props.settingsExpandedProjectIds,
 		settingsNavTab: props.settingsNavTab,
 		settingsPinnedSessionIds: props.settingsPinnedSessionIds,
+		settingsSessionSortMode: props.settingsSessionSortMode,
 		settingsLoaded: props.settingsLoaded,
 		onExpandedProjectsReady: props.onExpandedProjectsReady,
 		persistExpandedProjectIds: (projectIds) => {
@@ -77,11 +83,19 @@ export function AppSidebar(props: AppSidebarProps) {
 				.then(() => desktopApi.settings.update({ pinnedSessionIds: sessionIds }))
 				.catch(() => undefined);
 		},
+		persistSessionSortMode: (mode) => {
+			// 排序模式与置顶同款串行队列：快速切换选项时避免旧请求覆盖新值。
+			sessionSortModeSaveQueueRef.current = sessionSortModeSaveQueueRef.current
+				.catch(() => undefined)
+				.then(() => desktopApi.settings.update({ sessionSortMode: mode }))
+				.catch(() => undefined);
+		},
 	});
 
 	return (
 		<>
 			<SidebarContent
+				simple={props.simple}
 				controller={controller}
 				actions={props.actions}
 				currentProjectId={props.currentProjectId}
@@ -94,7 +108,7 @@ export function AppSidebar(props: AppSidebarProps) {
 				onOpenNewSession={props.onOpenNewSession}
 				chrome={
 					<>
-						<div className="list-toolbar flex h-10 shrink-0 items-center gap-1 border-b border-border/40 pr-2.5 pl-[max(0.625rem,var(--traffic-lights-width,0px))]">
+						<div className={props.simple ? "list-toolbar flex h-12 shrink-0 items-center gap-1 px-2.5 [-webkit-app-region:no-drag]" : "list-toolbar flex h-10 shrink-0 items-center gap-1 border-b border-border/40 pr-2.5 pl-[max(0.625rem,var(--traffic-lights-width,0px))]"}>
 							<AboutPopover appInfo={props.appInfo}>
 								<div
 									className="app-badge flex min-w-0 flex-1 cursor-pointer items-center justify-center pl-5"
@@ -113,9 +127,13 @@ export function AppSidebar(props: AppSidebarProps) {
 									<BrandLockup />
 								</div>
 							</AboutPopover>
-							<Button type="button" variant="ghost" size="icon-sm" className="icon-button list-toggle-native size-7" aria-label={props.listCollapsed ? t("app.expandList") : t("app.collapseList")} title={props.listCollapsed ? t("app.expandList") : t("app.collapseList")} onClick={props.toggleListCollapsed}>
-								<PanelLeft size={14} strokeWidth={2} aria-hidden="true" />
-							</Button>
+							{/* 简洁模式顶部 simple-navigation-bar 已有同语义的列表折叠/展开按钮
+							（面板折叠后它仍常驻），侧栏内再渲染一份就是同屏双入口；标签模式没有那条导航条，保留此处按钮。 */}
+							{!props.simple && (
+								<Button type="button" variant="ghost" size="icon-sm" className="icon-button list-toggle-native size-7" aria-label={props.listCollapsed ? t("app.expandList") : t("app.collapseList")} title={props.listCollapsed ? t("app.expandList") : t("app.collapseList")} onClick={props.toggleListCollapsed}>
+									<PanelLeft size={14} strokeWidth={2} aria-hidden="true" />
+								</Button>
+							)}
 						</div>
 					</>
 				}

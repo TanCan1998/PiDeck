@@ -34,7 +34,8 @@ export interface FileDiffProps {
 	defaultOpen?: boolean;
 	onOpenChange?: (open: boolean) => void;
 	collapseOnComplete?: boolean;
-	maxHeight?: number;
+	/** `null` = 不限高不自转滚轮：[PiDeck local] 外层已自带滚轮时（过程组组体）让内层让位，避免双层滚动条。 */
+	maxHeight?: number | null;
 	language?: AgentCodeLanguage;
 	copyText?: string;
 	onCopy?: () => void | Promise<void>;
@@ -69,6 +70,14 @@ export function FileDiff({ file, lines, status = "streaming", open, defaultOpen 
 	const [internalOpen, setInternalOpen] = useState(defaultOpen);
 	const currentOpen = open ?? internalOpen;
 	const streaming = status === "streaming";
+	// maxHeight 为 null（外层已自带滚轮，如过程组组体）时不做限高、不自转滚轮，直接自然铺开。
+	// 双层滚动条（内层小窗 + 外层组体）观感像卡死：内层到边即被 contain 切断，外层一像素不动。
+	// 只影响这一处容器：外层已有一条滚轮承载整组内容，内层再截断没有意义。
+	const maxHeightStyle = maxHeight === null ? undefined : { maxHeight };
+	// 不限高时仍保留横向滚动：diff 行可能很宽，去掉 overflow 会让宽行顶出组体、
+	// 反而给组体套出一条横向滚动条（overflow-y:auto 会让 overflow-x 计算成 auto）。
+	// 只纵轴让位——纵向轨道归外层那一条滚轮。
+	const scrollClass = maxHeight === null ? "overflow-x-auto" : "scrollbar-hide overflow-auto";
 	const additions = lines.filter((line) => line.type === "added").length;
 	const deletions = lines.filter((line) => line.type === "removed").length;
 	const canCopy = Boolean(copyText || onCopy);
@@ -148,7 +157,7 @@ export function FileDiff({ file, lines, status = "streaming", open, defaultOpen 
 			<AgentDisclosure id={contentId} role="region" aria-labelledby={triggerId} open={currentOpen} transition={animateHeight ? undefined : { duration: 0 }}>
 				<div className="pl-6 pt-1.5">
 					<div className="overflow-hidden rounded-xl bg-muted/80">
-						<div ref={viewportRef} data-slot="file-diff-viewport" aria-live="polite" className="scrollbar-hide overflow-auto" style={{ maxHeight }}>
+						<div ref={viewportRef} data-slot="file-diff-viewport" aria-live="polite" className={scrollClass} style={maxHeightStyle}>
 							<div className="font-mono text-xs leading-5">
 								<span className="sr-only">File changes</span>
 								{lines.map((line, index) => {

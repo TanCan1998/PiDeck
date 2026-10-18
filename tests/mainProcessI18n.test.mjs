@@ -160,12 +160,6 @@ test("AgentManager user-visible runtime diagnostics carry i18n descriptors", () 
 	assert.doesNotMatch(manager, /message\.text = `正在自动重试[^`]*原因：/);
 	assert.doesNotMatch(manager, /message\.text = `自动重试失败[^`]*原因：/);
 	assert.match(manager, /private addLocalizedMessage\(/);
-	// 白名单跳过文案按资源类型拆到 whitelistSkipNotice.ts（AgentManager 只负责按条派发），
-	// 三类 key 必须同时存在：漏一个类型，用户就不知道为什么「禁用」没生效。
-	const whitelistNotice = readFileSync("src/main/pi/whitelistSkipNotice.ts", "utf8");
-	for (const key of ["diagnostic.extensionWhitelistSkipped", "diagnostic.skillWhitelistSkipped", "diagnostic.promptWhitelistSkipped"]) {
-		assert.match(whitelistNotice, new RegExp(`"${key.replaceAll(".", "\\.")}"`));
-	}
 	assert.match(manager, /this\.translate\("session\.summaryPlaceholder"\)/);
 	assert.match(manager, /this\.translate\("session\.imagePlaceholder"\)/);
 	assert.match(manager, /this\.translate\("session\.historyTitle"/);
@@ -223,10 +217,13 @@ test("main-process Session IPC errors expose stable copy and retain diagnostics 
 
 test("main-process user surfaces use stable copy and keep caught details in logs", () => {
 	const source = mainIpcSource;
+	// 托盘菜单已从 index.ts 抽到 src/main/tray/trayMenuTemplate.ts，文案经注入的 copy() 使用；
+	// 硬编码中文守卫也同步扫这个文件（tray 不在 mainIpcSources 的扫描范围内）。
+	const trayTemplate = readFileSync("src/main/tray/trayMenuTemplate.ts", "utf8");
+	for (const key of ["tray.showWindow", "tray.restart", "tray.quit"]) {
+		assert.match(trayTemplate, new RegExp(`copy\\("${key.replaceAll(".", "\\.")}"`));
+	}
 	for (const key of [
-		"tray.showWindow",
-		"tray.restart",
-		"tray.quit",
 		"dialog.chooseChatHistoryFolder",
 		"dialog.chooseProjectFolder",
 		// 应用更新由 UpdateService 将底层错误映射为状态快照，设置页用 renderer copy 呈现。

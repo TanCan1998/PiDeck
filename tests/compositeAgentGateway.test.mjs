@@ -132,6 +132,10 @@ function makeFakeGateway(backend, { supportsOptional = true } = {}) {
 						calls.push(["reviveIfProcessAlive", backend, agentId]);
 						return backend === "pi";
 					},
+					async draftCommands(projectId) {
+						calls.push(["draftCommands", backend, projectId]);
+						return [{ name: `preview:${backend}`, description: "", source: "skill" }];
+					},
 				}
 			: {}),
 	};
@@ -288,4 +292,42 @@ test("backend 身份：对外以默认后端自居（接口自洽）", () => {
 	assert.equal(composite.backend, "pi");
 	const custom = new CompositeAgentGateway([makeFakeGateway("dsh")], "dsh");
 	assert.equal(custom.backend, "dsh");
+});
+
+test("draftCommands 只路由 pi 网关，dsh 网关实现被忽略", async () => {
+	const { pi, dsh, composite } = makeComposite();
+	const result = await composite.draftCommands("project-1");
+	assert.deepEqual(result, [{ name: "preview:pi", description: "", source: "skill" }]);
+	assert.ok(pi.calls.some(([name]) => name === "draftCommands"));
+	assert.ok(!dsh.calls.some(([name]) => name === "draftCommands"), "dsh 无 standby 池，绝不能路由过去");
+});
+
+test("getMessageWindow：无窗口实现的后端回退全量 getMessages（ACP/DSH 重下发修复）", async () => {
+	const { dsh, composite } = makeComposite();
+	const tab = await composite.create({ projectId: "p1", backend: "dsh" });
+	const messages = [
+		{ id: "m1", role: "user" },
+		{ id: "m2", role: "assistant" },
+	];
+	let routed = false;
+	dsh.getMessages = (agentId) => {
+		routed = true;
+		return messages;
+	};
+	const window = composite.getMessageWindow(tab.id);
+	// 全量回退：无 windowStart（渲染层协议 = 从 0 起全窗口），totalLength 与消息数一致；
+	// 逐字段断言（vm 沙箱对象与宿主 realm 原型不同，deepStrictEqual 会报 same structure）
+	assert.equal(window.messages, messages);
+	assert.equal(window.totalLength, messages.length);
+	assert.equal(window.windowStart, undefined);
+	assert.ok(routed, "必须路由到持有该 agent 的网关");
+});
+
+test("getMessageWindow：pi 网关的窗口协议原样透传（窗口段 + windowStart/fileVersion）", async () => {
+	const pi = makeFakeGateway("pi");
+	const expected = { messages: [{ id: "m2", role: "assistant" }], windowStart: 1, totalLength: 2, fileVersion: "v3" };
+	pi.getMessageWindow = () => expected;
+	const composite = new CompositeAgentGateway([pi]);
+	const tab = await composite.create({ projectId: "p1", backend: "pi" });
+	assert.equal(composite.getMessageWindow(tab.id), expected, "对象调用透传，不得丢 this 或复制错窗口");
 });

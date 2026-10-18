@@ -39,6 +39,8 @@ function loadPiProcess(spawnCalls) {
 			},
 			"./PiRpcClient": { PiRpcClient: FakeRpcClient },
 			"./PiLocator": { PiLocator: FakePiLocator },
+			// 不触达真实 ~/.pi 扩展目录：停放/还原在本用例无断言对象。
+			"./piExtensionFilter": { parkBlockedExtensionsInDir: () => [], unparkBlockedExtensions: () => {} },
 			// 25fd516 起 PiProcess 引入内置扩展参数拼接；WSL 测试只关心路径转换，按原样透传。
 			"../extensions/builtInExtensions": { appendBuiltInExtensionArgs: (args) => [...args] },
 			// sharedLogger 未注册时 getAppLogger 返回 null，PiProcess 埋点静默跳过。

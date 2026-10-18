@@ -52,7 +52,8 @@ export async function verifyRemoteGitDiscard(input: { window: Page; credentials:
 
 	await test.step("信任项目并看到可回滚的行", async () => {
 		await remoteProjectRow(window, root.split("/").pop() ?? "")
-			.locator(".project-draggable")
+			.locator(".conversation-title")
+			.first()
 			.click();
 		await window.getByRole("button", { name: "打开右侧边栏", exact: true }).click();
 		await window.getByTestId("drawer-rail-git").click();

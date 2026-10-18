@@ -3,7 +3,7 @@ import type { MouseEvent, ReactNode } from "react";
 import { Check, Copy, Eye, EyeOff } from "lucide-react";
 import { t } from "../i18n";
 import { writeClipboard } from "../utils/clipboard";
-import { PROVIDER_API_OPTIONS, API_TYPE_LABELS, getApiTypeDescription } from "./providerHeaders";
+import { PROVIDER_API_OPTIONS, DSH_PROVIDER_API_OPTIONS, API_TYPE_LABELS, getApiTypeDescription } from "./providerHeaders";
 import { Button } from "../components/ui-shadcn/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui-shadcn/select";
 import { Input } from "../components/ui-shadcn/input";
@@ -53,18 +53,20 @@ export function CopyButton(props: { text: string }) {
 }
 
 /** 密码输入框：支持显示/隐藏 + 复制 */
-export function SecretInput(props: { value: string; onChange: (v: string) => void; placeholder?: string }) {
+export function SecretInput(props: { value: string; onChange: (v: string) => void; placeholder?: string; ariaLabel?: string; disabled?: boolean }) {
 	const [visible, setVisible] = useState(false);
 	return (
 		<div className="flex w-full items-center gap-1.5">
 			<Input
 				type={visible ? "text" : "password"}
+				aria-label={props.ariaLabel}
+				disabled={props.disabled}
 				value={props.value}
 				onChange={(e) => props.onChange(e.target.value)}
 				placeholder={props.placeholder ?? t("config.apiKeyPlaceholder")}
 				className="h-8 min-w-0 flex-1 rounded-sm border border-border-subtle bg-bg-panel px-3 font-mono text-control text-text-primary outline-none transition-[border-color,box-shadow,background-color] duration-150 focus:border-[var(--color-accent)] focus:shadow-[var(--focus-ring)]"
 			/>
-			<Button type="button" variant="ghost" size="icon-sm" className="size-7" onClick={() => setVisible(!visible)} title={visible ? t("common.hide") : t("common.show")} aria-label={visible ? t("common.hide") : t("common.show")}>
+			<Button type="button" variant="ghost" size="icon-sm" className="size-7" onClick={() => setVisible(!visible)} title={visible ? t("common.hide") : t("common.show")} aria-label={visible ? t("common.hide") : t("common.show")} disabled={props.disabled}>
 				{visible ? <EyeOff size={14} aria-hidden="true" /> : <Eye size={14} aria-hidden="true" />}
 			</Button>
 			<CopyButton text={props.value} />
@@ -87,12 +89,14 @@ export function ConfigSelect(props: {
 	 * 内联场景（如兼容性组的「严格工具采样」与复选框并排）传 `w-auto` 按内容定宽。
 	 */
 	triggerClassName?: string;
+	/** 只读展示当前值（如 Pi 权威回答「该模型无可用档位」时不允许编辑默认档位）。 */
+	disabled?: boolean;
 }) {
 	// 老 settings.json 可能残留枚举外的取值（如自定义传输协议）；此时补一条「自定义」
 	// item 兜底，否则 Radix Select 因 value 无匹配 item 而显示空白、且无法回选。
 	const hasCustom = props.value !== "" && !isKnownComboboxValue(props.options, props.value);
 	return (
-		<Select value={props.value === "" ? SENTINEL : props.value} onValueChange={(value) => props.onChange(value === SENTINEL ? "" : value)}>
+		<Select value={props.value === "" ? SENTINEL : props.value} onValueChange={(value) => props.onChange(value === SENTINEL ? "" : value)} disabled={props.disabled}>
 			{/* trigger 必须带 w-full：shadcn 基础类自带 w-fit（utilities 层）会压过 legacy 的
 			    .config-select-trigger{width:100%}，不加则下拉收缩成内容宽度（值多的行长条很丑）。
 			    内联场景由调用方用 triggerClassName 传 w-auto 覆盖（cn 走 twMerge，后者胜出）。 */}
@@ -109,7 +113,7 @@ export function ConfigSelect(props: {
 							<span className="text-control font-semibold">
 								{t("config.apiTypeCustom")}: {props.value}
 							</span>
-							<small className="text-[11px] leading-[1.4] text-text-tertiary">{props.value}</small>
+							<small className="text-micro leading-[1.4] text-text-tertiary">{props.value}</small>
 						</span>
 					</SelectItem>
 				)}
@@ -197,7 +201,7 @@ export function ConfigComboboxInput(props: { value: string; options: Array<{ val
 							<Fragment key={section.group ?? `__ungrouped_${sectionIndex}`}>
 								{section.group && (
 									// 分组标题不可选中：cmdk 会把 CommandItem 当选项，标题用 div 避免干扰键盘导航。
-									<div className="px-2 pt-2 pb-1 text-[11px] font-medium text-text-tertiary">{section.group}</div>
+									<div className="px-2 pt-2 pb-1 text-micro font-medium text-text-tertiary">{section.group}</div>
 								)}
 								{section.items.map((option) => (
 									<CommandItem key={option.value} value={option.value} onSelect={() => commit(option.value)}>
@@ -217,9 +221,11 @@ export function ConfigComboboxInput(props: { value: string; options: Array<{ val
 }
 
 /** API 类型选择：shadcn Select（与全局下拉交互/动画一致）。
- *  预定义选项 + 描述；当前值为自定义值时动态追加「自定义」选项保留可读性。 */
-export function ApiTypeInput(props: { value: string; onChange: (value: string) => void }) {
-	const isCustom = Boolean(props.value) && !PROVIDER_API_OPTIONS.includes(props.value);
+ *  预定义选项 + 描述；当前值为自定义值时动态追加「自定义」选项保留可读性。
+ *  backend="dsh" 时只列 DSH 适配器实际注册的三种协议（见 DSH_PROVIDER_API_OPTIONS）。 */
+export function ApiTypeInput(props: { value: string; onChange: (value: string) => void; backend?: "pi" | "dsh" }) {
+	const options = props.backend === "dsh" ? DSH_PROVIDER_API_OPTIONS : PROVIDER_API_OPTIONS;
+	const isCustom = Boolean(props.value) && !options.includes(props.value);
 	return (
 		<Select value={props.value || SENTINEL} onValueChange={(value) => props.onChange(value === SENTINEL ? "" : value)}>
 			<SelectTrigger className="config-select-trigger w-full">
@@ -236,15 +242,15 @@ export function ApiTypeInput(props: { value: string; onChange: (value: string) =
 							<span className="text-control font-semibold">
 								{t("config.apiTypeCustom")}: {props.value}
 							</span>
-							<small className="text-[11px] leading-[1.4] text-text-tertiary">{props.value}</small>
+							<small className="text-micro leading-[1.4] text-text-tertiary">{props.value}</small>
 						</span>
 					</SelectItem>
 				)}
-				{PROVIDER_API_OPTIONS.map((option) => (
+				{options.map((option) => (
 					<SelectItem key={option} value={option}>
 						<span className="flex flex-col items-start gap-0.5">
 							<span className="text-control font-semibold">{API_TYPE_LABELS[option] || option}</span>
-							<small className="text-[11px] leading-[1.4] text-text-tertiary">{getApiTypeDescription(option)}</small>
+							<small className="text-micro leading-[1.4] text-text-tertiary">{getApiTypeDescription(option)}</small>
 						</span>
 					</SelectItem>
 				))}

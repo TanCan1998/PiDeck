@@ -14,9 +14,9 @@
  * 全部受保护）。恢复前应先由调用方创建 before-restore 快照（redo 栈），本模块
  * 只保证「恢复本身不破坏工作区」。
  *
- * git 执行复用 src/main/git/gitProcess.ts 的 runGit（spawn + 进程树 kill + 超时
- * 兜底），比 pi-rewind 自带的字符串拼接 spawn 更安全：路径全部走数组参数，
- * 无 shell 注入面。
+ * git 执行复用 src/main/git/gitRun.ts 的 runGitCommand（spawn + 进程树 kill + 超时
+ * 兜底，并按 cwd 分派宿主 git / WSL 发行版内 git），比 pi-rewind 自带的字符串拼接
+ * spawn 更安全：路径全部走数组参数，无 shell 注入面。
  */
 
 import { mkdtemp, rm } from "node:fs/promises";
@@ -25,8 +25,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { RewindCheckpointSummary } from "../../shared/types/rewind.ts";
-import { runGit } from "../git/gitProcess.ts";
-import { currentGitExecutable } from "../git/gitExecutable.ts";
+import { runGitCommand } from "../git/gitRun.ts";
 import { DEFAULT_MAX_CHECKPOINTS, MAX_UNTRACKED_DIR_FILES, MAX_UNTRACKED_FILE_SIZE, MAX_UNTRACKED_TOTAL_BYTES, REF_BASE, ZEROS } from "./checkpointConstants.ts";
 import { detectLargeDirs, isPathWithinAny, normalizeGitPath, shouldIgnoreForSnapshot } from "./checkpointFilter.ts";
 
@@ -48,8 +47,10 @@ export interface CheckpointData {
 	branch: string;
 	/** HEAD SHA（空仓库为 ZEROS） */
 	headSha: string;
-	/** 真实 index 树 SHA（恢复暂存区态用） */
+	/** 真实 index 树 SHA（恢复暂存区态用；merge 冲突态降级为 HEAD 树） */
 	indexTreeSha: string;
+	/** true = 快照时仓库处于 merge 冲突态，indexTreeSha 是降级值（仅诊断） */
+	indexTreeDegraded?: boolean;
 	/** 全量 worktree 树 SHA（index + 未跟踪；恢复工作区用） */
 	worktreeTreeSha: string;
 	/** 创建时刻（epoch ms） */
@@ -66,9 +67,9 @@ export interface CheckpointData {
 	droppedPaths?: string[];
 }
 
-/** git 命令小封装：跑 runGit、只回 trim 后的 stdout（错误原样抛给调用方 catch）。 */
+/** git 命令小封装：跑 runGitCommand、只回 trim 后的 stdout（错误原样抛给调用方 catch）。 */
 async function gitOp(root: string, args: string[], env?: NodeJS.ProcessEnv): Promise<string> {
-	const { stdout } = await runGit(args, { cwd: root, env }, currentGitExecutable());
+	const { stdout } = await runGitCommand(args, { cwd: root, env });
 	return stdout.trim();
 }
 
@@ -269,6 +270,16 @@ export async function addPathsToIndex(root: string, env: NodeJS.ProcessEnv, path
 }
 
 /**
+ * 探测 index 是否处于 merge 冲突态（ls-files -u 非空 = 存在 unmerged 条目）。
+ * 冲突态下 write-tree 必败（fatal: git-write-tree: error building trees），
+ * 2026-10 用户实锤：merge 冲突期间自动打点 3 连败，检查点整体不可用。
+ */
+async function detectUnmerged(root: string): Promise<boolean> {
+	const out = await gitOp(root, ["ls-files", "-u"]).catch(() => "");
+	return out.trim().length > 0;
+}
+
+/**
  * 把 HEAD + index + worktree 快照成一个 git ref，返回完整元数据。
  *
  * 临时 index 说明：worktree 树要包含未跟踪文件，但不能污染用户真实 index，
@@ -283,7 +294,17 @@ export async function createCheckpoint(opts: CreateCheckpointOpts): Promise<Chec
 	// 空仓库（无提交）时 rev-parse HEAD 失败 → ZEROS，恢复时跳过 reset。
 	const headSha = await gitOp(root, ["rev-parse", "HEAD"]).catch(() => ZEROS);
 	const branch = await gitOp(root, ["rev-parse", "--abbrev-ref", "HEAD"]).catch(() => "unknown");
-	const indexTreeSha = await gitOp(root, ["write-tree"]);
+	// merge 冲突（unmerged index）时 write-tree 必败；降级用 HEAD 树记录 index 快照，
+	// 恢复语义 = 把冲突态的 index 重置回 HEAD（回退到检查点时期望的正是干净态）。
+	// 快照不因此中断：冲突期间 agent 的文件回退能力比暂存区精度更重要。
+	let indexTreeDegraded = false;
+	const indexTreeSha = await gitOp(root, ["write-tree"]).catch(async (error: unknown) => {
+		if (headSha !== ZEROS && (await detectUnmerged(root))) {
+			indexTreeDegraded = true;
+			return headSha;
+		}
+		throw error;
+	});
 
 	const tmpDir = await mkdtemp(join(tmpdir(), "pi-rewind-"));
 	// Windows 上 git 环境变量里的反斜杠路径偶尔有歧义，统一转正斜杠。
@@ -348,17 +369,14 @@ export async function createCheckpoint(opts: CreateCheckpointOpts): Promise<Chec
 			GIT_COMMITTER_DATE: iso,
 		};
 
-		// commit-tree 的 message 走 stdin（runGit 的 input 通道；不给消息且不开 stdin
-		// 时 commit-tree 会挂起等输入，所以必须带 input）。
-		const { stdout: commitSha } = await runGit(
-			["commit-tree", worktreeTreeSha],
-			{
-				cwd: root,
-				env: { ...tmpEnv, ...commitEnv },
-				input: msg,
-			},
-			currentGitExecutable(),
-		);
+		// commit-tree 的 message 走 stdin（runGitCommand 的 input 通道；不给消息且不开 stdin
+		// 时 commit-tree 会挂起等输入，所以必须带 input）。WSL 分支的 GIT_INDEX_FILE
+		// 会被转成 /mnt/c/... 形态由 Linux git 使用。
+		const { stdout: commitSha } = await runGitCommand(["commit-tree", worktreeTreeSha], {
+			cwd: root,
+			env: { ...tmpEnv, ...commitEnv },
+			input: msg,
+		});
 
 		await gitOp(root, ["update-ref", `${REF_BASE}/${id}`, commitSha.trim()]);
 
@@ -372,6 +390,9 @@ export async function createCheckpoint(opts: CreateCheckpointOpts): Promise<Chec
 			branch,
 			headSha,
 			indexTreeSha,
+			// 仅诊断用：true = 快照时仓库处于 merge 冲突态，index 树降级成了 HEAD 树。
+			// 不写进 commit message（重载后丢失无妨，健康面板靠创建时日志即可）。
+			...(indexTreeDegraded ? { indexTreeDegraded: true } : {}),
 			worktreeTreeSha,
 			timestamp,
 			preexistingUntrackedFiles,
@@ -555,7 +576,7 @@ export async function loadAllCheckpoints(root: string, sessionId?: string): Prom
 		// 吞成 []；而 sessionId 过滤是在全量读取之后做的，任何会话都读不到自己的
 		// 检查点，表现为「检查点列表永远暂无」。stdin 无这个限制，仍保持单次进程调用
 		// 与批量解析的效率。
-		const { stdout: catOut } = await runGit(["cat-file", "--batch"], { cwd: root, input: `${pairs.map((p) => p.sha).join("\n")}\n` }, currentGitExecutable());
+		const { stdout: catOut } = await runGitCommand(["cat-file", "--batch"], { cwd: root, input: `${pairs.map((p) => p.sha).join("\n")}\n` });
 		const bySha = new Map<string, Omit<CheckpointData, "id">>();
 		// cat-file --batch 输出记录流：`<sha> commit <size>\n<contents>\n`。
 		// contents 是 commit 对象全文（tree/author/committer 头 + 空行 + message），
@@ -608,7 +629,7 @@ export async function deleteCheckpoints(root: string, ids: string[]): Promise<vo
 		const batch = ids.slice(i, i + BATCH);
 		const input = batch.map((id) => `delete ${REF_BASE}/${id}`).join("\n") + "\n";
 		try {
-			await runGit(["update-ref", "--stdin"], { cwd: root, input }, currentGitExecutable());
+			await runGitCommand(["update-ref", "--stdin"], { cwd: root, input });
 		} catch {
 			for (const id of batch) {
 				await deleteCheckpoint(root, id);
@@ -685,9 +706,20 @@ export async function diffCheckpoints(root: string, fromTree: string, toTree: st
 	}
 }
 
-/** 当前 index 树 SHA（只读，不落盘）；回退预览时与 checkpoint 的 worktree 树做 diff。 */
+/**
+ * 当前 index 树 SHA（只读，不落盘）；回退预览时与 checkpoint 的 worktree 树做 diff。
+ * merge 冲突时 write-tree 必败——降级用 HEAD 树做当前基线（diff 结果不含冲突
+ * 文件的暂存态，但预览面板可用），非冲突失败照常抛出。
+ */
 export async function currentIndexTree(root: string): Promise<string> {
-	return gitOp(root, ["write-tree"]);
+	try {
+		return await gitOp(root, ["write-tree"]);
+	} catch (error: unknown) {
+		if (await detectUnmerged(root)) {
+			return (await gitOp(root, ["rev-parse", "HEAD"]).catch(() => ZEROS)).trim();
+		}
+		throw error;
+	}
 }
 
 /** 完整元数据 → IPC/UI 摘要（去掉 git 内部 SHA）。 */

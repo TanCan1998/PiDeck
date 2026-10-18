@@ -20,11 +20,9 @@ export const ImageGenSettingsTab = forwardRef<
 		[props.onDirtyChange],
 	);
 
-	return (
-		<div className="min-w-0 p-4">
-			<ImageGenSection ref={ref} onDirtyChange={handleDirtyChange} />
-		</div>
-	);
+	// 不再自带 p-4：外层 TabsContent 的 .settings-panel 已提供内边距，
+	// 这里再包一层会让生图页比其他设置页双倍缩进。
+	return <ImageGenSection ref={ref} onDirtyChange={handleDirtyChange} />;
 });
 
 // 供 SettingsModal 通过 ref 直接调用保存（与 ConfigModal 复用同一 handle）

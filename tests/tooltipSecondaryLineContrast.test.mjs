@@ -76,7 +76,8 @@ test("Tooltip 反色面上不得使用页面文字色 token", () => {
 test("会话 Tab 悬停提示的第二行（工作区目录/路径）用反色面前景派生色", () => {
 	const tabsBar = readFileSync(TABS_BAR, "utf8");
 	const blocks = tooltipBlocks(tabsBar);
-	assert.equal(blocks.length, 2, "SessionTabsBar 应保留 会话 Tab / 文件 Tab 两处悬停提示");
+	// 默认标签模式的 SessionTab、简洁模式的 SessionTab、以及文件 Tab，共三处悬停提示。
+	assert.equal(blocks.length, 3, "SessionTabsBar 应保留 默认/简洁会话 Tab 与 文件 Tab 三处悬停提示");
 
 	for (const block of blocks) {
 		const code = stripJsxComments(block);
@@ -92,6 +93,6 @@ test("会话 Tab 悬停提示保留两行结构（标题 + 目录/路径）", ()
 	// 首行标题（font-medium，继承反色面前景色）与次行路径都必须存在，避免改动中丢掉路径行。
 	for (const block of blocks) {
 		assert.match(block, /font-medium/, `提示首行应保留标题字重：${block}`);
-		assert.match(block, /text-\[11px\]/, `提示次行应保留 11px 次要字号：${block}`);
+		assert.match(block, /text-micro/, `提示次行应保留 micro 档次要字号（默认 11px）：${block}`);
 	}
 });

@@ -52,6 +52,20 @@ function loadPiLocatorModule(platform = process.platform, envOverrides = {}, hom
 			target: ts.ScriptTarget.ES2022,
 		},
 	});
+	// 沙箱内的 require：相对导入逐层以「发起 import 的文件所在目录」为基准解析。
+	// 若把相对 specifier 直接丢给真实 require，会以 tests/ 为基准 → 生产代码新增本地 import 就整片 MODULE_NOT_FOUND。
+	const sandboxRequire = (baseDir, id) => {
+		if (id in moduleOverrides) return moduleOverrides[id];
+		if (id === "electron") return { app: { getPath: () => homePath } };
+		if (id.startsWith(".")) {
+			const dependencyPath = join(baseDir, id + ".ts");
+			return loadTsFile(dependencyPath, {
+				process: sandbox.process,
+				require: (nested) => sandboxRequire(dirname(dependencyPath), nested),
+			});
+		}
+		return require(id);
+	};
 	const sandbox = {
 		Buffer,
 		TextDecoder,
@@ -61,20 +75,7 @@ function loadPiLocatorModule(platform = process.platform, envOverrides = {}, hom
 			env: { ...process.env, ...envOverrides },
 			platform,
 		},
-		require: (id) => {
-			if (id in moduleOverrides) return moduleOverrides[id];
-			if (id === "electron") {
-				return { app: { getPath: () => homePath } };
-			}
-			// 相对依赖（../wsl/wslPiProbe、../wsl/wslExe）用同一套沙箱环境加载
-			if (id.startsWith(".")) {
-				return loadTsFile(join(PI_LOCATOR_DIR, id + ".ts"), {
-					process: sandbox.process,
-					require: (nested) => (nested in moduleOverrides ? moduleOverrides[nested] : require(nested)),
-				});
-			}
-			return require(id);
-		},
+		require: (id) => sandboxRequire(PI_LOCATOR_DIR, id),
 		...sandboxExtra,
 	};
 	sandbox.global = sandbox;
@@ -164,6 +165,28 @@ test("cmd shim quote-wraps arguments containing double quotes", () => {
 		assert.ok(/(?:^| )中文供应商(?: |$)/.test(commandLine), `普通名称不应被多余引号包裹：${commandLine}`);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+// ~ 不是 cmd 元字符（cmd 不展开 ~，那是 bash 的语义），但 Windows 8.3 短路径
+// （C:\Users\RUNNER~1\...；CI 的 tmpdir、部分用户的临时/主目录）天生带 ~。若把 ~ 算进
+// 「需要引号」，整条命令行会多套一层外引号，行尾那个引号直接粘在最后一个参数上。
+// CI 的 tmpdir 恰好就是 8.3 路径而本地不是，所以这里显式造一个带 ~ 的目录来兜住。
+test("cmd shim: tilde-only path (8.3 short name) gets no outer quote wrap", () => {
+	const root = join(tmpdir(), `pi-desktop-locator-tilde-${process.pid}-~866`, "nvm", "v22.22.1");
+	mkdirSync(root, { recursive: true });
+	const piPath = join(root, "pi.cmd");
+	writeFileSync(piPath, "@echo off\r\n", "utf8");
+	writeFileSync(join(root, "node.exe"), "", "utf8");
+	try {
+		const { PiLocator } = loadPiLocatorModule("win32");
+		const invocation = new PiLocator().createInvocation(piPath, ["--provider", "中文供应商"]);
+		const commandLine = invocation.args[3];
+
+		assert.ok(commandLine.startsWith(piPath), `tilde 路径不应多套外引号：${commandLine}`);
+		assert.match(commandLine, /(?:^| )中文供应商$/, `行尾引号不得粘在参数上：${commandLine}`);
+	} finally {
+		rmSync(join(tmpdir(), `pi-desktop-locator-tilde-${process.pid}-~866`), { recursive: true, force: true });
 	}
 });
 
@@ -305,6 +328,12 @@ test("getSearchDirs uses ~/.local/share/mise on darwin and linux", () => {
 			rmSync(root, { recursive: true, force: true });
 		}
 	}
+});
+
+test("createProcessEnv removes stale PiDeck proxy scope markers from inherited env", () => {
+	const { PiLocator } = loadPiLocatorModule("darwin", { PIDECK_PI_PROXY_SCOPE: "model-only" });
+	const env = new PiLocator().createProcessEnv();
+	assert.equal(env.PIDECK_PI_PROXY_SCOPE, undefined);
 });
 
 test("createProcessEnv prepends search dirs to PATH/Path without pathPrefix (npm check path)", () => {
@@ -731,6 +760,50 @@ test("Windows shim falls back to cmd.exe for a hand-written wrapper", () => {
 	}
 });
 
+// npm 12 起 npm.cmd/npx.cmd 换成变量式垫片：`SET "NPM_CLI_JS=%~dp0\node_modules\npm\bin\npm-cli.js"`
+// + 执行行 `"%NODE_EXE%" "%NPM_CLI_JS%" %*`。按全文取第一个 `node_modules\...js` 会抓到变量赋值里的
+// `npm-prefix.js`——实测把「装包」跑成「打印前缀」（exit 0 却什么都没装）。入口变量还可能被 prefix
+// 覆盖，静态解析给不出与 cmd 等价的目标，所以这种形态必须回退 cmd.exe 而不是猜。
+test("npm 12+ 的变量式 .cmd 垫片回退 cmd.exe（不再误取 npm-prefix.js）", () => {
+	const body = [
+		":: Created by npm, please don't edit manually.",
+		"@ECHO OFF",
+		"",
+		"SETLOCAL",
+		"",
+		'SET "NODE_EXE=%~dp0\\node.exe"',
+		'IF NOT EXIST "%NODE_EXE%" (',
+		'  SET "NODE_EXE=node"',
+		")",
+		"",
+		'SET "NPM_PREFIX_JS=%~dp0\\node_modules\\npm\\bin\\npm-prefix.js"',
+		'SET "NPM_CLI_JS=%~dp0\\node_modules\\npm\\bin\\npm-cli.js"',
+		`FOR /F "delims=" %%F IN ('CALL "%NODE_EXE%" "%NPM_PREFIX_JS%"') DO (`,
+		'  SET "NPM_PREFIX_NPM_CLI_JS=%%F\\node_modules\\npm\\bin\\npm-cli.js"',
+		")",
+		'IF EXIST "%NPM_PREFIX_NPM_CLI_JS%" (',
+		'  SET "NPM_CLI_JS=%NPM_PREFIX_NPM_CLI_JS%"',
+		")",
+		"",
+		'"%NODE_EXE%" "%NPM_CLI_JS%" %*',
+		"",
+	].join("\r\n");
+	const { root, binDir, piCmd } = makeNpmShimInstall(body, "node_modules/npm/bin/npm-cli.js");
+	// 两个入口都存在：旧实现会命中第一个（npm-prefix.js）并误判成 node 直启。
+	writeFileSync(join(binDir, "node_modules", "npm", "bin", "npm-prefix.js"), "console.log('prefix')", "utf8");
+	try {
+		const { PiLocator } = loadPiLocatorModule("win32", { APPDATA: join(root, "Roaming") }, root);
+		const invocation = new PiLocator().createInvocation(piCmd, ["install", "-g", "pkg"]);
+		assert.match(invocation.command.toLowerCase(), /cmd\.exe$/, "入口在运行时才定，必须回退 cmd.exe");
+		assert.equal(invocation.windowsVerbatimArguments, true);
+		assert.match(invocation.windowsLaunch?.reason ?? "", /变量式|无法静态解析/);
+		// 关键回归：绝不能把变量赋值里的 npm-prefix.js 当成入口。
+		assert.ok(!invocation.args.some((arg) => arg.includes("npm-prefix.js")), `不得解析出 npm-prefix.js：${invocation.args.join(" ")}`);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("Windows shim rejects an entry pointing outside the shim directory", () => {
 	// 垫片来自用户磁盘，属于不可信输入：node_modules 之外的路径必须拒绝。
 	const body = '@echo off\r\nnode "%dp0%\\node_modules\\..\\..\\evil.js" %*\r\n';
@@ -910,4 +983,39 @@ test("a driveless linux path without wsl context reports the actionable copy ins
 	const interop = await locator.validateCustomPath("/mnt/c/Users/x/AppData/Roaming/npm/pi", false, undefined, undefined);
 	assert.equal(interop.error, "KEY<mainPi.linuxPathOutsideWsl>");
 	// wsl:// 标记与 Windows 路径不受护栏影响——分别由 checkWslCommand / runCheck 分支的既有测试覆盖
+});
+
+test("getSearchDirs scans XDG fnm layouts and honors FNM_DIR on macOS/Linux (#318)", () => {
+	for (const platform of ["darwin", "linux"]) {
+		const root = join(tmpdir(), `pi-desktop-locator-fnm-xdg-${platform}-${process.pid}-${Date.now()}`);
+		// 现代版 fnm 的 XDG 数据目录布局（#318 用户的实际布局：~/.local/share/fnm）
+		mkdirSync(join(root, ".local", "share", "fnm", "node-versions", "v24.14.1", "installation", "bin"), { recursive: true });
+		// FNM_DIR 整体覆盖：另指一处自定义根
+		const fnmDir = join(root, "custom-fnm");
+		mkdirSync(join(fnmDir, "node-versions", "v22.0.0", "installation", "bin"), { recursive: true });
+		try {
+			const { PiLocator } = loadPiLocatorModule(platform, { FNM_DIR: fnmDir }, root);
+			const dirs = new PiLocator().getSearchDirs();
+			assert.ok(dirs.includes(join(root, ".local", "share", "fnm", "node-versions", "v24.14.1", "installation", "bin")), `${platform} should scan XDG fnm node-versions`);
+			assert.ok(dirs.includes(join(root, ".local", "share", "fnm", "current", "bin")), `${platform} should scan XDG fnm current/bin`);
+			assert.ok(dirs.includes(join(fnmDir, "node-versions", "v22.0.0", "installation", "bin")), `${platform} should honor FNM_DIR override`);
+			assert.ok(dirs.includes(join(fnmDir, "current", "bin")), `${platform} should scan FNM_DIR current/bin`);
+			// 旧版默认目录 ~/.fnm 仍要扫（向后兼容旧安装）
+			assert.ok(dirs.includes(join(root, ".fnm", "current", "bin")), `${platform} keeps scanning legacy ~/.fnm`);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	}
+});
+
+test("getSearchDirs scans macOS Application Support fnm when XDG_DATA_HOME is unset", () => {
+	const root = join(tmpdir(), `pi-desktop-locator-fnm-as-${process.pid}-${Date.now()}`);
+	mkdirSync(join(root, "Library", "Application Support", "fnm", "current", "bin"), { recursive: true });
+	try {
+		const { PiLocator } = loadPiLocatorModule("darwin", { XDG_DATA_HOME: "" }, root);
+		const dirs = new PiLocator().getSearchDirs();
+		assert.ok(dirs.includes(join(root, "Library", "Application Support", "fnm", "current", "bin")), "macOS XDG data default should be scanned");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });

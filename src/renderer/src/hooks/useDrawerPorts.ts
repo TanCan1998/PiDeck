@@ -1,28 +1,56 @@
-import type { Project } from "../../../shared/types";
+import type { Project, ProjectFileAccessScope, ProjectFileTarget } from "../../../shared/types";
 import { useMemo } from "react";
+import type { EditorTabOpenMode } from "../utils/editorTabs";
 import type { WorkspaceDrawerPanel } from "./useWorkspacePanels";
 import type { SessionFilterPill } from "../sessionFilterPills";
 import { openGitFileInEditor } from "../utils/gitFileOpen";
-import type { DrawerGitPort, DrawerChromePort, DrawerBrowserPort, DrawerFilesPort } from "../components/workspace/DrawerSurface";
+import type { RpcLogEntry } from "../../../shared/types/rpcLog";
+import type { DrawerBrowserPort, DrawerChromePort, DrawerFilesPort, DrawerGitPort, DrawerRpcLogPort } from "../components/workspace/DrawerSurface";
 
-interface UseDrawerPortsInput {
-	// Git
-	enableGitManagement: boolean;
-	activeProjectId: string | undefined;
+/**
+ * useFileEditor 返回的原始开 Tab 函数：本地文件是 string，远端/项目文件是 ProjectFileTarget。
+ * 与 useFileEditor 的 openEditorTab 签名保持一致，避免在抽屉边界把 target 降级成裸路径。
+ */
+type OpenEditorTabFn = (path: string | ProjectFileTarget, mode: "view" | "diff", originalContent?: string, modifiedContent?: string, allowSave?: boolean, tabKey?: string, label?: string, preserveDrawer?: boolean, openMode?: EditorTabOpenMode, initialLine?: number, fileAccessScope?: ProjectFileAccessScope) => void;
+
+/** Git port 的直通字段：类型直接取自 DrawerGitPort，避免两处漂移 */
+type GitPortInput = Pick<DrawerGitPort, "enableGitManagement" | "activeProjectId" | "gitDiffDisplayMode" | "openCommitFileDiff" | "openWorkspaceFileDiff" | "toggleGitDiffDisplayMode" | "closeGitDiff" | "gitApi" | "gitInfo" | "switchBranch" | "createBranch">;
+
+/** 文件/会话 port 的直通字段：类型直接取自 DrawerFilesPort */
+type FilesPortInput = Pick<
+	DrawerFilesPort,
+	| "sessionsProject"
+	| "sessionsProjectId"
+	| "files"
+	| "sessions"
+	| "sessionSourceFilter"
+	| "sessionHistoryLoading"
+	| "expandedDirs"
+	| "onToggleDirectory"
+	| "onCollapseAllDirectories"
+	| "setFileMenu"
+	| "refreshFiles"
+	| "showToast"
+	| "projects"
+	| "refreshProjectSessions"
+	| "runOpenSidebarSession"
+	| "isSameSessionPath"
+	| "runCopySession"
+	| "runExportHistorySession"
+	| "runDeleteHistorySession"
+	| "viewFilePath"
+	| "openFilePath"
+	| "api"
+	| "t"
+	| "projectRoot"
+	| "onDropFiles"
+	| "onPasteFiles"
+	| "onMoveFiles"
+>;
+
+interface UseDrawerPortsInput extends GitPortInput, FilesPortInput {
+	/** 当前项目：远端项目在文件抽屉里改用 RemoteProjectPanel（由 files port 下传） */
 	activeProject?: Project;
-	gitDrawerDiff: any;
-	gitDiffDisplayMode: string;
-	openCommitFileDiff: any;
-	openWorkspaceFileDiff: any;
-	toggleGitDiffDisplayMode: () => void;
-	closeGitDiff: () => void;
-	/** 仅关掉 Git Diff、保留文件 tab；Git 行内“打开文件”要先清 Diff 再开 tab。 */
-	dismissGitDiff: () => void;
-	gitApi: any;
-	gitInfo: any;
-	switchBranch: any;
-	createBranch: any;
-
 	// Workspace actions
 	openDrawer: (panel: WorkspaceDrawerPanel) => void;
 	closeDrawer: () => void;
@@ -31,43 +59,23 @@ interface UseDrawerPortsInput {
 	minimizeBrowser: () => void;
 	enterBrowserFullscreen: () => void;
 
+	// RPC log（临时面板：agent 绑定 + 关闭还原，由 useWorkspacePanels 管开关）
+	/** 当前日志面板绑定的 agent；undefined = 未打开 */
+	rpcLogAgentId: string | undefined;
+	/** 从磁盘补回缓冲之外的旧日志（会话右键入口） */
+	rpcLogListLogs: (agentId: string) => Promise<RpcLogEntry[]>;
+	rpcLogGetLogging: (agentId: string) => Promise<boolean>;
+	rpcLogSetLogging: (agentId: string, enabled: boolean) => Promise<boolean>;
+	/** 关闭日志面板并还原打开前的抽屉面板 */
+	closeRpcLogPanel: () => void;
+
 	// Browser
 	browserFullscreen: boolean;
 
-	// Files/History
-	sessionsProject: any;
-	sessionsProjectId: string | undefined;
-	files: any[];
-	sessions: any[];
-	sessionSourceFilter: Record<string, Set<SessionFilterPill> | null>;
-	sessionHistoryLoading: boolean;
-	expandedDirs: Set<string>;
-	onToggleDirectory: (dir: string) => void;
-	onCollapseAllDirectories: () => void;
-	setFileMenu: any;
-	refreshFiles: any;
-	showToast?: (message: string, duration?: number) => void;
-	projects: any[];
-	refreshProjectSessions: any;
-	runOpenSidebarSession: any;
-	isSameSessionPath: any;
-	runCopySession: any;
-	runExportHistorySession: any;
-	runDeleteHistorySession: any;
-	viewFilePath: any;
-	openFilePath: any;
-	/** 在中间栏编辑器打开（可编辑 tab）；Git 变更行内“打开”按钮使用 */
-	openEditorTab: any;
-	api: any;
-	t: any;
-	/** 当前项目根目录：文件面板空白处拖入/粘贴/右键菜单的落点 */
-	projectRoot: string | undefined;
-	/** 从 OS 拖入文件（复制到目标目录） */
-	onDropFiles: (targetDir: string, files: FileList) => void;
-	/** 粘贴剪贴板文件（Ctrl+V / 右键菜单） */
-	onPasteFiles: (targetDir: string) => void;
-	/** 文件树内部拖拽移动 */
-	onMoveFiles: (sourcePaths: string[], targetDir: string) => void;
+	/** 仅关掉 Git Diff、保留文件 tab；Git 行内“打开文件”要先清 Diff 再开 tab。 */
+	dismissGitDiff: () => void;
+	/** 原始开 Tab 函数（签名同 useFileEditor 的 openEditorTab） */
+	openEditorTab: OpenEditorTabFn;
 }
 
 export function useDrawerPorts(input: UseDrawerPortsInput) {
@@ -75,7 +83,6 @@ export function useDrawerPorts(input: UseDrawerPortsInput) {
 		const git: DrawerGitPort = {
 			enableGitManagement: input.enableGitManagement,
 			activeProjectId: input.activeProjectId,
-			gitDrawerDiff: input.gitDrawerDiff,
 			gitDiffDisplayMode: input.gitDiffDisplayMode,
 			openCommitFileDiff: input.openCommitFileDiff,
 			openWorkspaceFileDiff: input.openWorkspaceFileDiff,
@@ -99,6 +106,14 @@ export function useDrawerPorts(input: UseDrawerPortsInput) {
 			onCloseBrowser: input.closeBrowser,
 			onMinimizeBrowser: input.minimizeBrowser,
 			onEnterBrowserFullscreen: input.enterBrowserFullscreen,
+		};
+
+		const rpcLog: DrawerRpcLogPort = {
+			agentId: input.rpcLogAgentId,
+			loadHistory: input.rpcLogListLogs,
+			getLogging: input.rpcLogGetLogging,
+			setLogging: input.rpcLogSetLogging,
+			onClose: input.closeRpcLogPanel,
 		};
 
 		const files: DrawerFilesPort = {
@@ -125,8 +140,16 @@ export function useDrawerPorts(input: UseDrawerPortsInput) {
 			viewFilePath: input.viewFilePath,
 			openFilePath: input.openFilePath,
 			// 包装为单参：以可编辑模式在中间栏打开文件（Git 行内“打开文件”按钮）。
-			// 先清 Git Diff 再开 Tab 的顺序契约见 utils/gitFileOpen.ts。
-			openEditorTab: (path: string) => openGitFileInEditor(input.dismissGitDiff, input.openEditorTab, path),
+			// 先清 Git Diff 再开 Tab 的顺序契约见 utils/gitFileOpen.ts；远端 target 原样下传，
+			// 不降级成相对路径（主进程要靠 projectId + relativePath 定位远端文件）。
+			openEditorTab: (path) => {
+				if (typeof path === "string") {
+					openGitFileInEditor(input.dismissGitDiff, input.openEditorTab, path);
+					return;
+				}
+				input.dismissGitDiff();
+				input.openEditorTab(path, "view", undefined, undefined, true, undefined, undefined, false, "permanent");
+			},
 			api: input.api,
 			t: input.t,
 			projectRoot: input.projectRoot,
@@ -135,12 +158,11 @@ export function useDrawerPorts(input: UseDrawerPortsInput) {
 			onMoveFiles: input.onMoveFiles,
 		};
 
-		return { git, chrome, browser, files };
+		return { git, chrome, browser, files, rpcLog };
 	}, [
 		input.enableGitManagement,
 		input.activeProjectId,
 		input.activeProject,
-		input.gitDrawerDiff,
 		input.gitDiffDisplayMode,
 		input.openCommitFileDiff,
 		input.openWorkspaceFileDiff,
@@ -158,6 +180,11 @@ export function useDrawerPorts(input: UseDrawerPortsInput) {
 		input.minimizeBrowser,
 		input.enterBrowserFullscreen,
 		input.browserFullscreen,
+		input.rpcLogAgentId,
+		input.rpcLogListLogs,
+		input.rpcLogGetLogging,
+		input.rpcLogSetLogging,
+		input.closeRpcLogPanel,
 		input.sessionsProject,
 		input.sessionsProjectId,
 		input.files,

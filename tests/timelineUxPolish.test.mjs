@@ -5,14 +5,16 @@ import test from "node:test";
 const toolCard = readFileSync("src/renderer/src/components/session/ToolCallComponents.tsx", "utf8");
 const turnExecution = readFileSync("src/renderer/src/components/session/turn/useTurnExecution.ts", "utf8");
 const controller = readFileSync("src/renderer/src/hooks/useSessionTimelineController.ts", "utf8");
+const sendScroll = readFileSync("src/renderer/src/hooks/timeline/sendScroll.ts", "utf8");
 const scroller = readFileSync("src/renderer/src/components/agents/message-scroller.tsx", "utf8");
 const turnRow = readFileSync("src/renderer/src/components/session/turn/TurnRow.tsx", "utf8");
 const timeline = readFileSync("src/renderer/src/components/session/SessionMessageTimeline.tsx", "utf8");
 
 test("tool card name is a faint process-layer label, weight kept normal", () => {
 	// 过程层视觉：工具名用 tertiary 浅色退到正文之后；字重保持 normal（不降档，
-	// 过轻在 CJK 下会有锯齿感，用户反馈优先保字重、靠颜色区分）
-	assert.match(toolCard, /className="shrink-0 text-control lowercase text-text-faint"/);
+	// 过轻在 CJK 下会有锯齿感，用户反馈优先保字重、靠颜色区分）。
+	// 字号走会话正文轨道（text-chat-row = 正文 −2px）：随「会话正文字号」缩放，不随界面字号。
+	assert.match(toolCard, /className="shrink-0 text-chat-row lowercase text-text-faint"/);
 	assert.doesNotMatch(toolCard, /font-light/);
 	assert.doesNotMatch(toolCard, /font-\[650\]/);
 	// ToolActivityCard 也不再用 <strong> 加粗
@@ -42,16 +44,28 @@ test("scrollToBottom uses stick-to-bottom spring via scrollerScrollApiRef", () =
 	assert.match(timeline, /scrollApiRef=\{controller\.scrollerScrollApiRef\}/);
 });
 
-test("auto-collapse uses run-start positioning without breaking follow semantics", () => {
+test("auto-collapse survives without completion-reposition; send-time pin is the only auto-scroll", () => {
 	// 最终回答标记仍在（折叠后阅读用）；自动收起回调使用新的 onAutoCollapsed。
 	assert.match(turnRow, /data-final-answer=\{run\.id\}/);
 	assert.doesNotMatch(controller, /scrollFinalAnswerIntoView/);
 	assert.doesNotMatch(turnRow, /onProcessAutoCollapsed/);
 	assert.doesNotMatch(timeline, /onProcessAutoCollapsed/);
 	assert.match(turnRow, /onAutoCollapsed/);
-	assert.match(controller, /scrollFinalAnswerToUpperMiddle/);
-	assert.match(controller, /data-final-answer/);
-	assert.match(controller, /SETTLED_TURN_VIEWPORT_ANCHOR_RATIO/);
+	// 用户请求（m00677）：去掉完结/切回的自上旋滚动，自动滚动只在「发送那一刻」。
+	// 完结定位整链必须移除（scrollFinalAnswerToUpperMiddle 只允许安全的内部 no-op 吞杀）。
+	assert.doesNotMatch(timeline, /scheduleFinalAnswerSettle/);
+	assert.doesNotMatch(timeline, /scheduleSettleFinalAnswerTop/);
+	assert.doesNotMatch(timeline, /settleFinalAnswerTargetPx/);
+	// 自动滚动唯一路径：实现住 hooks/timeline/sendScroll.ts（SendScrollPositioner，612bb51c1 起迁移），
+	// controller 侧只保留接线：发送时把新 user 行交给独立定位器。
+	assert.match(controller, /SendScrollPositioner/);
+	assert.doesNotMatch(controller, /scrollFinalAnswerIntoView|scheduleFinalAnswerSettle|scheduleSettleFinalAnswerTop|settleFinalAnswerTargetPx/);
+	assert.match(controller, /sendScrollRef\.current\.pin\(timeline, sendMessageId/);
+	assert.match(sendScroll, /pinScrollDurationMs\(distance\)/);
+	assert.match(sendScroll, /TARGET_GAP_PX = 24/);
+	assert.match(sendScroll, /SKIP_EPSILON_PX = 8/);
+	assert.match(sendScroll, /CANCEL_INPUTS/);
+	assert.match(sendScroll, /cancel = \(\): void/);
 	// isLatestRun（自动收起）保持按「最后一条显示条目」判定；
 	// live 挂载门用单独的 isLastAgentRun（最后一个 agent-run）判定——
 	// 两者语义不同，不能合并（见 liveMountDecision 回归）。
@@ -67,10 +81,8 @@ test("followOutput re-lock uses spring when far from bottom", () => {
 	assert.match(scroller, /reduce \|\| distance <= followThreshold \? "instant" : "smooth"/);
 });
 
-test("settled positioning is state-driven, inputs never cancel it", () => {
-	// 2026-09 对抗审查收敛：鼠标移动/键盘/滚轮/触摸等输入事件不参与「最终回答
-	// 安静定位」的取消——只有「已结束且仍跟随」才触发，只有状态边界（真实上滚/回底/
-	// 切会话/新一轮）才取消。
+test("settled reposition removed: no completion-driven scrolling, state-driven send pin only", () => {
+	// 2026-09 对抗审查收敛仍适用：鼠标移动/键盘/滚轮/触摸等输入事件不参与滚动取消。
 	assert.doesNotMatch(timeline, /addEventListener\("pointermove"/);
 	assert.doesNotMatch(timeline, /addEventListener\("pointerdown"/);
 	assert.doesNotMatch(timeline, /addEventListener\("wheel"/);
@@ -78,27 +90,14 @@ test("settled positioning is state-driven, inputs never cancel it", () => {
 	assert.doesNotMatch(timeline, /addEventListener\("touchstart"/);
 	assert.doesNotMatch(controller, /addEventListener\("wheel", interrupt/);
 	assert.doesNotMatch(controller, /addEventListener\("pointerdown", interrupt/);
-	// 状态驱动取消仍然保留：
-	// - 引擎真实输入（wheel/touch）带 source="input" → 终止在途定位动画；
-	// - 历史浏览失效事务（回底/重锁/切会话）→ invalidateHistoryBrowsing 取消。
-	assert.match(controller, /source === "input"/);
-	assert.match(controller, /settleScrollCancelRef\.current\?\.\(\);/);
-	// 对抗审查补修：
-	// - F1：新一轮开始（busy 边沿）取消在途 settle 动画并恢复跟随贴底；
-	// - P2-①：动画期间用户接管（拖动滚动条等）经几何检测中断，不再逐帧覆盖；
-	// - P2-②：切回补挂 arm 幂等，已消费过 tick 的 run 不再重复 arm（记忆优先）。
-	assert.match(controller, /cancelSettledRepositionForNewRun/);
-	assert.match(timeline, /controller\.cancelSettledRepositionForNewRun\(\)/);
-	// 滚动条拖动取消用「命中滚动条区域」的事件判定；不用几何分叉启发式——
-	// 内容收缩 clamp 也会改变 scrollTop，几何启发式会误判并取消定位动画。
-	assert.match(controller, /onScrollbarPointerDown/);
-	assert.match(controller, /event\.clientX >= rect\.left \+ timeline\.clientWidth/);
+	// 完结定位系统全删除：不再有完结后的自动滚动/定位目标/完结动画取消链。
+	assert.doesNotMatch(timeline, /addEventListener\("wheel", turnSettle/);
+	assert.doesNotMatch(timeline, /turnSettleIdleLastRunRef\.current = runId/);
+	assert.doesNotMatch(timeline, /armSettledReposition\(latestRunIdRef/);
 	const pinScrollSource = readFileSync("src/renderer/src/lib/pinTurnScroll.ts", "utf8");
 	assert.doesNotMatch(pinScrollSource, /TAKEOVER_TOLERANCE_PX/);
-	assert.match(timeline, /settleTickConsumedRunRef/);
-	// 触发时序不变：1.5s 阅读停顿 + 320ms 布局稳定窗口。
-	assert.match(timeline, /TURN_SETTLE_IDLE_COLLAPSE_MS = 1500/);
-	assert.match(timeline, /TURN_SETTLE_SCROLL_DELAY_MS/);
-	// TurnRow 保留 onAutoCollapsed 通道（契约不依赖折叠回调驱动定位，但可扩展）。
+	// 完结动画取消只依靠历史浏览失效事务/回底/切会话；不再需要 run-start 忙搃取消完结定位。
+	assert.doesNotMatch(timeline, /controller\.cancelSettledRepositionForNewRun\(\)/);
+	// TurnRow 保留 onAutoCollapsed 通道（自动折叠仍独立于滚动定位）。
 	assert.match(turnRow, /onAutoCollapsed/);
 });

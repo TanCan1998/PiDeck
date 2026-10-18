@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import ts from "typescript";
-import vm from "node:vm";
+import { createTsSandbox } from "./helpers/createTsSandbox.mjs";
 
 /**
  * 复现回路（diagnosing-bugs Phase 1）：用户报告的两个症状
@@ -20,44 +18,13 @@ import vm from "node:vm";
  * tests/launchDefaults.test.mjs 中原先固化旧规则的两条断言（「显式默认优先于一切」
  * 「enabledModels 优先于欢迎偏好」）已同步改写为新规则，并保留「无点选时显式默认 /
  * enabledModels 仍各自胜出」的覆盖，防止旧优先级被悄悄恢复。
+ *
+ * 加载走 createTsSandbox（相对 import 按源文件目录解析），生产侧新增本地
+ * import 不再让本文件 MODULE_NOT_FOUND。
  */
+const load = createTsSandbox();
+const { resolveLaunchDefaultOptions: resolve } = load("src/main/sessions/launchDefaults.ts");
 
-function loadResolver() {
-	const source = readFileSync("src/main/sessions/launchDefaults.ts", "utf8");
-	const output = ts.transpileModule(source, {
-		compilerOptions: {
-			module: ts.ModuleKind.CommonJS,
-			target: ts.ScriptTarget.ES2022,
-			esModuleInterop: true,
-		},
-		fileName: "launchDefaults.ts",
-	}).outputText;
-	const module = { exports: {} };
-	vm.runInNewContext(
-		output,
-		{
-			module,
-			exports: module.exports,
-			require: (specifier) => {
-				if (specifier === "../../shared/modelDisplayName") {
-					return {
-						createSessionModelPreference: (provider, modelId, modelName) => ({
-							provider,
-							modelId,
-							modelName: typeof modelName === "string" && modelName.trim() ? modelName.trim() : modelId,
-						}),
-					};
-				}
-				return {};
-			},
-		},
-		{ filename: "launchDefaults.ts" },
-	);
-	return module.exports.resolveLaunchDefaultOptions;
-}
-
-const resolve = loadResolver();
-// vm 独立 realm 原型不同，deepEqual 会误报；JSON 往返归一到宿主 realm。
 // 本文件验证选择优先级，名称快照由 launchDefaults.test.mjs 单独验证。
 const plain = (value) => {
 	const normalized = value && typeof value === "object" ? JSON.parse(JSON.stringify(value)) : value;
@@ -98,4 +65,21 @@ test("症状(b)：无配置默认但设了 enabledModels 时，引导页刚选�
 	// 即「页面切了、发送后变回去」。展示与套用在此分叉。
 	assert.equal(result.defaultModelConfigured, undefined, "前提：展示层会让欢迎偏好参与回退");
 	assert.deepEqual(plain(result.model), PICKED, "enabledModels 把引导页点选挤掉了，导致底栏显示与实际套用不一致");
+});
+
+test("症状(c)：点选换模型后，思考档位也必须跟着换成该模型的每模型默认", () => {
+	const result = resolve({
+		settings: {
+			defaultProvider: "openai",
+			defaultModel: "gpt-5.2",
+			defaultThinkingLevel: "low",
+			modelThinkingLevels: { "openai/gpt-5.2": "low", "anthropic/claude-opus-4-6": "max" },
+		},
+		models: MODELS,
+		welcomeModel: PICKED,
+	});
+	// 展示（底栏档位）与实际套用同源：都按最终生效的 anthropic/claude-opus-4-6 查表，
+	// 若这里仍取全局 low，用户就会看到「显示 low、实际 max」的第二次分叉。
+	assert.deepEqual(plain(result.model), PICKED);
+	assert.equal(result.thinkingLevel, "max");
 });

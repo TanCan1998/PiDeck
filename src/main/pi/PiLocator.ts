@@ -1,12 +1,16 @@
 import { execFile } from "node:child_process";
-import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 import { delimiter, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { app } from "electron";
-import type { AppSettings, PiInstallStatus } from "../../shared/types";
+import type { AppSettings, PiInstallation, PiInstallationSource, PiInstallStatus } from "../../shared/types";
 import type { MainProcessTranslationKey } from "../../shared/i18n/mainProcessCopy";
+import { compareVersions } from "../utils/versionCompare";
+// 只依赖纯路径模块（零 Electron / 零副作用）：PiLocator 会在裸 Node 沙箱里被加载，
+// 引入便携 Node 安装器会把 DSH 运行时依赖一并拖进来，把检测链路弄重。
+import { piRuntimeNodeBinDir, piRuntimePiBinDir } from "./piRuntimePaths";
 import { WSL_PI_NEGATIVE_CACHE_TTL_MS, WSL_PI_PROBE_TIMEOUT_MS, buildWslCommandMarker, buildWslPiExecArgs, buildWslPiProbeScript, isWslInteropPath, parseWslCommandMarker, parseWslPiProbeOutput, type WslPiProbeResult } from "../wsl/wslPiProbe";
 import { decodeWslOutput } from "../wsl/wslExe";
-import { buildPiProxyEnvPatch } from "../sessions/sessionProxyPolicy";
+import { buildPiProxyEnvPatch, PIDECK_PI_PROXY_SCOPE } from "../sessions/sessionProxyPolicy";
 
 /**
  * 进程级 WSL pi 探测缓存。
@@ -30,6 +34,31 @@ const wslCommandInflight = new Map<string, Promise<string | null>>();
 let cachedLoginShellPath: string | undefined;
 let loginShellPathInflight: Promise<string> | undefined;
 
+/** 交互式登录 shell 反查到的 pi 路径（null = 查过但没找到）。 */
+type ShellPiProbeCacheEntry = { path: string | null; at: number };
+let shellPiProbeCache: ShellPiProbeCacheEntry | undefined;
+let shellPiProbeInflight: Promise<string | null> | undefined;
+
+/**
+ * 安装列表的进程级短缓存。
+ * 每次列举都要 spawn 全部候选的 `--version`（并行，单条几百毫秒），
+ * 启动检测与设置页检测会连续调用，没有缓存就白跑一轮。
+ * 设置变更/引导装完后由 invalidatePiInstallationCache() 主动失效。
+ */
+const INSTALLATION_LIST_TTL_MS = 10_000;
+let installationListCache: { key: string; at: number; value: PiInstallation[] } | undefined;
+
+/** 交互式 shell 探测超时：要加载用户 rc，比非交互探测宽松，但不能拖住检测按钮。 */
+const LOGIN_SHELL_PI_PROBE_TIMEOUT_MS = 5_000;
+/** 没找到时的负缓存：用户装完 pi 后点「从终端再找一次」或下次超过 TTL 自动重试。 */
+const LOGIN_SHELL_PI_NEGATIVE_TTL_MS = 60_000;
+
+/** 官方安装器（install.sh / install.ps1）的安装标记文件名，两侧布局一致。 */
+const MANAGED_INSTALL_MARKER = "managed-install.json";
+
+/** 安装来源的展示优先级：官方安装 > 包管理器全局 > PiDeck 便携副本 > 用户自选 > 其余 PATH 目录。 */
+const INSTALLATION_SOURCE_RANK: Record<PiInstallationSource, number> = { managed: 0, "package-manager": 1, portable: 2, custom: 3, path: 4 };
+
 /**
  * 各启动通道下单条命令行的安全字符预算，供技能/提示词白名单这类 O(N) 参数注入做兜底。
  *
@@ -48,10 +77,57 @@ function wslCommandCacheKey(distro: string, user: string): string {
 	return `${distro}\0${user}`;
 }
 
+/**
+ * realpath 容错版：路径不存在/软链断裂时回退原值（候选已由 existsSync 过滤，这里只用结果做去重与比较）。
+ */
+function safeRealpath(path: string): string {
+	try {
+		return realpathSync(path);
+	} catch {
+		return path;
+	}
+}
+
+/**
+ * 标记版本最高的那份安装（用于列表里的「较新」徒章）。
+ * 只在确实比其他人高时才标记：全部同版本时不标记，避免把「一样新」说成「更新」。
+ */
+function markNewestInstallation(installations: PiInstallation[]): void {
+	const versioned = installations.filter((item) => item.version);
+	if (versioned.length < 2) return;
+	const newest = versioned.reduce((best, current) => (compareVersions(current.version ?? "0.0.0", best.version ?? "0.0.0") > 0 ? current : best));
+	const higher = versioned.some((item) => item !== newest && compareVersions(newest.version ?? "0.0.0", item.version ?? "0.0.0") > 0);
+	if (higher) newest.isNewest = true;
+}
+
+/**
+ * 列表排序：当前使用项 → 终端默认项 → 来源优先级 → 路径字典序。
+ * 末尾用 path 兜底保证顺序稳定（UI 列表不会在两次检测之间乱跳）。
+ */
+function compareInstallations(a: PiInstallation, b: PiInstallation): number {
+	return Number(b.isActive) - Number(a.isActive) || Number(Boolean(b.shellDefault)) - Number(Boolean(a.shellDefault)) || INSTALLATION_SOURCE_RANK[a.source] - INSTALLATION_SOURCE_RANK[b.source] || a.path.localeCompare(b.path);
+}
+
 /** 测试用：每个 VM 用例自带一份模块，生产路径不要调用。 */
 export function resetWslCommandCache(): void {
 	wslCommandCache.clear();
 	wslCommandInflight.clear();
+}
+
+/**
+ * 清掉安装列表缓存。
+ * 设置里的自定义路径、WSL 开关变化，或引导安装写完 pi 之后必须调用，
+ * 否则用户在 TTL 内点「重新检测」看到的仍是旧列表。
+ */
+export function invalidatePiInstallationCache(): void {
+	installationListCache = undefined;
+}
+
+/** 测试用：连交互式 shell 反查缓存一并清掉。 */
+export function resetPiInstallationCaches(): void {
+	installationListCache = undefined;
+	shellPiProbeCache = undefined;
+	shellPiProbeInflight = undefined;
 }
 
 type PiLocatorCopy = (key: MainProcessTranslationKey, params?: Record<string, string | number>) => string;
@@ -107,7 +183,7 @@ export function describeCmdShimFallback(resolution: CmdShimResolution, shimPath:
 		case "unreadable":
 			return `垫片文件读取失败（权限或占用）：${shimPath}`;
 		case "unrecognized":
-			return "垫片结构不是 npm 生成的 pi.cmd（没有可识别的 node_modules/JS 入口引用）";
+			return "垫片入口无法静态解析（npm 12+ 等变量式 shim：入口由 SET 变量间接引用），已回退 cmd.exe；功能不受影响";
 		case "entry-missing":
 			return `垫片引用的 JS 入口不存在：${resolution.candidate}（常见于 nvm/pnpm 切换版本后残留的旧垫片）`;
 		case "not-cmd":
@@ -223,6 +299,19 @@ export class PiLocator {
 	}
 
 	getSearchDirs() {
+		// These directories only locate an existing pi installation; pi itself is not bundled yet.
+		return [...new Set(this.searchDirEntries().map((entry) => entry.dir))];
+	}
+
+	/**
+	 * 扫描目录 + 来源标签。
+	 *
+	 * 顺序即解析优先级（resolveCommand / getCandidates 取第一个存在的候选），所以必须保持原有的
+	 * 「env PATH → 登录 shell PATH → 包管理器/版本管理器目录 → 平台兜底 → PiDeck 自带运行时」；
+	 * 新增目录时应扦在同类群里，不要插到 PATH 前面（否则会静默改掉已有用户实际启动的 pi）。
+	 * 来源标签只用于「检测到多个安装」时的展示与排序（见 listInstallations）。
+	 */
+	private searchDirEntries(): Array<{ dir: string; source: PiInstallationSource }> {
 		const home = app.getPath("home");
 		const appData = process.env.APPDATA ?? join(home, "AppData", "Roaming");
 		const localAppData = process.env.LOCALAPPDATA ?? join(home, "AppData", "Local");
@@ -232,41 +321,79 @@ export class PiLocator {
 		// <mise 数据目录>/installs/node/<version>/ 下，与 node.exe 同目录。
 		const miseDataDir = process.env.MISE_DATA_DIR || (process.platform === "win32" ? join(localAppData, "mise") : join(home, ".local", "share", "mise"));
 		const miseInstallsDir = process.env.MISE_INSTALL_PATH || join(miseDataDir, "installs");
-		const dirs = [
-			...this.pathDirs(),
-			join(appData, "npm"),
-			join(localAppData, "pnpm"),
-			join(localAppData, "Yarn", "bin"),
-			join(localAppData, "Volta", "bin"),
-			join(miseDataDir, "shims"),
-			...this.listChildDirs(join(miseInstallsDir, "node")),
+		// pnpm 全局 bin：Linux 默认 ~/.local/share/pnpm（可被 PNPM_HOME 覆盖），
+		// macOS 默认 ~/Library/pnpm，Windows 默认 %LOCALAPPDATA%\pnpm。
+		// 官方推荐的 `pnpm add -g --ignore-scripts @earendil-works/pi-coding-agent` 就落在这里。
+		const pnpmHome = process.env.PNPM_HOME || (process.platform === "win32" ? join(localAppData, "pnpm") : process.platform === "darwin" ? join(home, "Library", "pnpm") : join(home, ".local", "share", "pnpm"));
+		const pkg = (dir: string) => ({ dir, source: "package-manager" as const });
+		const plain = (dir: string) => ({ dir, source: "path" as const });
+		const portable = (dir: string) => ({ dir, source: "portable" as const });
+		// fnm（POSIX）：数据目录可被 FNM_DIR 整体覆盖；旧版默认 ~/.fnm，现代版按 XDG
+		// （Linux ~/.local/share/fnm、macOS ~/Library/Application Support/fnm，也尊重 XDG_DATA_HOME）。
+		// #318：fnm 装在非 ~/.fnm 布局时，GUI 启动的 PATH 拿不到这些目录，pi 反查不到、
+		// 扩展版本检查（npm view）也会全部 ENOENT。多根都扫：listChildDirs 对不存在
+		// 的目录返回空集，代价可忽略。Windows 布局（node-versions/<ver>/installation 无 bin 层）
+		// 保留在下方 win32 分支，默认目录已被覆盖，FNM_DIR 覆盖场景暂无反馈不扩。
+		const fnmRoots = [...(process.env.FNM_DIR ? [process.env.FNM_DIR] : []), join(home, ".fnm"), join(process.env.XDG_DATA_HOME || join(home, ".local", "share"), "fnm"), ...(process.platform === "darwin" ? [join(home, "Library", "Application Support", "fnm")] : [])];
+		const fnmEntries = process.platform === "win32" ? [] : fnmRoots.flatMap((root) => [plain(join(root, "current", "bin")), ...this.listChildDirs(join(root, "node-versions")).map((dir) => plain(join(dir, "installation", "bin")))]);
+		const entries = [
+			...this.pathDirs().map(plain),
+			pkg(join(appData, "npm")),
+			// pnpm：PNPM_HOME / 平台默认目录 + Windows 的 %LOCALAPPDATA%\pnpm
+			pkg(pnpmHome),
+			pkg(join(localAppData, "pnpm")),
+			// yarn：classic 的全局 bin 在不同平台分别是 ~/.yarn/bin、~/.config/yarn/global/bin；
+			// Windows 的 %LOCALAPPDATA%\Yarn\bin 已由下一行覆盖。
+			pkg(join(home, ".yarn", "bin")),
+			pkg(join(home, ".config", "yarn", "global", "bin")),
+			pkg(join(localAppData, "Yarn", "bin")),
+			pkg(join(localAppData, "Volta", "bin")),
+			pkg(join(miseDataDir, "shims")),
+			...this.listChildDirs(join(miseInstallsDir, "node")).map(pkg),
 			// Windows fnm：node 与 npm 全局 bin（pi.cmd）同在
 			// %LOCALAPPDATA%\fnm\node-versions\<ver>\installation，macOS 分支已有等价兜底。
 			// Scoop：shims 目录放 scoop 装的 app shim；nodejs 的 npm prefix 默认是
 			// apps\nodejs\current（全局包装在该目录，node.exe 同目录）。
-			...(process.platform === "win32" ? [...this.listChildDirs(join(localAppData, "fnm", "node-versions")).map((dir) => join(dir, "installation")), join(home, "scoop", "shims"), join(home, "scoop", "apps", "nodejs", "current")] : []),
-			join(home, ".bun", "bin"),
-			join(home, ".deno", "bin"),
-			join(home, ".local", "bin"),
-			join(home, ".npm-global", "bin"),
-			join(home, ".nvm", "current", "bin"),
-			...this.listChildDirs(join(home, ".nvm", "versions", "node")).map((dir) => join(dir, "bin")),
-			join(home, ".asdf", "shims"),
-			join(home, ".volta", "bin"),
+			...(process.platform === "win32" ? [...this.listChildDirs(join(localAppData, "fnm", "node-versions")).map((dir) => join(dir, "installation")), join(home, "scoop", "shims"), join(home, "scoop", "apps", "nodejs", "current")].map(pkg) : []),
+			pkg(join(home, ".bun", "bin")),
+			pkg(join(home, ".deno", "bin")),
+			plain(join(home, ".local", "bin")),
+			pkg(join(home, ".npm-global", "bin")),
+			pkg(join(home, ".nvm", "current", "bin")),
+			...this.listChildDirs(join(home, ".nvm", "versions", "node")).map((dir) => pkg(join(dir, "bin"))),
+			...fnmEntries,
+			pkg(join(home, ".asdf", "shims")),
+			pkg(join(home, ".volta", "bin")),
+			// pi 官方安装器（install.sh；Windows 下 install.ps1 需 PI_EXPERIMENTAL=1）的启动器落点。
+			//
+			// 为什么必须扫：安装器只把 PATH 写进当前 shell 的 rc（bash → ~/.bashrc），
+			// 非交互登录 shell 读不到，GUI 启动的 PiDeck 不扫这里就会把「终端里明明有 pi」
+			// 判成没装，进而引导用户又装一份 npm 全局副本。入口也可能是 ~/.local/bin 里
+			// 指向该启动器的软链（安装器 select_managed_path_bin_dir），那条已在上面扫到。
+			//
+			// 为什么排在版本管理器目录之后：它只在其他候选都没命中时才生效，
+			// 避免静默改掉已有用户实际启动的 pi（换装走设置页/安装列表让用户自己选）。
+			// 来源不在这里标 managed：只有 managed-install.json 校验通过才算官方安装
+			// （见 classifyInstallationSource），残留/半删的目录不应被宣称成官方安装。
+			plain(join(home, ".pi", "agent", "bin")),
 			// macOS GUI 启动（Dock/Finder）经常拿不到终端里的 Homebrew PATH。
 			// Apple Silicon 默认 /opt/homebrew，Intel 常见 /usr/local；两者都扫一遍，
 			// 避免 M4 上 pi 装在 brew 里却被桌面端判定“未安装/启动失败”。
-			...(process.platform === "darwin" ? ["/opt/homebrew/bin", "/usr/local/bin", join(home, "Library", "pnpm"), join(home, ".fnm", "current", "bin"), ...this.listChildDirs(join(home, ".fnm", "node-versions")).map((dir) => join(dir, "installation", "bin"))] : []),
+			// fnm 目录不在本分支：已由上方 fnmEntries 统一覆盖（FNM_DIR/XDG 布局）。
+			...(process.platform === "darwin" ? ["/opt/homebrew/bin", "/usr/local/bin"].map(plain) : []),
 			// Linux 常见全局 bin，同样覆盖“桌面启动 PATH 不完整”的场景。
-			...(process.platform === "linux" ? ["/usr/local/bin", "/usr/bin"] : []),
+			...(process.platform === "linux" ? ["/usr/local/bin", "/usr/bin"].map(plain) : []),
 			// PiDeck 自带引导装的便携 Node/pi 全局目录（<userData>/pi-runtime）：
-			// 引导安装不写系统 PATH，装完 pi.cmd/pi 可执行落在这两个目录，必须自行扫描。
-			join(app.getPath("userData"), "pi-runtime", "node"),
-			join(app.getPath("userData"), "pi-runtime", "pi-global"),
+			// 引导安装不写系统 PATH，装完 pi 可执行落在这两个目录，必须自行扫描。
+			//
+			// 注意 1：POSIX 比 Windows 多一层 bin/（npm 全局可执行在 <prefix>/bin，Windows 才直接在 <prefix>；
+			// 官方 node 包同理 bin/node vs node.exe）。少这一层会导致
+			// 「引导装完 -> 重新检测说没装 -> 又引导你再装一遍」。
+			// 注意 2：只看当前 userData——dev 与正式版各管自己的 pi-runtime，不做跨数据目录互扫（产品决定）。
+			plain(piRuntimeNodeBinDir(app.getPath("userData"), process.platform)),
+			portable(piRuntimePiBinDir(app.getPath("userData"), process.platform)),
 		];
-
-		// These directories only locate an existing pi installation; pi itself is not bundled yet.
-		return [...new Set(dirs.filter(Boolean))];
+		return entries.filter((entry) => Boolean(entry.dir));
 	}
 
 	createProcessEnv(settings?: PiProxySettings, pathPrefix?: string, wsl?: PiCommandInvocation["wsl"]) {
@@ -301,6 +428,8 @@ export class PiLocator {
 	 */
 	sanitizePiChildEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 		const next: NodeJS.ProcessEnv = { ...env };
+		// 该标记只能由本次 PiDeck 代理 patch 重新写入，不能从宿主环境或用户 shell 继承。
+		delete next[PIDECK_PI_PROXY_SCOPE];
 
 		for (const key of Object.keys(next)) {
 			if (key.startsWith("ELECTRON_") || key === "ELECTRON_RUN_AS_NODE") {
@@ -530,6 +659,204 @@ export class PiLocator {
 	}
 
 	/**
+	 * 列出本机探测到的全部 pi 安装（含官方安装器的 managed 安装）。
+	 *
+	 * 为什么单独一条链路（而不是扩展 `check()`）：`check()` 只回答「用哪个」——第一个命中的候选。
+	 * 而用户实际可能存在多份安装（先 curl 装了官方安装，后来又被引导装了一份 npm 全局），
+	 * 此时 PiDeck 必须把两份都摆出来让用户自己选，而不是默默用其中一份。
+	 *
+	 * 目录顺序与来源判定和 `check()` 完全同源（同一个 searchDirEntries），
+	 * 所以 `isActive === true` 的那条就是 Agent 实际启动的那份。
+	 *
+	 * WSL 模式返回空数组：Agent 跑在发行版内，宿主候选不代表用户实际用的 pi，
+	 * 调用方（设置页/引导）应退回单结果视图（WSL 路径在 WSL 分区配置）。
+	 */
+	async listInstallations(customPath?: string, wslEnabled?: boolean, wslDistro?: string, wslUser?: string, options: { forceShellProbe?: boolean; customPaths?: readonly string[] } = {}): Promise<PiInstallation[]> {
+		if (wslEnabled && process.platform === "win32" && wslDistro && wslUser) return [];
+
+		// 先只做目录扫描：交互式 shell 反查要加载用户 rc，不能每次检测都无谓跑一遍。
+		// 两种情况才真的去问 shell：用户显式点「从终端再找一次」，或目录扫描一份都没找到
+		// （最后兜底：官方安装器的 PATH 只写进 shell rc，扫描可能真的看不见它）。
+		const scanned = this.candidateInstalls();
+		const shellPath = await this.probeLoginShellPi({ force: options.forceShellProbe, allowProbe: options.forceShellProbe === true || scanned.length === 0 });
+		// 用户路径 = 当前使用的那条（customPiPath）+ 设置里保存的备选池（piCustomPaths）；
+		// 去重后再进候选，避免同一个路径既当 active 又当备选而出现两行。
+		const userPaths = [...new Set([this.normalizeCustomPath(customPath), ...(options.customPaths ?? []).map((path) => String(path ?? "").trim())])].filter((path) => Boolean(path) && !path.startsWith("wsl://"));
+		const cacheKey = `${userPaths.join("\u0000")}\u0000${shellPath ?? ""}`;
+		const cached = installationListCache;
+		if (cached && cached.key === cacheKey && !options.forceShellProbe && Date.now() - cached.at < INSTALLATION_LIST_TTL_MS) return cached.value;
+
+		const candidates: Array<{ path: string; realPath: string; shellDefault?: boolean; userAdded?: boolean; missing?: boolean }> = [];
+		// 按 realpath 去重：`~/.local/bin/pi` 与 `~/.pi/agent/bin/pi` 是同一份安装；
+		// 保留先出现的那条（先出现 = 扫描优先级更高），并补回 shellDefault 标记。
+		const push = (path: string, flags: { shellDefault?: boolean; userAdded?: boolean; missing?: boolean } = {}) => {
+			const realPath = safeRealpath(path);
+			const existing = candidates.find((entry) => entry.realPath === realPath);
+			if (existing) {
+				// 同一份安装可能同时是「终端默认」和「我添加的」：标记合并到已有那行，不重复列出。
+				if (flags.shellDefault) existing.shellDefault = true;
+				if (flags.userAdded) existing.userAdded = true;
+				// 被自动扫描命中的条目必然存在；只有“用户添加且真的不存在”才算 missing。
+				if (flags.missing && !existsSync(path)) existing.missing = true;
+				return;
+			}
+			candidates.push({ path, realPath, ...flags });
+		};
+		for (const candidate of scanned) push(candidate);
+		// 登录 shell 反查到的 pi 可能根本不在扫描目录里（zsh / 自定义 PATH），补进来才能让用户选到它。
+		if (shellPath) push(shellPath, { shellDefault: true });
+		// 用户自己添加的路径：即使当前不存在也要列出来（missing），否则那行会静默消失，
+		// 用户既看不到「当前使用」的是谁，也无法修正或删除它。
+		for (const path of userPaths) push(path, { userAdded: true, missing: !existsSync(path) });
+
+		// 版本探测并行跑：单条几百毫秒，顺序跑会让设置页白等几秒。
+		const probes = await Promise.all(candidates.map((candidate) => this.probeVersion(candidate.path)));
+		const activePath = this.resolveCommand(customPath, wslEnabled, wslDistro, wslUser);
+		const activeRealPath = activePath.startsWith("wsl://") ? "" : safeRealpath(activePath);
+
+		const installations: PiInstallation[] = candidates.map((candidate, index) => {
+			// 路径不存在的条目不能拿去判 managed/portable（目录都没有），直接归为自定义路径。
+			const { source, managedRoot } = candidate.missing ? { source: "custom" as PiInstallationSource, managedRoot: undefined } : this.classifyInstallationSource(candidate.path);
+			return {
+				path: candidate.path,
+				realPath: candidate.realPath,
+				...(probes[index].version ? { version: probes[index].version } : {}),
+				...(probes[index].error ? { versionError: probes[index].error } : {}),
+				source,
+				...(managedRoot ? { managedRoot } : {}),
+				isActive: Boolean(activeRealPath) && candidate.realPath === activeRealPath,
+				...(candidate.userAdded ? { userAdded: true } : {}),
+				...(candidate.missing ? { missing: true } : {}),
+				...(candidate.shellDefault ? { shellDefault: true } : {}),
+			};
+		});
+
+		markNewestInstallation(installations);
+		installations.sort(compareInstallations);
+		installationListCache = { key: cacheKey, at: Date.now(), value: installations };
+		return installations;
+	}
+
+	/**
+	 * 反查「用户终端里敲 pi 用的那一份」。
+	 *
+	 * 官方安装器只把 PATH 写进**当前 shell 的 rc 文件**（bash 有 ~/.bashrc 就写 .bashrc，
+	 * 否则写 .profile），且只写当前这个 shell 家族。本项目既有的登录 shell 探测走
+	 * `/bin/sh -lc`（非交互），读不到 .bashrc，于是官方安装的 pi 在自动检测里天然不可见——
+	 * 这正是「终端里 pi 能用、PiDeck 说没装」的根因。
+	 *
+	 * 只在以下两种情况才真的跑：用户显式点「从终端再找一次」（force），或目录扫描一份都没找到
+	 * （最后兜底）——交互式 shell 会加载用户 rc，耗时与副作用都高于目录扫描，
+	 * 不适合放进每次启动的常规检测链路。
+	 * 结果只用于列表展示与排序（标 `shellDefault`），绝不参与 resolveCommand 的优先级，
+	 * 避免静默改掉已有用户实际启动的 pi。
+	 */
+	async probeLoginShellPi(options: { force?: boolean; allowProbe?: boolean } = {}): Promise<string | null> {
+		// Windows 的 PATH 来自系统合并环境（Explorer 启动的 Electron 已拿到），不走 shell rc，不需要反查。
+		if (process.platform === "win32") return null;
+		if (options.force) shellPiProbeCache = undefined;
+		const cached = shellPiProbeCache;
+		if (cached && (cached.path !== null || Date.now() - cached.at < LOGIN_SHELL_PI_NEGATIVE_TTL_MS)) return cached.path;
+		// allowProbe=false：只允许读缓存，不为这次调用启动交互式 shell。
+		if (options.allowProbe === false) return null;
+		if (shellPiProbeInflight) return shellPiProbeInflight;
+
+		const shells = this.loginShellCandidates();
+		const task = new Promise<string | null>((resolve) => {
+			const attempt = (index: number) => {
+				if (index >= shells.length) {
+					shellPiProbeCache = { path: null, at: Date.now() };
+					shellPiProbeInflight = undefined;
+					resolve(null);
+					return;
+				}
+				const shell = shells[index];
+				// 只取 stdout 里第一行「存在的绝对路径」：alias/function 形态（`alias pi='…'`）与 rc 的杂输出都被过滤掉。
+				execFile(shell, ["-ilc", "command -v pi 2>/dev/null"], { encoding: "utf8", timeout: LOGIN_SHELL_PI_PROBE_TIMEOUT_MS }, (_error, stdout) => {
+					const found = String(stdout ?? "")
+						.split("\n")
+						.map((line) => line.trim())
+						.find((line) => line.startsWith("/") && existsSync(line));
+					if (found) {
+						// fnm 这类版本管理器在交互 shell 里把 PATH 指到会话级临时软链
+						// （fnm: ~/.local/state/fnm_multishells/<id>/bin），shell 退出即被清理。
+						// 先解析成真实路径再返回：列表展示、「设为默认」、保存自定义路径拿到的
+						// 都是稳定落点，否则路径失效后 spawn pi ENOENT（#318 实测）。
+						const stable = safeRealpath(found);
+						shellPiProbeCache = { path: stable, at: Date.now() };
+						shellPiProbeInflight = undefined;
+						resolve(stable);
+						return;
+					}
+					// 这个 shell 跑不通或没找到：换下一个（$SHELL 可能是 fish/已知路径之外的 shell）。
+					attempt(index + 1);
+				});
+			};
+			attempt(0);
+		});
+		shellPiProbeInflight = task;
+		return task;
+	}
+
+	/**
+	 * 解析官方安装（managed install）的 install 根目录，语义与 pi 安装器的
+	 * `managed_install_root_for_command` 对齐：入口父目录的父目录下必须有合法标记文件；
+	 * 入口是软链（如 ~/.local/bin/pi → ~/.pi/agent/bin/pi）时按 realpath 解析后重试。
+	 * 不是 managed 安装时返回 undefined。
+	 */
+	resolveManagedInstallRoot(commandPath: string): string | undefined {
+		const roots = [dirname(dirname(commandPath)), dirname(dirname(safeRealpath(commandPath)))];
+		for (const agentDir of [...new Set(roots)]) {
+			const root = join(agentDir, "install");
+			if (this.isManagedInstallRoot(root)) return root;
+		}
+		return undefined;
+	}
+
+	private isManagedInstallRoot(root: string): boolean {
+		try {
+			const marker = JSON.parse(readFileSync(join(root, MANAGED_INSTALL_MARKER), "utf8")) as Record<string, unknown>;
+			return marker.kind === "pi-managed-install" && marker.schemaVersion === 1 && marker.layout === "releases-v1";
+		} catch {
+			return false;
+		}
+	}
+
+	/** 判定一份 pi 的来源；managed 优先（标记文件比目录名可靠），其次是用户自选路径。 */
+	private classifyInstallationSource(commandPath: string): { source: PiInstallationSource; managedRoot?: string } {
+		const managedRoot = this.resolveManagedInstallRoot(commandPath);
+		if (managedRoot) return { source: "managed", managedRoot };
+		const dir = dirname(commandPath);
+		const entry = this.searchDirEntries().find((item) => item.dir === dir);
+		// 目录不在任何已知落点 → 就是用户自己指定的那个路径（设置里手填/浏览选的）。
+		if (!entry) return { source: "custom" };
+		if (entry?.source === "portable") return { source: "portable" };
+		// 登录 shell 反查到的路径可能在便携目录的子目录下，单独兜一层。
+		const portableRoot = join(app.getPath("userData"), "pi-runtime");
+		const rel = relative(portableRoot, dir);
+		if (rel && !rel.startsWith("..") && !isAbsolute(rel)) return { source: "portable" };
+		return { source: entry?.source ?? "path" };
+	}
+
+	/** 探测单个入口的版本；失败不是错误（列表要保留这份装不起来的安装，让用户看到它）。 */
+	private async probeVersion(command: string): Promise<{ version?: string; error?: string }> {
+		const status = await this.runCheck(command, [], { quiet: true });
+		return status.installed ? { version: status.version } : { error: status.error };
+	}
+
+	/** 交互式登录 shell 候选：优先用户实际登录的 $SHELL，再退到常见路径。 */
+	private loginShellCandidates(): string[] {
+		const fromEnv = process.env.SHELL?.trim() ?? "";
+		const shells = [isAbsolute(fromEnv) ? fromEnv : "", "/bin/bash", "/bin/zsh", "/bin/sh"];
+		return [...new Set(shells.filter((shell) => shell && existsSync(shell)))];
+	}
+
+	/** 扫描目录 × 候选文件名，返回存在的入口（保序；供安装列表复用）。 */
+	private candidateInstalls(): string[] {
+		return this.getCandidates().filter((candidate) => existsSync(candidate));
+	}
+
+	/**
 	 * 归一化用户粘贴的路径：去除首尾引号，兼容 JSON 风格双反斜杠，并在 Windows 下优先补全同目录 pi.cmd。
 	 * 这样 UI 校验、settings 保存和 agent 启动都使用同一条路径规则，避免不同入口行为不一致。
 	 */
@@ -620,8 +947,11 @@ export class PiLocator {
 	 * - check: searchedDirs 为自动扫描的目录列表
 	 *
 	 * 使用 encoding: 'buffer' 避免 Windows 中文环境下 stderr 的 GBK 输出被 utf8 错误解码导致乱码。
+	 *
+	 * `quiet`：安装列表探测逐个候选跑 --version，没装好/陈旧的候选失败是常态，
+	 * 不必为每一条往主进程日志刷 console.error（真正的启动失败由 check()/PiProcess 报）。
 	 */
-	private async runCheck(command: string, searchedDirs: string[]): Promise<PiInstallStatus> {
+	private async runCheck(command: string, searchedDirs: string[], options: { quiet?: boolean } = {}): Promise<PiInstallStatus> {
 		return new Promise((resolve) => {
 			const invocation = this.createInvocation(command, ["--version"]);
 			execFile(
@@ -644,19 +974,21 @@ export class PiLocator {
 						const raw = stderrText || this.cleanExecError(error.message);
 						// 仅命令行本身没有诊断价值时，补上 exit code / timeout，方便区分 PATH 与真失败
 						const errObj = error as NodeJS.ErrnoException & { killed?: boolean; code?: string | number };
-						console.error("[PiLocator] pi CLI check failed", {
-							command,
-							error: raw,
-							stderr: stderrText || undefined,
-							stdout: stdoutText || undefined,
-							exitCode: errObj.code,
-							killed: errObj.killed,
-							invocation: {
-								command: invocation.command,
-								args: invocation.args,
-								pathPrefix: invocation.pathPrefix,
-							},
-						});
+						if (!options.quiet) {
+							console.error("[PiLocator] pi CLI check failed", {
+								command,
+								error: raw,
+								stderr: stderrText || undefined,
+								stdout: stdoutText || undefined,
+								exitCode: errObj.code,
+								killed: errObj.killed,
+								invocation: {
+									command: invocation.command,
+									args: invocation.args,
+									pathPrefix: invocation.pathPrefix,
+								},
+							});
+						}
 						resolve({ installed: false, command, searchedDirs, error: this.composeCheckFailure(raw) });
 						return;
 					}
@@ -931,11 +1263,18 @@ export class PiLocator {
 			return { kind: "unreadable" };
 		}
 		const baseDir = dirname(shimPath);
+		// 只在**实际执行行**（含 `%*`）上找入口：新式垫片（npm 12+ 的 npm.cmd/npx.cmd）用
+		// `SET "NPM_CLI_JS=%~dp0\node_modules\npm\bin\npm-cli.js"` 变量间接引用，执行行形如
+		// `"%NODE_EXE%" "%NPM_CLI_JS%" %*`。若按全文取第一个 `node_modules\…js`，会抓到变量赋值里的
+		// `npm-prefix.js`——实测把「装包」跑成「打印前缀」，exit 0 却什么都没装（npm 12.0.2 的 npm.cmd 复现）；
+		// 入口变量还可能被 prefix 覆盖，静态解析给不出与 cmd 等价的目标，因此这类形态一律回退 cmd.exe。
+		const execLines = content.split(/\r?\n/).filter((line) => line.includes("%*"));
 
 		// ① %dp0% / %~dp0% 之后紧跟 `\<node_modules 相对路径>`；`\\(` 中的反斜杠是字面量，
 		// 其后的 `(` 即捕获组起点，整段相对路径由该组取回。
-		const match = content.match(/%~?dp0%?\\(node_modules[\\/][^"%\r\n]+\.(?:m?js|cjs))/i);
-		if (match) {
+		for (const line of execLines) {
+			const match = /%~?dp0%?\\(node_modules[\\/][^"%\r\n]+\.(?:m?js|cjs))/i.exec(line);
+			if (!match) continue;
 			// 垫片内一律是 Windows 反斜杠；归一成 `/` 使 path.resolve 在 POSIX 宿主上也能正确拼接
 			// （测试会以 Linux/macOS 宿主模拟 win32 跑这条分支）。
 			const entry = resolve(baseDir, match[1].replace(/\\/g, "/"));
@@ -946,8 +1285,9 @@ export class PiLocator {
 		}
 
 		// ② 本地安装垫片：`"%dp0%\..\<包>\bin\<脚本>"`（可继续带 `..`，但必须留在 node_modules 内）
-		const shimRelative = content.match(/%~?dp0%?\\\.\.\\([^"%\r\n]+)/i);
-		if (shimRelative) {
+		for (const line of execLines) {
+			const shimRelative = /%~?dp0%?\\\.\.\\([^"%\r\n]+)/i.exec(line);
+			if (!shimRelative) continue;
 			const candidate = resolve(baseDir, `../${shimRelative[1].replace(/\\/g, "/")}`);
 			if (/[\\/]node_modules[\\/]/i.test(candidate) && isRunnableNodeEntry(candidate)) {
 				return { kind: "entry", entry: candidate, matchedBy: "shim-relative" };
@@ -988,7 +1328,11 @@ export class PiLocator {
 		// 引号外造成命令行分裂（实测 name=a" + 后续参数含 & → cmd 真去执行了 & 后面的命令）。
 		// % 故意不入类：引号阻止不了 cmd 的 %VAR% 展开（实测 "a%PATH%b" 照旧被展开），
 		// 放进字符类只会让人误以为已处理；含 % 的供应商名改由 isValidProviderName 拒绝。
-		return /[\s&()\[\]{}^=;!'+,`~|<>"]/.test(value);
+		// ~ 故意不入类：cmd 不展开 ~（那是 bash 的语义），而 Windows 8.3 短路径
+		// （C:\Users\RUNNER~1\...；CI 与部分用户机器的临时/主目录）天生带 ~。把它算进
+		// 「需要引号」会让整条命令行多套一层外引号，行尾那个引号直接粘在最后一个参数上
+		// （2026-09-30 CI 实证：中文供应商" → 供应商名匹配失败），而无空格时这层引号毫无必要。
+		return /[\s&()\[\]{}^=;!'+,`|<>"]/.test(value);
 	}
 
 	private getCommandBinDir(command: string) {

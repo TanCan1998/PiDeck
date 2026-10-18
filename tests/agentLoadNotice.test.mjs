@@ -104,7 +104,8 @@ test("reminder toggles are default-enabled and wired through App + SettingsStore
 	// 类型、主进程默认值、渲染层首屏默认值三处同步为开启
 	assert.match(settingsType, /agentCountReminderEnabled: boolean/);
 	assert.match(store, /agentCountReminderEnabled: true/);
-	assert.match(app, /agentCountReminderEnabled: true/);
+	// App 首屏默认已抽到 shared/types/settings.ts 的 createDefaultAppSettings
+	assert.match(settingsType, /agentCountReminderEnabled: true/);
 	// 渲染层 hook 读取开关：开启才提醒
 	assert.match(app, /useAgentLoadNotice\(settings\.agentCountReminderEnabled\)/);
 	// 设置面板提供开关（更新草稿对应字段）；开关位于通知设置 tab（NotificationTab）

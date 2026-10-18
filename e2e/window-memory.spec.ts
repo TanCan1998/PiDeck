@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { _electron as electron } from "@playwright/test";
 import { test, expect } from "./fixtures";
 
 /**
@@ -32,9 +33,9 @@ test("window memory: close writes position + size to userData", async ({ app, wi
 			}),
 		)
 		.toEqual([120, 90]);
-	const settled = await app.evaluate(({ BrowserWindow }) => {
+	const settled = await app.evaluate(({ BrowserWindow, screen }) => {
 		const b = BrowserWindow.getAllWindows()[0].getBounds();
-		return { x: b.x, y: b.y, width: b.width, height: b.height };
+		return { x: b.x, y: b.y, width: b.width, height: b.height, workArea: screen.getDisplayMatching(b).workArea };
 	});
 	expect(Math.abs(settled.width - 1200)).toBeLessThanOrEqual(4);
 	expect(Math.abs(settled.height - 760)).toBeLessThanOrEqual(4);
@@ -44,6 +45,49 @@ test("window memory: close writes position + size to userData", async ({ app, wi
 	const file = join(userDataPath, "last-window-bounds.json");
 	expect(existsSync(file)).toBe(true);
 	expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(settled);
+});
+
+test("window memory: edge-aligned native bounds survive full quit and restart", async ({ app, window, userDataRoot }) => {
+	await expect(window.locator("#boot-overlay")).toHaveCount(0, { timeout: 20_000 });
+	const recorded = await app.evaluate(({ BrowserWindow, screen }) => {
+		const w = BrowserWindow.getAllWindows()[0];
+		const area = screen.getDisplayMatching(w.getBounds()).workArea;
+		w.unmaximize();
+		// 原生吸附外框可含工作区外的不可见 resize border；用同类几何验证真实建窗与退出链路。
+		w.setBounds({ x: area.x - 7, y: area.y, width: Math.max(880, Math.floor(area.width / 2)) + 14, height: area.height + 7 });
+		const b = w.getBounds();
+		return { x: b.x, y: b.y, width: b.width, height: b.height, workArea: area };
+	});
+	await app.close();
+	const profileDir = join(userDataRoot, "profile");
+	expect(JSON.parse(readFileSync(join(profileDir, "last-window-bounds.json"), "utf8"))).toEqual(recorded);
+	// ProcessEnv 注解：展开 process.env 会让 ELECTRON_RENDERER_URL 被推断为必填 string，
+	// 下面 delete 需要可选键才合法；显式注解零行为差异，只让类型与现实一致。
+	const restartEnv: NodeJS.ProcessEnv = {
+		...process.env,
+		ELECTRON_RENDERER_URL: "",
+		PIDECK_E2E: "1",
+		PIDECK_E2E_USER_DATA_DIR: profileDir,
+		CI: "1",
+		...(process.platform === "win32" ? { APPDATA: userDataRoot, LOCALAPPDATA: userDataRoot, USERPROFILE: userDataRoot, HOME: userDataRoot } : process.platform === "darwin" ? { HOME: userDataRoot } : { XDG_CONFIG_HOME: userDataRoot, HOME: userDataRoot }),
+	};
+	delete restartEnv.ELECTRON_RENDERER_URL;
+	const executablePath = process.env.PIDEK_E2E_EXECUTABLE_PATH;
+	const restarted = await electron.launch({
+		...(executablePath ? { executablePath } : {}),
+		args: executablePath ? [`--user-data-dir=${profileDir}`] : [join(__dirname, ".."), `--user-data-dir=${profileDir}`],
+		env: restartEnv,
+	});
+	try {
+		const reopened = await restarted.firstWindow();
+		await reopened.waitForLoadState("domcontentloaded");
+		const restored = await restarted.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getBounds());
+		expect([restored.x, restored.y]).toEqual([recorded.x, recorded.y]);
+		expect(Math.abs(restored.width - recorded.width)).toBeLessThanOrEqual(1);
+		expect(Math.abs(restored.height - recorded.height)).toBeLessThanOrEqual(1);
+	} finally {
+		await restarted.close();
+	}
 });
 
 test.describe("window memory: startup restores recorded geometry", () => {

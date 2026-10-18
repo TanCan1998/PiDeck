@@ -57,6 +57,17 @@ const roots = [...inAsar]
 		"dsh-bill",
 		// PiDeck 主进程改读 extraResources catalog；DSH 的 pi-ai 由 @deepseek-ai 闭包追踪。
 		"undici",
+		// out/main 静态 require 的运行时库（2026-10 实测 grep 逐一验证；漏任何一个都会被误报
+		// 为可排除，照抄进 build.files 会运行时 MODULE_NOT_FOUND：
+		// zod+@modelcontextprotocol/sdk = CUA/MCP 默认关闭但 require 链存在；tar/smol-toml/
+		// minimatch/ignore = DSH/扩展运行时解析；electron-updater = 自动更新）。
+		"zod",
+		"@modelcontextprotocol/sdk",
+		"tar",
+		"electron-updater",
+		"minimatch",
+		"smol-toml",
+		"ignore",
 	]);
 
 const closure = new Set();

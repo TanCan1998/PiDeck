@@ -14,6 +14,9 @@ import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
  */
 
 const webServiceSource = readFileSync("src/main/web/WebServiceManager.ts", "utf8");
+const webApiRoutesSource = readFileSync("src/main/web/WebApiRoutes.ts", "utf8");
+const webSessionStreamSource = readFileSync("src/main/web/WebSessionStream.ts", "utf8");
+const webPageSource = readFileSync("src/main/web/webPageTemplate.ts", "utf8");
 const indexSource = readFileSync("src/main/index.ts", "utf8");
 
 const { PiEventToUiMessageStream, WebEventStreamRouter, SSE_DONE, serializeSseFrame } = loadTsCommonJs("src/main/web/WebEventStream.ts");
@@ -93,9 +96,13 @@ test("tool_execution_start/end produces tool-input-available and tool-output-ava
 		toolName: "bash",
 		toolCallId: "call_1",
 		isError: false,
+		// P2 工具卡展开：真实执行结果必须透传到 output（空对象会让历史工具卡无详情可展开）
+		result: { code: 0, stdout: "ok" },
 	});
 	assert.equal(end[0].type, "tool-output-available");
 	assert.equal(end[0].toolCallId, "call_1");
+	// result 对象由宿主传入、适配器原样透传；JSON 归一后 deepEqual（避开 vm realm 原型差异）
+	assert.deepEqual(JSON.parse(JSON.stringify(end[0].output)), { code: 0, stdout: "ok" });
 });
 
 test("assistant done and agent_end do not close the stream before tools finish", () => {
@@ -175,6 +182,56 @@ test("tool_execution_end without tool_execution_start is ignored to prevent AI S
 	assert.equal(toolCallEnd.length, 0);
 });
 
+test("duplicate toolcall_start after tool_execution_start must not reset state to running", () => {
+	const adapter = new PiEventToUiMessageStream();
+	// 顶层事件先到（正常路径）：发 input 帧
+	const top = adapter.push({ type: "tool_execution_start", toolName: "bash", toolCallId: "call_dup_1", args: { cmd: "ls" } });
+	assert.equal(top.filter((f) => f.type === "tool-input-available").length, 1);
+	// message 层重效（pi 回放顺序不定）：不重发 input，避免把已 settle 的 part 拍回 running
+	const replay = adapter.push({
+		type: "message_update",
+		assistantMessageEvent: {
+			type: "toolcall_start",
+			toolCall: { id: "call_dup_1", name: "bash", input: { cmd: "ls" } },
+		},
+	});
+	assert.equal(replay.length, 0, "duplicate input frames would regress AI SDK part state");
+});
+
+test("toolcall_end without output keeps the tool part running until execution end", () => {
+	const adapter = new PiEventToUiMessageStream();
+	adapter.push({ type: "tool_execution_start", toolName: "bash", toolCallId: "call_run_1", input: {} });
+	// LLM 层参数发完但执行未结束：不 settle，工具卡继续转圈
+	const mid = adapter.push({
+		type: "message_update",
+		assistantMessageEvent: { type: "toolcall_end", toolCall: { id: "call_run_1" } },
+	});
+	assert.equal(mid.length, 0, "toolcall_end without output must not settle the part");
+	// 真实结果到达才结算
+	const end = adapter.push({ type: "tool_execution_end", toolCallId: "call_run_1", isError: false, result: "done" });
+	assert.equal(end.at(-1).type, "tool-output-available");
+});
+
+test("toolcall_end with output settles once; later tool_execution_end does not duplicate", () => {
+	const adapter = new PiEventToUiMessageStream();
+	// message 层先到（回放最终消息带 output）
+	adapter.push({
+		type: "message_update",
+		assistantMessageEvent: {
+			type: "toolcall_start",
+			toolCall: { id: "call_fin_1", name: "bash", input: {} },
+		},
+	});
+	const mid = adapter.push({
+		type: "message_update",
+		assistantMessageEvent: { type: "toolcall_end", toolCall: { id: "call_fin_1", output: { ok: true } } },
+	});
+	assert.equal(mid.at(-1).type, "tool-output-available");
+	// 顶层事件后到：不再发第二份 output
+	const top = adapter.push({ type: "tool_execution_end", toolCallId: "call_fin_1", isError: false, result: { ok: true } });
+	assert.equal(top.filter((f) => f.type === "tool-output-available").length, 0);
+});
+
 test("agent_end error carries error frame before finish", () => {
 	const adapter = new PiEventToUiMessageStream();
 	const frames = adapter.push({ type: "agent_end", error: "boom" });
@@ -252,9 +309,11 @@ test("WebEventStreamRouter routes agent events to per-session entries only", () 
 });
 
 test("WebServiceManager registers /stream SSE endpoint with protocol header", () => {
-	assert.match(webServiceSource, /\/api\/sessions\/([^/]+)\/stream/);
-	assert.match(webServiceSource, /x-vercel-ai-ui-message-stream/);
-	assert.match(webServiceSource, /text\/event-stream/);
+	// 路由解析迁到路由表（Wave 5），SSE 头迁到 WebSessionStream（Wave 6）。
+	assert.match(webApiRoutesSource, /streamMatch = url\.pathname\.match\([^\n]*\/stream/);
+	assert.match(webSessionStreamSource, /x-vercel-ai-ui-message-stream/);
+	assert.match(webSessionStreamSource, /text\/event-stream/);
+	assert.match(webPageSource, /\/api\/sessions\/\\\$\{encodeURIComponent\(sessionId\)\}\/stream/);
 	// [DONE] 终止标记在翻译器模块
 	assert.match(readFileSync("src/main/web/WebEventStream.ts", "utf8"), /data: \[DONE\]/);
 });
@@ -268,16 +327,16 @@ test("index.ts wires pi event source + agent-to-session router to WebServiceMana
 
 test("web frontend preserves streaming block during polling refresh", () => {
 	// refresh() 在流式活跃时只渲染侧栏/状态，不整体重绘 #messages
-	assert.match(webServiceSource, /if \(streamingSessionId\)/);
-	assert.match(webServiceSource, /renderMessages\(\)/);
+	assert.match(webPageSource, /if \(streamingSessionId\)/);
+	assert.match(webPageSource, /renderMessages\(\)/);
 	// render() 不再直接操作 #messages（拆到 renderMessages）
-	const renderBody = webServiceSource.slice(webServiceSource.indexOf("function render() {"), webServiceSource.indexOf("function renderMessages()"));
+	const renderBody = webPageSource.slice(webPageSource.indexOf("function render() {"), webPageSource.indexOf("function renderMessages()"));
 	assert.doesNotMatch(renderBody, /el\("messages"\)/);
 });
 
 test("web frontend reloads authoritative messages on stream finish", () => {
 	// [DONE] 后先停流、再 loadSessionMessages + 整体重绘（替换流式增量块）
-	assert.match(webServiceSource, /finishStream\(sessionId\)/);
-	assert.match(webServiceSource, /loadSessionMessages\(sessionId\)/);
-	assert.match(webServiceSource, /async function finishStream/);
+	assert.match(webPageSource, /finishStream\(sessionId\)/);
+	assert.match(webPageSource, /loadSessionMessages\(sessionId\)/);
+	assert.match(webPageSource, /async function finishStream/);
 });

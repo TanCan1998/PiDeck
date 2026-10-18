@@ -655,6 +655,9 @@ export class AutomationRunCoordinator {
 				}
 			}
 
+			// 自动运行的终态必须留痕：无人值守触发的 agent 活动只能靠日志回溯
+			void this.logger?.info("automation", "Automation run finished", { runId, taskId: tracker?.taskId ?? run?.taskId, status, durationMs, ...(error ? { error } : {}) });
+
 			const updatedRun = await this.store.updateRun(
 				runId,
 				{

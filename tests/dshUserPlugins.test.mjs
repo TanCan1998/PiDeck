@@ -3,9 +3,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { load } from "js-yaml";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
-const { readUserPatchRows, isUserPluginEntry, classifyStaticPlugins, removeUserPatchRow, normalizeModuleName, resolveManagedPluginDir, USER_PATCH_FILENAME } = loadTsCommonJs("src/main/dsh/dshUserPlugins.ts");
+const { readUserPatchRows, isUserPluginEntry, classifyStaticPlugins, removeUserPatchRow, normalizeModuleName, resolveManagedPluginDir, withArrayDocumentFallback, dropEmptyArrayMarker, ensureUserPatchLayerIsArrayDocument, USER_PATCH_FILENAME } = loadTsCommonJs("src/main/dsh/dshUserPlugins.ts");
 
 const SAMPLE_PATCH = [
 	"# PiDeck / DSH 用户补丁层",
@@ -165,3 +166,105 @@ test("readUserPatchRows：真实读文件（集成路径，保证 readFileSync �
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+// dsh 0.2.0-rc.2 起 loadOptionalPatches 硬性要求补丁文件是顶层 YAML 数组：
+// 只有注释的文件解析成 null → host 直接起不来（用户可见报错 must be a top-level YAML array）。
+const COMMENT_ONLY_HEADER = ["# PiDeck / DSH 用户补丁层", "# 注释", "", ""].join("\n");
+
+test("withArrayDocumentFallback：只有注释的空文档补一行 []，注释原样保留", () => {
+	const healed = withArrayDocumentFallback(COMMENT_ONLY_HEADER);
+	assert.match(healed, /# PiDeck \/ DSH 用户补丁层/);
+	assert.deepEqual(load(healed), [], "补完必须是可解析的空数组");
+});
+
+test("withArrayDocumentFallback：合法数组/可疑形状原样返回（不猜用户意图）", () => {
+	assert.equal(withArrayDocumentFallback(SAMPLE_PATCH), SAMPLE_PATCH, "已是数组不动");
+	assert.equal(withArrayDocumentFallback("- insert:\n    - id: x/host\n"), "- insert:\n    - id: x/host\n");
+	assert.equal(withArrayDocumentFallback("id: scalar-top\n"), "id: scalar-top\n", "顶层是映射不猜");
+	assert.equal(withArrayDocumentFallback("name: [unterminated\n"), "name: [unterminated\n", "解析失败的形状不改写");
+});
+
+test("removeUserPatchRow 删掉最后一行后只剩注释 → 补 [] 仍是合法补丁层（卸载链路）", () => {
+	const single = [COMMENT_ONLY_HEADER, "- insert:", "    - id: only-one/host", "      name: dsh-plugin-only", "      config: {}", ""].join("\n");
+	const afterUninstall = removeUserPatchRow(single, { id: "only-one/host" });
+	assert.equal(afterUninstall.removed, true);
+	assert.ok(!afterUninstall.text.includes("- insert:"));
+	assert.equal(classifyEmpty(afterUninstall.text), true, "删完确实是空文档（正是必须出手的场景）");
+	const healed = withArrayDocumentFallback(afterUninstall.text);
+	assert.equal(readUserPatchRowsFromString(healed), 0, "补完 host 能起、且没有用户插件");
+});
+
+test("dropEmptyArrayMarker：摘掉占位后追加 insert 块仍是合法数组文档（install-dsh-plugin 追加链路）", () => {
+	const healed = withArrayDocumentFallback(COMMENT_ONLY_HEADER);
+	const stripped = dropEmptyArrayMarker(healed);
+	assert.ok(!stripped.includes("[]"), "占位行已摘");
+	const appended = `${stripped.endsWith("\n") ? "" : "\n"}- insert:\n    - id: new-plugin/host\n      name: dsh-plugin-new\n      config: {}\n`;
+	const document = `${stripped}${appended}`;
+	const parsed = load(document);
+	assert.equal(Array.isArray(parsed), true, "[] 与块式序列不能并存：追加前必须去占位");
+	assert.deepEqual(parsed[0].insert[0].id, "new-plugin/host");
+	// 缩进位置的字面 []（config 里的空数组值）不得被误删
+	assert.equal(dropEmptyArrayMarker("- insert:\n    - id: x/host\n      config: []\n"), "- insert:\n    - id: x/host\n      config: []\n");
+});
+
+test("ensureUserPatchLayerIsArrayDocument：就地修复注释-only 文件；缺失/已合法不写盘", () => {
+	const dir = mkdtempSync(join(tmpdir(), "pideck-heal-"));
+	try {
+		const missing = join(dir, "absent.yml");
+		assert.equal(ensureUserPatchLayerIsArrayDocument(missing), false, "文件缺失是合法状态");
+
+		const patchPath = join(dir, USER_PATCH_FILENAME);
+		writeFileSync(patchPath, COMMENT_ONLY_HEADER, "utf8");
+		assert.equal(ensureUserPatchLayerIsArrayDocument(patchPath), true);
+		const healed = readFileSync(patchPath, "utf8");
+		assert.match(healed, /# 注释/);
+		assert.deepEqual(load(healed), []);
+		assert.equal(ensureUserPatchLayerIsArrayDocument(patchPath), false, "已合法不再重复写");
+
+		writeFileSync(patchPath, SAMPLE_PATCH, "utf8");
+		assert.equal(ensureUserPatchLayerIsArrayDocument(patchPath), false, "有内容的补丁层不碰");
+		assert.equal(readFileSync(patchPath, "utf8"), SAMPLE_PATCH);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("DshHost 接线：启动前自愈补丁层，卸载写盘也走 [] 兜底", () => {
+	const source = readFileSync("src/main/dsh/DshHost.ts", "utf8");
+	assert.match(source, /ensureUserPatchLayerIsArrayDocument\(join\([\s\S]{0,80}?USER_PATCH_FILENAME\)\)/);
+	assert.match(source, /writeFileSync\(\s*patchPath,\s*withArrayDocumentFallback\(removed\.text\)/);
+	// 自愈必须发生在 host fork 之前（acquireHostLock 同段之前），否则补丁错误照旧致命。
+	const startIndex = source.search(/private async start\(\)/);
+	const healIndex = source.indexOf("ensureUserPatchLayerIsArrayDocument", startIndex);
+	const lockIndex = source.indexOf("this.acquireHostLock()", healIndex);
+	assert.ok(startIndex !== -1 && healIndex !== -1 && lockIndex !== -1 && healIndex < lockIndex);
+});
+
+test("install-dsh-plugin 登记前摘掉 [] 占位（与自愈写入格式兼容）", () => {
+	const script = readFileSync("scripts/install-dsh-plugin.mjs", "utf8");
+	// 与 dshUserPlugins.dropEmptyArrayMarker 同一判据（脚本不能 import TS，允许各留一份，由本测试把关）。
+	const stripIndex = script.indexOf(String.raw`/^\s*\[\s*\]\s*$/`);
+	const writeIndex = script.indexOf("writeFileSync(patchPath, `${current}");
+	assert.ok(stripIndex !== -1 && writeIndex !== -1 && stripIndex < writeIndex, "过滤发生在追加 Loader 行之前");
+});
+
+/** 判断是否空文档（与生产代码同一判据，测试里只做断言用）。 */
+function classifyEmpty(text) {
+	try {
+		return load(text) === null;
+	} catch {
+		return false;
+	}
+}
+
+function readUserPatchRowsFromString(text) {
+	const dir = mkdtempSync(join(tmpdir(), "pideck-rows-"));
+	try {
+		const path = join(dir, USER_PATCH_FILENAME);
+		writeFileSync(path, text, "utf8");
+		// 只回长度：沙箱里构造的数组与主 realm 的 Array 原型不同，断言整体结构会假失败。
+		return readUserPatchRows(path).rows.length;
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+}

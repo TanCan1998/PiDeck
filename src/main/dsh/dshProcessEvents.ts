@@ -1,5 +1,7 @@
 import type { SessionProcessEvent } from "../../shared/types/trajectory";
 import type { AgentRuntimeState } from "../../shared/types";
+import { calculateTokensPerSecond } from "../../shared/tps";
+import { estimateTokensFromText } from "../tokenEstimate";
 
 /**
  * DSH SessionEvent → 轨迹过程事件（纯函数，可单测）。
@@ -236,19 +238,21 @@ export function parseContextPressureProjection(values: unknown): { pressureToken
 	return Object.keys(result).length > 0 ? result : undefined;
 }
 
-/** 解析 contextBreakdown 投影单元值（attach 的 values 包装形或 mux 帧的单元值形均可）。 */
-export function parseContextBreakdownProjection(values: unknown): { systemTokens: number; toolsTokens: number; messageTokens: number } | undefined {
+/** 解析 contextBreakdown 投影单元值（attach 的 values 包装形或 mux 帧的单元值形均可）。
+ *  只保留实际上报的字段：缺的字段保持 undefined（=「未知」），绝不补 0——
+ *  补 0 会让只有 messageTokens 的投影在圆环上渲染成「系统 0 / 工具 0」的假数据。 */
+export function parseContextBreakdownProjection(values: unknown): { systemTokens?: number; toolsTokens?: number; messageTokens?: number } | undefined {
 	const raw = unwrapProjectionValue(values, "contextBreakdown");
 	if (!isRecord(raw)) return undefined;
 	const systemTokens = asNumber(raw.systemTokens);
 	const toolsTokens = asNumber(raw.toolsTokens);
 	const messageTokens = asNumber(raw.messageTokens);
 	if (systemTokens === undefined && toolsTokens === undefined && messageTokens === undefined) return undefined;
-	return {
-		systemTokens: systemTokens ?? 0,
-		toolsTokens: toolsTokens ?? 0,
-		messageTokens: messageTokens ?? 0,
-	};
+	const result: { systemTokens?: number; toolsTokens?: number; messageTokens?: number } = {};
+	if (systemTokens !== undefined) result.systemTokens = systemTokens;
+	if (toolsTokens !== undefined) result.toolsTokens = toolsTokens;
+	if (messageTokens !== undefined) result.messageTokens = messageTokens;
+	return result;
 }
 
 /**
@@ -286,8 +290,13 @@ export function parseSessionStatsProjection(values: unknown): DshSessionStatsPro
 }
 
 /**
- * 由 host sessionStats 投影派生渲染层视图：平均首字延迟与生成速度
- * （无样本字段保持 undefined，UI 不渲染对应行）。
+ * 由 host sessionStats 投影派生渲染层视图：平均首字延迟与两种生成速度
+ * （无样本字段保持 undefined，UI 显示 —）。
+ *
+ * 端到端分母取 ttftMs + decodeMs：官方折叠里有首 token 的 step，其 step/start →
+ * assistant/message 恰好拆成这两段，相加即模型调用耗时（step 内自动重试的等待
+ * 无论落在首 token 前后都在其中）。ttftMs 另含「有首 token 但无 usage」的 step（罕见），
+ * 只会让端到端略偏低。没有解码样本时两种速度都不给，口径保持一致。
  */
 export function deriveDshSessionStats(raw: DshSessionStatsProjection): AgentRuntimeState["dshSessionStats"] {
 	return {
@@ -296,7 +305,8 @@ export function deriveDshSessionStats(raw: DshSessionStatsProjection): AgentRunt
 		llmMs: raw.llmMs,
 		toolMs: raw.toolMs,
 		ttftAvgMs: raw.ttftSteps > 0 ? raw.ttftMs / raw.ttftSteps : undefined,
-		tokensPerSecond: raw.decodeMs > 0 ? raw.decodeTokens / (raw.decodeMs / 1000) : undefined,
+		tokensPerSecond: calculateTokensPerSecond(raw.decodeTokens, raw.decodeMs),
+		endToEndTokensPerSecond: raw.decodeMs > 0 ? calculateTokensPerSecond(raw.decodeTokens, raw.ttftMs + raw.decodeMs) : undefined,
 	};
 }
 
@@ -377,16 +387,17 @@ export function deriveSessionStatsFallback(messages: ReadonlyArray<{ role?: stri
 }
 
 /**
- * 对话消息 token 估算（与 pi 的 contextMessageTokens 同规则：文本字符数 ÷ 4）。
+ * 对话消息 token 估算（与 pi 的 contextMessageTokens 同规则：CJK 加权，中文 ≈1.5 字/token，
+ * 其余 ≈4 字符/token，见 src/main/tokenEstimate.ts）。
  * 无 host contextPressure 投影（token-meter 未挂载/adapter 未上报 usage）时的
  * 上下文圆环兜底占用——配合 request/context 的 contextWindow，dsh 会话在首个
  * 回合后即可显示圆环，与 pi 行为统一。
  */
 export function estimateContextTokens(messages: ReadonlyArray<{ role?: string; text?: string }>): number {
-	let chars = 0;
+	let tokens = 0;
 	for (const message of messages) {
 		if (typeof message.text !== "string" || !message.text) continue;
-		chars += message.text.length;
+		tokens += estimateTokensFromText(message.text);
 	}
-	return Math.floor(chars / 4);
+	return tokens;
 }

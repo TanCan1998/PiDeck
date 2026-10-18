@@ -134,6 +134,12 @@ dsh 仍随包分发，但把「runtime 是否可用」做成一等状态并据�
 | 打包 | `scripts/pack-dsh-runtime.mjs`：闭包收集 + 文件级裁剪 + **零复制打包**（用 tar 的 `onWriteEntry` 重命名条目，直接引用 node_modules 原文件）；`scripts/check-dsh-asar.mjs` 职责改为校验 runtime 归档（19 个基线包 + 6 个入口包） |
 | 依赖分区 | 24 个 dsh 包（22 个 `@deepseek-ai/*` + `dsh-bill` + `dsh-tool-pwsh-persistent`）已移入 devDependencies；production 依赖从 31 个降到 7 个 |
 
+**下载失败与取消的恢复边界**
+
+- 在线 runtime / runner Node 索引最多等待 30 秒，响应体上限 2 MiB；远端中止或超时会结束检查，不再一直停在加载中。
+- 归档下载采用 60 秒无数据进展超时，收到数据后重新计时，不以固定总时长中断仍在传输的大文件。
+- 成功、失败、取消和重定向交接均清理计时器及取消监听；取消或超时先关闭文件传输再返回，避免重试时半截文件仍被占用。现有断点续传与 sha256 校验保持不变。
+
 **实测数据（win32-x64，dsh 0.1.1-rc.1）**
 
 | 项 | 裁剪前 | 裁剪后 |

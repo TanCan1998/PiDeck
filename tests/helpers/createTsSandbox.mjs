@@ -109,6 +109,7 @@ export function createTsSandbox(options = {}) {
 				TextDecoder,
 				TextEncoder,
 				AbortController,
+				AbortSignal,
 				setTimeout,
 				clearTimeout,
 				setInterval,
@@ -117,6 +118,10 @@ export function createTsSandbox(options = {}) {
 				clearImmediate,
 				queueMicrotask,
 				crypto: globalThis.crypto,
+				// 构建期 define 的沙箱默认值（与 loadTsCommonJs 同源）：不预置它，
+				// 生产模块只要 import 到 deepLinkScheme / channelIdentity 就整片
+				// ReferenceError。默认 stable 通道，dev 通道用例经 globals 覆盖。
+				__PIDECK_DEV_BUILD__: false,
 				...globals,
 			},
 			{ filename: absolutePath },

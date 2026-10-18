@@ -11,7 +11,7 @@ import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
  * 开帧快照；PiDeck 的历史浏览是冷读路径（不能 follow，promote 会激活 Agent），
  * 因此由本桥把 sessionQuery observation cursor 暴露给主进程。任何对 throughSeq
  * 语义的误用（MAX_SAFE_INTEGER、负数等）都会让历史读取静默变空——见
- * docs/dsh-0.1.5-typert-migration.md 与 DshAgentManager.historyPage 注释。
+ * docs/dsh-remote-contract.md 与 DshAgentManager.historyPage 注释。
  */
 const { sessionBridgeRpc, handleSessionBridgeFetch, PIDECK_SESSION_BRIDGE_SERVICE } = loadTsCommonJs(
 	"src/main/dsh/pideckSessionBridge.ts",

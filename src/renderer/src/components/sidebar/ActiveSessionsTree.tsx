@@ -1,3 +1,4 @@
+import { recentSessionActivityAtom } from "../../atoms/recent-session-atoms";
 import { Ellipsis } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAtomValue } from "jotai";
@@ -11,17 +12,18 @@ import type { SidebarController } from "../../hooks/useSidebarController";
 import type { SidebarActions } from "./SidebarContent";
 import { Button } from "../ui-shadcn/button";
 import { PendingAskBadge } from "./PendingAskBadge";
-import { SessionBackendMark } from "../session/SessionSourceBadge";
+import { AcpBackendMark, SessionBackendMark, SideTaskMark } from "../session/SessionSourceBadge";
 import { SessionHoverCard } from "./SessionHoverCard";
 import { TitleScrollText } from "./TitleScrollText";
 import { SESSION_TAB_DRAG_MIME } from "../../utils/sessionSplitEdge";
 import { formatRelativeTime } from "../../utils/relativeTime";
-import { RECENT_SESSIONS_INITIAL_VISIBLE, collectActiveSessionRows, collectRecentSessionRows, growRecentVisible } from "./activitySessionsModel";
+import { useSessionActivityAt } from "../../hooks/sidebar/useSessionActivityClock";
+import { RECENT_SESSIONS_INITIAL_VISIBLE, collectActiveSessionRows, collectRecentActivityRows, growRecentVisible } from "./activitySessionsModel";
 import { RecentSessionsSection } from "./RecentSessionsSection";
 
 /** 活动页行样式：与 SessionTree 会话行同尺寸同圆角，但选中底不需要（活动页行不持久）。 */
 const activeRowClass =
-	"group/resource conversation agent-row relative flex min-h-8 w-full items-center gap-1.5 rounded-lg border border-transparent px-2 py-0 text-left text-body text-foreground shadow-none transition-[background-color,border-color,box-shadow] duration-200 hover:border-border-subtle hover:bg-muted/60 hover:text-foreground focus-visible:bg-muted/70 focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset";
+	"group/resource conversation agent-row relative flex min-h-8 w-full items-center gap-1.5 rounded-lg border border-transparent px-2 py-0 text-left text-body text-foreground shadow-none transition-[background-color,border-color,box-shadow] duration-base hover:border-border-subtle hover:bg-muted/60 hover:text-foreground focus-visible:bg-muted/70 focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset";
 
 /** 右侧「更多操作」按钮：与 SessionTree 同一套 absolute 浮层虚化模式，
  *  行 hover 出现，菜单打开期间保持点亮。 */
@@ -39,11 +41,13 @@ const rowMoreActionsClass = "row-more-actions pointer-events-none absolute top-1
  * 在侧栏面板下半部分。活动行可能很多，若共用一个滚动容器，要一路滚到底才能看到
  * 最近会话；反过来「加载更多」也会把活动行顶出视野。两半各占 1fr、各自滚动。
  */
-export function ActiveSessionsTree(props: { controller: SidebarController; actions: SidebarActions; currentSessionId?: string }) {
+export function ActiveSessionsTree(props: { controller: SidebarController; actions: SidebarActions; currentSessionId?: string; recentOnly?: boolean }) {
 	const { controller } = props;
 	// 活动页以会话为粒度，待确认标记直接按本行 sessionId 判定，
 	// 避免订阅项目级聚合值导致一个会话的 ask 点亮整页。
 	const sessionRuntimeUiById = useAtomValue(sessionRuntimeUiByIdAtom);
+	// 相对时间基准：live 计时点（本轮开始/上一轮结束）优先，否则用行的排序时间。
+	const activityAt = useSessionActivityAt();
 	// 活动行：跨项目收集所有已绑定 runtime 的 Agent（live + 终态）。
 	// catalog 只含 runtime 绑定（detached 已被 agentInventoryAtom 排除），
 	// 因此不再按 isLiveRuntimeStatus 过滤——否则 error/closed 的失败会话会从活动页消失。
@@ -52,25 +56,54 @@ export function ActiveSessionsTree(props: { controller: SidebarController; actio
 	// 「最近会话」可见条数：默认 10 条，手动「加载更多」每次 +10；「收起」回到首页大小。
 	// 行数受控是性能要求——侧栏一次性渲染几百行历史会明显卡顿（用户反馈）。
 	const [recentVisibleCount, setRecentVisibleCount] = useState(RECENT_SESSIONS_INITIAL_VISIBLE);
-	const recent = useMemo(() => collectRecentSessionRows({ catalog: controller.catalog, activeRows: liveRows, visibleCount: recentVisibleCount }), [controller.catalog, liveRows, recentVisibleCount]);
-	// 「最近」是跨项目数据，而项目 catalog 只在展开/选中该项目时才扫描。
-	// 活动页挂载时把尚未扫描的项目排进按需扫描（主进程立即返回目录缓存、后台扫描去重+冷却，
-	// 见 BackgroundScanCoordinator），否则重启后活动区与最近区会同时为空——
-	// 这正是用户要求补「最近」的起因。已在 loading/ready 的项目在 App 侧直接跳过，
-	// 且以静默方式预热（不挂 loading 态、不装看门狗），避免侧栏一堆项目同时转圈。
-	const projectIds = useMemo(() => controller.catalog.projects.map((project) => project.id), [controller.catalog.projects]);
+	const recentActivity = useAtomValue(recentSessionActivityAtom);
+	// 两种模式共用同一份「最近会话」收集逻辑：数据源是用户实际启动过的会话访问记录。
+	// 差异只在去重——本页渲染活动行时排除其中已出现的会话；简洁模式（recentOnly）不渲染
+	// 活动行，传空数组，否则正在运行的会话会在侧栏彻底消失。
+	const recent = useMemo(
+		() =>
+			collectRecentActivityRows({
+				catalog: controller.catalog,
+				activity: recentActivity,
+				activeRows: props.recentOnly ? [] : liveRows,
+				visibleCount: recentVisibleCount,
+			}),
+		[controller.catalog, liveRows, recentVisibleCount, recentActivity, props.recentOnly],
+	);
+	// 只预热本页真正要渲染的行所属项目，不再扫描全部历史来填满「最近」（旧实现的后遗症）。
+	// 活动行要用各自项目的会话记录补标题，故非 recentOnly 时并上活动行所属项目。
+	const prewarmProjectIds = useMemo(() => {
+		const wanted = new Set(recentActivity.map((entry) => entry.projectId));
+		if (!props.recentOnly) for (const row of liveRows) wanted.add(row.projectId);
+		return [...wanted].filter((id) => controller.catalog.projects.some((project) => project.id === id));
+	}, [recentActivity, liveRows, props.recentOnly, controller.catalog.projects]);
 	const ensureCatalogsLoaded = props.actions.sessions.ensureCatalogsLoaded;
 	// 每个项目只请求一次：动作引用可能随 App 每次渲染变化，若不记住已请求的项目，
 	// 失败/空结果项目会被反复重试，形成扫描请求风暴。重试交给项目刷新入口或重进活动页。
 	const requestedProjectIdsRef = useRef<Set<string>>(new Set());
 	useEffect(() => {
-		const pending = projectIds.filter((projectId) => !requestedProjectIdsRef.current.has(projectId));
+		const pending = prewarmProjectIds.filter((projectId) => !requestedProjectIdsRef.current.has(projectId));
 		if (pending.length === 0) return;
 		for (const projectId of pending) requestedProjectIdsRef.current.add(projectId);
 		ensureCatalogsLoaded(pending);
-	}, [ensureCatalogsLoaded, projectIds]);
+	}, [ensureCatalogsLoaded, prewarmProjectIds]);
 
 	const hasRecent = recent.rows.length > 0;
+	if (props.recentOnly)
+		return (
+			<div className="recent-sessions-pane flex flex-col">
+				<RecentSessionsSection
+					controller={controller}
+					actions={props.actions}
+					currentSessionId={props.currentSessionId}
+					rows={recent.rows}
+					totalCount={recent.totalCount}
+					visibleCount={recentVisibleCount}
+					onLoadMore={() => setRecentVisibleCount((current) => growRecentVisible(current, recent.totalCount))}
+					onCollapse={() => setRecentVisibleCount(RECENT_SESSIONS_INITIAL_VISIBLE)}
+				/>
+			</div>
+		);
 
 	// 两段都空才是真正的空态；只有活动区空时用一行提示顶替，
 	// 不能让 h-full 空态占满高度把下方「最近」挤出视野。
@@ -92,7 +125,7 @@ export function ActiveSessionsTree(props: { controller: SidebarController; actio
 					const sessionId = record?.id;
 					const selected = sessionId === props.currentSessionId;
 					const summary = record ? sessionRecordToSummary(record) : undefined;
-					const displayTitle = summary?.name || agent.title;
+					const displayTitle = summary?.name || agent.title || t("common.untitled");
 					const project = controller.catalog.projects.find((p) => p.id === projectId);
 					const pendingAsk = hasPendingAskForSession(sessionId, sessionRuntimeUiById);
 					// 单击默认 preview；双击显式常驻（与 SessionTree 同一入口语义）。
@@ -113,7 +146,7 @@ export function ActiveSessionsTree(props: { controller: SidebarController; actio
 									type="button"
 									className={cn(activeRowClass, selected && "bg-bg-active text-foreground")}
 									onClick={() => openSession()}
-									onDoubleClick={() => openSession("permanent")}
+									onDoubleClick={props.actions.sessions.simpleNavigation ? undefined : () => openSession("permanent")}
 									draggable={Boolean(sessionId)}
 									onDragStart={(event) => {
 										if (!sessionId) return;
@@ -129,11 +162,13 @@ export function ActiveSessionsTree(props: { controller: SidebarController; actio
 										<div className="conversation-title flex min-w-0 items-center gap-1.5">
 											{/* 选中背景仍保留，聚焦行也允许 hover 查看完整标题 */}
 											<TitleScrollText text={displayTitle} className="font-medium" />
-											<SessionBackendMark backend={agent.backend} />
+											{agent.backend === "acp" ? <AcpBackendMark acpToolId={record?.acpToolId} /> : <SessionBackendMark backend={agent.backend} />}
 											{/* 待确认标记：该会话正在等用户回答 ask，与项目行徽章共用同一组件 */}
 											{pendingAsk && <PendingAskBadge count={1} />}
-											{/* 相对时间常显：hover 时被右侧「⋯」浮层盖住（与历史会话行同一策略） */}
-											<span className="shrink-0 text-caption tabular-nums text-muted-foreground group-hover/row:hidden">{formatRelativeTime(sortAt)}</span>
+											{record?.sideTask && <SideTaskMark />}
+											{/* 相对时间常显：hover 时被右侧「⋯」浮层盖住（与历史会话行同一策略）。
+											   基准是计时点（用户输入 / turn 结束），不是每次写入都刷新的文件时间。 */}
+											<span className="shrink-0 text-micro tabular-nums text-muted-foreground group-hover/row:hidden">{formatRelativeTime(activityAt(sessionId, sortAt))}</span>
 										</div>
 									</div>
 								</button>

@@ -63,7 +63,8 @@ export async function verifyRemoteGitBranch(input: { window: Page; credentials: 
 
 	await test.step("信任并打开引用区（展开即手动加载）", async () => {
 		await remoteProjectRow(window, root.split("/").pop() ?? "")
-			.locator(".project-draggable")
+			.locator(".conversation-title")
+			.first()
 			.click();
 		await window.getByRole("button", { name: "打开右侧边栏", exact: true }).click();
 		await window.getByTestId("drawer-rail-git").click();

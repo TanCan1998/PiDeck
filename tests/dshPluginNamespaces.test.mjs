@@ -19,7 +19,7 @@ test("isDshPluginNamespace：PiDeck 独占管理的保留命名空间不属于�
 	assert.equal(isDshPluginNamespace("llm-deepseek"), false);
 	assert.equal(isDshPluginNamespace("llm-pi-ai"), false);
 	assert.equal(isDshPluginNamespace("permission"), false);
-	assert.equal(isDshPluginNamespace("agent-presets"), false);
+	assert.equal(isDshPluginNamespace("agent-preset-registry"), false);
 });
 
 test("dshPluginNamespaceTitleKey：已知插件返回 i18n 标题 key", () => {

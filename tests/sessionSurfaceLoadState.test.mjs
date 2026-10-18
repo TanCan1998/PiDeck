@@ -73,8 +73,11 @@ test("timeline controller exposes surface loading for the bottom composer gate",
 	assert.match(controllerSource, /isSurfaceLoading/);
 	assert.match(controllerSource, /deriveSessionSurfaceRuntime\(/);
 	assert.match(controllerSource, /isKnownEmptySessionRecord/);
-	// 切会话已有缓存或空草稿时不得把 loadState 打成 loading（否则空会话闪骨架）。
-	assert.match(controllerSource, /if \(cachedEntry \|\| knownEmpty\) return/);
+	// 切会话已有**真实内容**或空草稿时不得把 loadState 打成 loading（否则空会话闪骨架）。
+	// 但空 runtime 投影（主进程读盘失败下发 0 条、重启换代下发未初始化窗口）不算内容——
+	// 必须读盘核实，否则 loadState 停在 undefined、骨架屏永驻
+	// （2026-10-08 fork/copy 现场、Issue #350）。
+	assert.match(controllerSource, /shouldSkipInitialDiskRead\(\{ previouslyLoaded, cachedEntry, knownEmpty, loadStateStatus \}\)/);
 	// 预热写 filePath/dshSessionId 后仍粘住空会话，避免起始页 / 历史骨架抽搐。
 	assert.match(controllerSource, /stickyEmptyRef/);
 	// 无锚点恢复必须等读盘完成，否则冷会话 scrollHeight≈0 把 restorePhase 钉成 complete。
@@ -91,7 +94,7 @@ test("timeline skeleton copy is history loading, not agent starting", () => {
 	assert.match(timelineSource, /t\("app\.historyLoading"\)/);
 	assert.doesNotMatch(timelineSource.slice(timelineSource.indexOf("{isConversationLoading && (")), /t\("app\.agentStarting"\)/);
 	assert.match(zh, /"app\.historyLoading": "正在加载历史…"/);
-	assert.match(en, /"app\.historyLoading": "Loading history\.\.\."/);
+	assert.match(en, /"app\.historyLoading": "Loading history…"/);
 });
 
 test("unloaded session with no load state must not flash the start surface", () => {
@@ -227,4 +230,13 @@ test("history availability gate only flags pages main marked unavailable", () =>
 	// 真空会话（无 unavailable 字段）不能被误判成不可用——否则空草稿永远进错误态。
 	assert.equal(sessionHistoryUnavailableState({ messages: [], total: 0, nextBefore: null }), null);
 	assert.equal(sessionHistoryUnavailableState({ messages: [{ role: "user" }], total: 1, nextBefore: 0 }), null);
+});
+
+test("stickyEmptySessionIds 必须有 LRU 上限（会话删除后条目永不清理，桌面进程长运行无界增长）", () => {
+	const controllerSource = readFileSync("src/renderer/src/hooks/useSessionTimelineController.ts", "utf8");
+	// 与 latestLoadBySession（LATEST_LOAD_LRU_LIMIT=20）同构：模块级 Set 跨挂载存活，
+	// 删除的草稿会话在 catalog 清理后 sticky 条目仍残留，只有上限裁剪能兑底。
+	assert.match(controllerSource, /STICKY_EMPTY_SESSION_LRU_LIMIT = \d+/, "sticky 集合必须声明 LRU 上限常量");
+	assert.match(controllerSource, /stickyEmptySessionIds\.size <= STICKY_EMPTY_SESSION_LRU_LIMIT\) return/, "add 路径必须走上限裁剪");
+	assert.match(controllerSource, /stickyEmptySessionIds\.keys\(\)\.next\(\)\.value/, "超限必须删最早插入的键（Set 迭代序 = 插入序）");
 });

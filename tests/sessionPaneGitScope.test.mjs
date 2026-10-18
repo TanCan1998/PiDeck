@@ -61,6 +61,10 @@ describe("session pane git project scope", () => {
 				},
 			};
 			const gitCalls = [];
+			// refs 事件源 mock：与真实 preload 行为对齐——watchRefs 返回 watchId，
+			// onRefsChanged 返回退订函数；事件由测试按需手动触发。
+			const refsListeners = [];
+			let watchSeq = 0;
 			const gitApiMock = {
 				branches: async (projectId) => {
 					gitCalls.push(["branches", projectId]);
@@ -73,6 +77,21 @@ describe("session pane git project scope", () => {
 				checkout: async (projectId, branch) => {
 					gitCalls.push(["checkout", projectId, branch]);
 					return { current: branch, branches: ["branch-a", "branch-b"] };
+				},
+				watchRefs: async (projectId) => {
+					gitCalls.push(["watchRefs", projectId]);
+					watchSeq += 1;
+					return `watch-${watchSeq}`;
+				},
+				unwatchRefs: async (watchId) => {
+					gitCalls.push(["unwatchRefs", watchId]);
+				},
+				onRefsChanged: (listener) => {
+					refsListeners.push(listener);
+					return () => {
+						const index = refsListeners.indexOf(listener);
+						if (index >= 0) refsListeners.splice(index, 1);
+					};
 				},
 			};
 			const { usePaneGitInfo: bareHook } = loadTsCommonJs("src/renderer/src/hooks/usePaneGitInfo.ts", {

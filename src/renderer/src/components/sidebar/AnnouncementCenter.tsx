@@ -75,7 +75,7 @@ function levelToneClass(level: AnnouncementItem["level"]): string {
 function SectionLabel(props: { children: ReactNode; count?: number }) {
 	const { children, count } = props;
 	return (
-		<div className="flex items-baseline gap-1.5 px-0.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70 first:mt-0 mt-1">
+		<div className="flex items-baseline gap-1.5 px-0.5 text-micro font-medium uppercase tracking-wide text-muted-foreground/70 first:mt-0 mt-1">
 			<span>{children}</span>
 			{count !== undefined && count > 0 && <span className="text-muted-foreground/50">({count})</span>}
 		</div>
@@ -94,9 +94,9 @@ function AnnouncementCard(props: { item: AnnouncementItem; unread: boolean; onVi
 			{/* 列表卡片不渲染 md（公告是外部数据）：摘要清洗标记 + 折叠空白 + 截断，
 			   完整正文放详情弹窗经 MarkdownStream 的 sanitize 管线渲染 */}
 			<p className="mt-1.5 line-clamp-2 text-xs leading-relaxed text-muted-foreground">{announcementExcerpt(item.body)}</p>
-			<footer className="mt-2 flex items-center justify-between text-[11px] text-muted-foreground/80">
+			<footer className="mt-2 flex items-center justify-between text-micro text-muted-foreground/80">
 				<time dateTime={item.publishedAt}>{item.publishedAt.slice(0, 10)}</time>
-				<Button type="button" variant="ghost" size="sm" className="h-auto p-0 text-[11px] text-muted-foreground/80 hover:text-foreground" onClick={() => onViewDetail(item)}>
+				<Button type="button" variant="ghost" size="sm" className="h-auto p-0 text-micro text-muted-foreground/80 hover:text-foreground" onClick={() => onViewDetail(item)}>
 					{t("announcements.viewDetail")}
 				</Button>
 			</footer>
@@ -286,7 +286,7 @@ export function AnnouncementCenter() {
 								<Megaphone className="size-4" />
 							</Button>
 							{/* 未读圆点：与设置按钮更新角标同款式；仅 notice 计入（guide 常驻不打扰） */}
-							{unreadCount > 0 && <span className="pointer-events-none absolute right-1 top-1 size-2 rounded-full bg-[var(--color-accent)]" aria-hidden="true" />}
+							{unreadCount > 0 && <span className="pointer-events-none absolute right-1 top-1 size-2 rounded-full bg-[var(--color-accent)] ring-2 ring-[var(--color-bg-sidebar)]" aria-hidden="true" />}
 						</div>
 					</DialogTrigger>
 				</TooltipTrigger>
@@ -368,7 +368,7 @@ export function AnnouncementCenter() {
 							{/* 已读归档：公告读过折叠成一行（看过后不该占主列表）；flash 已读不归档直接消失 */}
 							{readNotices.length > 0 && (
 								<section className="flex flex-col gap-2.5">
-									<Button type="button" variant="ghost" size="sm" className="h-auto justify-start gap-1 self-start px-0.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70 hover:bg-transparent hover:text-foreground" onClick={() => setShowRead((v) => !v)} aria-expanded={showRead}>
+									<Button type="button" variant="ghost" size="sm" className="h-auto justify-start gap-1 self-start px-0.5 text-micro font-medium uppercase tracking-wide text-muted-foreground/70 hover:bg-transparent hover:text-foreground" onClick={() => setShowRead((v) => !v)} aria-expanded={showRead}>
 										{showRead ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
 										{t("announcements.section.read")}
 										<span className="text-muted-foreground/50">({readNotices.length})</span>

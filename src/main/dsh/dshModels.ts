@@ -1,4 +1,60 @@
 import type { AvailableModel, DshDiscoveredModel, FetchedModel } from "../../shared/types";
+import type { ModelCatalog, ModelSelection } from "@deepseek-ai/dsh-api-session-controller/types";
+
+/** 按上游 wire 形状验证；描述文字允许空串，不替适配器发明额外约束。 */
+function isModelSelection(value: unknown): value is ModelSelection {
+	return isRecord(value) && typeof value.provider === "string" && value.provider.length > 0 && typeof value.model === "string" && value.model.length > 0 && (value.reasoningEffort === undefined || typeof value.reasoningEffort === "string");
+}
+
+function isModelReasoning(value: unknown): boolean {
+	return (
+		isRecord(value) &&
+		(value.defaultEffort === undefined || typeof value.defaultEffort === "string") &&
+		Array.isArray(value.efforts) &&
+		value.efforts.every((effort: unknown) => isRecord(effort) && typeof effort.id === "string" && typeof effort.name === "string" && (effort.description === undefined || typeof effort.description === "string"))
+	);
+}
+
+function isCatalogModel(value: unknown): boolean {
+	return isRecord(value) && typeof value.id === "string" && typeof value.name === "string" && (value.description === undefined || typeof value.description === "string") && (value.reasoning === undefined || isModelReasoning(value.reasoning));
+}
+
+function isModelCatalog(value: unknown): value is ModelCatalog {
+	return (
+		isRecord(value) &&
+		isModelSelection(value.default) &&
+		Array.isArray(value.routableProviders) &&
+		value.routableProviders.every((provider: unknown) => typeof provider === "string") &&
+		Array.isArray(value.groups) &&
+		value.groups.every((group: unknown) => isRecord(group) && typeof group.id === "string" && typeof group.name === "string" && Array.isArray(group.models) && group.models.every(isCatalogModel)) &&
+		Array.isArray(value.failures) &&
+		value.failures.every((failure: unknown) => isRecord(failure) && typeof failure.id === "string" && typeof failure.name === "string" && typeof failure.message === "string")
+	);
+}
+
+/** RPC 结果仍是 unknown；消费前验证，不引入运行时 SDK 依赖或用断言伪装 wire 安全。 */
+export function parseDshModelCatalog(value: unknown): ModelCatalog {
+	if (!isModelCatalog(value)) throw new Error("Invalid DSH model catalog");
+	return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** 官方 modelSelection 投影：下一次请求的选择优先，不能拿 host 默认覆盖已有会话。 */
+export function readDshModelSelection(value: unknown): ModelSelection | null {
+	if (!isRecord(value)) throw new Error("DSH model selection projection is unavailable");
+	if ((value.next !== null && !isModelSelection(value.next)) || (value.lastUsed !== null && !isModelSelection(value.lastUsed))) throw new Error("DSH model selection projection is invalid");
+	return value.next ?? value.lastUsed;
+}
+
+/** 目录与冷读投影合成旧宿主视图；目录成员资格不决定 provider 是否可路由。 */
+export function resolveDshModelDirectory(catalog: ModelCatalog, projection: unknown): { current: ModelSelection; routable: boolean } {
+	if (!isRecord(projection) || !isRecord(projection.values)) throw new Error("DSH model selection projection is unavailable");
+	const current = readDshModelSelection(projection.values.modelSelection) ?? catalog.default;
+	return { current, routable: catalog.routableProviders.includes(current.provider) };
+}
 
 /**
  * DSH host 模型目录 → PiDeck AvailableModel 列表（纯函数，可单测）。
@@ -13,18 +69,18 @@ import type { AvailableModel, DshDiscoveredModel, FetchedModel } from "../../sha
  */
 export type DshModelGroupInput = {
 	id: string;
-	models?: Array<{
+	models?: ReadonlyArray<{
 		id: string;
 		name?: string;
 		reasoning?: {
-			efforts?: Array<{ id: string; name?: string; description?: string }>;
+			efforts?: ReadonlyArray<{ id: string; name?: string; description?: string }>;
 			defaultEffort?: string;
 		};
 	}>;
 };
 
 /** DSH host 模型目录 → PiDeck AvailableModel 列表（纯函数，可单测）。 */
-export function toDshAvailableModels(groups: DshModelGroupInput[]): AvailableModel[] {
+export function toDshAvailableModels(groups: readonly DshModelGroupInput[]): AvailableModel[] {
 	const result: AvailableModel[] = [];
 	for (const group of groups) {
 		for (const model of group.models ?? []) {

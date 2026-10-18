@@ -90,7 +90,7 @@ function fixture(overrides = {}) {
 		status: "idle",
 		createdAt: 2,
 	};
-	const calls = { createDraft: 0, createAnonymous: 0, createAgent: 0, createProject: [], deleteProject: [], send: [], stateTargets: [], modelTargets: [], messageSessions: [], rewindTargets: [], rewindParams: [], rewindRestores: [] };
+	const calls = { createDraft: 0, createAnonymous: 0, createAgent: 0, createProject: [], deleteProject: [], send: [], stateTargets: [], modelTargets: [], rewindTargets: [], rewindParams: [], rewindRestores: [], fileChanges: [], subagents: [], todo: [] };
 	const targeted = (target, value) => ({ ok: true, value: { target, value } });
 	const deps = {
 		// SSE 流式依赖：测试环境不订阅真实 pi 事件，但必须提供可调用实现满足契约。
@@ -108,10 +108,6 @@ function fixture(overrides = {}) {
 		listModels: async () => [{ provider: "openai", id: "gpt-test", name: "GPT Test" }],
 		listAgents: () => [agent],
 		listSessions: async () => [],
-		getSessionRuntimeMessages: (sessionId) => {
-			calls.messageSessions.push(sessionId);
-			return { target: runtime, value: [{ id: "m1", role: "assistant", text: "ready", timestamp: 1 }] };
-		},
 		listCatalogSessions: async () => [session],
 		createSessionDraft: async (input) => {
 			calls.createDraft += 1;
@@ -148,6 +144,19 @@ function fixture(overrides = {}) {
 			windowStart: 30,
 			truncated: true,
 		}),
+		listSessionFileChanges: async (sessionId) => {
+			calls.fileChanges.push(sessionId);
+			return [{ path: "src/a.ts", changeType: "edit", additions: 1, deletions: 0, timestamp: 1 }];
+		},
+		listSessionSubagents: async (sessionId) => {
+			calls.subagents.push(sessionId);
+			return [{ id: "sub-1", name: "explore", status: "completed", startedAt: 1 }];
+		},
+		listSessionTodo: async (sessionId) => {
+			calls.todo.push(sessionId);
+			// 与真实实现对齐：会话无 todo 快照时返回 null（路由侧归一为 {todo:null}）
+			return sessionId === "session-1" ? { todos: [{ content: "ship it", status: "completed" }], updatedAt: 2 } : null;
+		},
 		readSessionMessagePage: async () => ({ messages: [], total: 0, nextBefore: null }),
 		sendSessionPrompt: async (input) => {
 			calls.send.push(input);
@@ -226,7 +235,7 @@ async function withServer(run, overrides = {}) {
 	const WebServiceManager = loadWebServiceManager();
 	const harness = fixture(overrides);
 	const manager = new WebServiceManager(harness.deps);
-	await manager.start("127.0.0.1", 0);
+	await manager.start("127.0.0.1", 0, false);
 	const baseUrl = `http://127.0.0.1:${manager.current.port}`;
 	try {
 		await run({ ...harness, baseUrl });
@@ -242,7 +251,7 @@ test("Web service restart rebinds the configured listener", async () => {
 	await manager.start("127.0.0.1", 0);
 	const port = manager.current.port;
 	try {
-		await manager.restart({ webServiceEnabled: true, webServiceHost: "127.0.0.1", webServicePort: port });
+		await manager.restart({ webServiceEnabled: true, webServiceHost: "127.0.0.1", webServicePort: port, webServiceRequiresAuth: false });
 		const response = await fetch(`http://127.0.0.1:${port}/api/health`);
 		assert.equal(response.status, 200);
 		assert.equal((await response.json()).ok, true);
@@ -412,6 +421,52 @@ test("runtime HTTP commands preserve the full generation-validated target", asyn
 	});
 });
 
+test("runtime restart streams heartbeat bytes while pending and still returns parseable JSON", async () => {
+	let releaseRestart;
+	const restartGate = new Promise((resolve) => {
+		releaseRestart = resolve;
+	});
+	await withServer(
+		async ({ baseUrl, runtime }) => {
+			const target = {
+				sessionId: runtime.sessionId,
+				agentId: runtime.agentId,
+				runtimeGeneration: runtime.runtimeGeneration,
+			};
+			const response = await fetch(`${baseUrl}/api/sessions/session-1/runtime/restart`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ target }),
+			});
+			// 响应头先行到达：pending 期间浏览器能确认请求活着，而不是转圈黑盒。
+			assert.equal(response.status, 200);
+			const reader = response.body.getReader();
+			// 第一个数据块应是心跳（JSON 前导空白），而不是最终结果——证明重启期间有持续字节。
+			const first = await reader.read();
+			assert.equal(first.done, false);
+			const firstText = new TextDecoder().decode(first.value);
+			assert.equal(firstText.trim(), "");
+			releaseRestart();
+			let rest = "";
+			for (;;) {
+				const chunk = await reader.read();
+				if (chunk.done) break;
+				rest += new TextDecoder().decode(chunk.value);
+			}
+			// 前导心跳空白不影响 JSON 解析（客户端 fetch().json() 的口径）。
+			const body = JSON.parse(firstText + rest);
+			assert.equal(body.result.ok, true);
+			assert.equal(body.result.value.restarted, true);
+		},
+		{
+			restartSessionRuntime: async () => {
+				await restartGate;
+				return { ok: true, value: { restarted: true } };
+			},
+		},
+	);
+});
+
 test("runtime rewind routes forward checkpointId/scope and keep the validated target", async () => {
 	await withServer(async ({ baseUrl, runtime, calls }) => {
 		const target = {
@@ -512,14 +567,14 @@ test("whole-history read endpoint returns a bounded window with truncation metad
 	});
 });
 
-test("web polling state includes Session records, runtimes, and Session-keyed messages", async () => {
-	await withServer(async ({ baseUrl, calls }) => {
+test("web polling state carries sessions/runtimes but no per-session message payloads (P0 slim)", async () => {
+	await withServer(async ({ baseUrl }) => {
 		const response = await fetch(`${baseUrl}/api/state`);
 		const state = await response.json();
 		assert.equal(state.sessions[0].id, "session-1");
 		assert.equal(state.runtimes[0].runtimeGeneration, 3);
-		assert.equal(state.messagesBySession["session-1"][0].text, "ready");
-		assert.deepEqual(calls.messageSessions, ["session-1"]);
+		// P0 瘦身：/api/state 不再携带任何会话消息（历史走 /messages 与 /messages/page，运行中走 SSE）
+		assert.equal("messagesBySession" in state, false);
 	});
 });
 
@@ -538,33 +593,17 @@ test("the browser client accepts the real Session-first web-state contract", asy
 			assert.equal(runtimeEvent?.sessionId, "session-1");
 			assert.equal(runtimeEvent?.payload.status, "idle");
 			const messageEvent = events.find((event) => event.sourceChannel === "sessions:messages");
-			assert.equal(messageEvent?.payload.messages[0].text, "ready");
+			assert.equal(messageEvent?.payload.messages[0].text, "window");
 		} finally {
 			unsubscribe();
 		}
 	});
 });
 
-test("web polling omits a message snapshot whose runtime target no longer matches", async () => {
-	await withServer(
-		async ({ baseUrl }) => {
-			const response = await fetch(`${baseUrl}/api/state`);
-			const state = await response.json();
-			assert.equal(state.runtimes[0].agentId, "agent-1");
-			assert.equal("session-1" in state.messagesBySession, false);
-		},
-		{
-			getSessionRuntimeMessages: () => ({
-				target: { sessionId: "session-1", agentId: "agent-2", runtimeGeneration: 4 },
-				value: [{ id: "stale", role: "assistant", text: "stale", timestamp: 1 }],
-			}),
-		},
-	);
-});
-
-test("web polling cannot read runtime messages directly by Agent ID", () => {
+test("web polling no longer pulls per-runtime message snapshots", () => {
 	const source = readFileSync("src/main/web/WebServiceManager.ts", "utf8");
-	assert.match(source, /getSessionRuntimeMessages\(runtime\.sessionId\)/);
+	// P0：deps 已删除 getSessionRuntimeMessages，/api/state 与 Agent 内存消息解耦
+	assert.doesNotMatch(source, /getSessionRuntimeMessages/);
 	assert.doesNotMatch(source, /getMessages\(runtime\.agentId\)/);
 });
 
@@ -623,10 +662,10 @@ test("web errors expose stable codes without leaking unknown server exceptions",
 test("web responses strip desktop diagnostics and raw prompt errors recursively", async () => {
 	await withServer(
 		async ({ baseUrl, runtime }) => {
-			const state = await (await fetch(`${baseUrl}/api/state`)).json();
-			const serializedState = JSON.stringify(state);
-			assert.doesNotMatch(serializedState, /SECRET_MESSAGE_DIAGNOSTIC/);
-			assert.equal("debugDetails" in state.messagesBySession["session-1"][0].meta, false);
+			// P0 瘦身后诊断剥离从有界消息端点断言（/api/state 已无消息负载）
+			const messagesBody = await (await fetch(`${baseUrl}/api/sessions/session-1/messages`)).json();
+			assert.doesNotMatch(JSON.stringify(messagesBody), /SECRET_MESSAGE_DIAGNOSTIC/);
+			assert.equal("debugDetails" in messagesBody.messages[0].meta, false);
 
 			const prompt = await (
 				await fetch(`${baseUrl}/api/sessions/session-1/prompt`, {
@@ -651,13 +690,8 @@ test("web responses strip desktop diagnostics and raw prompt errors recursively"
 			assert.doesNotMatch(JSON.stringify(command), /SECRET_COMMAND_STACK/);
 		},
 		{
-			getSessionRuntimeMessages: (_sessionId) => ({
-				target: {
-					sessionId: "session-1",
-					agentId: "agent-1",
-					runtimeGeneration: 3,
-				},
-				value: [
+			readSessionMessages: async () => ({
+				messages: [
 					{
 						id: "m-secret",
 						agentId: "agent-1",
@@ -670,6 +704,9 @@ test("web responses strip desktop diagnostics and raw prompt errors recursively"
 						},
 					},
 				],
+				total: 1,
+				windowStart: 0,
+				truncated: false,
 			}),
 			sendSessionPrompt: async (input) => ({
 				accepted: false,
@@ -731,8 +768,13 @@ test("SSE /stream endpoint forwards pi agent events as AI SDK UI message frames"
 			emitPiEvent("agent-1", { type: "agent_settled" });
 
 			const wire = await readUntil("data: [DONE]");
-			const afterDone = await reader.read();
-			assert.equal(afterDone.done, true, "the SSE response must close after [DONE]");
+			// keepAlive（W2）：/stream 是 EventSource 常驻订阅，一轮 [DONE] 后连接保留，
+			// 下一轮事件在同一连接上继续（旧语义「[DONE] 即关」导致 Ask 续答等后续轮次丢帧）。
+			// 验证法：直接发第二轮事件并读帧——若服务端已关连接，read 返回 done、读不到 Round2。
+			emitPiEvent("agent-1", { type: "message_start", message: { role: "assistant", id: "m2" } });
+			emitPiEvent("agent-1", { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Round2" } });
+			emitPiEvent("agent-1", { type: "agent_settled" });
+			const wire2 = await readUntil("Round2");
 			const frames = wire
 				.split("\n\n")
 				.filter((line) => line.startsWith("data: ") && line.slice(6).trim() !== "[DONE]")
@@ -749,6 +791,23 @@ test("SSE /stream endpoint forwards pi agent events as AI SDK UI message frames"
 			assert.equal(frames[3].id, frames[1].id);
 			assert.equal(frames[4].type, "text-end");
 			assert.equal(frames[5].type, "finish");
+			// 第二轮帧里必须出现新的 start（messageId=m2）：同连接跨轮重置生效。
+			const round2Start = wire2
+				.split("\n\n")
+				.filter((line) => line.startsWith("data: "))
+				.map((line) => line.slice(6))
+				.find(
+					(body) =>
+						body.startsWith("{") &&
+						(() => {
+							try {
+								return JSON.parse(body).type === "start" && JSON.parse(body).messageId === "m2";
+							} catch {
+								return false;
+							}
+						})(),
+				);
+			assert.ok(round2Start, "second turn must open with a fresh start frame (messageId m2) on the same connection");
 			controller.abort();
 		},
 		{
@@ -814,6 +873,48 @@ test("chat endpoint mints a per-turn request idempotency key instead of reusing 
 	});
 });
 
+/**
+ * 计划模式：/api/chat 必须把 body.agentMessage 原样透传给 sendSessionPrompt
+ * （隐藏指令通道，由内置扩展 pi-deck-plan-mode 识别）；未携带时不得注入空字段。
+ */
+test("chat endpoint forwards agentMessage hidden instruction when present", async () => {
+	const submit = (baseUrl, messageId, extra) =>
+		fetch(`${baseUrl}/api/chat`, {
+			method: "POST",
+			headers: { "content-type": "application/json", accept: "text/event-stream" },
+			body: JSON.stringify({
+				id: "session-1",
+				messages: [{ id: messageId, role: "user", parts: [{ type: "text", text: "帮我重构" }] }],
+				trigger: "submit-message",
+				messageId,
+				...extra,
+			}),
+		});
+	const waitFor = async (predicate) => {
+		for (let attempt = 0; attempt < 200; attempt += 1) {
+			if (predicate()) return;
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		}
+		throw new Error("condition was not met before the timeout");
+	};
+
+	await withServer(async ({ baseUrl, calls }) => {
+		// 隐居指令透传：内容原样到达 sendSessionPrompt
+		const planned = await submit(baseUrl, "plan-1", { agentMessage: "__PI_DECK_PLAN_MODE__\n帮我重构" });
+		assert.equal(planned.status, 200);
+		void planned.body?.cancel().catch(() => undefined);
+		await waitFor(() => calls.send.length === 1);
+		assert.equal(calls.send[0].agentMessage, "__PI_DECK_PLAN_MODE__\n帮我重构");
+
+		// 普通消息：不携带 agentMessage 字段（不注入空串，保持现有 payload 形态）
+		const plain = await submit(baseUrl, "plain-1", {});
+		assert.equal(plain.status, 200);
+		void plain.body?.cancel().catch(() => undefined);
+		await waitFor(() => calls.send.length === 2);
+		assert.equal("agentMessage" in calls.send[1], false);
+	});
+});
+
 // ── dev 模式静态资源代理：外部 Web 端必须加载重构后的 React 版（A2） ──
 
 /** 起一个 mock vite dev server，记录请求路径并返回固定资源内容。 */
@@ -848,6 +949,24 @@ async function startMockDevServer() {
 }
 
 /** dev 模式（devRendererUrl 已注入）下，静态请求全部代理到 vite dev server。 */
+test("session activity strips routes expose file changes, subagents, and todo snapshots", async () => {
+	await withServer(async ({ baseUrl }) => {
+		// 与桌面 IPC 同源的三条监控路由：形状 + 按 sessionId 取数
+		const files = await (await fetch(`${baseUrl}/api/sessions/session-1/file-changes`)).json();
+		assert.equal(files.changes.length, 1);
+		assert.equal(files.changes[0].path, "src/a.ts");
+
+		const subs = await (await fetch(`${baseUrl}/api/sessions/session-1/subagents`)).json();
+		assert.equal(subs.subagents[0].id, "sub-1");
+
+		const todo = await (await fetch(`${baseUrl}/api/sessions/session-1/todo`)).json();
+		assert.equal(todo.todo.todos[0].content, "ship it");
+
+		const missing = await (await fetch(`${baseUrl}/api/sessions/missing-session/todo`)).json();
+		assert.equal(missing.todo, null);
+	});
+});
+
 test("web service dev mode proxies static assets to the renderer dev server", async () => {
 	const devServer = await startMockDevServer();
 	try {

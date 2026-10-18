@@ -3,13 +3,12 @@ import { t, type TranslationKey } from "../../i18n";
 import { cn } from "../../lib/utils";
 import { Button } from "../../components/ui-shadcn/button";
 import { Badge } from "../../components/ui-shadcn/badge";
-import { Progress } from "../../components/ui-shadcn/progress";
 import { ScrollArea } from "../../components/ui-shadcn/scroll-area";
 import { Textarea } from "../../components/ui-shadcn/textarea";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../../components/ui-shadcn/tabs";
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from "../../components/ui-shadcn/dialog";
 import { SectionHeading } from "../../components/ui-shadcn/section-heading";
-import { X, Copy, RefreshCw, FileDown, PackageOpen, Sparkles, MonitorCheck, Bug, MessageSquarePlus } from "lucide-react";
+import { X, Copy, RefreshCw, FileDown, PackageOpen, Sparkles, MonitorCheck, Bug, Loader2, MessageSquarePlus } from "lucide-react";
 import type { HealthStatus } from "../../../../shared/types";
 import { summarizeChecks } from "./reportFormat";
 import { useFeedbackReport, type HealthCheckState } from "./useFeedbackReport";
@@ -49,7 +48,7 @@ const STATE_LABEL: Record<HealthCheckState, TranslationKey> = {
  * - AI 分析：生成可复制给任意 AI 的分析提示词
  * - 导出分享：复制 Markdown / 群卡片 / 导出文件
  *
- * 使用成熟的 ui-shadcn 组件（Tabs/ScrollArea/Badge/Progress），不引入新依赖。
+ * 使用成熟的 ui-shadcn 组件（Tabs/ScrollArea/Badge），不引入新依赖。
  * 所有复制走主进程剪贴板（大文本可靠），所有导出走主进程保存对话框。
  */
 export function FeedbackDialog({ open, project, appInfo, onClose, onToast, onOpenExternal, onCreateSessionWithPrompt }: FeedbackDialogProps) {
@@ -177,7 +176,7 @@ export function FeedbackDialog({ open, project, appInfo, onClose, onToast, onOpe
 									</div>
 								) : feedback.state === "running" ? (
 									<div className="flex h-full flex-col items-center justify-center gap-3">
-										<Progress className="h-1.5 w-56" />
+										<Loader2 size={28} className="animate-pideck-spin text-muted-foreground" aria-hidden="true" />
 										<p className="text-sm text-muted-foreground">{t("feedback.health.runningHint")}</p>
 									</div>
 								) : feedback.state === "error" ? (
@@ -188,7 +187,7 @@ export function FeedbackDialog({ open, project, appInfo, onClose, onToast, onOpe
 									<div className="space-y-2">
 										{feedback.report!.checks.map((check) => (
 											<div key={check.id} className="flex items-start gap-2 rounded-lg border px-3 py-2">
-												<span className={cn("mt-0.5 rounded px-1.5 py-0.5 text-[11px] font-medium", STATUS_TONE[check.status])}>{check.status.toUpperCase()}</span>
+												<span className={cn("mt-0.5 rounded px-1.5 py-0.5 text-micro font-medium", STATUS_TONE[check.status])}>{check.status.toUpperCase()}</span>
 												<div className="min-w-0 flex-1">
 													<div className="text-sm font-medium">{t(`health.check.${check.id}` as never)}</div>
 													{check.detail ? (

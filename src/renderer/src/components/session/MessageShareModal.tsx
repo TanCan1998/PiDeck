@@ -51,7 +51,7 @@ export function MultiSelectModal(props: { renderedRuns: RenderMessage[]; onClose
 		<Dialog open onOpenChange={(next) => !next && props.onClose()}>
 			<DialogContent
 				showCloseButton={false}
-				className={cn("flex h-[min(720px,calc(100vh-48px))] w-[min(780px,calc(100vw-48px))] max-w-[min(780px,calc(100vw-48px))] flex-col gap-0 overflow-hidden rounded-lg border border-border bg-bg-panel p-0 shadow-[var(--shadow-xl)]", "animate-in fade-in-0 slide-in-from-bottom-2 duration-150")}
+				className={cn("flex h-[min(720px,calc(100vh-48px))] w-[min(780px,calc(100vw-48px))] max-w-[min(780px,calc(100vw-48px))] flex-col gap-0 overflow-hidden rounded-lg border border-border bg-bg-panel p-0 shadow-[var(--shadow-modal)]", "animate-in fade-in-0 slide-in-from-bottom-2 duration-fast")}
 			>
 				<DialogHeader className="flex-row items-center justify-between px-4 py-3">
 					<DialogTitle>{t("app.multiSelectEnter")}</DialogTitle>

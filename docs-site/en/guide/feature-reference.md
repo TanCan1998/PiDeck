@@ -162,7 +162,7 @@ Three pills switch the sidebar view; the selection is remembered:
 **Bottom bar of the composer**
 
 - **`+` menu**: attachment (hidden in imagegen), skills, prompt templates, mode switch (normal / goal / plan / imagegen; a `×` appears when a special mode is active).
-- **Model / thinking chip** (center): shows `model · thinking level`. Click for the model picker (search, grouped by provider, favorites, usage badges, refresh) or the thinking picker (off → max). Switching models mid-run applies after the current round ("old → new"); switches that need a restart prompt for confirmation. You can also cycle with shortcuts: `Ctrl+M` through favorite models, `Ctrl+T` through the levels the current model supports (both rebindable in Settings → Shortcuts).
+- **Model / thinking chip** (center): shows `model · thinking level`. Click for the model picker (search, grouped by provider, favorites, usage badges, refresh) or the thinking picker (off → max). Switching models mid-run applies after the current round ("old → new"); switches that need a restart prompt for confirmation. You can also cycle with shortcuts: `Ctrl+M` through favorite models, `Ctrl+T` through the levels the current model supports (both rebindable in Settings → Shortcuts). If the catalog or favorites are still loading, the shortcut runs only while the original pane, backend, and runtime binding remain valid and focus has not left the pane. Changing panes, runtime bindings, or backends cancels the pending shortcut; returning does not replay it.
 - **Backend switcher** (bottom-left logo): pi / DSH / imagegen. Locked once the session is active.
 - **Safety level** (bottom-left): security gate levels (off/standard/strict) for pi; permission presets for DSH.
 - **Context ring** (next to send): context usage; click to expand: two-segment usage, cache hits, token details, reply performance, usage query, compaction entry.
@@ -208,7 +208,7 @@ Triggered by `⑂` on a queued message. It:
 
 ### Other panels & entries
 
-- **Scratch pad**: `Ctrl/Cmd+Shift+S` (also a tool-rail button). Create/delete notes, Markdown mode, task checkboxes, export to file. Notes follow the session.
+- **Scratch pad**: click the session tool-rail button or press `Ctrl/Cmd+Shift+S` to open/close it in the right sidebar, sharing panel switching and width adjustment with other sidebar tools. Select notes from the top dropdown; create/delete notes, edit/preview Markdown, toggle task checkboxes, and export to file. Content is saved automatically.
 - **Trace panel**: drawer "Trace" tab — per-round lanes of input/model/tool events.
 - **Checkpoints (Rewind)**: drawer "Checkpoints" tab — see below.
 - **Session start page**: no messages yet — a large centered composer plus a project switcher.

@@ -5,18 +5,19 @@ import { t } from "../../../i18n";
 import { desktopApi } from "../../../desktopApi";
 import { SKIN_PRESETS } from "../../../themePresets";
 import { clampSessionTabMaxWidth, SESSION_TAB_MAX_WIDTH_MAX, SESSION_TAB_MAX_WIDTH_MIN } from "../../../../../shared/sessionTabWidth";
+// 缩放档位与快捷键（shared/shortcuts zoomIn/zoomOut）共用同一套边界/步长，避免两处漂移
+import { clampZoomFactor, ZOOM_FACTOR_MAX, ZOOM_FACTOR_MIN, ZOOM_FACTOR_STEP } from "../../../../../shared/zoom";
 import { Button } from "../../ui-shadcn/button";
 import { Input } from "../../ui-shadcn/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../ui-shadcn/select";
 import { SettingsSection } from "./SettingsStorageTab";
 import { DirtyMarker, SettingRow, SettingSwitchRow } from "./SettingRows";
+import { BrandingSection } from "./BrandingSection";
 import { ModuleVisibilitySection } from "./ModuleVisibilitySection";
+import { ComposerFeaturesSection } from "./ComposerFeaturesSection";
+import { CustomThemeSection } from "./CustomThemeSection";
 import { Check, Minus, Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
-
-const ZOOM_FACTOR_MIN = 0.8;
-const ZOOM_FACTOR_MAX = 1.5;
-const ZOOM_FACTOR_STEP = 0.05;
 
 type AppearanceTabProps = {
 	draft: AppSettings;
@@ -48,7 +49,6 @@ export const AppearanceTab = memo(function AppearanceTab(props: AppearanceTabPro
 	// 保留 ACCENT_PRESETS 仅供自定义主题参考（无独立主色下拉）。
 	const fontSizeOptions: SelectOption[] = [
 		{ value: "compact", label: t("settings.fontSizeCompact") },
-		{ value: "default", label: t("settings.fontSizeDefault") },
 		{ value: "medium", label: t("settings.fontSizeMedium") },
 		{ value: "large", label: t("settings.fontSizeLarge") },
 		{ value: "xlarge", label: t("settings.fontSizeXlarge") },
@@ -65,14 +65,33 @@ export const AppearanceTab = memo(function AppearanceTab(props: AppearanceTabPro
 	];
 
 	const changeZoomFactor = (delta: number) => {
-		const next = Math.min(ZOOM_FACTOR_MAX, Math.max(ZOOM_FACTOR_MIN, Math.round((draft.zoomFactor + delta) * 100) / 100));
-		updateDraft({ zoomFactor: next });
+		updateDraft({ zoomFactor: clampZoomFactor(draft.zoomFactor + delta) });
 	};
 
 	return (
 		<>
 			{/* 主题与背景 */}
-			<SettingsSection title={t("settings.sectionThemeBackground")}>
+			<SettingsSection id="settings-section-appearance-theme-background" title={t("settings.sectionThemeBackground")}>
+				<SettingRow
+					anchor="appearance-navigation-mode"
+					title={
+						<>
+							<span>{t("settings.navigationMode")}</span>
+							<DirtyMarker dirty={isDirty("navigationMode")} label={t("settings.navigationMode")} />
+						</>
+					}
+					description={t("settings.navigationModeDesc")}
+				>
+					<Select value={draft.navigationMode} onValueChange={(value) => updateDraft({ navigationMode: value as AppSettings["navigationMode"] })}>
+						<SelectTrigger className="w-40">
+							<SelectValue />
+						</SelectTrigger>
+						<SelectContent>
+							<SelectItem value="tabs">{t("settings.navigationTabs")}</SelectItem>
+							<SelectItem value="simple">{t("settings.navigationSimple")}</SelectItem>
+						</SelectContent>
+					</Select>
+				</SettingRow>
 				<SettingRow
 					title={
 						<>
@@ -95,6 +114,8 @@ export const AppearanceTab = memo(function AppearanceTab(props: AppearanceTabPro
 						</SelectContent>
 					</Select>
 				</SettingRow>
+				{/* Logo 风格 / 自定义 logo 图 / 应用显示名称：品牌区专属几行（含选图异步态），拆到 BrandingSection 控制本文件体量 */}
+				<BrandingSection draft={draft} updateDraft={updateDraft} isDirty={isDirty} />
 				{draft.theme === "schedule" && (
 					<SettingRow
 						title={
@@ -129,10 +150,24 @@ export const AppearanceTab = memo(function AppearanceTab(props: AppearanceTabPro
 						value={draft.themeSkin}
 						onPick={(id) => {
 							const preset = SKIN_PRESETS.find((p) => p.id === id);
-							// 外观主题自带推荐主色：选择主题时联动写入 accent，保证「一套主题 = 完整外观」
-							updateDraft(preset ? { themeSkin: id, accent: preset.accent } : { themeSkin: id });
+							// 外观主题自带推荐主色：选择主题时联动写入 accent，保证「一套主题 = 完整外观」；
+							// 切回内置皮肤时同时清掉自定义主题包快照（快照仅 themeSkin=custom 时生效，双保险防残留）
+							updateDraft(preset ? { themeSkin: id, accent: preset.accent, customTheme: undefined } : { themeSkin: id, customTheme: undefined });
 						}}
 					/>
+				</SettingRow>
+				{/* 自定义主题包（userData/custom-themes/）：卡片列表 + JSON 编辑器 + AI 指南 */}
+				<SettingRow
+					title={
+						<>
+							<span>{t("settings.sectionCustomThemes")}</span>
+							<DirtyMarker dirty={isDirty("customTheme") || (isDirty("themeSkin") && draft.themeSkin === "custom")} label={t("settings.sectionCustomThemes")} />
+						</>
+					}
+					description={t("settings.customThemesDesc")}
+					stacked
+				>
+					<CustomThemeSection draft={draft} updateDraft={updateDraft} />
 				</SettingRow>
 				{/* 背景图片：pideck-bg:// 协议加载 userData/backgrounds/ 下文件 */}
 				<SettingRow
@@ -148,7 +183,7 @@ export const AppearanceTab = memo(function AppearanceTab(props: AppearanceTabPro
 						{draft.backgroundImage ? (
 							<img src={`pideck-bg://local/${encodeURIComponent(draft.backgroundImage)}`} alt="" className="h-12 w-20 shrink-0 rounded-sm border border-border object-cover" />
 						) : (
-							<div className="flex h-12 w-20 shrink-0 items-center justify-center rounded-sm border border-dashed border-border text-[11px] text-muted-foreground">—</div>
+							<div className="flex h-12 w-20 shrink-0 items-center justify-center rounded-sm border border-dashed border-border text-micro text-muted-foreground">—</div>
 						)}
 						<Button
 							variant="outline"
@@ -193,7 +228,7 @@ export const AppearanceTab = memo(function AppearanceTab(props: AppearanceTabPro
 			</SettingsSection>
 
 			{/* 字体 */}
-			<SettingsSection title={t("settings.sectionFonts")}>
+			<SettingsSection id="settings-section-appearance-fonts" title={t("settings.sectionFonts")}>
 				{/* 窗口缩放：与字号设置同分组，避免「字变大」两个入口分散在不同分组；
            提示文案说明其与字号档位的区别（缩放=整体，字号=仅文字）。 */}
 				<SettingRow
@@ -209,7 +244,7 @@ export const AppearanceTab = memo(function AppearanceTab(props: AppearanceTabPro
 						<Button
 							variant="ghost"
 							size="icon"
-							className="size-8 rounded-[6px] border border-border-subtle bg-bg-panel text-text-secondary hover:border-[var(--color-accent)] hover:bg-bg-active hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-40"
+							className="size-8 rounded-sm border border-border-subtle bg-bg-panel text-text-secondary hover:border-[var(--color-accent)] hover:bg-bg-active hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-40"
 							disabled={draft.zoomFactor <= ZOOM_FACTOR_MIN}
 							onClick={() => changeZoomFactor(-ZOOM_FACTOR_STEP)}
 							aria-label={t("settings.zoomOut")}
@@ -223,7 +258,7 @@ export const AppearanceTab = memo(function AppearanceTab(props: AppearanceTabPro
 						<Button
 							variant="ghost"
 							size="icon"
-							className="size-8 rounded-[6px] border border-border-subtle bg-bg-panel text-text-secondary hover:border-[var(--color-accent)] hover:bg-bg-active hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-40"
+							className="size-8 rounded-sm border border-border-subtle bg-bg-panel text-text-secondary hover:border-[var(--color-accent)] hover:bg-bg-active hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-40"
 							disabled={draft.zoomFactor >= ZOOM_FACTOR_MAX}
 							aria-label={t("settings.zoomIn")}
 							title={t("settings.zoomIn")}
@@ -263,7 +298,7 @@ export const AppearanceTab = memo(function AppearanceTab(props: AppearanceTabPro
 					onChange={(checked) => {
 						props.setPerAreaFontSize(checked);
 						if (!checked) {
-							updateDraft({ uiFontSize: null, chatFontSize: null, inputFontSize: null });
+							updateDraft({ uiFontSize: null, tabBarFontSize: null, chatFontSize: null, inputFontSize: null });
 						}
 					}}
 				/>
@@ -279,6 +314,29 @@ export const AppearanceTab = memo(function AppearanceTab(props: AppearanceTabPro
 							alignEnd={false}
 						>
 							<Select value={draft.uiFontSize ?? draft.fontSize} onValueChange={(value) => updateDraft({ uiFontSize: value as AppSettings["uiFontSize"] })}>
+								<SelectTrigger className="w-full">
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									{fontSizeOptions.map((option) => (
+										<SelectItem key={option.value} value={option.value} disabled={option.disabled}>
+											{option.label}
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+						</SettingRow>
+						<SettingRow
+							title={
+								<>
+									<span>{t("settings.tabBarFontSize")}</span>
+									<DirtyMarker dirty={isDirty("tabBarFontSize")} label={t("settings.tabBarFontSize")} />
+								</>
+							}
+							alignEnd={false}
+						>
+							{/* 未单独设置时跟随界面字号（与 App.tsx 的 data-tab-font-size 回落一致），下拉显示实际生效档位 */}
+							<Select value={draft.tabBarFontSize ?? draft.uiFontSize ?? draft.fontSize} onValueChange={(value) => updateDraft({ tabBarFontSize: value as AppSettings["tabBarFontSize"] })}>
 								<SelectTrigger className="w-full">
 									<SelectValue />
 								</SelectTrigger>
@@ -394,17 +452,38 @@ export const AppearanceTab = memo(function AppearanceTab(props: AppearanceTabPro
 			</SettingsSection>
 
 			{/* 聊天排版 */}
-			<SettingsSection title={t("settings.sectionChatLayout")}>
+			<SettingsSection id="settings-section-appearance-chat-layout" title={t("settings.sectionChatLayout")}>
 				<SettingRow anchor="appearance-content-width" title={<span>{t("settings.contentWidthPct")}</span>} description={t("settings.contentWidthPctDesc")}>
 					<div className="flex w-full items-center gap-2">
 						<input type="range" min="60" max="100" step="1" value={draft.chatContentWidthPct} onChange={(event) => updateDraft({ chatContentWidthPct: parseInt(event.target.value) })} className="min-w-0 flex-1 accent-[var(--color-accent)]" aria-label={t("settings.contentWidthPct")} />
 						<span className="min-w-8 shrink-0 text-right font-brand text-sm text-muted-foreground tabular-nums">{draft.chatContentWidthPct}%</span>
 					</div>
 				</SettingRow>
+				{/* 会话状态（待办/修改文件/子代理）显示位置：右侧边栏下半区 / 输入框上方，二选一 */}
+				<SettingRow
+					anchor="appearance-session-status-placement"
+					title={
+						<>
+							<span>{t("settings.sessionStatusPlacement")}</span>
+							<DirtyMarker dirty={isDirty("sessionStatusPlacement")} label={t("settings.sessionStatusPlacement")} />
+						</>
+					}
+					description={t("settings.sessionStatusPlacementDesc")}
+				>
+					<Select value={draft.sessionStatusPlacement} onValueChange={(value) => updateDraft({ sessionStatusPlacement: value as AppSettings["sessionStatusPlacement"] })}>
+						<SelectTrigger className="w-40">
+							<SelectValue />
+						</SelectTrigger>
+						<SelectContent>
+							<SelectItem value="sidebar">{t("settings.sessionStatusPlacementSidebar")}</SelectItem>
+							<SelectItem value="composer">{t("settings.sessionStatusPlacementComposer")}</SelectItem>
+						</SelectContent>
+					</Select>
+				</SettingRow>
 			</SettingsSection>
 
 			{/* 窗口样式 */}
-			<SettingsSection title={t("settings.sectionWindowStyle")}>
+			<SettingsSection id="settings-section-appearance-window-style" title={t("settings.sectionWindowStyle")}>
 				{/* 会话 Tab 宽度上限：仅封顶不设最小宽，Tab 仍按内容收缩；拖动时先本地夹取预览，保存时主进程再归一化。 */}
 				<SettingRow anchor="appearance-session-tab-width" title={<span>{t("settings.sessionTabMaxWidth")}</span>} description={t("settings.sessionTabMaxWidthDesc")}>
 					<div className="flex w-full items-center gap-2">
@@ -427,6 +506,8 @@ export const AppearanceTab = memo(function AppearanceTab(props: AppearanceTabPro
 
 			{/* 功能模块：按需收起不用的模块 UI 入口（issue #248） */}
 			<ModuleVisibilitySection draft={draft} updateDraft={updateDraft} isDirty={isDirty} visionEnabled={props.visionEnabled} />
+			{/* 输入框功能显示：与功能模块同域（按需收起入口），紧跟其后成组 */}
+			<ComposerFeaturesSection draft={draft} updateDraft={updateDraft} isDirty={isDirty} />
 		</>
 	);
 });
@@ -456,7 +537,7 @@ const AppearanceThemePicker = memo(function AppearanceThemePicker(props: { value
 						className={cn("group relative flex flex-col gap-1.5 rounded-lg border p-2 text-left transition-colors duration-fast", selected ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)]" : "border-border-subtle bg-bg-panel hover:border-border-default")}
 					>
 						{/* 色板迷你预览：左=侧栏，右=应用区（边框线/主色/面板块） */}
-						<span className="flex h-12 w-full overflow-hidden rounded-[6px] border border-border-subtle" style={{ background: surface.background }} aria-hidden="true">
+						<span className="flex h-12 w-full overflow-hidden rounded-sm border border-border-subtle" style={{ background: surface.background }} aria-hidden="true">
 							<span className="h-full w-[32%] border-r border-border-subtle" style={{ background: surface.sidebar }} />
 							<span className="flex-1 p-1.5">
 								<span className="mb-1 block h-1.5 w-3/4 rounded-sm" style={{ background: surface.border }} />

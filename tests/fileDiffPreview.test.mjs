@@ -19,3 +19,15 @@ test("HTML preview remains isolated from the renderer origin and popup capabilit
 	assert.match(preview, /referrerPolicy="no-referrer"/);
 	assert.doesNotMatch(preview, /allow-same-origin|allow-popups|allow-top-navigation/);
 });
+
+test("CodeMirror 编辑器保持懒加载：主 chunk 不得静态拉进 CodeMirror 6 全家桶", () => {
+	// CodeMirrorEditor 静态链（@codemirror/view|state|commands|autocomplete|search|lint）
+	// 经 WorkbenchContent → App 进入主 chunk，启动即解析；必须走 lazy 分包。
+	assert.match(source, /const CodeMirrorEditor = lazy\(\(\) => import\("\.\/CodeMirrorEditor"\)/, "CodeMirrorEditor 必须懒加载");
+	assert.doesNotMatch(source, /import \{ CodeMirrorEditor \} from/, "禁止静态 import 复活");
+	// 用法处必须包 Suspense，首次加载有占位而不是白屏
+	const usage = source.indexOf("<CodeMirrorEditor value=");
+	assert.ok(usage > 0, "CodeMirrorEditor 用法应可被发现");
+	const before = source.slice(Math.max(0, usage - 800), usage);
+	assert.match(before, /<Suspense/, "用法必须包在 Suspense 内");
+});

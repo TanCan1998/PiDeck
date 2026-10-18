@@ -1,10 +1,11 @@
+import { Button } from "./components/ui-shadcn/button";
+import { NoticeHistoryDialog } from "./components/ui-shadcn/notice-history-dialog";
+import { useSessionNavigation } from "./hooks/useSessionNavigation";
+import { WorkbenchFileTabs } from "./components/workspace/WorkbenchFileTabs";
+import { ArrowLeft, ArrowRight, PanelLeft } from "lucide-react";
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useAtomValue, useSetAtom, useStore } from "jotai";
-import { applyAppearanceAttributes, toggleThemeMode } from "./themeAppearance";
-// 壁纸模式已注入的 token 键（effect 重跑/清除设置时需要跨运行保留，避免漏清）
-let injectedWallpaperTokens = new Set<string>();
-// 自定义外观主题（customThemeOverrides）已注入的 token 键：切换主题时先清后注，防残留
-let injectedCustomTokens = new Set<string>();
+import { toggleThemeMode } from "./themeAppearance";
 import {
 	Code,
 	Activity,
@@ -14,6 +15,7 @@ import {
 	Pencil,
 	Terminal,
 	GitBranch,
+	ListTree,
 	// 命令面板（Ctrl/Cmd+P）操作项图标
 	SquarePen,
 	Settings2,
@@ -21,22 +23,36 @@ import {
 	CircleStop,
 	RefreshCw,
 	Fingerprint,
+	// 抽屉 RPC 日志 Tab 图标
+	ScrollText,
+	// 抽屉侧边任务 Tab 图标：不用 PanelRight——那是会话头部抽屉开关的图形，并排会认错
+	Rocket,
 } from "lucide-react";
-import { showNotice, type NoticeKind } from "./utils/notice";
+import { configureNoticeDefaults, showNotice, type NoticeKind } from "./utils/notice";
 import { copyTextWithCopiedNotice } from "./utils/clipboardNotice";
-import { restoreArchivedPiSession } from "./utils/sessionArchiveActions";
-import type { ArchivedPiSession } from "../../shared/types";
-import { sessionHistoryUnavailableState } from "./utils/sessionHistoryAvailability";
+
 import { buildSettingsCommands, type PaletteCommand } from "./utils/commandPaletteCommands";
 import { CommandPalette } from "./components/overlays/CommandPalette";
 import { CommandPaletteOnboarding, markCommandPaletteOnboardingSeen } from "./components/overlays/CommandPaletteOnboarding";
 import { desktopApi as api, isLanWeb, missingElectronPreload } from "./desktopApi";
-import { turnFlowSettingsAtom, defaultAgentBackendAtom, effectiveAgentBackendAtom, busySendDeliveryAtom, hiddenModulesAtom, imageGenConfigAtom, dshRuntimeStatusAtom, openSettingsAtom, openAutomationModalAtom, sessionRecordsAtom, bumpNewTurnCollapseTickAtom } from "./atoms";
-import { resolveBusySendDelivery } from "../../shared/busySendDelivery";
-import { SESSION_TAB_MAX_WIDTH_DEFAULT } from "../../shared/sessionTabWidth";
-import { FILE_TREE_ABSOLUTE_MAX_DEPTH } from "../../shared/fileTree";
-// 文件链接路由：图片类型走弹窗预览
-const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp", "ico"]);
+import {
+	turnFlowSettingsAtom,
+	defaultAgentBackendAtom,
+	effectiveAgentBackendAtom,
+	busySendDeliveryAtom,
+	hiddenModulesAtom,
+	hiddenComposerFeaturesAtom,
+	imageGenConfigAtom,
+	enhanceModelAtom,
+	enhanceIncludeContextAtom,
+	dshRuntimeStatusAtom,
+	openSettingsAtom,
+	openAutomationModalAtom,
+	sessionRecordsAtom,
+	bumpNewTurnCollapseTickAtom,
+	rpcLoggingAgentIdsAtom,
+	toggleRpcLoggingAgent,
+} from "./atoms";
 import { type SidebarActions } from "./components/sidebar/SidebarContent";
 import { AppSidebar } from "./components/sidebar/AppSidebar";
 import { AppBootstrap } from "./components/app/AppBootstrap";
@@ -46,15 +62,19 @@ import { useRename } from "./hooks/useRename";
 import { useProjectRuntimeCapabilities } from "./hooks/useRuntimeCapabilities";
 import { useSessionRuntimeBridge } from "./hooks/useSessionRuntimeBridge";
 import { useAgentLoadNotice } from "./hooks/useAgentLoadNotice";
+import { useArchMismatchNotice } from "./hooks/useArchMismatchNotice";
 import { useAnnouncementNotifier } from "./hooks/useAnnouncementNotifier";
 import { useModelsVerifyNotifier } from "./hooks/useModelsVerifyNotifier";
 import { useBackgroundAskPatrol } from "./hooks/useBackgroundAskPatrol";
 import { announcementCenterOpenAtom, announcementNotificationEnabledAtom } from "./atoms/announcement-atoms";
+import { appDisplayNameAtom, customLogoAtom, logoStyleAtom } from "./atoms/app-ui-atoms";
+import { LOGO_STYLE_STORAGE_KEY, resolveLogoStyle } from "./components/app/piTuiLogoData";
+import { writeBootBrandCache } from "./components/app/bootBrandCache";
+import { resolveAppDisplayName } from "../../shared/types/settings";
 import { openProviderLoginAtom } from "./atoms/providerLoginAtoms";
 import { useSessionLayout } from "./hooks/useSessionLayout";
 import { useFileEditor } from "./hooks/useFileEditor";
-import { resolveFileLinkPath } from "./utils/filePathLinks";
-import { imageMimeTypeFromPath } from "./utils/composerImages";
+import { useSessionFileLinks } from "./hooks/workspace/useSessionFileLinks";
 import { useOverlayActions } from "./hooks/useOverlayActions";
 import { useWorkspacePanels, type WorkspaceDrawerPanel, type WorkspaceExternalEditorAdapter } from "./hooks/useWorkspacePanels";
 import { useDrawerPorts } from "./hooks/useDrawerPorts";
@@ -63,26 +83,39 @@ import { resolveTerminalOwner, terminalOwnerKey } from "./terminalDockState";
 import { useImportFlow } from "./hooks/useImportFlow";
 import { useDirectoryImport } from "./hooks/useDirectoryImport";
 import { useQueuedPrompt } from "./hooks/useQueuedPrompt";
+import { useComposerStateSessionPrune } from "./hooks/useComposerStateSessionPrune";
 import { activeAgentIdAtom } from "./hooks/useSessionRuntimeController";
 import { useSessionHistoryMutations } from "./hooks/useSessionHistoryMutations";
 import { useUserMessageEditReplay } from "./hooks/useUserMessageEditReplay";
-import { PromptDeliveryUnknownError } from "./utils/promptErrors";
-import { isLiveRuntimeStatus, requireSessionCommand, resolveSessionRunState, sessionRunCapabilities, SessionCommandFailure, sessionCommandFailureToast, toSessionRuntimeTarget, type SessionRunCapabilities, type SessionRunAction } from "./utils/sessionCommands";
-import { GUIDE_BOOTSTRAP_SESSION_ID, readWelcomeBackendPreference, readWelcomeDshModelPreference, readWelcomeModelPreference, readWelcomeThinkingPreference, resolveChatSessionBootstrap, resolveGuidePageBackend } from "./utils/chatSessionBootstrap";
-import { detectRendererPlatform } from "./lib/detectRendererPlatform";
-import { msUntilNextThemeBoundary } from "../../shared/themeSchedule";
+import { isLiveRuntimeStatus, sessionCommandFailureToast, type SessionRunCapabilities, type SessionRunAction } from "./utils/sessionCommands";
+import { GUIDE_BOOTSTRAP_SESSION_ID, readWelcomeAcpToolPreference, readWelcomeBackendPreference, readWelcomeDshModelPreference, readWelcomeModelPreference, readWelcomeThinkingPreference, resolveChatSessionBootstrap, resolveGuidePageBackend } from "./utils/chatSessionBootstrap";
+import { useAppAppearance } from "./hooks/appearance/useAppAppearance";
+import { useAppBootstrapInfo } from "./hooks/app/useAppBootstrapInfo";
+import { useBootOverlayReady } from "./hooks/app/useBootOverlayReady";
+import { useCommandPalette } from "./hooks/app/useCommandPalette";
+import { useSidebarArchiveActions } from "./hooks/sidebar/useSidebarArchiveActions";
+import { useSettingsUpdater } from "./hooks/settings/useSettingsUpdater";
+import { useTpsDisplayMode } from "./hooks/settings/useTpsDisplayMode";
+import { useSessionRunControl } from "./hooks/session/useSessionRunControl";
+import { useCloseSessionTabShortcut } from "./hooks/useCloseSessionTabShortcut";
+import { useProjectFileTreeController } from "./hooks/files/useProjectFileTreeController";
+import { useSessionDurationTracking } from "./hooks/session/useSessionDurationTracking";
+import { useSessionPromptDispatch } from "./hooks/session/useSessionPromptDispatch";
 
 import { usePiUpdate } from "./hooks/usePiUpdate";
 import { useProviderUsageStartupWarmup } from "./hooks/useProviderUsage";
 
 import { useBackgroundUpdateWatch } from "./hooks/useBackgroundUpdateWatch";
+import { useChannelSwitchWatch } from "./hooks/useChannelSwitchWatch";
+import { useDataEnvWatch } from "./hooks/useDataEnvWatch";
+import { DataModeChoiceDialog } from "./components/app/DataModeChoiceDialog";
+import { DataEnvMismatchDialog } from "./components/app/DataEnvMismatchDialog";
 import { useProjectSync } from "./hooks/useProjectSync";
 import {
 	agentInventoryAtom,
 	applySessionRuntimeEventAtom,
 	currentSessionAtom,
 	currentSessionIdAtom,
-	currentSessionMessagesAtom,
 	currentSessionRuntimeAtom,
 	projectInventoryAtom,
 	removeSessionComposerStateAtom,
@@ -98,7 +131,7 @@ import {
 	sessionCatalogLoadStateAtom,
 	sessionMessagesCacheAtom,
 	sessionSummariesByProjectIdAtomFamily,
-	sessionDraftByIdAtom,
+	modifiedFilesAtom,
 	promoteSessionComposerStateAtom,
 	promoteSessionMessagesCacheAtom,
 	setSessionAttachmentsAtom,
@@ -108,12 +141,16 @@ import {
 	setSessionDraftAtom,
 	cacheSessionMessagesAtom,
 	upsertSessionAtom,
+	acpToolsAtom,
+	acpEnabledAtom,
 } from "./atoms";
-import { applyDshGoalSendTransform, buildComposerPromptSubmission } from "./composerBehavior";
 import { isSameSessionPath } from "./agentListDisplay";
-import { resolveLocale, setI18nLocale, t, translateI18nDescriptor } from "./i18n";
+import { t } from "./i18n";
 import { isChatProject, loadSessionSourceFilter, saveSessionSourceFilter, isReplacementForPendingAgent, isPendingAgentId, migrateAgentRecord, stampIdleSessionDuration, type PendingAgentTab } from "./rendererUtils";
 import { isLocalProject, isRemoteProject } from "../../shared/projectLocation";
+import { fileTreeNodeDisplayPath } from "./utils/fileTreeLazy";
+import { reorderProjectList } from "./utils/projectOrder";
+import { MiniOverlaySurface } from "./components/mini-overlay/MiniOverlaySurface";
 import type { SessionFilterPill } from "./sessionFilterPills";
 import { useResize } from "./hooks/useResize";
 import { ARCHIVED_SESSION_TOAST_MS, archivedSessionToastMessage, useSessionActions } from "./hooks/useSessionActions";
@@ -121,23 +158,27 @@ import { useScratchPad } from "./hooks/useScratchPad";
 import { useDshRuntimeStatusSync } from "./hooks/useDshRuntimeStatusSync";
 import { useDshRuntimeMigrationNotice } from "./hooks/useDshRuntimeMigrationNotice";
 import { useDshRuntimeInstallProgressSync } from "./hooks/useDshRuntimeInstallProgressSync";
-import { DSH_INSTALL_SETTINGS_TARGET, maybeHintMissingDshRunnerNode, showDshRuntimeBlockHint } from "./utils/dshRuntimeHint";
-import { dshSendBlockReason } from "../../shared/types/dshRuntime";
 import { useWorktreeActions } from "./hooks/useWorktreeActions";
 import { ChatSessionPane } from "./components/session/ChatSessionPane";
 import { SessionSplitStage } from "./components/session/SessionSplitStage";
 import { splitLayoutSessionIds } from "./utils/sessionSplitEdge";
-import { fileTreeNodeDisplayPath, fileTreeNodeKey, findDirectoryNodeByPath, findLoadedDirectory, loadProjectFileTree, markFileTreeLoadFailed, mergeFileTreeChildren } from "./utils/fileTreeLazy";
+
 import { SessionTabsBar, type SessionTabsBarProps, type SessionToolAction } from "./components/session/SessionTabsBar";
 import { SessionPaneServicesProvider, type SessionFileOpenContext } from "./components/session/SessionPaneServices";
+import { SessionStatusPanel } from "./components/session/statusPanel/SessionStatusPanel";
 import { ProjectEmptyState } from "./components/session/ProjectEmptyState";
 import { RemoteProjectEnrollDialog } from "./components/sidebar/RemoteProjectEnrollDialog";
 import { FileLinkBaseProvider } from "./components/session/FileLinkBase";
 import { useSessionWorkspaceChrome } from "./hooks/useSessionWorkspaceChrome";
+import { useSessionIdAliasMigration } from "./hooks/useSessionIdAliasMigration";
 import { useQuickTask } from "./hooks/useQuickTask";
+import { useSideTasks } from "./hooks/useSideTasks";
 import { QuickTaskSurface } from "./components/app/QuickTaskSurface";
-import { ScratchPadOverlay } from "./components/overlays/ScratchPadOverlay";
 import { AskPanelOverlay } from "./components/overlays/AskPanelOverlay";
+import { HostPluginPanelHost } from "./components/plugins/HostPluginPanelHost";
+import { HostPluginPageOverlay } from "./components/plugins/HostPluginPageOverlay";
+import { useHostPluginPageTab } from "./hooks/useHostPluginPageTab";
+import { useHostPluginNavigation } from "./hooks/plugins/useHostPluginNavigation";
 import { TerminalDockPanel } from "./components/terminal/TerminalDockPanel";
 import { ResizablePanel, ResizablePanelGroup } from "./components/ui-shadcn/resizable";
 import { AppShell } from "./components/app/AppShell";
@@ -148,18 +189,20 @@ import { WorkbenchContent } from "./components/workspace/WorkbenchContent";
 import { RenameModals } from "./components/RenameModals";
 import { SessionActionOverlays } from "./components/overlays/SessionActionOverlays";
 import { SessionProxyDialog } from "./components/session/SessionProxyDialog";
+import { CuaApprovalDialog, useCuaApproval } from "./components/overlays/CuaApprovalDialog";
 
 import { ImportOverlayHost } from "./components/overlays/ImportOverlayHost";
 import { EnvironmentOverlay } from "./components/overlays/EnvironmentOverlay";
 import { usePiEnvironmentGuide } from "./hooks/usePiEnvironmentGuide";
-import { EnvironmentDialog, FileContextMenu, ImagePreviewModal, type SessionModifiedFile } from "./components/app/AppParts";
+import { EnvironmentDialog, FileContextMenu, ImagePreviewModal } from "./components/app/AppParts";
 import { ExternalEditorOverlay } from "./components/workspace/ExternalEditorOverlay";
 import { navigateTo } from "./components/app/BrowserPanel";
-import { flattenFiles, fileNodeDragPayloadToRef, mergeCommands, getToolFilePath, getToolNewContent, getToolChangedLineCount } from "./components/app/AppUtils";
+import { flattenFiles, fileNodeDragPayloadToRef, mergeCommands } from "./components/app/AppUtils";
 // ProjectResourcesModal 仅在打开资源弹层时加载
 const ProjectResourcesModal = lazy(() => import("./components/app/ProjectResourcesModal").then((m) => ({ default: m.ProjectResourcesModal })));
-import { createDefaultExternalEditorSettings, createDefaultSoundAlertSettings, DEFAULT_PET_SCALE } from "../../shared/types";
+import { createDefaultAppSettings } from "../../shared/types";
 import { hydrateImageContents } from "../../shared/imageContentSrc";
+import { parseSessionStatusPlacement, placementShowsSidebarPanel } from "../../shared/sessionStatusPlacement";
 import type {
 	AgentRuntimeState,
 	AgentTab,
@@ -178,9 +221,11 @@ import type {
 	SessionSummary,
 	ComposerAgentMode,
 	TerminalTarget,
+	TerminalThemeId,
 	GitBranchInfo,
 	FocusTargetPayload,
 } from "../../shared/types";
+import type { TerminalDockSettings } from "./components/terminal/TerminalDock";
 
 export function App() {
 	if (missingElectronPreload) {
@@ -209,11 +254,14 @@ export function App() {
 	const store = useStore();
 	// Composer input state is owned by ComposerArea; the root does not subscribe to each key.
 	const currentSessionId = useAtomValue(currentSessionIdAtom);
+	// 开屏交接：已聚焦会话（工作区知道自己该显示什么）才撤启动遮罩，
+	// 否则会先闪一帧「无会话空态 = 引导页」再变正常。
+	useBootOverlayReady(currentSessionId !== undefined);
 	const currentSession = useAtomValue(currentSessionAtom);
 	// currentSessionRuntime / currentSessionRuntimeUi / currentSessionSendState: sync store.get() only.
-	// Streaming subscriptions are in SessionRuntimeInjector.
-	// Timeline 由各 ChatSessionPane 自持；大纲只读当前聚焦会话的消息缓存。
-	const activeMessages = useAtomValue(currentSessionMessagesAtom);
+	// Streaming subscriptions are in SessionRuntimeInjector. 修改文件清单走内容稳定投影 atom，
+	// 消息 flush 不改变清单内容时不会叫醒 App 根（否则文件抽屉等大树每 50ms 全量重渲）。
+	const modifiedFiles = useAtomValue(modifiedFilesAtom);
 	const projects = useAtomValue(projectInventoryAtom);
 	const agents = useAtomValue(agentInventoryAtom);
 	const setCurrentSessionId = useSetAtom(currentSessionIdAtom);
@@ -236,6 +284,8 @@ export function App() {
 	const removeSessionState = useSetAtom(removeSessionStateAtom);
 	const removeSessionComposerState = useSetAtom(removeSessionComposerStateAtom);
 	const setImageGenConfig = useSetAtom(imageGenConfigAtom);
+	const setEnhanceModel = useSetAtom(enhanceModelAtom);
+	const setEnhanceIncludeContext = useSetAtom(enhanceIncludeContextAtom);
 	const currentSessionIdRef = useRef<string | undefined>(currentSessionId);
 	currentSessionIdRef.current = currentSessionId;
 	const openSessionRequestRef = useRef(0);
@@ -266,23 +316,14 @@ export function App() {
 	const expandedProjects = useAtomValue(sidebarExpandedProjectIdsAtom);
 	const compactMiddlePackagesEnabled = useAtomValue(compactMiddlePackagesAtom);
 
-	const [commands, setCommands] = useState<PiCommand[]>([]);
-	const [promptTemplateList] = useState<Array<{ name: string; path: string; description: string; content: string; argumentHint?: string }>>([]);
 	const jumpToMessageRef = useRef<((messageId: string) => void) | null>(null);
 	// TECH DEBT (Phase 3): promptByAgent / attachedImagesByAgent legacy mirrors removed.
 	// All drafts/attachments go through Session atoms (setSessionDraft / setSessionAttachments).
 
-	// contentEditable 的实时值通过 livePromptByAgentRef 保持最新，发送路径始终从这里读取草稿。
-	const livePromptByAgentRef = useRef<Record<string, string>>({});
-
 	/** 当前正在重启的 Agent，用于仅给对应会话显示 loading，避免切到其他 Agent 后仍被全局禁用。 */
-	const [restartingAgentId, setRestartingAgentId] = useState<string | null>(null);
 	/** 当前正在激活（首次启动）的会话：未绑定 Agent 时「重启会话」走 activateRuntime，用会话 id 标记 loading。 */
-	const [activatingSessionId, setActivatingSessionId] = useState<string | null>(null);
 	/** 当前正在停止的 Agent：Tab 栏「停止」/侧栏关闭 Agent 时给对应会话 tab 徽章显示 loading。 */
-	const [stoppingAgentId, setStoppingAgentId] = useState<string | null>(null);
 	/** 当前正在从磁盘重载消息的会话：Tab 栏「重载」时给对应会话 tab 徽章显示 loading。 */
-	const [reloadingSessionId, setReloadingSessionId] = useState<string | null>(null);
 	const [previewImage, setPreviewImage] = useState<ImageContent | null>(null);
 	/**
 	 * 会话代理设置弹框目标会话。侧栏会话菜单与 Tab 栏 ⋯ 菜单共用同一个宿主，
@@ -297,13 +338,8 @@ export function App() {
 	/** & 会话引用选择缓存：key = chip raw（如 "&My Session"），value = 选中的消息列表 */
 	const [sessionRefSelections, setSessionRefSelections] = useState<Record<string, { messages: Array<{ role: string; content: string }>; fullContext: boolean; selectedIndices: number[] }>>({});
 
-	/** 每个 agent 最后一次会话的开始时间(status 变为 running 时记录),用 ref 避免 effect 闭包陈旧 */
-	const sessionStartByAgentRef = useRef<Record<string, number>>({});
-	/** 每个 agent 最后一次会话的总时长(ms),仅在会话结束后更新 */
-	const [sessionDurationByAgent, setSessionDurationByAgent] = useState<Record<string, number>>({});
 	// 会话区不再维护独立的“修改文件摘要”卡片；diff 入口贴在 edit/write 工具调用处，
 	// 避免会话输入框上方摘要与 Git 工作区状态/历史会话恢复互相干扰。
-	const agentStatusByAgentRef = useRef<Record<string, AgentTab["status"]>>({});
 
 	// 记录 composer 光标位置,用于光标相关的 @ / 触发检测与建议项替换。
 	const [fileMenu, setFileMenu] = useState<{
@@ -327,6 +363,38 @@ export function App() {
 	const showToast = useCallback((message: string, duration?: number, kind?: NoticeKind) => {
 		showNotice(message, duration, kind);
 	}, []);
+	// userData 更名（pi-desktop → PiDeck）一次性提示：主进程在 setPath 前已完成迁移，
+	// 这里首挂载消费式领取结果 toast——领过一次即清空，之后启动永不再弹。
+	useEffect(() => {
+		void api.projects
+			.consumeMigrationNotice()
+			.then((notice) => {
+				if (notice) showToast(t("app.userDataMigrationNotice", { newPath: notice.newPath }), 8000);
+			})
+			.catch(() => undefined);
+	}, [showToast]);
+	// ACP 工具表（settings.acpTools 快照）：挂载时拉一次供新建会话菜单/设置页共享；
+	// 后续变更由设置页保存后整表回写 acpToolsAtom，不做事件订阅（改动频率极低）。
+	// 同一次拉取顺带同步 acpEnabled 快照：菜单组仅在开关开启时渲染（主进程在 create 边界同规则门控）。
+	// 开关的后续变更由设置页开关直接回写 acpEnabledAtom，无需重启应用。
+	useEffect(() => {
+		let cancelled = false;
+		void api.acp
+			.listTools()
+			.then((tools) => {
+				if (!cancelled) store.set(acpToolsAtom, tools);
+			})
+			.catch(() => undefined);
+		void api.settings
+			.get()
+			.then((settings) => {
+				if (!cancelled) store.set(acpEnabledAtom, settings.acpEnabled === true);
+			})
+			.catch(() => undefined);
+		return () => {
+			cancelled = true;
+		};
+	}, [store]);
 	// 历史命令：按 agent 隔离，agent 关闭即清除（不持久化）
 	const promptHistoryRef = useRef<Record<string, string[]>>({});
 
@@ -395,40 +463,6 @@ export function App() {
 		},
 		[workspace.collapseDrawer, workspace.expandDrawer],
 	);
-	const saveExpandedDirs = useCallback((projectId: string, dirs: Set<string>) => {
-		try {
-			localStorage.setItem(PROJECT_EXPANDED_DIRS_KEY_PREFIX + projectId, JSON.stringify([...dirs]));
-		} catch {
-			/* ignore */
-		}
-	}, []);
-
-	const loadExpandedDirs = useCallback((projectId: string): Set<string> => {
-		try {
-			const key = PROJECT_EXPANDED_DIRS_KEY_PREFIX + projectId;
-			let raw = localStorage.getItem(key);
-			if (!raw) {
-				const legacyAgents = agentsRef.current.filter((a) => a.projectId === projectId).map((a) => a.id);
-				for (const agentId of legacyAgents) {
-					const oldKey = `pid:agent-expanded-dirs:${agentId}`;
-					const value = localStorage.getItem(oldKey);
-					if (value) {
-						if (!localStorage.getItem(key)) localStorage.setItem(key, value);
-						localStorage.removeItem(oldKey);
-						raw = value;
-						break;
-					}
-				}
-			}
-			if (raw) {
-				const arr = JSON.parse(raw);
-				if (Array.isArray(arr)) return new Set(arr);
-			}
-		} catch {
-			/* ignore */
-		}
-		return new Set();
-	}, []);
 	/** 打开文件编辑器前所在的抽屉面板，供返回按钮恢复 */
 	const [sessionsProjectId, setSessionsProjectId] = useState<string>();
 	const [projectResourcesProject, setProjectResourcesProject] = useState<Project | null>(null);
@@ -477,53 +511,6 @@ export function App() {
 		setSessionCatalogLoadState,
 		t,
 	});
-	// 文件树镜像：restoreExpandedDirs 等异步回调读取当前树，不依赖渲染闭包。
-	const filesRef = useRef(files);
-	filesRef.current = files;
-
-	/**
-	 * 展开目录自愈：扫描当前树里「已展开但 children 缺失、hasChildren 仍为 true」
-	 * 的目录并按需补拉。修复两类残留场景：
-	 * 1. 目录 listing 被代次/切项目丢弃（#159 兕底路径、旧代次 IPC）后，展开态还在；
-	 * 2. 历史版本失败未打标（hasChildren=true + 无 children）留下的永久占位。
-	 * 返回是否有目录需要修复（含拉取成功/失败）；无目录需要修复时返回 false。
-	 */
-	const restoreExpandedDirs = useCallback(
-		async (projectId: string): Promise<boolean> => {
-			// 从镜像 ref 读当前树：本函数在抽屉打开回调里调用，闭包里的 files 可能是旧渲染帧。
-			const pending: Array<{ path: string; target?: ProjectFileTarget }> = [];
-			const collectPending = (nodes: FileTreeNode[]) => {
-				for (const node of nodes) {
-					if (node.type !== "directory") continue;
-					// 「已展开 + 无 children + 未标失败」= 占位正在展示或即将展示的目录，需要补拉。
-					const nodeKey = fileTreeNodeKey(node);
-					if (expandedDirsRef.current.has(nodeKey) && !Array.isArray(node.children) && node.hasChildren !== false) {
-						pending.push({ path: nodeKey, target: node.target });
-					}
-					if (node.children?.length) collectPending(node.children);
-				}
-			};
-			collectPending(filesRef.current);
-			if (pending.length === 0) return false;
-			const generation = beginFileTreeRequest();
-			// 父目录先补：子目录 listing 依赖父层先 merge 出节点才能写入。
-			pending.sort((left, right) => left.path.length - right.path.length);
-			for (const item of pending) {
-				const { path: directory, target } = item;
-				try {
-					const children = target ? await api.files.list(target, { maxDepth: 0 }) : await api.files.list(projectId, { maxDepth: 0, directory });
-					if (!isFileTreeRequestCurrent(generation, projectId)) return true;
-					setFiles((tree) => mergeFileTreeChildren(tree, directory, children));
-				} catch (error) {
-					console.error("[Files] restore expand failed", directory, error);
-					if (!isFileTreeRequestCurrent(generation, projectId)) return true;
-					setFiles((tree) => markFileTreeLoadFailed(tree, directory));
-				}
-			}
-			return true;
-		},
-		[beginFileTreeRequest, isFileTreeRequestCurrent],
-	);
 
 	// 回答结束后的会话列表后台静默刷新：500ms 尾沿去抖。
 	// 多个 Agent 同时结束回答时只扫描一次，避免重复 IPC 与列表抖动。
@@ -546,6 +533,8 @@ export function App() {
 		setCodexImportProject,
 		claudeImportProject,
 		setClaudeImportProject,
+		qoderImportProject,
+		setQoderImportProject,
 		openCodeImportProject,
 		setOpenCodeImportProject,
 		zcodeImportProject,
@@ -554,18 +543,32 @@ export function App() {
 		setWorkbuddyImportProject,
 		cursorImportProject,
 		setCursorImportProject,
+		kimiImportProject,
+		setKimiImportProject,
+		kimiWorkImportProject,
+		setKimiWorkImportProject,
+		minimaxImportProject,
+		setMinimaxImportProject,
 		codexImportController,
 		claudeImportController,
+		qoderImportController,
 		openCodeImportController,
 		zcodeImportController,
 		workbuddyImportController,
 		cursorImportController,
+		kimiImportController,
+		kimiWorkImportController,
+		minimaxImportController,
 		openCodexImport,
 		openClaudeImport,
+		openQoderImport,
 		openOpenCodeImport,
 		openZCodeImport,
 		openWorkBuddyImport,
 		openCursorImport,
+		openKimiImport,
+		openKimiWorkImport,
+		openMinimaxImport,
 	} = useImportFlow({
 		setProjectMenu: () => undefined,
 		refreshProjectSessions,
@@ -574,6 +577,8 @@ export function App() {
 		importCodexSessionsApi: api.codexSessions.import,
 		scanClaudeSessions: api.claudeSessions.scan,
 		importClaudeSessionsApi: api.claudeSessions.import,
+		scanQoderSessions: api.qoderSessions.scan,
+		importQoderSessionsApi: api.qoderSessions.import,
 		scanOpenCodeSessions: api.openCodeSessions.scan,
 		importOpenCodeSessionsApi: api.openCodeSessions.import,
 		scanZCodeSessions: api.zcodeSessions.scan,
@@ -582,6 +587,15 @@ export function App() {
 		importWorkBuddySessionsApi: api.workbuddySessions.import,
 		scanCursorSessions: api.cursorSessions.scan,
 		importCursorSessionsApi: api.cursorSessions.import,
+		scanKimiSessions: api.kimiSessions.scan,
+		importKimiSessionsApi: api.kimiSessions.import,
+		describeKimiWorkShareRoot: api.kimiWorkSessions.describe,
+		scanKimiWorkSessions: api.kimiWorkSessions.scan,
+		importKimiWorkSessionsApi: api.kimiWorkSessions.import,
+		scanMinimaxSessions: api.minimaxSessions.scan,
+		importMinimaxSessionsApi: api.minimaxSessions.import,
+		getSettings: api.settings.get,
+		updateSettings: api.settings.update,
 		t,
 	});
 
@@ -616,15 +630,6 @@ export function App() {
 
 	const getProjectSessionRecords = (projectId: string) => store.get(sessionRecordsByProjectIdAtomFamily(projectId));
 	const getSessionRecord = (sessionId: string) => store.get(sessionRecordByIdAtomFamily(sessionId));
-	const getRuntimeTargetForSession = (sessionId: string | undefined) => (sessionId ? toSessionRuntimeTarget(sessionId, store.get(sessionRuntimeBySessionIdAtomFamily(sessionId))) : undefined);
-	// target 存在不代表 live（error/closed 终态仍持有绑定）：改文件前是否要先停 Agent
-	// 必须按 runtime status 判定，避免对已死进程误发 stop。
-	const isSessionRuntimeLive = (sessionId: string) => isLiveRuntimeStatus(store.get(sessionRuntimeBySessionIdAtomFamily(sessionId))?.status);
-	const getRuntimeTargetForAgent = (agentId: string | undefined) => {
-		if (!agentId) return undefined;
-		const sessionId = store.get(sessionIdByRuntimeAgentIdAtomFamily(agentId));
-		return getRuntimeTargetForSession(sessionId);
-	};
 	const [sessionHistoryLoading, setSessionHistoryLoading] = useState(false);
 
 	// 后台更新状态订阅（electron-updater 快照驱动）：自动下载开启时静默下载，
@@ -636,131 +641,16 @@ export function App() {
 		openSettings: () => store.set(openSettingsAtom, { tab: "dev" }),
 	});
 
-	const PROJECT_EXPANDED_DIRS_KEY_PREFIX = "pid:project-expanded-dirs:";
+	// 通道切换状态订阅：初拉当前通道 + 切换快照，AppUpdateCard 徽章/切换向导消费。
+	useChannelSwitchWatch({ api });
+
+	// 数据环境事件订阅：dev 首启模式选择 / 目录标记警告 / 导入进度（弹窗由 dataEnvAtoms 驱动）。
+	useDataEnvWatch({ api });
 
 	// localStorage 只负责首屏；展开项目的权威设置必须等首次 settings.get 返回后才参与迁移。
 	const [settingsLoaded, setSettingsLoaded] = useState(false);
 	const [expandedProjectsReady, setExpandedProjectsReady] = useState(false);
-	const [settings, setSettings] = useState<AppSettings>({
-		useNativeTitleBar: true,
-		showNativeMenu: false,
-		sendShortcut: "enter-send",
-		defaultAgentBackend: "pi",
-		theme: "system",
-		themeScheduleLightStart: "07:00",
-		themeScheduleDarkStart: "19:00",
-		accent: "default",
-		themeSkin: "classic-green",
-		customThemeOverrides: {},
-		backgroundImage: "",
-		backgroundImageOpacity: 0.8,
-		language: "system",
-		startupWindowMode: "last",
-		piEnvironmentChecked: false,
-		/** 扩展禁用白名单：与 SettingsStore 默认一致，空数组 = 不启用白名单（首屏未拉到真实设置前的默认值） */
-		disabledExtensions: [],
-		disableExtensionWhitelist: false,
-		/** 技能禁用列表：与 SettingsStore 默认一致，空数组 = 不启用技能白名单 */
-		disabledSkills: [],
-		/** 提示词模板禁用列表：与 SettingsStore 默认一致，空数组 = 不启用模板白名单 */
-		disabledPrompts: [],
-		sessionTabOpenMode: "preview",
-		// 与 main SettingsStore 默认一致：标题生成默认关闭，避免首轮结束后无感知消耗 token
-		autoSessionTitle: false,
-		// 与 main SettingsStore 默认一致：忙碌时发送默认「插入当前回合」
-		busySendDelivery: "steer",
-		// 遗留字段：快捷消息已改存独立配置文件 userData/quick-messages.json（见 useQuickMessages），
-		// 这里保留字段只为满足 AppSettings 类型，内容不再被读取。
-		quickMessages: [],
-		enableGitManagement: true,
-		gitCommitMessagePrompt: "请根据以下 git diff 生成一条中文 git commit message。\n\n变更描述：\n{diff}\n\nGitmoji 对应关系：\n✨ feat - 新功能\n🐛 fix - Bug 修复\n📚 docs - 文档更新\n💎 style - 代码格式\n♻️ refactor - 重构\n🧪 test - 测试\n🔧 chore - 构建/工具",
-		gitCommitMessageProvider: "",
-		gitCommitMessageModel: "",
-		gitExecutablePath: "",
-		dshRunnerNodePath: "",
-		closeToTray: true,
-		singleInstance: true,
-		enableNotifications: true,
-		// Ask 提问系统通知默认关闭：与主进程 SettingsStore 默认一致（默认不打扰）
-		askNotificationEnabled: false,
-		// 人文关怀提醒默认开启：与主进程 SettingsStore 默认一致，首屏未拉到真实设置前不关闭提醒
-		agentCountReminderEnabled: true,
-		// 公告通知默认开启：与主进程 SettingsStore 默认一致，首屏未拉到真实设置前不误关提醒
-		announcementNotificationEnabled: true,
-		// showThinking 由 pi agent 的 hideThinkingBlock 控制，启动后从主进程加载的真实值会覆盖此处
-		showThinking: true,
-		// 流式对话行为：默认自动展开中间过程；新一轮默认收起非最新轮（与 SettingsStore 一致）
-		expandInterimDuringStream: true,
-		// 过程组显示默认关闭：与主进程 SettingsStore 默认一致，首屏未拉到真实设置前保持平铺渲染
-		processGroupDisplay: false,
-		collapsePrevRunsOnNewTurn: true,
-		showDevTools: false,
-		developerDiagnostics: false,
-		// Electron Chromium 沙箱默认关，与主进程历史兼容策略一致
-		electronChromiumSandbox: false,
-		piProxyEnabled: false,
-		piProxyUrl: "http://127.0.0.1:7890",
-		piProxyBypass: "localhost,127.0.0.1,::1",
-		piProxyProviders: [],
-		piProxyModels: [],
-		desktopProxyEnabled: false,
-		desktopProxyUrl: "http://127.0.0.1:7890",
-		desktopProxyBypass: "localhost,127.0.0.1,::1",
-		customPiPath: "",
-		wslEnabled: false,
-		wslDistro: "Ubuntu",
-		wslUser: "root",
-		telemetryEnabled: true,
-		webServiceEnabled: false,
-		webServiceHost: "127.0.0.1",
-		webServicePort: 8765,
-		rpcTimeout: 600_000,
-		linkOpenMode: "external",
-		workspaceContentOpenMode: "split",
-		contentMaxWidth: 1800,
-		chatContentWidthPct: 80,
-		sessionTabMaxWidth: SESSION_TAB_MAX_WIDTH_DEFAULT,
-		maxEditorFileSizeMB: 5,
-		externalEditors: createDefaultExternalEditorSettings(),
-
-		// 桌面宠物默认关闭：关闭后应用与现状完全一致，零回归
-		petEnabled: false,
-		petId: "clawd",
-		petAlwaysOnTop: true,
-		petScale: DEFAULT_PET_SCALE,
-		petPatrolEnabled: true,
-		petPatrolPauseMin: 5,
-		// 闲置 agent 自动释放：与 main SettingsStore 默认值保持一致，避免启动时闪烁
-		idleAgentAutoRelease: true,
-		idleAgentKeepCount: 5,
-		idleAgentTimeoutMin: 60,
-		favoriteModels: [],
-
-		// 字体配置：与 main SettingsStore 默认值保持一致，避免启动时闪烁
-		fontSize: "default",
-		uiFontSize: null,
-		chatFontSize: null,
-		inputFontSize: null,
-		zoomFactor: 1,
-		fontFamilyBase: "system",
-		fontFamilyBaseCustom: "",
-		fontFamilyMono: "system-mono",
-		fontFamilyMonoCustom: "",
-		removedBuiltInExtensions: [],
-		// 声音提醒：与主进程 defaultSettings 保持一致（完成/异常开、等待输入关）
-		soundAlert: createDefaultSoundAlertSettings(),
-		imageGenSize: "unset",
-		imageGenWatermark: false,
-		imageGenOutputFormat: "png",
-		autoDownloadUpdates: true,
-		// 与主进程 defaultSettings 保持一致：更新源默认 GitHub 官方，自定义镜像前缀留空
-		updateSource: "github",
-		customUpdateSourceUrl: "",
-		// 与主进程 defaultSettings 保持一致：offline 默认关，让模型目录随启动刷新
-		piRpcOffline: false,
-		piRpcNoExtensions: false,
-		piRpcNoSkills: false,
-	});
+	const [settings, setSettings] = useState<AppSettings>(createDefaultAppSettings);
 
 	// 流式对话行为设置同步给 turn 组件（TurnRow 直接订阅 atom，避免 5 层 props 透传；
 	// 设置变化低频，全局订阅成本可忽略）。
@@ -769,9 +659,8 @@ export function App() {
 		setTurnFlowSettings({
 			expandInterimDuringStream: settings.expandInterimDuringStream,
 			processGroupDisplay: settings.processGroupDisplay,
-			collapsePrevRunsOnNewTurn: settings.collapsePrevRunsOnNewTurn,
 		});
-	}, [settings.expandInterimDuringStream, settings.processGroupDisplay, settings.collapsePrevRunsOnNewTurn, setTurnFlowSettings]);
+	}, [settings.expandInterimDuringStream, settings.processGroupDisplay, setTurnFlowSettings]);
 
 	// 新建会话默认后端同步给根级组件（并行问询 AskPanel 等不持有 settings props）。
 	const setDefaultAgentBackend = useSetAtom(defaultAgentBackendAtom);
@@ -796,6 +685,13 @@ export function App() {
 		setHiddenModules(settings.hiddenModules ?? []);
 	}, [settings.hiddenModules, setHiddenModules]);
 
+	// 隐藏的输入框功能入口同步给不持有 settings props 的消费方（ComposerBottomBar 的模式选择器），
+	// 与 hiddenModules 同一模式。
+	const setHiddenComposerFeatures = useSetAtom(hiddenComposerFeaturesAtom);
+	useEffect(() => {
+		setHiddenComposerFeatures(settings.hiddenComposerFeatures ?? []);
+	}, [settings.hiddenComposerFeatures, setHiddenComposerFeatures]);
+
 	// 启动预热：应用起来后把「已开启用量查询」的供应商各查一次（串行错峰），
 	// 打开模型/认证页即可直接看到徽章数值，不必先手动刷新。
 	useProviderUsageStartupWarmup();
@@ -810,18 +706,10 @@ export function App() {
 	}, [settings.enableGitManagement, drawer, workspace.closeDrawer]);
 
 	/* settingsNotice 已改用 showToast（sonner）实现 */
-	const [webServiceChanging, setWebServiceChanging] = useState(false);
-	const [appInfo, setAppInfo] = useState<AppInfo>({
-		version: "-",
-		releasesUrl: "https://github.com/ayuayue/PiDeck/releases",
-		// 同步判定，避免 Mac 首帧在 appInfo IPC 返回前误画 Win 窗口按钮
-		platform: detectRendererPlatform(),
-		homeDir: "",
-		userDataDir: "",
-	});
-	const [systemLanguage, setSystemLanguage] = useState<string | null>(null);
-	const resolvedLocale = resolveLocale(settings.language, systemLanguage ?? undefined);
-	setI18nLocale(resolvedLocale);
+	// 应用自描述信息域（版本/平台/目录 + 系统语言）收口到 useAppBootstrapInfo
+	const { appInfo, systemLanguage } = useAppBootstrapInfo(api);
+	// 外观/i18n 域（明暗解析、壁纸/皮肤/字体注入、locale 同步）统一收口到 useAppAppearance
+	useAppAppearance({ settings, systemLanguage, settingsLoaded });
 
 	// ===== Pi 更新/安装/代理 hook (H1) =====
 	const piUpdate = usePiUpdate({
@@ -875,31 +763,31 @@ export function App() {
 		terminalStatesByOwner,
 		prune: pruneTerminalDockState,
 	} = useTerminalDock(terminalOwner);
-	// 终端 IPC 目标：
-	// - agent owner → 当前会话的 runtime target（须绑定已启动 Agent）；拿不到 runtime
-	//   （从未启动 / 停止后绑定缺失）时回退项目 ID 目标，由主进程读取受信任 cwd——
-	//   保证普通项目的会话无论 Agent 是否激活都能开项目终端（按钮常显）。
-	// - project owner（引导页/未激活 agent/历史会话）→ 项目 ID，主进程解析工作目录。
-	// - Chat 项目没有可落地的 cwd，不提供终端（激活中的匿名聊天除外，走 agent 目标）。
-	const terminalTarget: TerminalTarget | undefined = useMemo(() => {
-		if (!terminalOwner) return undefined;
-		const fallbackProject = (() => {
-			const pid = terminalOwner.kind === "project" ? terminalOwner.id : (activeProjectId ?? currentSessionRecord?.projectId);
-			return pid ? projects.find((p) => p.id === pid) : undefined;
-		})();
-		const projectTarget = fallbackProject && !isChatProject(fallbackProject) ? { kind: "project" as const, projectId: fallbackProject.id } : undefined;
-		if (terminalOwner.kind === "agent") {
-			const runtimeTarget = getRuntimeTargetForSession(currentSessionId);
-			return runtimeTarget ? { kind: "agent", ...runtimeTarget } : projectTarget;
-		}
-		return projectTarget;
-	}, [terminalOwner, currentSessionId, currentSessionRecord, projects, activeProjectId]);
-	const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
-	// 展开目录镜像：restoreExpandedDirs 在异步回调里读取，避免闭包拿到旧 state。
-	const expandedDirsRef = useRef<Set<string>>(expandedDirs);
-	expandedDirsRef.current = expandedDirs;
-	// 手动刷新/增删改后仍只拉浅层 + 当前展开目录，避免再走整棵 12 层 IPC。
-	const refreshVisibleFiles = useCallback((projectId?: string, silent?: boolean) => refreshFiles(projectId, silent, expandedDirs), [expandedDirs, refreshFiles]);
+	// 终端外观设置：App 级单份，随 AppSettings 持久化；dock 只收子集 props，不自读 settings
+	const terminalSettings = useMemo<TerminalDockSettings>(
+		() => ({
+			themeId: settings.terminalTheme,
+			fontFamily: settings.terminalFontFamily,
+			fontSize: settings.terminalFontSize,
+			scrollback: settings.terminalScrollback,
+			cursorStyle: settings.terminalCursorStyle,
+			cursorBlink: settings.terminalCursorBlink,
+			copyOnSelect: settings.terminalCopyOnSelect,
+			paddingY: settings.terminalPaddingY,
+			confirmClose: settings.terminalConfirmClose,
+			startupCommand: settings.terminalStartupCommand,
+		}),
+		[settings.terminalTheme, settings.terminalFontFamily, settings.terminalFontSize, settings.terminalScrollback, settings.terminalCursorStyle, settings.terminalCursorBlink, settings.terminalCopyOnSelect, settings.terminalPaddingY, settings.terminalConfirmClose, settings.terminalStartupCommand],
+	);
+	const setTerminalTheme = useCallback(
+		(themeId: TerminalThemeId) => {
+			void api.settings
+				.update({ terminalTheme: themeId })
+				.then(setSettings)
+				.catch(() => showToast(t("settings.terminal.themeChangeFailed"), 3000));
+		},
+		[api, showToast],
+	);
 	const [expandedSidebarProjects, setExpandedSidebarProjects] = useState<Set<string>>(new Set());
 	const expandedSidebarProjectsRef = useRef(expandedSidebarProjects);
 	expandedSidebarProjectsRef.current = expandedSidebarProjects;
@@ -918,7 +806,27 @@ export function App() {
 	const pendingComposerCaretRef = useRef<number | null>(null);
 	const pendingAgentsRef = useRef<PendingAgentTab[]>([]);
 
-	const scratchPad = useScratchPad();
+	// 项目文件树域（展开持久化/自愈/下钻/切换加载）收口到 useProjectFileTreeController。
+	// 文件树是纯本机能力：远端项目没有本机 path，hook 需要据此跳过一切本地 files:list。
+	const isLocalProjectId = useCallback((projectId: string) => projects.some((project) => project.id === projectId && isLocalProject(project)), [projects]);
+	const { expandedDirs, refreshVisibleFiles, restoreExpandedDirs, drillCompactChain, toggleDirectory, collapseAllDirectories } = useProjectFileTreeController({
+		files,
+		setFiles,
+		refreshFiles,
+		beginFileTreeRequest,
+		isFileTreeRequestCurrent,
+		activeProjectId,
+		activeProjectIdRef,
+		isLocalProjectId,
+		compactMiddlePackagesEnabled,
+		agentsRef,
+		refreshProjects,
+		showToast,
+	});
+
+	const scratchPad = useScratchPad(workspace);
+	// CUA 操作审批：根级订阅主进程推送的审批请求并渲染确认弹框（事件驱动，全局唯一一份）。
+	const cuaApproval = useCuaApproval();
 	// DSH runtime 安装态同步：全进程只挂这一份（IPC 拉取 + 变更订阅 → dshRuntimeStatusAtom）。
 	// 必须早于任何按安装态门控的 UI 计算，否则首帧会用 checking 初值渲染。
 	useDshRuntimeStatusSync();
@@ -927,16 +835,6 @@ export function App() {
 	useDshRuntimeInstallProgressSync();
 	// 存量 dsh 用户升级后 runtime 不在时给一次直达提示（有 dsh 会话才提示，只提示一次）。
 	useDshRuntimeMigrationNotice();
-
-	// Drawer loading handled by useWorkspacePanels; only expandedDirs logic remains.
-	useEffect(() => {
-		if (!activeProjectId) {
-			setExpandedDirs(new Set());
-			return;
-		}
-		const dirs = loadExpandedDirs(activeProjectId);
-		setExpandedDirs(dirs);
-	}, [activeProjectId, loadExpandedDirs]);
 
 	const activeProjectRuntimeCapabilities = useProjectRuntimeCapabilities(activeProjectId);
 	const activeProject = projects.find((project) => project.id === activeProjectId);
@@ -958,6 +856,9 @@ export function App() {
 		overlays,
 	});
 
+	// 会话时长跟踪（running→idle 边沿写 sessionDurationByAgent）收口到 useSessionDurationTracking
+	const { sessionDurationByAgent } = useSessionDurationTracking({ displayAgents, activeAgentId });
+
 	// displayAgents 的 ref，供只挂载一次的 IPC 监听器读取最新 Agent 列表，避免闭包陈旧
 	const displayAgentsRef = useRef(displayAgents);
 	displayAgentsRef.current = displayAgents;
@@ -969,29 +870,30 @@ export function App() {
 	const rewindBackend = activeAgent?.backend ?? currentSessionRecord?.backend;
 	const rewindSupported = rewindBackend === undefined || rewindBackend === "pi";
 
+	// === RPC 日志 Tab 门控（抽屉活动栏）===
+	// rpcLoggingAgentIdsAtom 是「开启了 RPC 日志记录的 agent」渲染层镜像，唯一写入方是
+	// rpc.setLogging 包装（主进程回执落地才写，见下方 sidebarActions）。Tab 门控叠加
+	// 「agent 仍存活」判定：agentId 键在进程关闭后不清理（无复用价值），陈旧键只允许让
+	// Tab 多显示（保守方向），叠加存活判定后即使有陈旧键也不会渲染出指向死 agent 的 Tab。
+	const rpcLoggingAgentIds = useAtomValue(rpcLoggingAgentIdsAtom);
+	const setRpcLoggingAgentIds = useSetAtom(rpcLoggingAgentIdsAtom);
+	const patchRpcLoggingAgentIds = useCallback((agentId: string, enabled: boolean) => {
+		setRpcLoggingAgentIds((current) => toggleRpcLoggingAgent(current, agentId, enabled));
+	}, []);
+	const rpcLogTabTargetAgentId = useMemo(() => {
+		if (rpcLoggingAgentIds.size === 0) return undefined;
+		const liveIds = new Set([...displayAgents, ...pendingAgents].filter((agent) => agent.status !== "closed" && agent.status !== "error").map((agent) => agent.id));
+		// 优先沿用面板当前绑定的 agent（同一次观看会话内 Tab 点击不切换观察对象）
+		if (workspace.rpcLogAgentId && rpcLoggingAgentIds.has(workspace.rpcLogAgentId) && liveIds.has(workspace.rpcLogAgentId)) return workspace.rpcLogAgentId;
+		for (const id of rpcLoggingAgentIds) if (liveIds.has(id)) return id;
+		return undefined;
+	}, [rpcLoggingAgentIds, displayAgents, pendingAgents, workspace.rpcLogAgentId]);
+
 	// Timeline scroll, pagination and jump ownership lives in sessionTimeline.
 	// Modern Session drafts and attachments are subscribed by ComposerArea; the root only
 	// keeps the legacy queue adapter for agents that do not yet have a Session record.
-	function setPromptForAgent(agentId: string, value: string | ((current: string) => string)) {
-		const targetAgentId = agentId;
-		// previous 必须从 Session draft atom 读取（权威源）：输入框的编辑/删除都经 composer
-		// setDraft 写入 atom，livePromptByAgentRef 只在 setPromptForAgent 内更新，若用它当
-		// previous，「右键引用 → 删除 → 再右键引用」会把已删除的旧引用带回输入框。
-		const previous = store.get(sessionDraftByIdAtom)[targetAgentId] ?? "";
-		const nextValue = typeof value === "function" ? value(previous) : value;
-		if (nextValue) livePromptByAgentRef.current[targetAgentId] = nextValue;
-		else delete livePromptByAgentRef.current[targetAgentId];
-		setSessionDraft({ sessionId: targetAgentId, value: nextValue });
-	}
-
-	function getComposerTargetId() {
-		return currentSessionIdRef.current ?? activeAgentIdRef.current;
-	}
-
-	function setPrompt(value: string | ((current: string) => string)) {
-		const targetId = getComposerTargetId();
-		if (targetId) setPromptForAgent(targetId, value);
-	}
+	// 提示词发送路径（草稿写入/忙碌投递语义/IPC sendPrompt 唯一出口/错误码本地化）收口到 useSessionPromptDispatch。
+	const { livePromptByAgentRef, setPromptForAgent, setPrompt, isAgentCurrentlyBusy, dispatchPromptSnapshot, submitPromptSnapshot, translateAgentErrorMessage } = useSessionPromptDispatch({ store, setSessionDraft, currentSessionId, currentSessionIdRef, activeAgentIdRef, showToast });
 
 	// Queue ownership extracted to useQueuedPrompt.
 	const queue = useQueuedPrompt({
@@ -1007,6 +909,9 @@ export function App() {
 		unknownDeliveryMessage: t("app.queuedUnknown"),
 		dispatchPromptSnapshot,
 	});
+	// composer 域 per-session 状态（草稿/引用全文仓/发送态等）的外部删除清理，
+	// 与 queue 同一所有权模式：records+runtime 双双消失才回收，引导页虚拟会话豁免。
+	useComposerStateSessionPrune(store);
 	useSessionRuntimeBridge({
 		onRuntimeCapabilityChanged: ({ sessionId, previous, current, patch }) => {
 			if (previous?.isExecutingTool && !current.isExecutingTool && (patch.toolStateSequence == null || previous.toolStateSequence == null || patch.toolStateSequence >= previous.toolStateSequence) && queue.isSessionRuntimeBusy(sessionId)) {
@@ -1025,6 +930,36 @@ export function App() {
 	});
 	// 激活 Agent 数量告警：受设置 agentCountReminderEnabled 控制（默认开启），每个启动周期提示一次
 	useAgentLoadNotice(settings.agentCountReminderEnabled);
+	useTpsDisplayMode(settings.tpsDisplayMode);
+
+	// 架构错包检测：x64 包跑在 Apple Silicon（Rosetta）下时提示换装 arm64 原生包（可永久关闭）
+	useArchMismatchNotice();
+
+	// logo 风格 → 渲染层镜像 atom + localStorage 缓存：LogoMark/侧栏/关于弹层订阅 atom 即时切换；
+	// localStorage 让下次启动的启动画面（React 挂载前）就能用同一风格，避免开屏闪回默认 pi-tui。
+	const setLogoStyle = useSetAtom(logoStyleAtom);
+	useEffect(() => {
+		const logoStyle = resolveLogoStyle(settings.logoStyle);
+		setLogoStyle(logoStyle);
+		try {
+			window.localStorage.setItem(LOGO_STYLE_STORAGE_KEY, logoStyle);
+		} catch {
+			// localStorage 不可用（隐私模式等）只影响启动画面回退 classic，不致命
+		}
+	}, [settings.logoStyle, setLogoStyle]);
+
+	// 自定义品牌（显示名称 / 自定义 logo 图）→ 渲染层镜像 atom：品牌区、关于弹层、空态 LogoMark 订阅即时切换；
+	// 同时写 localStorage 开屏缓存，让下次启动的开屏（React 挂载前）用同一套品牌值。
+	// 自定义图只在 custom 风格下进缓存：切回内置风格时要把上一张图清掉，否则开屏会残留旧图。
+	const setAppDisplayName = useSetAtom(appDisplayNameAtom);
+	const setCustomLogo = useSetAtom(customLogoAtom);
+	useEffect(() => {
+		const displayName = resolveAppDisplayName(settings.appDisplayName);
+		const customLogo = resolveLogoStyle(settings.logoStyle) === "custom" ? (settings.logoCustomImage ?? "") : "";
+		setAppDisplayName(displayName);
+		setCustomLogo(settings.logoCustomImage ?? "");
+		writeBootBrandCache(displayName, customLogo);
+	}, [settings.appDisplayName, settings.logoCustomImage, settings.logoStyle, setAppDisplayName, setCustomLogo]);
 
 	// 公告通知开关 → 渲染层镜像 atom：通知调度与侧栏入口显隐共用同一数据源，
 	// 设置保存后即时生效（settings.get 首拉与 onSettingsApplied 都经此处同步）
@@ -1040,6 +975,10 @@ export function App() {
 
 	// 公告通知调度（读镜像 atom）：输入/Agent 运行中/模态打开/窗口不活跃时自动延后弹出（不打扰操作，见 hook 注释）
 	useAnnouncementNotifier();
+	// toast 展示时长同步给 notice helper（全局统一口径；保存设置即时生效）
+	useEffect(() => {
+		configureNoticeDefaults({ toastDurationMs: settings.toastDurationMs });
+	}, [settings.toastDurationMs]);
 	// 模型保存后台验证结果（fork 真实 pi ~17s）失败时全局 toast；成功静默，见 hook 注释
 	useModelsVerifyNotifier();
 	const activeQueuedPrompts = currentSessionId ? (queue.queuedPrompts[currentSessionId] ?? []) : [];
@@ -1121,191 +1060,7 @@ export function App() {
 		loadPersistedWidth: loadSidebarWidth,
 		persistWidth: persistSidebarWidth,
 	});
-	useEffect(() => {
-		document.documentElement.lang = resolvedLocale;
-	}, [resolvedLocale]);
 
-	useEffect(() => {
-		const media = window.matchMedia?.("(prefers-color-scheme: dark)");
-		const applyTheme = () => {
-			// 明暗 / 外观主题 / 主色统一经 themeAppearance 应用（与设置弹窗实时预览共用实现）：
-			// data-theme(浅暗) + data-appearance(表面色板) + data-accent(主题自带主色)
-			applyAppearanceAttributes(document.documentElement, settings, Boolean(media?.matches));
-		};
-		applyTheme();
-		const cleanups: Array<() => void> = [];
-		if (settings.theme === "system" && media?.addEventListener) {
-			media.addEventListener("change", applyTheme);
-			cleanups.push(() => media.removeEventListener("change", applyTheme));
-		}
-		// 跟随时间：睡到下一次浅色/暗色边界再应用，避免每分钟轮询。
-		if (settings.theme === "schedule") {
-			let timer: number | undefined;
-			const arm = () => {
-				const delay = msUntilNextThemeBoundary(new Date(), settings.themeScheduleLightStart, settings.themeScheduleDarkStart);
-				timer = window.setTimeout(() => {
-					applyTheme();
-					arm();
-				}, delay);
-			};
-			arm();
-			cleanups.push(() => {
-				if (timer !== undefined) window.clearTimeout(timer);
-			});
-		}
-		return () => {
-			for (const cleanup of cleanups) cleanup();
-		};
-		// 依赖 theme 与 accent：只改主题色时也必须重新应用 data-accent（否则界面不变）
-	}, [settings.theme, settings.themeScheduleLightStart, settings.themeScheduleDarkStart, settings.accent, settings.themeSkin]);
-
-	// 外观主题自定义覆盖 + 换肤背景图统一管理（原两个 effect 互相清除：
-	// 皮肤 effect 清 token 时误清壁纸注入、背景 effect 的 else 分支又误清皮肤 bg 键——
-	// 合并后顺序固定：先自定义覆盖，后壁纸覆盖。内置外观主题色板由 CSS data-appearance 承担。）
-	useEffect(() => {
-		const root = document.documentElement;
-		const isDark = root.dataset.theme === "dark";
-		const BG_TOKENS = [
-			"--color-bg-app",
-			"--color-bg-sidebar",
-			"--color-bg-panel",
-			"--color-bg-input",
-			"--color-bg-muted",
-			"--color-bg-hover",
-			"--color-bg-active",
-			"--color-background",
-			"--color-card",
-			// Markdown/表格使用 chat 专属 token；未注入时会继续显示固定白色代码块。
-			"--color-chat-card-bg",
-			"--color-chat-muted-bg",
-			"--color-chat-control-bg",
-			"--color-chat-table-bg",
-		];
-
-		// 1. 自定义外观主题覆盖：customThemeOverrides 总是叠加在内置外观主题之上
-		//    （inline 样式优先于 stylesheet 的 [data-appearance] 块，语义=「自定义压过内置」）。
-		//    内置主题（classic-green/graphite/sea-blue/warm-beige）的表面色板由 CSS
-		//    [data-appearance] 块承担，这里不再注入内置皮肤变量，避免 inline 与样式表互相覆盖。
-		//    先清掉上次注入的 custom token，保证切换主题后无残留。
-		for (const k of injectedCustomTokens) root.style.removeProperty(`--color-${k}`);
-		injectedCustomTokens.clear();
-		for (const [k, v] of Object.entries(settings.customThemeOverrides ?? {})) {
-			root.style.setProperty(`--color-${k}`, v);
-			injectedCustomTokens.add(k);
-		}
-
-		// 2. 换肤背景图：遮罩同色渐变（浅白/暗黑）+ 壁纸模式 token 半透明注入。
-		//    存储语义=图片可见度（0=全遮，1=图全显）；滑块 80% → 遮罩 0.2 → 图 80% 透出。
-		root.dataset.bgImage = settings.backgroundImage ? "on" : "off";
-		if (settings.backgroundImage) {
-			// 采样前先摘掉上一轮注入的壁纸 token：inline style 在 cascade 上压过
-			// :root[data-theme="dark"] 样式表，不摘的话 getComputedStyle 读到的是
-			// 上一轮主题烤进的旧值，重注入又基于旧值——背景被永久焊死在注入时的
-			// 明暗（暗色启动后亮色坏、亮色启动后暗色坏，即主题互相「打架」的根因）。
-			for (const k of injectedWallpaperTokens) root.style.removeProperty(k);
-			injectedWallpaperTokens.clear();
-			root.style.setProperty("--app-bg-image", `url("pideck-bg://local/${encodeURIComponent(settings.backgroundImage)}")`);
-			const alpha = Math.min(1, Math.max(0, 1 - settings.backgroundImageOpacity));
-			// 面板不透明度与遮罩同步并加 10% 基础偏移（面板更实一点，可读性更好）：
-			// 滑块 80% → 面板 30%；100% → 10%（图完整显示）；0% → 100%（纯色）
-			const panelMix = Math.min(100, Math.round(alpha * 100) + 10);
-			const rgb = isDark ? "0,0,0" : "255,255,255";
-			root.style.setProperty("--app-bg-mask", `linear-gradient(rgba(${rgb},${alpha}), rgba(${rgb},${alpha}))`);
-			// 半透明 token：getComputedStyle 取当前计算值（含皮肤覆盖）→ 静态 color-mix，无循环引用。
-			// 壁纸模式下所有面板统一用 --color-bg-app 作基色 + 同一个 panelMix，
-			// 保证侧栏/会话区/抽屉透出的图片明暗完全一致
-			const cs = getComputedStyle(root);
-			const base = cs.getPropertyValue("--color-bg-app").trim();
-			// 供弹窗覆盖规则使用：纯色基色 + 面板不透明度（弹窗 = 面板 + 10% 更实）
-			if (base) root.style.setProperty("--wallpaper-base", base);
-			root.style.setProperty("--wallpaper-panel-alpha", `${panelMix}%`);
-			for (const k of BG_TOKENS) {
-				const v = cs.getPropertyValue(k).trim();
-				if (v) {
-					root.style.setProperty(k, `color-mix(in srgb, ${base} ${panelMix}%, transparent)`);
-					injectedWallpaperTokens.add(k);
-				}
-			}
-			// Select/Dropdown/Popover 会 portal 到 body，不能继承 DialogContent 的局部变量。
-			// 单独给浮层保留 92% 以上的底色，避免半透明面板 token 让菜单内容透出并误读为“透明坏了”。
-			const floatingMix = Math.max(92, Math.min(100, panelMix + 40));
-			root.style.setProperty("--color-bg-popover", `color-mix(in srgb, ${base} ${floatingMix}%, transparent)`);
-			root.style.setProperty("--wallpaper-floating-alpha", `${floatingMix}%`);
-			injectedWallpaperTokens.add("--color-bg-popover");
-		} else {
-			root.style.removeProperty("--app-bg-image");
-			root.style.removeProperty("--app-bg-mask");
-			// 只清本 effect 注入过的壁纸 token，绝不误清皮肤设置的 bg 键
-			for (const k of injectedWallpaperTokens) root.style.removeProperty(k);
-			injectedWallpaperTokens.clear();
-			root.style.removeProperty("--wallpaper-base");
-			root.style.removeProperty("--wallpaper-panel-alpha");
-			root.style.removeProperty("--wallpaper-floating-alpha");
-		}
-	}, [settings.themeSkin, settings.theme, settings.customThemeOverrides, settings.backgroundImage, settings.backgroundImageOpacity]);
-
-	// 字号与命名字体预设由 data 属性选择 CSS token；只有 custom 字体需要注入用户输入。
-	useEffect(() => {
-		const root = document.documentElement;
-		const uiFontSize = settings.uiFontSize ?? settings.fontSize;
-		const chatFontSize = settings.chatFontSize ?? settings.fontSize;
-		const inputFontSize = settings.inputFontSize ?? settings.fontSize;
-		root.dataset.uiFontSize = uiFontSize;
-		root.dataset.chatFontSize = chatFontSize;
-		root.dataset.inputFontSize = inputFontSize;
-		// 旧属性保留，兼容外部依赖或测试仍读取 dataset.fontSize 的场景
-		root.dataset.fontSize = settings.fontSize;
-		root.dataset.fontBase = settings.fontFamilyBase;
-		root.dataset.fontMono = settings.fontFamilyMono;
-
-		// 自定义字体统一追加 CJK 回退：用户只填西文字体时，中文不能落到 SimSun 小字挤压
-		// （与下方 mono 注入同理，见 foundation.css 注释）。
-		const baseCustomFont = settings.fontFamilyBaseCustom.trim();
-		if (settings.fontFamilyBase === "custom" && baseCustomFont) {
-			root.style.setProperty("--font-family-base", `${baseCustomFont}, "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "HarmonyOS Sans SC", "Hiragino Sans GB", "Noto Sans CJK SC", sans-serif`);
-		} else {
-			root.style.removeProperty("--font-family-base");
-		}
-
-		// 自定义等宽字体同样必须追加 CJK 回退：用户一般只填西文字体
-		// （如 JetBrains Mono），不追加时中文会落到 SimSun 小字挤压（见 foundation.css 注释）。
-		const monoCustomFont = settings.fontFamilyMonoCustom.trim();
-		if (settings.fontFamilyMono === "custom" && monoCustomFont) {
-			root.style.setProperty("--font-family-mono", `${monoCustomFont}, "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "HarmonyOS Sans SC", "Hiragino Sans GB", "Noto Sans CJK SC"`);
-		} else {
-			root.style.removeProperty("--font-family-mono");
-		}
-	}, [settings.fontSize, settings.uiFontSize, settings.chatFontSize, settings.inputFontSize, settings.fontFamilyBase, settings.fontFamilyBaseCustom, settings.fontFamilyMono, settings.fontFamilyMonoCustom]);
-
-	/** 当前会话中 agent 修改过的文件(从 tool 消息 meta 中提取) */
-	// 优化:只在消息数量变化时才重新计算,减少不必要的遍历
-	const modifiedFiles = useMemo(() => {
-		const byPath = new Map<string, SessionModifiedFile>();
-		for (const msg of activeMessages) {
-			if (msg.role !== "tool") continue;
-			const toolName: string | undefined = msg.meta?.toolName as string | undefined;
-			const args: unknown = msg.meta?.args;
-			const status: string = String(msg.meta?.status ?? "done");
-			// 只收集文件写入/编辑类的工具调用，作为右侧 Files 与会话结束摘要的统一数据源。
-			if (!toolName || !/write|edit|create|patch/i.test(toolName)) continue;
-			const filePath = getToolFilePath(args);
-			if (!filePath) continue;
-			const previous = byPath.get(filePath);
-			// 同一路径再次被修改时移动到 Map 末尾，右侧修改清单才能按"最新修改"展示。
-			if (previous) byPath.delete(filePath);
-			// originalContent 不再存储到消息 meta 中（full file 会使会话体积过大）。
-			// diff 展示时使用工具参数（oldText/newText）显示变动区域。
-			byPath.set(filePath, {
-				path: filePath,
-				toolName,
-				status: status === "running" ? "running" : (previous?.status ?? status),
-				changedLines: (previous?.changedLines ?? 0) + getToolChangedLineCount(toolName, args),
-				originalContent: "",
-				content: getToolNewContent(toolName, args) ?? previous?.content,
-			});
-		}
-		return Array.from(byPath.values());
-	}, [activeMessages.length, activeAgentId]);
 	const flatFiles = useMemo(() => flattenFiles(files), [files]);
 	// === file editor hook ===
 	const {
@@ -1342,7 +1097,8 @@ export function App() {
 		modifiedFiles,
 		setDrawer,
 		setDrawerCollapsed,
-		contentOpenMode: settings.workspaceContentOpenMode ?? "split",
+		preserveTabsForGit: settings.navigationMode === "simple",
+		contentOpenMode: settings.navigationMode === "simple" ? "split" : (settings.workspaceContentOpenMode ?? "split"),
 		showToast,
 		readFileContent: api.files.readContent,
 		readGitOriginalContent: api.git.originalContent,
@@ -1353,113 +1109,29 @@ export function App() {
 		t,
 	});
 
-	// 会话内文件链接打开路由：按扩展名分级——
-	// 图片 → 弹窗预览（readBase64 → ImagePreviewModal）；markdown/html → 中间栏查看
-	//（FileDiffViewer 对 .md 默认 preview、.html 用 HtmlPreview 内置渲染）；其他文件 → 编辑器打开。
-	// 替代原先的"系统默认应用打开"（.md 会被浏览器接管、体验割裂）
-	// line 为可选 `path:line` 位置标记：编辑器打开后滚动定位到该行。
-	const handleOpenLinkedFile = useCallback(
-		async (path: string, line?: number, context?: SessionFileOpenContext) => {
-			// 有栏级上下文时绝不回退 App 当前焦点：分屏左栏的点击不能借用右栏 cwd/project。
-			const baseDir = context ? context.baseDir : (activeAgent?.cwd ?? activeProject?.path);
-			const projectRoot = context ? context.projectRoot : activeProject?.path;
-			const projectId = context ? context.projectId : activeProject?.id;
-			// 会话内入口必须携带稳定 projectId；缺失时不能降级成通用读取绕开主进程项目边界。
-			if (context && !projectId) {
-				showToast(t("app.fileLinkCannotResolve", { path }));
-				return;
-			}
-			const resolved = resolveFileLinkPath(path, baseDir, projectRoot);
-			// 相对路径无基准目录、`..` 逃逸或绝对路径落在项目外都会返回 null。
-			// 主进程读取时还会按 projectId 对真实路径做第二次边界校验。
-			if (!resolved) {
-				showToast(t("app.fileLinkCannotResolve", { path }));
-				return;
-			}
-			const fileAccessScope = projectId ? { projectId } : undefined;
-			// 点击时 stat 一次定路由：渲染期 verdict 只回答「存在与否」，区分不了目录，
-			// 目录链接进编辑器 readContent 会抛 EISDIR（"illegal operation on a directory"）。
-			// 目录 → 资源管理器直接打开；不存在（校验后被移动/删除，或 verdict 未返回时点击）
-			// → 友好提示，不再把原始 ENOENT/EISDIR 甩给用户。
-			let stat = { exists: false, isDirectory: false };
-			try {
-				stat = await api.files.stat(resolved, fileAccessScope);
-			} catch {
-				// stat 通道异常按不存在处理，走统一提示
-			}
-			if (!stat.exists) {
-				showToast(t("app.fileLinkNotFound", { path: resolved }));
-				return;
-			}
-			if (stat.isDirectory) {
-				void api.files.open(resolved, fileAccessScope).catch((error) =>
-					showToast(
-						t("app.openFileFailed", {
-							error: error instanceof Error ? error.message : String(error),
-						}),
-					),
-				);
-				return;
-			}
-			const ext = resolved.split(".").pop()?.toLowerCase() ?? "";
-			if (IMAGE_EXTENSIONS.has(ext)) {
-				// readBase64 返回原始 base64，不是 data URL；直接构造 ImageContent 供预览弹层使用。
-				void api.files
-					.readBase64(resolved, undefined, fileAccessScope)
-					.then((data) => {
-						if (!data) throw new Error("FILE_NOT_FOUND");
-						setPreviewImage({
-							type: "image",
-							mimeType: imageMimeTypeFromPath(resolved),
-							data,
-						});
-					})
-					.catch((error) =>
-						showToast(
-							t("app.openFileFailed", {
-								error: error instanceof Error ? error.message : String(error),
-							}),
-						),
-					);
-				return;
-			}
-			// markdown / html / 其他文本文件：统一抽屉查看；scope 固化进 tab，切焦点后仍按原项目读取。
-			viewFilePath(resolved, undefined, line, fileAccessScope);
-		},
-		[activeAgent?.cwd, activeProject?.id, activeProject?.path, viewFilePath, showToast],
-	);
-
-	// 工具抽屉（files/git/browser）的统一切换语义：当前面板已展开 → 关闭；
-	// 其余情况打开/切到目标面板。outline 浮动按钮与抽屉活动栏共用同一套语义，
-	// 保证两个入口行为一致。注意必须放在 useFileEditor 之后（依赖 gitDrawerDiff）。
-	const handleToolDrawerAction = useCallback(
-		(panel: WorkspaceDrawerPanel) => {
-			if (workspace.drawer === panel && !workspace.drawerCollapsed) {
-				if (panel === "git" && gitDrawerDiff) {
-					closeGitDiff();
-					return;
-				}
-				workspace.closeDrawer();
-			} else if (panel === "files" && activeProjectId) {
-				// 打开文件抽屉时先做一次「展开目录自愈」：若树里存在已展开但 children
-				// 缺失、hasChildren 仍为 true 的目录（代次丢失/加载失败等历史残留），
-				// 按需补拉消掉「加载中...」；返回 false 表示没有需要修复的目录，
-				// 才走一次常规静默 refreshFiles。自愈本身不阻塞抽屉打开。
-				void restoreExpandedDirs(activeProjectId).then((repaired) => {
-					if (!repaired) void refreshVisibleFiles(activeProjectId, true);
-				});
-				workspace.openDrawer(panel);
-			} else {
-				workspace.openDrawer(panel);
-			}
-		},
-		[workspace, gitDrawerDiff, closeGitDiff, activeProjectId, refreshVisibleFiles, restoreExpandedDirs],
-	);
+	// 会话内文件链接路由：两个口子分开——
+	// 会话文件链接域（分级打开/安全门/抽屉切换）收口到 useSessionFileLinks
+	const { openSessionFilePath, requestExternalPathOpen, externalPathOpenDialog, handleOpenLinkedFile, handleToolDrawerAction } = useSessionFileLinks({
+		activeAgent,
+		activeProject,
+		currentSessionId,
+		activeProjectId,
+		showToast,
+		setPreviewImage,
+		viewFilePath,
+		workspace,
+		gitDrawerDiff,
+		closeGitDiff,
+		refreshVisibleFiles,
+		restoreExpandedDirs,
+	});
 
 	const workspaceChrome = useSessionWorkspaceChrome({
 		currentSessionId,
 		activeProjectId,
 	});
+	// #354：catalog 身份归并后迁移渲染层持久化的「最近活动」引用（Tab 置顶在 chrome hook 内迁移）。
+	useSessionIdAliasMigration();
 
 	const {
 		selectProject: selectProjectCommand,
@@ -1495,7 +1167,89 @@ export function App() {
 		defaultBackend: effectiveAgentBackend,
 	});
 
+	// 会话运行控制域（target 解析/克隆/关闭/中止/重启/重载/能力快照 + 四个 busy 态）收口到 useSessionRunControl
+	const {
+		restartingAgentId,
+		activatingSessionId,
+		stoppingAgentId,
+		reloadingSessionId,
+		getRuntimeTargetForSession,
+		getRuntimeTargetForAgent,
+		isSessionRuntimeLive,
+		openReplacedRuntimeSession,
+		cloneAgentSession,
+		applyAgentRuntimeState,
+		refreshRuntimeState,
+		reloadSessionMessages,
+		closeAgent,
+		requestCloseAgent,
+		requestCloseAgentForSession,
+		abortAgent,
+		restartActiveAgent,
+		restartSessionAnyState,
+		exportAgentHtml,
+		getSessionRunCapabilities,
+		runSessionControl,
+	} = useSessionRunControl({
+		agents,
+		activeAgent,
+		activeAgentId,
+		activeProjectId,
+		showToast,
+		overlays,
+		refreshProjectSessions,
+		selectSessionCommand,
+		registerOpenSession: workspaceChrome.registerOpenSession,
+		getSessionRecord,
+		pendingAgentsRef,
+		setPendingAgents,
+		queueFlushBySessionRef,
+		queuedPromptsRef: queue.queuedPromptsRef,
+		suppressQueueAutoDrain: queue.suppressSessionQueueAutoDrain,
+	});
+
+	// Cmd/Ctrl+W 关闭当前会话标签页：回答进行中先弹确认（确认 = 停止 + 关闭），空闲直接关。
+	// 会话目标解析/停止/确认框分别复用 runControl/overlays，本处仅装配。
+	useCloseSessionTabShortcut({ closeTab: workspaceChrome.closeTab, abortAgent, overlays });
+
+	// 终端 IPC 目标：Agent 会话优先绑定当前 runtime；未启动或已停止时回退到项目 cwd。
+	// 该计算必须放在 useSessionRunControl 之后，因为 runtime target resolver 是该 hook 的返回值。
+	const terminalTarget: TerminalTarget | undefined = useMemo(() => {
+		if (!terminalOwner) return undefined;
+		const fallbackProject = (() => {
+			const pid = terminalOwner.kind === "project" ? terminalOwner.id : (activeProjectId ?? currentSessionRecord?.projectId);
+			return pid ? projects.find((p) => p.id === pid) : undefined;
+		})();
+		// 远端项目没有本机 cwd：只传 projectId，由主进程按项目 locator 解析远端终端目标。
+		const projectTarget = fallbackProject && !isChatProject(fallbackProject) ? { kind: "project" as const, projectId: fallbackProject.id, ...(isRemoteProject(fallbackProject) ? {} : { cwd: fallbackProject.path }) } : undefined;
+		if (terminalOwner.kind === "agent") {
+			const runtimeTarget = getRuntimeTargetForSession(currentSessionId);
+			return runtimeTarget ? { kind: "agent" as const, ...runtimeTarget } : projectTarget;
+		}
+		return projectTarget;
+	}, [terminalOwner, currentSessionId, currentSessionRecord, projects, activeProjectId, getRuntimeTargetForSession]);
+	// 终端面板判定远端外观需要的项目记录：由 App 读取后作为普通 prop 下传，
+	// TerminalDock 本身保持无 Jotai 依赖（dev 的终端 harness 直接以 props 渲染它）。
+	const terminalTargetProject = terminalProjectId ? projects.find((project) => project.id === terminalProjectId) : undefined;
+
 	const quickTask = useQuickTask({ ready: settingsLoaded, backend: effectiveAgentBackend, upsertSession, selectSession: selectSessionCommand, registerSession: workspaceChrome.registerOpenSession, refreshProjects, getSessionRecord });
+
+	// 侧边任务：抽屉「侧边任务」面板持有的轻量会话。创建/切换/释放都在 useSideTasks 里，
+	// App 只负责「建好后把抽屉开到这个面板」，不登记主区 Tab、不改当前会话（面板自己寻址）。
+	const sideTasks = useSideTasks({
+		backend: effectiveAgentBackend,
+		showToast,
+		onCreated: () => workspace.openDrawerForce("sideTask"),
+	});
+
+	// 外部链接与本地服务 Web UI 共用同一个出口：强制打开 browser 抽屉 + 内置浏览器新建 tab。
+	const openInBrowser = (url: string) => {
+		workspace.openDrawerForce("browser");
+		navigateTo(url);
+	};
+
+	// 桌面插件发起的会话导航：broker 已验权限/归属，这里只注入现有选中动作（复用唯一选中路径）
+	useHostPluginNavigation(selectSessionCommand, openInBrowser);
 
 	// 关闭 Tab / 分屏退栏时的焦点切换：只改 currentSession，不碰 Tab 登记
 	useEffect(() => {
@@ -1571,6 +1325,7 @@ export function App() {
 		async (projectId: string, sessionId: string, tabMode: "preview" | "permanent" = "permanent") => {
 			const openedId = await runOpenSidebarSessionById(projectId, sessionId);
 			if (openedId) workspaceChrome.registerOpenSession(openedId, tabMode);
+			return openedId;
 		},
 		[runOpenSidebarSessionById, workspaceChrome],
 	);
@@ -1609,7 +1364,7 @@ export function App() {
 				// 选了 dsh 但 DSH runtime 不可用时按 effectiveAgentBackendAtom 同一条
 				// 钳制规则回落 pi，避免首次发送才在 createDraft 门控上抛错。
 				// 与 ComposerArea 的展示用同一纯函数：展示的后端和创建的后端必须一致。
-				const draftBackend = resolveGuidePageBackend({ override: readWelcomeBackendPreference(), effectiveDefault: effectiveAgentBackend });
+				const draftBackend = resolveGuidePageBackend({ override: readWelcomeBackendPreference(), acpToolId: readWelcomeAcpToolPreference(), effectiveDefault: effectiveAgentBackend });
 				// 模型偏好按后端分开取（issue #253）：DSH 的模型是 host route 名，不在 models.json，
 				// 必须作为显式 model 直接带给 host；pi 的偏好走 welcomeModel（launchDefaults 会按
 				// models.json 校验存在性）。历史上 DSH 侧不读偏好，点选因此永远不生效。
@@ -1626,6 +1381,7 @@ export function App() {
 					projectId: project.id,
 					title: draftBackend === "dsh" ? `${project.name} DSH` : `${project.name} agent`,
 					backend: draftBackend,
+					...(draftBackend === "acp" ? { acpToolId: readWelcomeAcpToolPreference() } : {}),
 					...(welcomeModel ? (draftBackend === "dsh" ? { model: welcomeModel } : { welcomeModel }) : {}),
 					...(welcomeThinking ? { thinkingLevel: welcomeThinking } : {}),
 				});
@@ -1655,10 +1411,6 @@ export function App() {
 		},
 		[activeProjectId, projects, promoteSessionComposerState, promoteSessionMessagesCache, selectSessionCommand, upsertSession, workspaceChrome, effectiveAgentBackend],
 	);
-
-	/** 有效命令名白名单：仅已知命令渲染为 chip */
-	const mergedCommands = useMemo(() => mergeCommands(commands), [commands]);
-	const validCommandNames = useMemo(() => new Set([...mergedCommands.map((c) => c.name), ...promptTemplateList.map((t) => t.name)]), [mergedCommands, promptTemplateList]);
 
 	/** 有效文件路径白名单：仅工作区真实存在的 @ 引用渲染为 chip */
 	const validFilePaths = useMemo(() => new Set(flatFiles.map((f) => f.relativePath)), [flatFiles]);
@@ -1699,12 +1451,7 @@ export function App() {
 			setSettings(next);
 			showToast(t("settings.restartNotice"));
 		},
-		onOpenInBrowser: (url: string) => {
-			// 外部链接必须强制打开 browser 面板（openDrawer 是 toggle 语义，
-			// 已是 browser 展开时会关抽屉，导致首次点击关抽屉、二次重复入栈）
-			workspace.openDrawerForce("browser");
-			navigateTo(url);
-		},
+		onOpenInBrowser: openInBrowser,
 		onTrustRequest: overlays.setTrustRequest,
 		// 主进程焦点目标（通知点击/右键打开项目）：sessionId 走旧链路选中会话；
 		// projectId/projectPath 由 useSessionWorkspaceChrome 的订阅处理（本回调只透传不重复消费）。
@@ -1717,18 +1464,6 @@ export function App() {
 
 	useEffect(() => {
 		void workspace.loadExternalEditors().catch(() => undefined);
-		void api.app
-			.preferredSystemLanguages()
-			.then((languages) => setSystemLanguage(languages.find((language) => typeof language === "string" && language.trim()) ?? null))
-			.catch(() => setSystemLanguage(null));
-		void api.app
-			.info()
-			.then((info) => {
-				setAppInfo(info);
-				// 与窗口标题一致：开发态功能分支时文档标题带分支名
-				document.title = info.devBranch ? `PiDeck · ${info.devBranch}` : "PiDeck";
-			})
-			.catch(() => undefined);
 		void api.imagegen
 			.getConfig()
 			.then(setImageGenConfig)
@@ -1738,6 +1473,8 @@ export function App() {
 			.then((next) => {
 				setSettings(next);
 				setSettingsLoaded(true);
+				setEnhanceModel(next.enhanceModel ?? null);
+				setEnhanceIncludeContext(next.enhanceIncludeContext === true);
 				piUpdate.setCustomPiPath(next.customPiPath ?? "");
 				if (!Object.values(next.externalEditors).some((editor) => editor.command)) {
 					void api.editors
@@ -1860,18 +1597,6 @@ export function App() {
 
 	// Outline jumps through the same timeline controller that owns pagination and scroll state.
 
-	useEffect(() => {
-		const target = getRuntimeTargetForSession(currentSessionId);
-		if (!target) {
-			setCommands([]);
-			return;
-		}
-		void api.sessions
-			.listRuntimeCommands(target)
-			.then((result) => setCommands(requireSessionCommand(result).value))
-			.catch(() => setCommands([]));
-	}, [activeAgentId, currentSessionId]);
-
 	// 持久化会话来源过滤配置
 	useEffect(() => {
 		try {
@@ -1880,48 +1605,6 @@ export function App() {
 			// 静默失败
 		}
 	}, [sessionSourceFilter]);
-
-	// 追踪 agent 会话开始/结束时间,计算会话时长
-	useEffect(() => {
-		// 活 agent 集合（agentId 每次 spawn 随机，标签关闭后旧键永久残留 → 按活集合裁剪，2026-10）
-		const liveIds = new Set(displayAgents.map((a) => a.id));
-		for (const id of Object.keys(agentStatusByAgentRef.current)) {
-			if (!liveIds.has(id)) delete agentStatusByAgentRef.current[id];
-		}
-		for (const id of Object.keys(sessionStartByAgentRef.current)) {
-			if (!liveIds.has(id)) delete sessionStartByAgentRef.current[id];
-		}
-		setSessionDurationByAgent((d) => {
-			let changed = false;
-			const next: typeof d = {};
-			for (const id of Object.keys(d)) {
-				if (liveIds.has(id)) next[id] = d[id];
-				else changed = true;
-			}
-			return changed ? next : d;
-		});
-		for (const agent of displayAgents) {
-			if (agent.id !== activeAgentId) continue;
-			const previousStatus = agentStatusByAgentRef.current[agent.id];
-			const stamped = stampIdleSessionDuration({
-				previousStatus,
-				status: agent.status,
-				startedAt: sessionStartByAgentRef.current[agent.id],
-				now: Date.now(),
-			});
-			// 只在 running→idle 边沿写时长；已 idle 后再被新 displayAgents 引用戳到不得 setState。
-			if (stamped.clearStart) {
-				delete sessionStartByAgentRef.current[agent.id];
-			} else if (stamped.startedAt != null) {
-				sessionStartByAgentRef.current[agent.id] = stamped.startedAt;
-			}
-			if (stamped.durationMs != null) {
-				const durationMs = stamped.durationMs;
-				setSessionDurationByAgent((d) => (d[agent.id] === durationMs ? d : { ...d, [agent.id]: durationMs }));
-			}
-			agentStatusByAgentRef.current[agent.id] = agent.status;
-		}
-	}, [activeAgentId, displayAgents]);
 
 	// 汇报聚焦会话给主进程：非聚焦会话收到 Ask 请求时触发桌面通知（Task 9）
 	useEffect(() => {
@@ -1962,45 +1645,14 @@ export function App() {
 		}
 	}, [activeProjectId, activeProjectIsRemote, expandedProjects, expandedProjectsReady, projects, refreshProjectSessions, store]);
 
+	// 项目切换只刷 git 分支（文件树加载/恢复已收口到 useProjectFileTreeController）
 	useEffect(() => {
 		if (!activeProjectId || activeProjectIsRemote) {
-			beginFileTreeRequest();
-			setFiles((current) => (current.length === 0 ? current : []));
 			setGitInfo({ current: null, branches: [] });
 			return;
 		}
-
-		// 只跟项目：切 tab / agent 数量变化不得清空展开目录，也不得整棵重扫文件树。
-		// 先立刻清空旧树，并抬高代次，避免大仓库扫描期间右侧仍显示上一个项目（#159）。
-		const projectId = activeProjectId;
-		const generation = beginFileTreeRequest();
-		// 空树复用原数组，避免 effect 误触发时用新 [] 把 React 更新打满。
-		setFiles((current) => (current.length === 0 ? current : []));
-		const dirs = loadExpandedDirs(projectId);
-		setExpandedDirs(dirs);
 		let cancelled = false;
-		void (async () => {
-			try {
-				const hydrated = await loadProjectFileTree(
-					() => api.files.list({ projectId, relativePath: "" }, { maxDepth: 0 }),
-					dirs,
-					() => !cancelled && isFileTreeRequestCurrent(generation, projectId),
-					(directory) => (typeof directory === "string" ? api.files.list(projectId, { maxDepth: 0, directory }) : api.files.list(directory, { maxDepth: 0 })),
-				);
-				if (!cancelled && hydrated) setFiles(hydrated);
-			} catch (error) {
-				if (cancelled) return;
-				console.error("[Files] refresh failed", error);
-				const message = error instanceof Error ? error.message : String(error);
-				const tooLarge = message.match(/FILE_TREE_DIRECTORY_TOO_LARGE:(\d+):(\d+)/);
-				const projectDirectoryMissing = message.includes("PROJECT_DIRECTORY_MISSING");
-				if (projectDirectoryMissing) {
-					// 项目在启动/切换期间被外部删除：清空树后重扫项目 presence，侧栏马上标出失效目录。
-					void refreshProjects().catch(() => undefined);
-				}
-				showToast(tooLarge ? t("app.filesDirectoryTooLarge", { count: tooLarge[1], max: tooLarge[2] }) : projectDirectoryMissing ? t("app.projectDirectoryMissing") : t("app.filesRefreshFailed", { error: message }), 4000);
-			}
-		})();
+
 		void api.git
 			.branches(activeProjectId)
 			.then((info) => {
@@ -2012,22 +1664,19 @@ export function App() {
 		return () => {
 			cancelled = true;
 		};
-		// 该 effect 只应由项目身份切换触发；refreshProjects 是 hook 每次渲染返回的命令，
-		// 放入依赖会让 setFiles 后再次触发扫描，形成文件树刷新循环。
-	}, [activeProjectId, activeProjectIsRemote, beginFileTreeRequest, isFileTreeRequestCurrent, loadExpandedDirs]);
+	}, [activeProjectId, activeProjectIsRemote]);
 
 	useEffect(() => {
 		if (!activeProjectId || activeProjectIsRemote) return;
 		let stopped = false;
 		const refreshGitInfo = async () => {
 			try {
-				// 轮询分支信息
 				const next = await api.git.branches(activeProjectId);
 				if (stopped) return;
-				// 分支可能在外部终端/IDE 中切换,轮询只在状态真的变化时更新,避免不必要重渲染。
+				// 外部终端/IDE 切分支时同步侧栏徽标与抽屉，只在状态真的变化时更新，避免不必要重渲染。
 				setGitInfo((current) => (current.current === next.current && current.branches.join("\n") === next.branches.join("\n") ? current : next));
 				// 侧栏分支徽标与 Git 抽屉同源：外部终端 checkout 后也要一起跟上。
-				// 只更新聚焦项目——非聚焦项目不在轮询范围内，由栏内 usePaneGitInfo 回写。
+				// 只更新聚焦项目——非聚焦项目不在监听范围内，由栏内 usePaneGitInfo 回写。
 				setBranchByProject((prev) => (prev[activeProjectId] === next.current ? prev : { ...prev, [activeProjectId]: next.current }));
 			} catch {
 				if (!stopped) {
@@ -2035,10 +1684,25 @@ export function App() {
 				}
 			}
 		};
-		const timer = window.setInterval(refreshGitInfo, 4000);
+		void refreshGitInfo();
+		// 与栏内 usePaneGitInfo 同一事件源：主进程 GitRefsWatcher 复用一份 1.5s refs
+		// 签名轮询，替代 App 级 4s 盲轮询；订阅失败时静默降级为初始一次回读。
+		const offRefsChanged = api.git.onRefsChanged((changedWatchId) => {
+			if (changedWatchId !== watchId || stopped) return;
+			void refreshGitInfo();
+		});
+		const watchPromise = api.git.watchRefs(activeProjectId).catch(() => null);
+		let watchId: string | null = null;
+		void watchPromise.then((id) => {
+			watchId = id;
+		});
 		return () => {
 			stopped = true;
-			window.clearInterval(timer);
+			offRefsChanged();
+			// 竞态安全：卸载时 watch 可能尚未 resolve，退订等它落地后执行。
+			void watchPromise.then((id) => {
+				if (id) void api.git.unwatchRefs(id);
+			});
 		};
 	}, [activeProjectId, activeProjectIsRemote]);
 
@@ -2047,31 +1711,6 @@ export function App() {
 	 * 必须先刷新 catalog 再登记 Tab：否则 chrome 的 prune 看到 records 里还没有新 id，会立刻清掉刚打开的 Tab。
 	 * 选中与登记都在这里组合——selectSession 本身不碰 Tab。
 	 */
-	async function openReplacedRuntimeSession(projectId: string | undefined, targetSessionId: string | undefined) {
-		if (!projectId || !targetSessionId) return;
-		await refreshProjectSessions(projectId);
-		workspaceChrome.registerOpenSession(targetSessionId, "permanent");
-		selectSessionCommand(projectId, targetSessionId, true);
-	}
-
-	async function cloneAgentSession(agentId: string) {
-		try {
-			const target = getRuntimeTargetForAgent(agentId);
-			if (!target) return;
-			const result = requireSessionCommand(await api.sessions.cloneRuntime(target));
-			if (result?.cancelled) {
-				showToast(t("app.sessionCopyCancelled"));
-				return;
-			}
-			showToast(t("app.currentSessionCopied"));
-			await refreshRuntimeState(agentId);
-			const projectId = agents.find((agent) => agent.id === agentId)?.projectId ?? activeProjectId;
-			await openReplacedRuntimeSession(projectId, result.targetSessionId);
-		} catch (err) {
-			showToast(err instanceof Error ? err.message : String(err), 5000);
-		}
-	}
-
 	async function deleteDraftSession(session: SessionRecord) {
 		try {
 			await api.sessions.deleteRecord(session.id);
@@ -2084,28 +1723,38 @@ export function App() {
 		}
 	}
 
-	async function reorderProjects(sourceProjectId: string, targetProjectId: string) {
+	async function reorderProjects(sourceProjectId: string, targetProjectId: string, position: "before" | "after" = "after") {
 		if (sourceProjectId === targetProjectId) return;
 		const sourceProject = projects.find((project) => project.id === sourceProjectId);
 		const targetProject = projects.find((project) => project.id === targetProjectId);
 		if (isChatProject(sourceProject) || isChatProject(targetProject)) return;
-		const sourceIndex = projects.findIndex((project) => project.id === sourceProjectId);
-		const targetIndex = projects.findIndex((project) => project.id === targetProjectId);
-		if (sourceIndex === -1 || targetIndex === -1) return;
-
+		// 插入点由拖放边缘显式决定（utils/projectOrder 纯函数，便于单测）。
 		const previousProjects = projects;
-		const nextProjects = [...projects];
-		const [movedProject] = nextProjects.splice(sourceIndex, 1);
-		const targetIndexAfterRemoval = nextProjects.findIndex((project) => project.id === targetProjectId);
-		const insertIndex = sourceIndex < targetIndex ? targetIndexAfterRemoval + 1 : targetIndexAfterRemoval;
-		nextProjects.splice(insertIndex, 0, movedProject);
-		setProjects(nextProjects);
+		const nextProjects = reorderProjectList(projects, (project) => project.id, sourceProjectId, targetProjectId, position);
+		if (nextProjects === previousProjects) return;
+		setProjects([...nextProjects]);
 
 		try {
 			const savedProjects = await api.projects.reorder(nextProjects.map((project) => project.id));
 			setProjects(savedProjects);
 		} catch (error) {
 			setProjects(previousProjects);
+			showToast(
+				t("app.projectSortFailed", {
+					error: error instanceof Error ? error.message : String(error),
+				}),
+				4000,
+			);
+		}
+	}
+
+	/** 置顶/取消置顶普通项目：主进程落库后用返回列表刷新，聊天项目由 ProjectStore 拒绝。 */
+	async function setProjectPinned(project: Project, pinned: boolean) {
+		if (isChatProject(project)) return;
+		try {
+			const savedProjects = await api.projects.setPinned(project.id, pinned);
+			setProjects(savedProjects);
+		} catch (error) {
 			showToast(
 				t("app.projectSortFailed", {
 					error: error instanceof Error ? error.message : String(error),
@@ -2140,72 +1789,6 @@ export function App() {
 		}
 	}
 
-	function applyAgentRuntimeState(agentId: string, incoming: AgentRuntimeState) {
-		const target = getRuntimeTargetForAgent(agentId);
-		if (!target) return undefined;
-		applyRuntimeEvent({
-			...target,
-			sourceChannel: "agents:runtime-state",
-			payload: { agentId, state: incoming },
-		});
-		return store.get(sessionRuntimeBySessionIdAtomFamily(target.sessionId))?.state;
-	}
-
-	async function refreshRuntimeState(agentId = activeAgentId) {
-		if (!agentId || isPendingAgentId(agentId)) return;
-		const target = getRuntimeTargetForAgent(agentId);
-		if (!target) return;
-		const result = await api.sessions.getRuntimeState(target).catch(() => undefined);
-		if (result?.ok) applyAgentRuntimeState(agentId, result.value.value);
-	}
-
-	/**
-	 * 从磁盘重新加载会话消息（外部修改会话文件后刷新时间线）。
-	 * 仅用于未启动/异常（无 live runtime）的会话：live 会话刷新应走「重启 Agent」，
-	 * 直接 force 磁盘会覆盖运行时内存中的流式消息。force 覆盖缓存后，所有展示该会话的
-	 * 时间线（含分屏栏）都会通过 sessionMessagesCacheAtom 订阅自动更新。
-	 */
-	async function reloadSessionMessages(sessionId: string) {
-		if (!sessionId) return;
-		// live 运行时（starting/idle/running）不能强刷磁盘，会覆盖内存中的流式消息；
-		// error/closed 终态仍持有绑定（getRuntimeTargetForSession 有 target），但进程已死，
-		// 应当允许从磁盘刷新——这里必须按 status 判 live，不能用 target 判（否则 error/closed 的重载入口会被静默吞掉）。
-		if (isSessionRuntimeLive(sessionId)) return;
-		// 标记重载中：Tab 栏「重载」菜单项/tab 徽章 + 会话消息区域遮罩据此显示 loading 动画
-		setReloadingSessionId(sessionId);
-		setMutationOverlay({ sessionId, kind: "reloading" });
-		setSessionMessageLoadState({ sessionId, state: { status: "loading" } });
-		try {
-			const page = await api.sessions.readRecordMessagePage(sessionId, undefined, 100);
-			// DSH host 被手动停止：读盘返回带原因的空页，不是「空会话」。
-			// 必须早退，否则 force 写空缓存会把这个会话洗成空白（看着像数据丢了）。
-			const unavailable = sessionHistoryUnavailableState(page);
-			if (unavailable) {
-				setSessionMessageLoadState({ sessionId, state: unavailable });
-				return;
-			}
-			setCacheMessages({
-				sessionId,
-				messages: page.messages,
-				source: "disk",
-				expectedRevision: 0,
-				page: { total: page.total, nextBefore: page.nextBefore },
-				force: true,
-			});
-			setSessionMessageLoadState({ sessionId, state: { status: "ready" } });
-			showToast(t("app.sessionReloaded"), 2000);
-		} catch (error) {
-			setSessionMessageLoadState({
-				sessionId,
-				state: { status: "error", error: error instanceof Error ? error.message : String(error) },
-			});
-			showToast(t("app.sessionReloadFailed", { error: error instanceof Error ? error.message : String(error) }), 5000);
-		} finally {
-			setReloadingSessionId((current) => (current === sessionId ? null : current));
-			setMutationOverlay({ sessionId, kind: null });
-		}
-	}
-
 	/** 调整菜单位置避免溢出视口 */
 	function adjustMenuPos(x: number, y: number, width = 200, height = 260) {
 		const vw = window.innerWidth;
@@ -2214,296 +1797,6 @@ export function App() {
 			x: x + width > vw ? Math.max(4, vw - width - 8) : x,
 			y: y + height > vh ? Math.max(4, vh - height - 8) : y,
 		};
-	}
-
-	/**
-	 * 关闭 Agent：杀掉绑定的 pi/DSH 进程并解绑（会话记录、历史消息与 Tab 全部保留，
-	 * 之后可再「启动 Agent」）。与「停止回答」（abort，只中断当前回合）语义不同。
-	 * 匿名会话的记录会被主进程丢弃，因此入口走 requestCloseAgent 先确认。
-	 */
-	async function closeAgent(agentId: string) {
-		if (isPendingAgentId(agentId)) return;
-		const target = getRuntimeTargetForAgent(agentId);
-		if (!target) {
-			// 没有绑定 = 没有可关闭的进程（渲染层快照可能已过期）：给出可见原因，
-			// 而不是静默返回让用户以为「点了没反应」。要恢复运行请用「启动 Agent」。
-			showToast(t("sessionCommand.runtimeUnavailable"), 3000);
-			return;
-		}
-		// 标记停止中：Tab 栏「停止」菜单项/tab 徽章 + 会话消息区域遮罩据此显示 loading 动画
-		setStoppingAgentId(agentId);
-		setMutationOverlay({ sessionId: target.sessionId, kind: "stopping" });
-		try {
-			requireSessionCommand(await api.sessions.stopRuntime(target));
-		} finally {
-			setStoppingAgentId((current) => (current === agentId ? null : current));
-			setMutationOverlay({ sessionId: target.sessionId, kind: null });
-		}
-	}
-
-	function requestCloseAgent(agent: Pick<AgentTab, "id" | "noSession">): Promise<void> {
-		if (!agent.noSession) return closeAgent(agent.id);
-		overlays.showConfirm({
-			title: t("app.anonymousChatCloseTitle"),
-			message: t("app.anonymousChatCloseBody"),
-			danger: true,
-			confirmLabel: t("common.close"),
-			onConfirm: () => {
-				overlays.clearConfirm();
-				void closeAgent(agent.id).catch((error) => {
-					showToast(error instanceof Error ? error.message : String(error), 5000);
-				});
-			},
-		});
-		return Promise.resolve();
-	}
-
-	/**
-	 * 关闭 Agent（会话维度入口，供 Tab 下拉使用）：复用侧栏 Agent 菜单的确认逻辑
-	 * 与 closeAgent 链路（杀进程 + 解绑）。匿名会话内容不可恢复，会先弹确认。
-	 */
-	function requestCloseAgentForSession(sessionId: string): void {
-		const target = getRuntimeTargetForSession(sessionId);
-		if (!target) {
-			showToast(t("sessionCommand.runtimeUnavailable"), 3000);
-			return;
-		}
-		void requestCloseAgent({
-			id: target.agentId,
-			noSession: getSessionRecord(sessionId)?.noSession,
-		});
-	}
-
-	async function abortAgent(agentId = activeAgentId) {
-		if (!agentId || isPendingAgentId(agentId)) return;
-		const target = getRuntimeTargetForAgent(agentId);
-		if (!target) {
-			showToast(t("sessionCommand.runtimeUnavailable"), 4000);
-			return;
-		}
-		// 立即清除流式状态，让思考气泡和 loading 立刻消失，不等后端 RPC 返回
-		const previous = store.get(sessionRuntimeBySessionIdAtomFamily(target.sessionId))?.state;
-		if (previous) {
-			applyAgentRuntimeState(agentId, { ...previous, isStreaming: false });
-		}
-		try {
-			requireSessionCommand(await api.sessions.abortRuntime(target));
-		} catch (error) {
-			// abort 失败必须可见：之前此处直接 throw 变成未处理 rejection，
-			// 用户点停止后毫无反馈、agent 继续运行，表现为「停止不了」。
-			showToast(error instanceof Error ? error.message : String(error), 5000);
-		}
-		// 不调用 refreshRuntimeState：AgentManager.abort() 会通过 emitState 推送正确状态，
-		// 避免后端 get_state 返回过时的 isStreaming: true 覆盖前端立刻设的 false。
-	}
-
-	/**
-	 * restartRuntime 的核心流程：pending（重启中）动画 + 替换回调 + toast。
-	 * restartingAgent 仅用于侧栏/tab 的重启中反馈；找不到时（如已 detach 的终态
-	 * agent 不在 inventory）也照常重启，不因缺少展示对象而阻断。
-	 */
-	async function restartRuntimeTarget(target: SessionRuntimeTarget, restartingAgent?: AgentTab) {
-		if (restartingAgent) {
-			setRestartingAgentId(restartingAgent.id);
-			pendingAgentsRef.current = [
-				...pendingAgentsRef.current.filter((agent) => agent.id !== restartingAgent.id),
-				{
-					...restartingAgent,
-					status: "starting",
-					pendingKind: "restart",
-					pendingStartedAt: Date.now(),
-				},
-			];
-			setPendingAgents(pendingAgentsRef.current);
-		}
-		try {
-			const replacement = requireSessionCommand(await api.sessions.restartRuntime(target));
-			if (restartingAgent) {
-				pendingAgentsRef.current = pendingAgentsRef.current.filter((agent) => agent.id !== restartingAgent.id);
-				setPendingAgents(pendingAgentsRef.current);
-			}
-			void refreshRuntimeState(replacement.runtime.agentId);
-			showToast(t("app.agentRestarted"), 2000);
-		} catch (error) {
-			if (restartingAgent) {
-				pendingAgentsRef.current = pendingAgentsRef.current.map((agent) => (agent.id === restartingAgent.id ? { ...agent, status: "error" } : agent));
-				setPendingAgents(pendingAgentsRef.current);
-			}
-			throw error;
-		} finally {
-			if (restartingAgent) {
-				setRestartingAgentId((current) => (current === restartingAgent.id ? null : current));
-			}
-		}
-	}
-
-	async function restartActiveAgent(agentId = activeAgentId) {
-		if (!agentId) return;
-		const restartingAgent = agents.find((agent) => agent.id === agentId) ?? activeAgent;
-		if (!restartingAgent) return;
-		const target = getRuntimeTargetForAgent(restartingAgent.id);
-		if (!target) {
-			// error/closed 终态仍保留 agentId+runtimeGeneration（target 存在，可幂等重启）；
-			// 只有 detached/无绑定（无 target）才会走到这里。该场景由 restartSessionAnyState
-			// 改走 activateRuntime 启动，这里兜底防竞态/其他入口（如模型切换重启）静默无反馈。
-			showToast(t("sessionCommand.runtimeUnavailable"), 4000);
-			return;
-		}
-		try {
-			await restartRuntimeTarget(target, restartingAgent);
-		} catch (error) {
-			showToast(error instanceof Error ? error.message : String(error), 5000);
-		}
-	}
-
-	/**
-	 * 按会话状态分派「重启会话」：失败/未启动/空闲/运行中的统一入口。
-	 * - 有绑定（runtime.agentId 仍在）→ restartRuntimeTarget；error/closed 终态也能幂等重启。
-	 * - 无绑定（未启动/detached）→ activateRuntime 启动新 Agent。
-	 * - restartRuntime 若因「主进程已惰性解绑」抛 SESSION_RUNTIME_UNAVAILABLE/CHANGED
-	 *   （agent crash 后发消息激活触发主进程 unbindTerminalAgent 但不推事件，前端未同步），
-	 *   降级 activateRuntime 重新绑定启动——根治「右键重启没反应」。
-	 */
-	async function restartSessionAnyState(sessionId: string) {
-		if (!sessionId) return;
-		const runtime = store.get(sessionRuntimeBySessionIdAtomFamily(sessionId));
-		const target = toSessionRuntimeTarget(sessionId, runtime);
-		if (target) {
-			try {
-				await restartRuntimeTarget(
-					target,
-					agents.find((agent) => agent.id === target.agentId),
-				);
-				return;
-			} catch (error) {
-				const canFallback = error instanceof SessionCommandFailure && (error.code === "SESSION_RUNTIME_UNAVAILABLE" || error.code === "SESSION_RUNTIME_CHANGED");
-				if (!canFallback) {
-					showToast(error instanceof Error ? error.message : String(error), 5000);
-					return;
-				}
-				// 主进程绑定已解绑（前端未同步）：降级为重新激活启动，不重复报错。
-				// 先清掉 restart 失败残留的 error pending，避免激活成功后侧栏出现两个同会话 agent。
-				pendingAgentsRef.current = pendingAgentsRef.current.filter((agent) => agent.id !== target.agentId);
-				setPendingAgents(pendingAgentsRef.current);
-			}
-		}
-		// 未启动/已解绑：激活会话（ensureRuntime 对无绑定会话 create 新 Agent，幂等去重防重复点击）。
-		// DSH 会话 runtime 不可用（未安装/损坏）时 host 无法 fork，activateRuntime 只会抛
-		// 模块解析裸报错——给「去安装」提示（含直达入口）而不是把底层错误甩给用户。
-		const restartRecord = store.get(sessionRecordsAtom)[sessionId];
-		if (restartRecord?.backend === "dsh") {
-			const dshStatus = store.get(dshRuntimeStatusAtom);
-			if (dshSendBlockReason(dshStatus.state)) {
-				showDshRuntimeBlockHint(() => store.set(openSettingsAtom, DSH_INSTALL_SETTINGS_TARGET), dshStatus.state, dshStatus.reason, {
-					installed: dshStatus.runtimeVersion,
-					declared: dshStatus.declaredRuntimeVersion,
-				});
-				return;
-			}
-			maybeHintMissingDshRunnerNode(() => store.set(openSettingsAtom, { tab: "dev", section: "dsh-runner-node" }));
-		}
-		// 重启活会话走 restartRuntimeTarget→restartingAgentId→SessionSurfaceStage 的 isRestarting 遮罩；
-		// 这里（无绑定）没有 restartingAgentId，需显式设置 activating 遮罩，让会话消息区域也有加载动画。
-		setActivatingSessionId(sessionId);
-		setMutationOverlay({ sessionId, kind: "activating" });
-		try {
-			const activated = requireSessionCommand(await api.sessions.activateRuntime(sessionId));
-			void refreshRuntimeState(activated.agentId);
-			showToast(t("app.sessionStarted"), 2000);
-		} catch (error) {
-			showToast(error instanceof Error ? error.message : String(error), 5000);
-		} finally {
-			setActivatingSessionId((current) => (current === sessionId ? null : current));
-			setMutationOverlay({ sessionId, kind: null });
-		}
-	}
-
-	async function exportAgentHtml(agentId: string) {
-		if (isPendingAgentId(agentId)) return;
-		try {
-			const target = getRuntimeTargetForAgent(agentId);
-			if (!target) return;
-			const result = requireSessionCommand(await api.sessions.exportRuntimeHtml(target)).value as {
-				path: string;
-			};
-			showToast(t("app.exportedPath", { path: result.path }), 3500);
-		} catch (err) {
-			showToast(err instanceof Error ? err.message : String(err), 5000);
-		}
-	}
-
-	/**
-	 * 会话运行控制能力（全状态）：读当前 runtime 快照 → 纯函数策略 → 四项能力。
-	 * UI（Tab 下拉 / 侧栏右键菜单）只消费这里的结果，不再各自写 isLiveRuntimeStatus 分叉，
-	 * 根治「某些状态没有入口」和「两处判定不一致」。
-	 */
-	function getSessionRunCapabilities(sessionId: string | undefined): SessionRunCapabilities | undefined {
-		if (!sessionId) return undefined;
-		const runtime = store.get(sessionRuntimeBySessionIdAtomFamily(sessionId));
-		const target = toSessionRuntimeTarget(sessionId, runtime);
-		const busy = activatingSessionId === sessionId || reloadingSessionId === sessionId || (Boolean(target?.agentId) && restartingAgentId === target?.agentId) || queueFlushBySessionRef.current.has(sessionId);
-		const activeQueued = queue.queuedPromptsRef.current[sessionId] ?? [];
-		return sessionRunCapabilities({
-			state: resolveSessionRunState(runtime, Boolean(target)),
-			hasBinding: Boolean(target),
-			busy,
-			hasInFlightQueuedPrompt: activeQueued.some((qp) => qp.status === "sending" || qp.status === "unknown"),
-		});
-	}
-
-	/**
-	 * 会话运行控制统一入口：任意状态、任意入口（Tab 下拉 / 侧栏菜单 / 快捷键）都走这里。
-	 * - start：未启动/已解绑/error/closed → 有绑定走 restartRuntime 重建进程，无绑定走 activateRuntime。
-	 * - abort：只中断当前正在执行的回合（abort），进程与绑定保留、可立即继续对话；
-	 *   与输入框的「停止」同义——要杀进程请走「关闭 Agent」（closeAgent）。
-	 * - restart：与 start 同路径（对 live 语义即重启）；running 时先弹确认，避免误杀正在输出的回答。
-	 * - reload：无进程时从磁盘刷新消息文件。
-	 */
-	async function runSessionControl(sessionId: string, action: SessionRunAction): Promise<void> {
-		if (!sessionId) return;
-		const capabilities = getSessionRunCapabilities(sessionId);
-		if (!capabilities) return;
-
-		if (action === "reload") {
-			await reloadSessionMessages(sessionId);
-			return;
-		}
-
-		if (action === "abort") {
-			const target = getRuntimeTargetForSession(sessionId);
-			if (!target) {
-				// 进程已经不存在（终态被主进程惰性解绑）：没有可中断的回合。
-				showToast(t("sessionCommand.runtimeUnavailable"), 3000);
-				return;
-			}
-			// abortAgent 自带失败 toast 与「立即清流式态」处理，不抛异常。
-			await abortAgent(target.agentId);
-			return;
-		}
-
-		// action === "start" | "restart"
-		// live 态下这是「杀掉正在跑的进程重建」：会中断当前回答，必须先确认。
-		if (capabilities.requiresConfirm) {
-			overlays.showConfirm({
-				title: t("runControl.restartRunningTitle"),
-				message: t("runControl.restartRunningBody"),
-				confirmLabel: t("app.restart"),
-				onConfirm: () => {
-					overlays.clearConfirm();
-					void restartSessionAnyState(sessionId);
-				},
-			});
-			return;
-		}
-		await restartSessionAnyState(sessionId);
-	}
-
-	// isAgentBusy: synchronous store read (steer logic is callback-only, not render-time).
-	function isAgentCurrentlyBusy(): boolean {
-		if (!currentSessionId) return false;
-		const rt = store.get(currentSessionRuntimeAtom);
-		// 与 composer isBusy 对齐（含 isExecutingTool）：DSH 工具执行期间 steer 也应可用。
-		return rt?.status === "running" || Boolean(rt?.state?.isStreaming) || Boolean(rt?.state?.isExecutingTool);
 	}
 
 	// Drain by stable Session identity so runtime replacement cannot orphan queued work.
@@ -2518,87 +1811,14 @@ export function App() {
 
 	// Session prompt submission is owned by useSessionComposerController.
 
-	async function dispatchPromptSnapshot(sessionId: string, message: string, images?: ImageContent[], streamingBehavior?: "steer" | "followUp", agentMode: ComposerAgentMode = "normal", templateDescription?: string) {
-		// 排队投递与输入框同一套规则：DSH 拒绝 agentMessage，首次目标改写成 /goal。
-		const record = store.get(sessionRecordByIdAtomFamily(sessionId));
-		const isDsh = record?.backend === "dsh";
-		const visibleMessage = isDsh
-			? applyDshGoalSendTransform({
-					message,
-					mode: agentMode,
-					goal: store.get(sessionRuntimeBySessionIdAtomFamily(sessionId))?.state?.goal,
-				})
-			: message;
-		const submission = buildComposerPromptSubmission(visibleMessage, isDsh ? "normal" : agentMode);
-		let result: Awaited<ReturnType<typeof api.sessions.sendPrompt>>;
-		try {
-			result = await api.sessions.sendPrompt({
-				sessionId,
-				requestId: crypto.randomUUID(),
-				message: submission.message,
-				images,
-				...(submission.agentMessage ? { agentMessage: submission.agentMessage } : {}),
-				...(templateDescription ? { description: templateDescription } : {}),
-				...(streamingBehavior ? { streamingBehavior } : {}),
-			});
-		} catch (error) {
-			// IPC/fetch 在请求发出后断开时无法判断主进程是否已经提交给 pi；按未知处理，
-			// 绝不能把它降级为可重试失败，否则网络/IPC 抖动会造成重复发送。
-			throw new PromptDeliveryUnknownError(error instanceof Error ? error.message : String(error));
-		}
-		if (!result.accepted) {
-			const localizedError = translateI18nDescriptor(result, result.error);
-			if (result.delivery === "unknown") {
-				throw new PromptDeliveryUnknownError(localizedError);
-			}
-			throw new Error(localizedError);
-		}
-		// 排队投递（steer「插入当前回合」/ followUp 排队）同样构成「新一轮」：
-		// bump 会话 tick，timeline 侧非最新轮据此收起（设置② collapsePrevRunsOnNewTurn）。
-		// 普通发送由 useSessionSend 的 sendPrompt 返回值自己 bump；这里是队列 drain 的
-		// 唯一出口，漏掉会导致中断轮（无最终回答）在新一轮开始后仍保持展开。
-		store.set(bumpNewTurnCollapseTickAtom, sessionId);
-	}
-
-	async function submitPromptSnapshot(
-		sessionId: string,
-		message: string,
-		images?: ImageContent[],
-		streamingBehavior?: "steer" | "followUp",
-		agentMode: ComposerAgentMode = "normal",
-		/** prompt 模板匹配到的 description，作为元数据发给 pi agent 标识意图 */
-		templateDescription?: string,
-	) {
-		// 非队列入口：当前选中 agent 忙碌时按「忙碌时投递行为」设置决定投递语义
-		// （pi/dsh 统一）；空闲直发（undefined）。客户端队列 drain 直接调用
-		// dispatchPromptSnapshot，并显式指定其投递语义。
-		const behavior = streamingBehavior ?? resolveBusySendDelivery(sessionId === currentSessionId && isAgentCurrentlyBusy(), store.get(busySendDeliveryAtom));
-		try {
-			await dispatchPromptSnapshot(sessionId, message, images, behavior, agentMode, templateDescription);
-			return true;
-		} catch (error) {
-			if (error instanceof PromptDeliveryUnknownError) {
-				showToast(t("app.queuedUnknown"), 6000);
-				return "unknown" as const;
-			}
-			showToast(error instanceof Error ? error.message : String(error), 4000);
-			return false;
-		}
-	}
-
-	/** 将主进程抛出的错误消息中的 BUSY_ 前缀码转为前端多语言文案 */
-	function translateAgentErrorMessage(msg: string): string {
-		if (msg.startsWith("BUSY_STREAMING:")) return t("message.busyStreaming");
-		if (msg.startsWith("BUSY_TOOL:")) return t("message.busyTool");
-		if (msg.startsWith("BUSY_GENERIC:")) return t("message.busyGeneric");
-		return msg;
-	}
-
+	// Session prompt dispatch extracted to useSessionPromptDispatch
+	// (dispatchPromptSnapshot / submitPromptSnapshot / translateAgentErrorMessage /
+	// isAgentCurrentlyBusy / setPromptForAgent / setPrompt / livePromptByAgentRef).
 	/**
 	 * pi 历史消息改写：无 runtime 直接改 JSONL；有 runtime 先确认停止再改文件。
 	 * DSH 入口在 Injector 按 backend 隐藏。下次发送才重新激活 Agent。
 	 */
-	const { editMessage, deleteMessage, resendUserMessage, forkFromUserMessage, forkingMessageId } = useSessionHistoryMutations({
+	const { editMessage, deleteMessage, removeMessageImage, resendUserMessage, forkFromUserMessage, forkAtEntry, forkingMessageId } = useSessionHistoryMutations({
 		currentSessionId,
 		getRuntimeTargetForSession,
 		getRuntimeTargetForAgent,
@@ -2626,6 +1846,20 @@ export function App() {
 		},
 		// 生图 draft：会话消息里存在生图占位/结果即判定为生图模式（无 pi runtime、无 pi JSONL）。
 		isImageGenSession: (sessionId) => (store.get(sessionMessagesCacheAtom)?.[sessionId]?.messages ?? []).some((message) => message.meta?.imageGen !== undefined),
+		// fork 化重发/编辑只服务本机 pi 后端：DSH 维持 legacy 路径（策略层返回 catalog）
+		isDshSession: (sessionId) => getSessionRecord(sessionId)?.backend === "dsh",
+		// 远端 SSH 会话同样维持 catalog：改写主机上的会话文件由 RemoteSessionHistoryWriter 负责
+		// （含外部改动冲突检测）；pi fork 只接受 user 条目，而编辑目标是 assistant 回复。
+		isRemoteSession: (sessionId) => getSessionRecord(sessionId)?.locator?.kind === "ssh",
+		// fork 锚点是否为最后一条用户消息：尾部 → 替换语义（旧会话隐藏）；非尾部 → 分支模式（旧会话保留可见）。
+		// 缓存缺失时按非尾部处理（false），宁可两会话并存也不隐藏可能还有独属内容的旧会话。
+		isLastUserMessage: (sessionId, message) => {
+			const cached = store.get(sessionMessagesCacheAtom)?.[sessionId]?.messages;
+			if (!cached) return false;
+			const index = cached.findIndex((candidate) => candidate.id === message.id);
+			if (index < 0) return false;
+			return !cached.slice(index + 1).some((candidate) => candidate.role === "user");
+		},
 		// 生图重发：把失败的提示词（+参考图）放回输入框供一键重试。参考图直接整体替换附件栏
 		//（重发目标就是这轮消息自身，不需要前插保留——那是失败后保留用户新粘贴图的场景）。
 		restoreImageGenTurn: (sessionId, text, images) => {
@@ -2663,84 +1897,16 @@ export function App() {
 		}
 	}
 
-	async function updateSettings(patch: Partial<AppSettings>) {
-		const changesWebService = "webServiceEnabled" in patch || "webServiceHost" in patch || "webServicePort" in patch;
-		if (changesWebService) {
-			setWebServiceChanging(true);
-			showToast(patch.webServiceEnabled === false ? t("app.webStopping") : t("app.webApplying"));
-		}
-		try {
-			const next = await api.settings.update(patch);
-			setSettings(next);
-			let notice = t("app.settingsSaved");
-			if ("piProxyEnabled" in patch || "piProxyUrl" in patch || "piProxyBypass" in patch || "piProxyModels" in patch) {
-				notice = next.piProxyEnabled ? t("app.shellProxySaved") : t("app.shellProxyDisabled");
-				piUpdate.setPiProxyNoticeTone("info");
-				piUpdate.setPiProxyNotice(next.piProxyEnabled ? t("app.shellProxySaved") : "");
-			}
-			if ("desktopProxyEnabled" in patch || "desktopProxyUrl" in patch || "desktopProxyBypass" in patch) {
-				notice = next.desktopProxyEnabled ? t("app.webProxySaved") : t("app.webProxyDisabled");
-			}
-			if ("sendShortcut" in patch) {
-				notice = t("app.sendShortcutSaved");
-			}
-			if ("webServiceEnabled" in patch || "webServiceHost" in patch || "webServicePort" in patch) {
-				notice = next.webServiceEnabled ? t("app.webServiceStarted", { port: next.webServicePort }) : t("app.webServiceStopped");
-			}
-			if ("useNativeTitleBar" in patch) {
-				notice = t("app.titleBarSaved");
-			}
-			// Chromium 沙箱依赖启动参数与 webPreferences，保存后必须整应用重启才生效。
-			if ("electronChromiumSandbox" in patch) {
-				notice = t("app.settingsSaved"); // sandbox 需重启
-			}
-			// 单实例锁在进程启动时申请，修改后需重启才切换多开/复用行为。
-			if ("singleInstance" in patch) {
-				notice = t("app.settingsSaved"); // 单实例需重启
-			}
-			// 启动窗口预设仅在下次 createWindow 时应用。
-			if ("startupWindowMode" in patch) {
-				notice = t("app.settingsSaved"); // 启动窗口需重启
-			}
-			// WSL/Windows pi 源切换：重新检测 pi 环境、刷新项目和会话列表
-			if ("wslEnabled" in patch || "wslDistro" in patch || "wslUser" in patch) {
-				// WSL 配置变更后强制重探：否则切换 distro/用户名仍会命中旧的 wsl:// 绝对路径缓存
-				void api.pi
-					.check(true)
-					.then((next) => setPiStatus(next))
-					.catch(() => undefined);
-				void api.projects
-					.list()
-					.then(setProjects)
-					.catch(() => undefined);
-				if (activeProjectId) {
-					void refreshProjectSessions(activeProjectId, true).catch(() => undefined);
-				}
-			}
-			showToast(notice);
-			return true;
-		} catch (error) {
-			setSettings(await api.settings.get());
-			showToast(error instanceof Error ? error.message : String(error));
-			return false;
-		} finally {
-			if (changesWebService) setWebServiceChanging(false);
-		}
-	}
-
-	async function restartWebService() {
-		if (!settings.webServiceEnabled || webServiceChanging) return;
-		setWebServiceChanging(true);
-		showToast(t("settings.webRestarting"));
-		try {
-			await api.settings.restartWebService();
-			showToast(t("settings.webRestarted"));
-		} catch (error) {
-			showToast(error instanceof Error ? error.message : String(error));
-		} finally {
-			setWebServiceChanging(false);
-		}
-	}
+	// 设置写入域（updateSettings/restartWebService + webServiceChanging 态）收口到 useSettingsUpdater
+	const { updateSettings, restartWebService, webServiceChanging } = useSettingsUpdater({
+		showToast,
+		piUpdate,
+		onSettingsApplied: setSettings,
+		onProjectsChanged: setProjects,
+		activeProjectId,
+		refreshProjectSessions,
+		webServiceEnabled: settings.webServiceEnabled,
+	});
 
 	const switchBranch = useCallback(
 		async (branch: string) => {
@@ -2781,195 +1947,15 @@ export function App() {
 		[activeProjectId, showToast],
 	);
 
-	/**
-	 * 折叠中间包模式下的「自动下钻」：展开一个目录时，若它是一条
-	 * 「单子目录且无文件」的链（Java/Maven、NestJS 等深包结构），
-	 * 一次把它加载到链尾，让折叠后的点分节点直接展开到真实内容，
-	 * 避免用户逐层点 11 次。
-	 */
-	async function drillCompactChain(projectId: string, startPath: string) {
-		let current = startPath;
-		let currentTarget = findDirectoryNodeByPath(filesRef.current, startPath)?.target;
-		const chain = new Set<string>([startPath]);
-		for (let i = 0; i < FILE_TREE_ABSOLUTE_MAX_DEPTH; i++) {
-			let children: FileTreeNode[];
-			try {
-				children = currentTarget ? await api.files.list(currentTarget, { maxDepth: 0 }) : await api.files.list(projectId, { maxDepth: 0, directory: current });
-			} catch {
-				// 超大目录 / 权限问题：标记当前层「加载失败」，避免展开占位「加载中...」永久盖住文件名；
-				// 保留已加载部分（已 merge 的上层不受影响），用户重新点开可自然重试。
-				setFiles((tree) => markFileTreeLoadFailed(tree, current));
-				break;
-			}
-			if (activeProjectIdRef.current !== projectId) return;
-			setFiles((tree) => mergeFileTreeChildren(tree, current, children));
-			// 恰 1 个子目录且无文件 → 继续沿链下钻，并把该子目录也标记展开。
-			if (children.length === 1 && children[0].type === "directory") {
-				current = fileTreeNodeKey(children[0]);
-				currentTarget = children[0].target;
-				chain.add(current);
-				continue;
-			}
-			break;
-		}
-		// 整条链（含链尾）一次性并入展开集合：折叠模式下只有链尾 path 可见，
-		// 但关闭折叠后整条链仍需保持展开；持久化保证重新打开项目能重建。
-		setExpandedDirs((prev) => {
-			const next = new Set(prev);
-			for (const p of chain) next.add(p);
-			if (activeProjectIdRef.current === projectId) saveExpandedDirs(projectId, next);
-			return next;
-		});
-	}
-
-	function toggleDirectory(path: string) {
-		// 文件树默认折叠,只有用户显式展开目录才显示子项,避免大仓库一打开就产生视觉噪音。
-		let expanding = false;
-		setExpandedDirs((current) => {
-			const next = new Set(current);
-			if (next.has(path)) next.delete(path);
-			else {
-				next.add(path);
-				expanding = true;
-			}
-			// 持久化展开状态到 localStorage，切换回此项目时恢复
-			if (activeProjectId) saveExpandedDirs(activeProjectId, next);
-			return next;
-		});
-		// 首次展开时按需拉这一层；收起或已有 children 只改展开态，避免重复 IPC。
-		if (!expanding || !activeProjectId) return;
-		const projectId = activeProjectId;
-		if (compactMiddlePackagesEnabled) {
-			// 折叠模式下沿单子目录链自动下钻，一次展开整条包链
-			void drillCompactChain(projectId, path);
-			return;
-		}
-		setFiles((current) => {
-			if (findLoadedDirectory(current, path)) return current;
-			void api.files
-				.list(projectId, { maxDepth: 0, directory: path })
-				.then((children) => {
-					if (activeProjectIdRef.current !== projectId) return;
-					setFiles((tree) => mergeFileTreeChildren(tree, path, children));
-				})
-				.catch((error) => {
-					// 拉取失败（目录被删/无权限/超上限）：不打标的话该目录会永远停在
-					// 「加载中...」占位。标记 hasChildren=false 让占位立刻消失；重新点开
-					// 目录时 findLoadedDirectory 未命中会再次拉取，形成重试入口。
-					console.error("[Files] expand failed", error);
-					if (activeProjectIdRef.current !== projectId) return;
-					setFiles((tree) => markFileTreeLoadFailed(tree, path));
-				});
-			return current;
-		});
-	}
-
-	function collapseAllDirectories() {
-		const collapsedDirs = new Set<string>();
-		setExpandedDirs(collapsedDirs);
-		// 全部收起同样持久化，避免用户切换项目后又恢复此前展开的目录。
-		if (activeProjectId) saveExpandedDirs(activeProjectId, collapsedDirs);
-	}
-
-	async function deleteSidebarSession(projectId: string, session: SessionSummary) {
-		try {
-			await api.sessions.deleteRecord(session.id);
-		} catch (error) {
-			// 主进程可能拦截删除（会话正在使用中/删除失败），拒绝必须落成友好 toast，
-			// 否则会成为未处理 rejection（全局"未处理异常"弹窗，2026-08 用户反馈）。
-			// 剥离 Electron 的 "Error invoking remote method 'xxx': " 前缀，只展示主进程真实原因。
-			const raw = error instanceof Error ? error.message : String(error ?? "");
-			const reason = raw
-				.replace(/^Error invoking remote method ['"][^'"]+['"]:\s*/i, "")
-				.replace(/^Error:\s*/i, "")
-				.trim();
-			showToast(reason || t("app.sessionDeleteFailed"), 5000, "error");
-			return;
-		}
-		// 先关 Tab 再清状态，并带走 sibling-dir / parentSessionPath 子会话，避免空态 Composer 残留。
-		dismissSessionTree(session, projectId);
-		// 远端记录只移出列表，远端文件原样保留：提示不能给「已删除数据」的错觉（本机文案逐字不变）。
-		showToast(t(session.locator?.kind === "ssh" ? "session.removedRemoteRecord" : "app.sessionDeleted"), 2200);
-		// 已按删除结果摘除子树；对账不能重新插入项目级 loading 行，挤动其它会话。
-		await refreshProjectSessions(projectId, true);
-	}
-
-	/** 归档会话：从列表移除但不销毁文件；toast 按后端告知恢复入口（pi 走会话管理，DSH 走配置页归档区） */
-	async function archiveSidebarSession(projectId: string, session: SessionSummary) {
-		await api.sessions.archiveRecord(session.id);
-		dismissSessionTree(session, projectId);
-		showToast(archivedSessionToastMessage(session), ARCHIVED_SESSION_TOAST_MS);
-		await refreshProjectSessions(projectId);
-	}
-
-	/** 恢复归档会话：文件移回原路径并重新扫描 */
-	async function unarchiveSidebarSession(archived: ArchivedPiSession, projectId = activeProjectId) {
-		try {
-			await restoreArchivedPiSession(archived, api.sessions);
-		} catch (error) {
-			showToast(error instanceof Error ? error.message : String(error), 5000, "error");
-			throw error;
-		}
-		showToast(t("app.sessionRestored"), 2200);
-		// 归档管理弹窗可以从非当前项目打开；必须刷新弹窗所属项目，否则文件已恢复但侧栏仍沿用旧目录快照。
-		if (projectId) await refreshProjectSessions(projectId);
-	}
-
-	/** 恢复 DSH 归档会话：host 目录移回 sessions 树并由主进程重建 catalog 记录 */
-	async function unarchiveDshSidebarSession(dshSessionId: string, projectId = activeProjectId) {
-		await api.sessions.unarchiveDshSession(dshSessionId);
-		showToast(t("app.sessionRestored"), 2200);
-		// 恢复目标项目由主进程按 manifest 的 cwd 决定；刷新当前弹窗项目即可让 catalog 快照更新。
-		if (projectId) await refreshProjectSessions(projectId);
-	}
-
-	/** 列出已归档会话（会话管理弹窗恢复视图用） */
-	function listArchivedSidebarSessions() {
-		return api.sessions.listArchived();
-	}
-
-	/** 永久删除已归档会话（pi 文件归档：文件移入回收站并移出索引） */
-	async function deleteArchivedSidebarSession(archivedPath: string) {
-		await api.sessions.deleteArchivedRecord(archivedPath);
-		showToast(t("app.sessionDeletedFromArchive"), 2200);
-		// 归档删除不影响常规目录；刷新当前项目只是让 catalog 快照与磁盘一致。
-		const projectId = activeProjectId;
-		if (projectId) await refreshProjectSessions(projectId);
-	}
-
-	/** 列出 DSH 归档会话（会话管理弹窗归档视图用；与 pi 归档合并展示） */
-	function listArchivedDshSidebarSessions() {
-		return api.sessions.listArchivedDshSessions();
-	}
-
-	/** 永久删除已归档 DSH 会话（host 目录移入回收站） */
-	async function deleteArchivedDshSidebarSession(dshSessionId: string) {
-		await api.sessions.deleteArchivedDshSession(dshSessionId);
-		showToast(t("app.sessionDeletedFromArchive"), 2200);
-		const projectId = activeProjectId;
-		if (projectId) await refreshProjectSessions(projectId);
-	}
-
-	function requestDeleteSidebarSession(projectId: string, session: SessionSummary) {
-		const childCount = getProjectSessionRecords(projectId).filter((candidate) => isSameSessionPath(candidate.parentSessionPath, session.filePath)).length;
-		if (childCount === 0) {
-			void deleteSidebarSession(projectId, session);
-			return;
-		}
-		overlays.showConfirm({
-			title: t("drawer.sessionDeleteTitle"),
-			message: t("drawer.sessionDeleteBodyWithChildren", {
-				name: session.name || t("common.untitled"),
-				count: childCount,
-			}),
-			danger: true,
-			confirmLabel: t("common.delete"),
-			onConfirm: () => {
-				overlays.clearConfirm();
-				void deleteSidebarSession(projectId, session);
-			},
-		});
-	}
+	// 侧栏会话归档/删除族收口到 useSidebarArchiveActions（删除/归档/恢复 + DSH 归档）
+	const { deleteSidebarSession, archiveSidebarSession, unarchiveSidebarSession, unarchiveDshSidebarSession, listArchivedSidebarSessions, deleteArchivedSidebarSession, listArchivedDshSidebarSessions, deleteArchivedDshSidebarSession, requestDeleteSidebarSession } = useSidebarArchiveActions({
+		activeProjectId,
+		showToast,
+		overlays,
+		refreshProjectSessions,
+		dismissSessionTree,
+		getSessionRecords: getProjectSessionRecords,
+	});
 
 	async function removeSidebarProject(project: Project) {
 		try {
@@ -3048,6 +2034,7 @@ export function App() {
 			},
 			refreshAll: refreshAllProjects,
 			reorder: reorderProjects,
+			setPinned: setProjectPinned,
 			reveal: (project) => {
 				// 本机文件处理器不接受远端路径：远端项目不提供「在文件夹中显示」。
 				if (!isLocalProject(project)) return Promise.resolve();
@@ -3060,9 +2047,13 @@ export function App() {
 			importSessions: (project, source) => {
 				if (source === "codex") return openCodexImport(project);
 				if (source === "claude") return openClaudeImport(project);
+				if (source === "qoder") return openQoderImport(project);
 				if (source === "zcode") return openZCodeImport(project);
 				if (source === "workbuddy") return openWorkBuddyImport(project);
 				if (source === "cursor") return openCursorImport(project);
+				if (source === "kimi") return openKimiImport(project);
+				if (source === "kimiwork") return openKimiWorkImport(project);
+				if (source === "minimax") return openMinimaxImport(project);
 				return openOpenCodeImport(project);
 			},
 			importDirectorySessions: (project) => openDirectoryImport(project),
@@ -3078,9 +2069,11 @@ export function App() {
 			changeChatPath,
 		},
 		sessions: {
-			// 侧栏单击模式由设置 sessionTabOpenMode 控制（默认 preview=临时预览，发消息自动晋升常驻）；
-			// 双击仍是显式常驻。tabMode 为 undefined 时用当前设置值。
-			open: (projectId, sessionId, tabMode) => openSidebarSessionByIdWithTab(projectId, sessionId, tabMode ?? settings.sessionTabOpenMode),
+			// 简洁模式没有临时预览；标签模式保留原设置及双击晋升。
+			simpleNavigation: settings.navigationMode === "simple",
+			open: async (projectId, sessionId, tabMode) => {
+				await openSidebarSessionByIdWithTab(projectId, sessionId, settings.navigationMode === "simple" ? "permanent" : (tabMode ?? settings.sessionTabOpenMode));
+			},
 			// 活动页「最近会话」跨项目展示：后台静默预热尚未扫描的项目 catalog。
 			ensureCatalogsLoaded: (projectIds) => {
 				for (const projectId of projectIds) ensureProjectCatalogLoaded(projectId, true);
@@ -3096,8 +2089,27 @@ export function App() {
 			createDraft: async (projectId) => {
 				await createSessionDraftWithTab(projectId);
 			},
+			// 侧边任务：建带标记的会话 + 打开抽屉面板。刻意不选会话、不登记主区 Tab——
+			// 侧边任务与主工作区互不打扰是这条链路的底线（面板自己按 sessionId 寻址）。
+			createSideTask: async (projectId, backend) => {
+				await sideTasks.create({ projectId, backend });
+			},
 			createAnonymous: async (projectId) => {
 				await createAnonymousSessionWithTab(projectId);
+			},
+			// ACP 工具会话：backend 固定 acp、acpToolId 指向 settings.acpTools 条目。
+			// 工具表已加载进 acpToolsAtom，此处只按 id 取名称作草稿标题；找不到（刚被删）
+			// 提示引导而不是静默失败。创建后与 createDraft 同一条选中/登记链。
+			createAcp: async (projectId, toolId) => {
+				const tool = store.get(acpToolsAtom).find((candidate) => candidate.id === toolId);
+				if (!tool) {
+					showToast(t("app.acpNoTools"), 3000);
+					return;
+				}
+				const session = await api.sessions.createDraft({ projectId, title: tool.name, backend: "acp", acpToolId: tool.id });
+				upsertSession(session);
+				selectSessionCommand(projectId, session.id, false);
+				workspaceChrome.registerOpenSession(session.id, "permanent");
 			},
 			deleteDraft: deleteDraftSession,
 			rename: rename.openSessionRename,
@@ -3131,6 +2143,7 @@ export function App() {
 				await archiveSidebarSession(projectId, session);
 			},
 			unarchive: async (archived, projectId) => {
+				// 远端归档记录只能按 catalog id 恢复，本机归档走归档路径；派发收在 hook 内，身份不互相回退。
 				await unarchiveSidebarSession(archived, projectId);
 			},
 			listArchived: () => listArchivedSidebarSessions(),
@@ -3185,17 +2198,26 @@ export function App() {
 			},
 			setLogging: (agentId, enabled) => {
 				const target = getRuntimeTargetForAgent(agentId);
-				return target ? api.rpcLogs.setLogging(target, enabled) : Promise.resolve(false);
+				if (!target) return Promise.resolve(false);
+				// 回执落地后才写渲染层镜像：侧栏菜单文案与抽屉 rpcLog Tab 门控都读它，
+				// 写早了会把开关失败误显示为已开启（回执 false 表示主进程未允许）。
+				return api.rpcLogs.setLogging(target, enabled).then((receipt) => {
+					patchRpcLoggingAgentIds(agentId, receipt);
+					return receipt;
+				});
 			},
 			listLogs: (agentId) => {
 				const target = getRuntimeTargetForAgent(agentId);
 				return target ? api.rpcLogs.get({ target }) : Promise.resolve([]);
 			},
+			// 日志面板 = 右侧抽屉的临时面板：非模态，可与消息区同时使用（旧弹窗打开时发不了消息）
+			openViewer: (agentId) => workspace.openRpcLogPanel(agentId),
 		},
 	};
 
 	const sidebarContentNode = (
 		<AppSidebar
+			simple={settings.navigationMode === "simple"}
 			listCollapsed={listCollapsed}
 			toggleListCollapsed={toggleListCollapsed}
 			actions={sidebarActions}
@@ -3215,6 +2237,7 @@ export function App() {
 			settingsExpandedProjectIds={settings.sidebarExpandedProjectIds}
 			settingsNavTab={settings.sidebarNavTab}
 			settingsPinnedSessionIds={settings.pinnedSessionIds}
+			settingsSessionSortMode={settings.sessionSortMode}
 			settingsLoaded={settingsLoaded}
 			onExpandedProjectsReady={() => setExpandedProjectsReady(true)}
 			// 关于弹框：版本号/官网/GitHub 链接数据来自 AppInfo IPC（上方 useEffect 已拉取）
@@ -3244,6 +2267,11 @@ export function App() {
 		[selectSessionCommand, store],
 	);
 
+	const navigation = useSessionNavigation(currentSessionId, (id) => {
+		workspaceChrome.registerOpenSession(id, "permanent");
+		focusSessionPane(id);
+	});
+
 	// 后台 Ask 通知「前往会话」：跳转的同时登记常驻 Tab——agent 开多时被询问的会话
 	// 可能根本没开 Tab（后台并行 ask 等），只切焦点的话回答完切换出去就找不到了。
 	const jumpToAskSession = useCallback(
@@ -3269,6 +2297,8 @@ export function App() {
 		if (!el || prevSessionIdRef.current === currentSessionId) return;
 		const prev = prevSessionIdRef.current;
 		prevSessionIdRef.current = currentSessionId;
+		// 简洁模式直接切内容：整区位移会越过面板边界，制造额外滚动条。
+		if (settings.navigationMode === "simple") return;
 		// 分屏内面板间聚焦切换：各栏都已渲染、内容未变，只有聚焦边框亮起；
 		// 整区重播淡入微位移会造成「抖/闪」，静默跳过（边框高亮由
 		// .session-split-pane-focused 类切换承担，无动画）。
@@ -3286,98 +2316,106 @@ export function App() {
 			{ duration: 160, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
 		);
 		return () => anim.cancel();
-	}, [currentSessionId, workspaceChrome.splitLayout]);
+	}, [currentSessionId, workspaceChrome.splitLayout, settings.navigationMode]);
 
-	// —— Tab 栏 ⋯ 菜单「当前会话操作」：重命名 / 复制会话 / 导出 HTML / 复制路径 / 打开文件 ——
-	// 与侧栏会话右键菜单同源同语义：搜索定位的会话可能不在侧栏可见（侧栏只渲染部分行），
-	// ⋯ 菜单是唯一稳定入口。live 会话复制走 clone 分流（Agent 换绑新会话，DSH 亦可），
-	// 历史/未启动会话走 copyRecord；DSH 历史会话无宿主文件，隐藏复制/导出组（与侧栏一致）。
-	async function copyCurrentSessionFromTabs() {
-		if (!currentSessionId) return;
-		if (currentSessionIsLive && activeAgentId) {
-			await cloneAgentSession(activeAgentId);
-			return;
-		}
-		await runCopySession(currentSessionId, currentSessionRecord?.projectId);
-	}
-
-	async function copyCurrentSessionPathFromTabs() {
-		if (!currentSessionId) return;
-		// DSH 会话文件路径按 dshSessionId + cwd 推导（与侧栏 copyPath 同源）；
-		// 失败/不可推导时提示而不是把空值写进剪贴板。
-		const path = currentSessionRecord?.backend === "dsh" ? await api.sessions.getDshSessionPath(currentSessionId) : currentSessionRecord?.filePath;
-		if (!path) {
-			showToast(t("menu.copySessionFilePathUnavailable"), 3000);
-			return;
-		}
-		await navigator.clipboard.writeText(path);
-		showToast(t("common.copied"));
-	}
-
-	const tabsSessionActions: SessionTabsBarProps["sessionActions"] =
-		currentSessionId && currentSessionRecord
-			? {
-					canCopySession: currentSessionRecord.status !== "draft" && (currentSessionIsLive || currentSessionRecord.backend !== "dsh"),
-					canExportHtml: currentSessionRecord.status !== "draft" && currentSessionRecord.backend !== "dsh",
-					hasFilePath: Boolean(currentSessionRecord.filePath),
-					onCopySession: () => {
-						void copyCurrentSessionFromTabs();
-					},
-					onCopySessionFilePath: () => {
-						void copyCurrentSessionPathFromTabs();
-					},
-					onOpenSessionFile: currentSessionRecord.filePath
-						? () => {
-								const filePath = currentSessionRecord.filePath;
-								if (!filePath) return;
-								api.files.open(filePath).catch((error) => {
-									showToast(
-										t("app.openFileFailed", {
-											error: error instanceof Error ? error.message : String(error),
-										}),
-										4000,
-									);
-								});
-							}
-						: undefined,
-					onExportSessionHtml: () => {
-						if (!currentSessionId) return;
-						// live 会话走 runtime 导出（与侧栏 agent 导出同源）；历史会话读文件导出
-						if (currentSessionIsLive && activeAgentId) {
-							void exportAgentHtml(activeAgentId);
+	// —— Tab 栏会话操作组（重命名 / 复制会话 / 导出 HTML / 复制路径 / 打开文件）——
+	// 与侧栏会话右键菜单同源同语义，参数化到任意 sessionId：⋯ 菜单喂当前会话，
+	// Tab 右键菜单（SessionTabsBar contextSessionActions）喂被右键的 Tab——后台 Tab
+	// 同样可操作。live 会话复制走 clone 分流（Agent 换绑新会话，DSH 亦可），历史/
+	// 未启动会话走 copyRecord；DSH 历史会话无宿主文件，隐藏复制/导出组（与侧栏一致）。
+	// record/runtime 用 store 现查（右键目标不在 current* 闭包里）；agent 列表闭包自
+	// 当次渲染（SessionTabsBar 的 renderTab 每渲染重建，无过期问题）。
+	const buildTabsSessionActions = (sessionId: string): SessionTabsBarProps["sessionActions"] => {
+		const record = store.get(sessionRecordsAtom)[sessionId];
+		if (!record) return undefined;
+		const runtime = store.get(sessionRuntimeBySessionIdAtomFamily(sessionId));
+		const isLive = isLiveRuntimeStatus(runtime?.status);
+		const agentId = runtime?.agentId;
+		// 草稿闸门：草稿期不提供重命名（自动命名还没跑，先钉名字会让条目进 manual
+		// 终态，扩展规划的会话名再也写不进来）；复制/导出同款闸门。
+		// ACP 同样隐藏：live 复制走 pi manager cloneSession 会报 unknown agent，历史会话
+		// 无 filePath 只会报「文件不存在」——两条路都是死胡同（2027-03 审计发现 H）。
+		const canRename = record.status !== "draft";
+		return {
+			canCopySession: canRename && record.backend !== "acp" && (isLive || record.backend !== "dsh"),
+			canExportHtml: canRename && record.backend !== "dsh" && record.backend !== "acp",
+			hasFilePath: Boolean(record.filePath),
+			// 侧边任务：目标会话的项目与后端原样带过去；不登记主区常驻 Tab、不改当前会话焦点。
+			onCreateSideTask: () => void sideTasks.create({ projectId: record.projectId, backend: record.backend }),
+			onCopySession: () => {
+				if (isLive && agentId) {
+					void cloneAgentSession(agentId);
+					return;
+				}
+				void runCopySession(sessionId, record.projectId);
+			},
+			onCopySessionFilePath: () => {
+				void (async () => {
+					// DSH 会话文件路径按 dshSessionId + cwd 推导（与侧栏 copyPath 同源）；
+					// 失败/不可推导时提示而不是把空值写进剪贴板。
+					const path = record.backend === "dsh" ? await api.sessions.getDshSessionPath(sessionId) : record.filePath;
+					if (!path) {
+						showToast(t("menu.copySessionFilePathUnavailable"), 3000);
+						return;
+					}
+					await navigator.clipboard.writeText(path);
+					showToast(t("common.copied"));
+				})();
+			},
+			onOpenSessionFile: record.filePath
+				? () => {
+						const filePath = record.filePath;
+						if (!filePath) return;
+						api.files.open(filePath).catch((error) => {
+							showToast(
+								t("app.openFileFailed", {
+									error: error instanceof Error ? error.message : String(error),
+								}),
+								4000,
+							);
+						});
+					}
+				: undefined,
+			onExportSessionHtml: () => {
+				// live 会话走 runtime 导出（与侧栏 agent 导出同源）；历史会话读文件导出
+				if (isLive && agentId) {
+					void exportAgentHtml(agentId);
+					return;
+				}
+				api.sessions
+					.exportRecordHtml(sessionId)
+					.then((result) => showToast(result.truncated ? t("app.exportedPathTruncated", { path: result.path }) : t("app.exportedPath", { path: result.path }), 3500))
+					.catch((error) => showToast(error instanceof Error ? error.message : String(error), 5000));
+			},
+			onRename: canRename
+				? () => {
+						// live 会话用 agent 重命名（与侧栏 AgentContextMenu 同源，改名同步运行时标题）；
+						// 历史/未启动会话用 record 拼侧栏同构的 SessionSummary 走统一重命名弹框。
+						const agent = agentId ? [...displayAgents, ...pendingAgents].find((candidate) => candidate.id === agentId) : undefined;
+						if (isLive && agent) {
+							rename.openAgentRename(agent);
 							return;
 						}
-						api.sessions
-							.exportRecordHtml(currentSessionId)
-							.then((result) => showToast(result.truncated ? t("app.exportedPathTruncated", { path: result.path }) : t("app.exportedPath", { path: result.path }), 3500))
-							.catch((error) => showToast(error instanceof Error ? error.message : String(error), 5000));
-					},
-					// 草稿期不提供重命名入口（与 canCopySession/canExportHtml 同款草稿闸门）：此时
-					// 自动命名还没跑，先钉一个名字会让条目进 manual 终态，扩展规划的会话名再也写不进来。
-					onRenameSession:
-						currentSessionRecord.status === "draft"
-							? undefined
-							: () => {
-									if (!currentSessionRecord) return;
-									// live 会话用 agent 重命名（与侧栏 AgentContextMenu 同源，改名同步运行时标题）；
-									// 历史/未启动会话用 record 拼侧栏同构的 SessionSummary 走统一重命名弹框。
-									if (currentSessionIsLive && activeAgent) {
-										rename.openAgentRename(activeAgent);
-										return;
-									}
-									rename.openSessionRename(currentSessionRecord.projectId, {
-										id: currentSessionRecord.id,
-										filePath: currentSessionRecord.filePath ?? "",
-										name: currentSessionRecord.title,
-										preview: currentSessionRecord.preview,
-										updatedAt: currentSessionRecord.updatedAt,
-										messageCount: currentSessionRecord.messageCount,
-										backend: currentSessionRecord.backend,
-										forked: currentSessionRecord.forked,
-									});
-								},
-				}
-			: undefined;
+						rename.openSessionRename(record.projectId, {
+							id: record.id,
+							filePath: record.filePath ?? "",
+							name: record.title,
+							preview: record.preview,
+							updatedAt: record.updatedAt,
+							messageCount: record.messageCount,
+							backend: record.backend,
+							forked: record.forked,
+						});
+					}
+				: undefined,
+		};
+	};
+	// ⋯ 菜单（当前会话）与 Tab 右键菜单（被右键的 Tab）共用同一工厂，闸门语义一致。
+	const tabsSessionActions = currentSessionId ? buildTabsSessionActions(currentSessionId) : undefined;
+
+	useEffect(() => {
+		if (settings.navigationMode === "simple" && workspaceChrome.previewSessionTabId) workspaceChrome.promotePreview(workspaceChrome.previewSessionTabId);
+	}, [settings.navigationMode, workspaceChrome.previewSessionTabId, workspaceChrome.promotePreview]);
 
 	const sessionTabsProps = {
 		tabs: workspaceChrome.sessionTabIds,
@@ -3401,6 +2439,11 @@ export function App() {
 			.sort((a, b) => Number(b.isChat) - Number(a.isChat)),
 		onNewSessionInProject: (projectId: string) => {
 			void createSessionDraftWithTab(projectId);
+		},
+		// ACP 工具会话入口（Tab 栏 + 下拉尾部，工具→项目二级）：走 sidebarActions.createAcp，
+		// 与设置页共用同一条创建链（backend=acp + acpToolId）。
+		onNewAcpSession: (projectId: string, toolId: string) => {
+			void sidebarActions.sessions.createAcp(projectId, toolId);
 		},
 		onTogglePin: workspaceChrome.togglePin,
 		onReorder: workspaceChrome.reorderTab,
@@ -3430,7 +2473,9 @@ export function App() {
 			: undefined,
 		// 会话代理（网络代理）入口：与侧栏会话菜单同源，打开同一个弹框。
 		// 仅在有当前会话时给出；弹框内自行判断 DSH 等宿主差异并给出「下次启动生效」提示。
-		onOpenProxySetting: currentSessionId ? () => setProxyDialogSessionId(currentSessionId) : undefined,
+		// ACP 隐藏：会话代理只在 pi spawn 时消费（AgentManager.resolveSessionProxy），
+		// ACP 子进程从不读取——入口是死胡同（2027-03 审计发现 H）。
+		onOpenProxySetting: currentSessionId && getSessionRecord(currentSessionId)?.backend !== "acp" ? () => setProxyDialogSessionId(currentSessionId) : undefined,
 		onToggleDrawer: toggleRightDrawer,
 		drawerOpen: Boolean(drawer && !drawerCollapsed),
 		listCollapsed,
@@ -3469,6 +2514,7 @@ export function App() {
 
 	const sessionPaneServices = useMemo(
 		() => ({
+			simpleNavigation: settings.navigationMode === "simple",
 			isLanWeb,
 			promoteSessionToPermanent: workspaceChrome.promotePreview,
 			showToast,
@@ -3487,22 +2533,25 @@ export function App() {
 			resendUserMessage,
 			editMessage,
 			deleteMessage,
+			removeMessageImage,
 			forkFromUserMessage,
 			forkingMessageId,
-			openSidebarSessionById: (projectId: string, sessionId: string) => openSidebarSessionByIdWithTab(projectId, sessionId, "permanent"),
+			openSidebarSessionById: async (projectId: string, sessionId: string) => {
+				await openSidebarSessionByIdWithTab(projectId, sessionId, "permanent");
+			},
 			focusAskSessionById: jumpToAskSession,
 			agents: displayAgents,
 			queuedPromptsBySession: queue.queuedPrompts,
 			queueRetract: queue.retractQueuedPromptForEdit,
 			queueDiscard: queue.discardQueuedPrompt,
 			queueChangeBehavior: queue.setQueuedPromptBehavior,
+			queueSuppressAutoDrain: queue.suppressSessionQueueAutoDrain,
 			queueFlushBySessionRef,
 			restartingAgentId,
 			sessionDurationByAgent,
 			activeProjectId,
 			onProjectGitChanged: handleProjectGitChanged,
 			showThinking: settings.showThinking,
-			validCommandNames,
 			validFilePaths,
 			terminalStatesByOwner,
 			activeTerminalOwnerKey,
@@ -3510,6 +2559,9 @@ export function App() {
 			setTerminalOpenByOwnerKey,
 			setTerminalCollapsedByOwnerKey,
 			setTerminalHeight,
+			terminalSettings,
+			hiddenComposerFeatures: settings.hiddenComposerFeatures ?? [],
+			onTerminalThemeChange: setTerminalTheme,
 			environmentDialog: Boolean(environmentDialog),
 			showNotice,
 			api,
@@ -3526,6 +2578,7 @@ export function App() {
 			createSessionDraftWithTab,
 			changeChatPath,
 			deleteMessage,
+			removeMessageImage,
 			diffFilePath,
 			displayAgents,
 			editMessage,
@@ -3545,6 +2598,7 @@ export function App() {
 			queue.discardQueuedPrompt,
 			queue.queuedPrompts,
 			queue.retractQueuedPromptForEdit,
+			queue.suppressSessionQueueAutoDrain,
 			queueFlushBySessionRef,
 			restartActiveAgent,
 			restartingAgentId,
@@ -3552,14 +2606,17 @@ export function App() {
 			resendUserMessage,
 			sessionDurationByAgent,
 			settings.showThinking,
+			settings.navigationMode,
 			setPreviewImage,
 			setTerminalCollapsedByOwnerKey,
 			setTerminalHeight,
+			setTerminalTheme,
+			terminalSettings,
+			settings.hiddenComposerFeatures,
 			setTerminalOpenByOwnerKey,
 			showToast,
 			terminalStatesByOwner,
 			availableTerminalHeight,
-			validCommandNames,
 			validFilePaths,
 			workspaceChrome.exitSplit,
 			workspaceChrome.promotePreview,
@@ -3599,12 +2656,15 @@ export function App() {
 					{!isLanWeb && terminalDockVisible && terminalTarget && (
 						<TerminalDockPanel
 							target={terminalTarget}
+							targetProject={terminalTargetProject}
 							open={terminalOpen}
 							closing={terminalDockClosing}
 							collapsed={terminalCollapsed}
 							height={terminalRowHeight}
 							maxHeight={availableTerminalHeight ?? 120}
 							terminal={api.terminal}
+							terminalSettings={terminalSettings}
+							onThemeChange={setTerminalTheme}
 							ownerKey={terminalOwner ? terminalOwnerKey(terminalOwner) : undefined}
 							onOpenChange={setTerminalOpenForOwner}
 							onCollapsedChange={setTerminalCollapsedForOwner}
@@ -3631,28 +2691,22 @@ export function App() {
 			current === width ? current : width,
 		);
 	}, []);
-	const workbenchLayout = workbenchHasGitDiff ? gitDiffDisplayMode : editorMode;
+	const simpleMode = settings.navigationMode === "simple";
+	// 会话状态显示位置：首屏设置未拉到 / 预览环境缺字段时按默认值处理
+	const sessionStatusPlacement = parseSessionStatusPlacement(settings.sessionStatusPlacement);
+	const [simpleContentExpanded, setSimpleContentExpanded] = useState(false);
+	useEffect(() => setSimpleContentExpanded(false), [activeTabId, gitDrawerDiff?.filePath, simpleMode]);
+	const workbenchLayout = simpleMode ? (simpleContentExpanded ? "maximize" : "split") : workbenchHasGitDiff ? gitDiffDisplayMode : editorMode;
 
 	// 文件/Diff Tab 挂进总 SessionTabsBar：与会话共用一条栏，内容区不再另起绿条 Tab
-	const workbenchEditorTabs =
-		workbenchHasGitDiff && gitDrawerDiff
-			? [
-					{
-						id: gitDrawerDiff.filePath,
-						label: gitDrawerDiff.label,
-						title: gitDrawerDiff.filePath,
-						active: true,
-					},
-				]
-			: workbenchHasEditor
-				? editorTabs.map((tab) => ({
-						id: tab.id,
-						label: tab.label ?? tab.filePath.split(/[/\\]/).pop() ?? tab.filePath,
-						title: tab.filePath,
-						preview: tab.id === previewEditorTabId,
-						active: tab.id === activeTabId,
-					}))
-				: [];
+	const fileTabs = editorTabs.map((tab) => ({
+		id: tab.id,
+		label: tab.label ?? tab.filePath.split(/[/\\]/).pop() ?? tab.filePath,
+		title: tab.filePath,
+		preview: tab.id === previewEditorTabId,
+		active: !workbenchHasGitDiff && tab.id === activeTabId,
+	}));
+	const workbenchEditorTabs = [...(simpleMode || !workbenchHasGitDiff ? fileTabs : []), ...(workbenchHasGitDiff && gitDrawerDiff ? [{ id: `git-diff:${gitDrawerDiff.filePath}`, label: gitDrawerDiff.label, title: gitDrawerDiff.filePath, active: true }] : [])];
 
 	// 工具开关上收会话 Tab 栏（原右侧悬浮工具条入口的唯一挂载点）：
 	// 草稿纸 / 终端 / 外部编辑器，与抽屉开关同排。
@@ -3700,116 +2754,56 @@ export function App() {
 	// 并跳转，这边搜「设置项 + 操作」。「重启当前 Agent」「复制 Agent ID」这类命令
 	// 此前只能钻进侧栏/Tab 的右键菜单里翻，命令面板给它们一条可搜索的直达路径。
 	//
-	// 唤起由主进程 before-input-event 广播（键位可在设置页改），输入框聚焦时跳过——
-	// 与新建会话/会话搜索同一套判定，避免打字时误开面板。
-	const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+	// 命令面板域（开关/快捷键唤起/命令列表）收口到 useCommandPalette
+	const { commandPaletteOpen, setCommandPaletteOpen, openCommandPalette, commandPaletteCommands } = useCommandPalette({
+		activeProjectId,
+		currentSessionId,
+		activeAgentId,
+		hiddenModules: settings.hiddenModules ?? [],
+		actions: { selectProjectCommand, restartActiveAgent, closeAgent, runSessionControl },
+	});
 
-	// 打开命令面板的唯一入口：顺手记下「用户已经知道这个功能了」，
-	// 这样自己摸到快捷键的人不会再被启动引导打扰（引导只在完全没接触过时才有价值）。
-	const openCommandPalette = useCallback(() => {
-		markCommandPaletteOnboardingSeen();
-		setCommandPaletteOpen(true);
+	// 窗口缩放快捷键（Ctrl/Cmd+= / Ctrl/Cmd+-）由主进程直接改 zoomFactor 并落盘
+	// （见 main/windowZoom.ts），渲染层只订阅新比例同步设置态——否则设置页
+	// 「外观 → 窗口缩放」会一直显示快捷键改动前的旧百分比。
+	useEffect(() => {
+		return api.app.onZoomFactorChange((zoomFactor) => {
+			setSettings((prev) => (prev.zoomFactor === zoomFactor ? prev : { ...prev, zoomFactor }));
+		});
 	}, []);
 
-	useEffect(() => {
-		return api.app.onShortcutTriggered((id) => {
-			if (id !== "openCommandPalette") return;
-			const target = document.activeElement;
-			if (target instanceof HTMLElement && (target.isContentEditable || target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement)) {
-				return;
-			}
-			openCommandPalette();
-		});
-	}, [openCommandPalette]);
-
-	// 列表刻意不 memo：条目数在百级以内，构建成本远低于一次 React 渲染；而 t() 是
-	// 模块级函数，memo 依赖里没法可靠表达「语言变了」，漏掉就会出现
-	// 「切完语言，面板里还是旧文案」。
-	const commandPaletteCommands: PaletteCommand[] = (() => {
-		const commands: PaletteCommand[] = [];
-		const actionGroup = t("command.groupActions");
-
-		commands.push({
-			id: "action:new-session",
-			group: actionGroup,
-			title: t("command.actionNewSession"),
-			keywords: ["new", "新建", "会话", "session", "chat", "创建"],
-			icon: SquarePen,
-			run: () => {
-				if (activeProjectId) selectProjectCommand(activeProjectId);
-			},
-		});
-
-		commands.push({
-			id: "action:open-settings",
-			group: actionGroup,
-			title: t("command.actionOpenSettings"),
-			keywords: ["settings", "设置", "偏好", "preferences", "配置"],
-			icon: Settings2,
-			run: () => store.set(openSettingsAtom, { tab: "common" }),
-		});
-
-		// 运行控制类命令只在有当前会话时才出现——没有目标时列出来只会点了没反应。
-		//
-		// 副标题刻意写「命令说明」而不是会话标题：会话标题是用户内容（自动命名出来的
-		// 中文短语），摆在命令名下面会被直接读成这条命令的用途——曾把会话标题
-		// 「检查 Git 更新与冲突情况」显示在「重启当前 Agent」下面，看起来像 Git 功能。
-		// 命令名里的「当前」已经指明了作用对象。
-		if (currentSessionId) {
-			commands.push({
-				id: "action:restart-agent",
-				group: actionGroup,
-				title: t("command.actionRestartAgent"),
-				subtitle: t("command.actionRestartAgentDesc"),
-				keywords: ["restart", "重启", "重开", "agent", "进程", "重新启动"],
-				icon: RotateCw,
-				run: () => void restartActiveAgent(activeAgentId),
-			});
-			commands.push({
-				id: "action:stop-agent",
-				group: actionGroup,
-				title: t("command.actionStopAgent"),
-				subtitle: t("command.actionStopAgentDesc"),
-				keywords: ["stop", "停止", "关闭", "agent", "进程", "结束"],
-				icon: CircleStop,
-				run: () => {
-					if (activeAgentId) void closeAgent(activeAgentId);
-				},
-			});
-			commands.push({
-				id: "action:reload-session",
-				group: actionGroup,
-				title: t("command.actionReloadSession"),
-				subtitle: t("command.actionReloadSessionDesc"),
-				keywords: ["reload", "重载", "重新加载", "刷新", "session"],
-				icon: RefreshCw,
-				run: () => void runSessionControl(currentSessionId, "reload"),
-			});
-		}
-
-		// 复制 Agent ID：无绑定（从未启动/已解绑）时没有可复制的值，不列出来
-		if (activeAgentId) {
-			commands.push({
-				id: "action:copy-agent-id",
-				group: actionGroup,
-				title: t("command.actionCopyAgentId"),
-				subtitle: activeAgentId,
-				keywords: ["copy", "复制", "agent", "id", "标识"],
-				icon: Fingerprint,
-				run: () => void copyTextWithCopiedNotice(activeAgentId),
-			});
-		}
-
-		commands.push(...buildSettingsCommands((target) => store.set(openSettingsAtom, target), settings.hiddenModules));
-		return commands;
-	})();
-
+	const selectWorkbenchTab = (id: string) => {
+		if (id.startsWith("git-diff:")) return;
+		if (workbenchHasGitDiff) dismissGitDiff();
+		selectEditorTab(id);
+	};
+	const closeWorkbenchTab = (id: string) => {
+		if (id.startsWith("git-diff:")) {
+			if (simpleMode) dismissGitDiff();
+			else closeGitDiff();
+		} else closeEditorTab(id);
+	};
+	const toggleSimpleContent = () => setSimpleContentExpanded((value) => !value);
+	// 页面式插件面板伪 Tab：tab 模式下挂进 SessionTabsBar（打开时会话 Tab 退非选中，
+	// 点任意会话 Tab 即收起）；simple 模式不挂（插件页直接铺满会话区，由 Overlay 承担）。
+	const hostPluginPageTab = useHostPluginPageTab();
 	const sessionTabsBarNode = (
 		<SessionTabsBar
 			{...sessionTabsProps}
+			simple={simpleMode}
+			// 插件页占据会话区时，会话 Tab 不得显示选中态（当前呈现的不是会话）
+			currentSessionId={hostPluginPageTab ? undefined : currentSessionId}
+			pluginTab={simpleMode ? null : hostPluginPageTab}
+			// 点任意会话 Tab（含当前 Tab，sessionId 不变的场景）也要收起插件页；
+			// Overlay 的 scope 变化兑底只覆盖「切到别的会话」这一分支。
+			onSelect={(sessionId) => {
+				hostPluginPageTab?.onClose();
+				workspaceChrome.selectTab(sessionId);
+			}}
 			sessionActions={tabsSessionActions}
+			contextSessionActions={buildTabsSessionActions}
 			toolActions={sessionToolActions}
-			editorTabs={workbenchEditorTabs}
+			editorTabs={simpleMode ? [] : workbenchEditorTabs}
 			onSelectEditorTab={(tabId) => {
 				if (workbenchHasGitDiff) return;
 				selectEditorTab(tabId);
@@ -3829,15 +2823,18 @@ export function App() {
 		<WorkbenchContent
 			theme={workbenchTheme}
 			maxFileSizeMB={settings.maxEditorFileSizeMB}
+			editorTabs={editorTabs}
+			onDirty={promotePreviewEditorTab}
 			gitDiff={workbenchHasGitDiff && gitDrawerDiff ? gitDrawerDiff : null}
-			gitDiffDisplayMode={gitDiffDisplayMode}
-			onToggleGitDiffMode={toggleGitDiffDisplayMode}
-			onCloseGitDiff={closeGitDiff}
-			activeTab={workbenchHasEditor && activeTab ? activeTab : null}
-			editorMode={editorMode}
-			onToggleEditorMode={activeTab?.preserveDrawer ? undefined : toggleEditorMode}
+			gitDiffDisplayMode={simpleMode ? workbenchLayout : gitDiffDisplayMode}
+			onToggleGitDiffMode={simpleMode ? toggleSimpleContent : toggleGitDiffDisplayMode}
+			onCloseGitDiff={simpleMode ? dismissGitDiff : closeGitDiff}
+			activeTab={activeTab}
+			editorMode={simpleMode ? workbenchLayout : editorMode}
+			onToggleEditorMode={simpleMode ? toggleSimpleContent : activeTab?.preserveDrawer ? undefined : toggleEditorMode}
 			onCloseEditor={() => {
-				closeEditor();
+				if (simpleMode && activeTab) closeEditorTab(activeTab.id);
+				else closeEditor();
 			}}
 			readContent={readEditorFileContent}
 			readOriginalContent={readEditorOriginalContent}
@@ -3845,14 +2842,31 @@ export function App() {
 		/>
 	) : null;
 
-	const chatPaneContentNode = <WorkbenchStage chrome={sessionTabsBarNode} layout={workbenchLayout} hasContent={workbenchHasContent} session={chatPaneSessionNode} content={workbenchContentNode} onContentWidthChange={handleWorkbenchContentWidth} />;
+	const chatPaneContentNode = (
+		<WorkbenchStage
+			simple={simpleMode}
+			contentChrome={<WorkbenchFileTabs tabs={workbenchEditorTabs} onSelect={selectWorkbenchTab} onClose={closeWorkbenchTab} onPromote={promotePreviewEditorTab} />}
+			chrome={sessionTabsBarNode}
+			layout={workbenchLayout}
+			hasContent={workbenchHasContent}
+			// 插件页面式面板：以工作区会话列上的非模态覆盖层呈现（presentation:"page"），
+			// 会话树保持挂载，关闭覆盖层即原样还原（滚动/草稿/终端内存态不丢）。
+			session={
+				<div className="relative flex h-full min-h-0 min-w-0 flex-col">
+					{chatPaneSessionNode}
+					<HostPluginPageOverlay projectId={activeProject?.id} sessionId={currentSessionId} />
+				</div>
+			}
+			content={workbenchContentNode}
+			onContentWidthChange={handleWorkbenchContentWidth}
+		/>
+	);
 
 	// ── DrawerSurface port objects (stable via useMemo) ──
 	const drawerPorts = useDrawerPorts({
 		enableGitManagement: settings.enableGitManagement,
 		activeProjectId,
 		activeProject: activeProject ?? undefined,
-		gitDrawerDiff,
 		gitDiffDisplayMode,
 		openCommitFileDiff,
 		openWorkspaceFileDiff,
@@ -3870,6 +2884,11 @@ export function App() {
 		minimizeBrowser: () => workspace.minimizeBrowser(),
 		enterBrowserFullscreen: () => workspace.enterBrowserFullscreen(),
 		browserFullscreen,
+		rpcLogAgentId: workspace.rpcLogAgentId,
+		rpcLogListLogs: sidebarActions.rpc.listLogs,
+		rpcLogGetLogging: sidebarActions.rpc.getLogging,
+		rpcLogSetLogging: sidebarActions.rpc.setLogging,
+		closeRpcLogPanel: workspace.closeRpcLogPanel,
 		sessionsProject,
 		sessionsProjectId,
 		files,
@@ -3963,12 +2982,44 @@ export function App() {
 
 	return (
 		// 非会话静态区域使用当前焦点作为兜底；每个 SessionRuntimeInjector 会用本栏 cwd/project 覆盖。
-		<FileLinkBaseProvider baseDir={activeAgent?.cwd ?? activeProject?.path} projectId={activeProject?.id} projectRoot={activeProject?.path}>
+		<FileLinkBaseProvider baseDir={activeAgent?.cwd ?? activeProject?.path} projectId={activeProject?.id} projectRoot={activeProject?.path} sessionId={currentSessionId}>
 			<>
 				<AppBootstrap {...bootstrapProps} />
 				<AppShell
+					navigationChrome={
+						simpleMode ? (
+							<div className="simple-navigation-bar flex h-8 shrink-0 items-center gap-0.5 bg-(--simple-shell-surface) px-2 [&_button]:[-webkit-app-region:no-drag]">
+								<Button variant="ghost" size="icon-sm" className="size-6.5" type="button" aria-label={listCollapsed ? t("app.expandList") : t("app.collapseList")} title={listCollapsed ? t("app.expandList") : t("app.collapseList")} onClick={toggleListCollapsed}>
+									<PanelLeft size={14} />
+								</Button>
+								<Button variant="ghost" size="icon-sm" className="size-6.5" type="button" aria-label={t("navigation.back")} title={t("navigation.back")} disabled={!navigation.canBack} onClick={navigation.back}>
+									<ArrowLeft size={14} />
+								</Button>
+								<Button variant="ghost" size="icon-sm" className="size-6.5" type="button" aria-label={t("navigation.forward")} title={t("navigation.forward")} disabled={!navigation.canForward} onClick={navigation.forward}>
+									<ArrowRight size={14} />
+								</Button>
+							</div>
+						) : undefined
+					}
 					compactContent={
-						quickTask.active ? (
+						// 极简浮窗模式：渲染当前活跃会话（不是 quickTask）
+						new URLSearchParams(window.location.search).get("mini-overlay") === "1" ? (
+							<MiniOverlaySurface
+								activeProjectId={activeProjectId}
+								onCreateSession={createSessionDraftWithTab}
+								onOpenSession={openSidebarSessionByIdWithTab}
+								onSwitchToQuickTask={() => {
+									const projectPath = currentSession ? projects.find((item) => item.id === currentSession.projectId)?.path : undefined;
+									void api.miniOverlay.switchToQuickTask(projectPath).catch(() => showToast(t("miniOverlay.windowActionFailed"), 4000, "error"));
+								}}
+							>
+								{currentSession ? (
+									<SessionPaneServicesProvider value={sessionPaneServices}>
+										<ChatSessionPane sessionId={currentSession.id} focused onFocusPane={() => focusSessionPane(currentSession.id)} splitPane={false} />
+									</SessionPaneServicesProvider>
+								) : null}
+							</MiniOverlaySurface>
+						) : quickTask.active ? (
 							<QuickTaskSurface task={quickTask}>
 								<SessionPaneServicesProvider value={sessionPaneServices}>{quickTask.session && <ChatSessionPane sessionId={quickTask.session.id} focused onFocusPane={() => focusSessionPane(quickTask.session!.id)} splitPane={false} />}</SessionPaneServicesProvider>
 							</QuickTaskSurface>
@@ -3989,12 +3040,14 @@ export function App() {
 					chatPaneContent={chatPaneContentNode}
 					drawerRail={
 						<WorkspaceDrawerRail
+							addLabel={t("drawer.addPanel")}
 							actions={[
 								{
 									id: "files",
 									label: t("app.files"),
 									icon: <FolderOpen size={16} />,
 									active: drawer === "files",
+									pinned: true,
 									onClick: () => handleToolDrawerAction("files"),
 								},
 								// 编辑器入口已迁到分屏（SessionTabsBar），右侧抽屉不再提供 editor 面板
@@ -4006,6 +3059,7 @@ export function App() {
 												label: t("drawer.sourceControl"),
 												icon: <GitBranch size={16} />,
 												active: drawer === "git",
+												pinned: true,
 												onClick: () => handleToolDrawerAction("git"),
 											},
 										]
@@ -4016,8 +3070,27 @@ export function App() {
 									label: t("session.view.trajectory"),
 									icon: <Activity size={16} />,
 									active: drawer === "trajectory",
+									pinned: workspace.pinnedPanels.includes("trajectory"),
+									canRemove: true,
+									onTogglePinned: () => workspace.toggleDrawerPanelPinned("trajectory"),
 									onClick: () => handleToolDrawerAction("trajectory"),
 								},
+								// 分支树面板：与检查点同口径仅 pi 后端展示；条目树是 pi 会话文件的概念。
+								...(rewindSupported
+									? [
+											{
+												id: "branchTree" as const,
+												label: t("session.branchTree.title"),
+												// 图标用 ListTree 而不是 GitFork：活动栏里 Git 面板已经是 GitBranch，两个 git 系图标并排会认错「分支」入口。
+												icon: <ListTree size={16} />,
+												active: drawer === "branchTree",
+												pinned: workspace.pinnedPanels.includes("branchTree"),
+												canRemove: true,
+												onTogglePinned: () => workspace.toggleDrawerPanelPinned("branchTree"),
+												onClick: () => handleToolDrawerAction("branchTree"),
+											},
+										]
+									: []),
 								// 检查点面板：仅当前会话为 pi 后端时展示（rewind 能力；dsh 暂不声明）。
 								...(rewindSupported
 									? [
@@ -4026,6 +3099,9 @@ export function App() {
 												label: t("rewind.title"),
 												icon: <History size={16} />,
 												active: drawer === "rewind",
+												pinned: workspace.pinnedPanels.includes("rewind"),
+												canRemove: true,
+												onTogglePinned: () => workspace.toggleDrawerPanelPinned("rewind"),
 												onClick: () => handleToolDrawerAction("rewind"),
 											},
 										]
@@ -4035,12 +3111,73 @@ export function App() {
 									label: t("app.browser"),
 									icon: <Globe size={16} />,
 									active: drawer === "browser",
+									pinned: workspace.pinnedPanels.includes("browser"),
+									canRemove: true,
+									onTogglePinned: () => workspace.toggleDrawerPanelPinned("browser"),
 									onClick: () => handleToolDrawerAction("browser"),
 								},
+								// 侧边任务 Tab：点了「新建侧边任务」才出现（面板正打开时也保留，
+								// 否则空态面板会挂在没有归属 tab 的内容上）。
+								...(sideTasks.ids.length > 0 || drawer === "sideTask"
+									? [
+											{
+												id: "sideTask",
+												label: t("sideTask.title"),
+												icon: <Rocket size={16} />,
+												active: drawer === "sideTask",
+												onClick: () => handleToolDrawerAction("sideTask"),
+											},
+										]
+									: []),
+								{
+									id: "scratchPad",
+									label: t("scratchPad.title"),
+									icon: <Pencil size={16} />,
+									active: scratchPad.isOpen,
+									onClick: scratchPad.toggle,
+								},
+								// RPC 日志专属 Tab：默认隐藏，任一存活的 agent 开启记录后才出现
+								//（门控与目标 agent 计算见 rpcLogTabTargetAgentId）。
+								...(rpcLogTabTargetAgentId
+									? [
+											{
+												id: "rpcLog",
+												label: t("drawer.rpcLog"),
+												icon: <ScrollText size={16} />,
+												active: drawer === "rpcLog",
+												onClick: () => {
+													// rpcLog 面板必须绑定 agentId（无 id 的 openDrawer("rpcLog") 会渲染空面板）：
+													// 已展开则点击关闭走还原语义（回到日志打开前的面板），否则切到目标 agent 的日志。
+													if (workspace.drawer === "rpcLog" && !workspace.drawerCollapsed) workspace.closeRpcLogPanel();
+													else workspace.openRpcLogPanel(rpcLogTabTargetAgentId);
+												},
+											},
+										]
+									: []),
 							]}
 						/>
 					}
-					drawerContent={(visibleDrawerPanel) => <DrawerSurface drawer={visibleDrawerPanel} drawerCollapsed={drawerCollapsed} git={drawerPorts.git} chrome={drawerPorts.chrome} browser={drawerPorts.browser} files={drawerPorts.files} />}
+					drawerFooter={
+						placementShowsSidebarPanel(sessionStatusPlacement) ? (
+							<SessionPaneServicesProvider value={sessionPaneServices}>
+								<SessionStatusPanel sessionId={currentSessionId} />
+							</SessionPaneServicesProvider>
+						) : undefined
+					}
+					drawerContent={(visibleDrawerPanel) => (
+						<DrawerSurface
+							drawer={visibleDrawerPanel}
+							drawerCollapsed={drawerCollapsed}
+							git={drawerPorts.git}
+							chrome={drawerPorts.chrome}
+							browser={drawerPorts.browser}
+							files={drawerPorts.files}
+							rpcLog={drawerPorts.rpcLog}
+							scratchPad={scratchPad}
+							sideTask={{ controller: sideTasks, paneServices: sessionPaneServices }}
+							branchTree={{ forkAtEntry: (entryId, fallbackText) => void forkAtEntry(entryId, fallbackText, `branch:${entryId}`) }}
+						/>
+					)}
 					setListCollapsed={setListCollapsed}
 					setListWidth={setListWidth}
 					setDrawerCollapsed={setDrawerCollapsed}
@@ -4225,6 +3362,13 @@ export function App() {
 								piUpdate.checkPiInstall("manual");
 							}}
 							onOpenInstallDocs={() => api.app.openExternal("https://pi.dev/docs/latest/quickstart#install")}
+							installations={piUpdate.piInstallations ?? []}
+							applyingInstallationPath={piUpdate.applyingInstallationPath}
+							onChooseInstallation={(path) => void piUpdate.choosePiInstallation(path)}
+							onShellProbeInstallations={() => void piUpdate.loadPiInstallations({ forceShellProbe: true })}
+							shellProbingInstallations={piUpdate.piInstallationsProbing}
+							onBrowsePiPath={() => void piUpdate.browsePiPath()}
+							browsingPiPath={piUpdate.browsingPiPath}
 							customPath={piUpdate.customPiPath}
 							customPathValidating={piUpdate.customPathValidating}
 							customPathResult={piUpdate.customPathResult}
@@ -4295,18 +3439,21 @@ export function App() {
 						}
 					/>
 					{previewImage && <ImagePreviewModal image={previewImage} onClose={() => setPreviewImage(null)} />}
+					{/* 项目外文件链接二次确认（安全等级：敏感文件 / 限定目录 / 配置不可读时才弹） */}
+					{externalPathOpenDialog}
 					{/* 会话代理设置：侧栏菜单与 Tab 栏 ⋯ 菜单共用的宿主（同一弹框实例） */}
 					{proxyDialogSessionId && <SessionProxyDialog sessionId={proxyDialogSessionId} onClose={() => setProxyDialogSessionId(null)} />}
 					{codexImportProject && <ImportOverlayHost kind="codex" project={codexImportProject} controller={codexImportController} onClose={() => setCodexImportProject(null)} />}
 					{claudeImportProject && <ImportOverlayHost kind="claude" project={claudeImportProject} controller={claudeImportController} onClose={() => setClaudeImportProject(null)} />}
+					{qoderImportProject && <ImportOverlayHost kind="qoder" project={qoderImportProject} controller={qoderImportController} onClose={() => setQoderImportProject(null)} />}
 					{openCodeImportProject && <ImportOverlayHost kind="opencode" project={openCodeImportProject} controller={openCodeImportController} onClose={() => setOpenCodeImportProject(null)} />}
 					{zcodeImportProject && <ImportOverlayHost kind="zcode" project={zcodeImportProject} controller={zcodeImportController} onClose={() => setZcodeImportProject(null)} />}
 					{workbuddyImportProject && <ImportOverlayHost kind="workbuddy" project={workbuddyImportProject} controller={workbuddyImportController} onClose={() => setWorkbuddyImportProject(null)} />}
 					{cursorImportProject && <ImportOverlayHost kind="cursor" project={cursorImportProject} controller={cursorImportController} onClose={() => setCursorImportProject(null)} />}
+					{kimiImportProject && <ImportOverlayHost kind="kimi" project={kimiImportProject} controller={kimiImportController} onClose={() => setKimiImportProject(null)} />}
+					{kimiWorkImportProject && <ImportOverlayHost kind="kimiwork" project={kimiWorkImportProject} controller={kimiWorkImportController} onClose={() => setKimiWorkImportProject(null)} />}
+					{minimaxImportProject && <ImportOverlayHost kind="minimax" project={minimaxImportProject} controller={minimaxImportController} onClose={() => setMinimaxImportProject(null)} />}
 					{directoryImportProject && <ImportOverlayHost kind="directory" project={directoryImportProject} controller={directoryImportController} onClose={() => setDirectoryImportProject(null)} />}
-
-					{/* Scratch Pad（草稿本）：根级渲染，避免受 chat-pane grid 影响定位 */}
-					<ScratchPadOverlay controller={scratchPad} />
 
 					{/* 定时任务与自动化管理中心全功能弹窗（模态呈现，不覆盖会话工作区） */}
 					<AutomationModal
@@ -4317,6 +3464,11 @@ export function App() {
 
 					{/* 并行问询结果弹框（AskPanel）：独立匿名会话的结果展示，根级渲染 */}
 					<AskPanelOverlay />
+					<HostPluginPanelHost projectId={activeProject?.id} sessionId={currentSessionId} />
+
+					{/* toast 通知历史：全渲染层唯一一份（设置页/详情弹窗两个入口共用，
+					    模块级 opener 注册式打开，见 utils/noticeHistory + ui-shadcn/notice-history-dialog） */}
+					<NoticeHistoryDialog />
 
 					{/* 外部编辑器选择气泡 */}
 					<ExternalEditorOverlay
@@ -4337,6 +3489,13 @@ export function App() {
         不主动提示就等于不存在。看完即写 localStorage，只弹一次。
         空状态（没项目）不弹——那时面板本身也没什么可搜的。 */}
 				{!quickTask.active && <CommandPaletteOnboarding enabled={Boolean(activeProjectId) && !commandPaletteOpen} onTryNow={openCommandPalette} />}
+
+				{/* 数据环境弹窗族：首启数据模式选择（内含导入向导）与目录标记警告，事件/atom 驱动 */}
+				<DataModeChoiceDialog />
+				<DataEnvMismatchDialog />
+
+				{/* CUA 操作审批弹框：pi Agent 注入鼠标/键盘前的用户确认（事件驱动，根级渲染） */}
+				<CuaApprovalDialog request={cuaApproval.request} pendingCount={cuaApproval.pendingCount} responding={cuaApproval.responding} open={cuaApproval.open} onOpenChange={cuaApproval.setOpen} onRespond={(allowed) => void cuaApproval.respond(allowed)} onCancel={cuaApproval.cancel} />
 			</>
 		</FileLinkBaseProvider>
 	);

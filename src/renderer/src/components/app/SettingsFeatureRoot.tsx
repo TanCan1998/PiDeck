@@ -5,6 +5,8 @@ import { settingsFocusAtom, settingsOpenAtom } from "../../atoms";
 import { updateStatusAtom } from "../../atoms/update-atoms";
 import { flushUpdateInstallPreflight, updateInstallPreflightTasksAtom } from "../../atoms/update-install-preflight";
 import { desktopApi as api } from "../../desktopApi";
+import { useBridgeResync } from "../../hooks/useBridgeResync";
+import { useBridgeSessionId } from "../bridge/BridgeSlot";
 import type { PiUpdateController } from "../../hooks/usePiUpdate";
 import { t } from "../../i18n";
 import { showNotice } from "../../utils/notice";
@@ -36,6 +38,16 @@ export function SettingsFeatureRoot(props: SettingsFeatureRootProps) {
 	const setUpdateStatus = useSetAtom(updateStatusAtom);
 	const updateInstallPreflightTasks = useAtomValue(updateInstallPreflightTasksAtom);
 	const updateInstallInFlightRef = useRef(false);
+	// 设置弹窗是**挂载/卸载**式（关闭时整个弹窗 return null），所以这里每次打开
+	// 都强制向桥要一次快照（§9.4 触发 3）—— 不用非 force 版本是因为
+	// 「绑定没变但桥侧贡献丢过」（如扩展 /reload 后重建）也需要补推。
+	// 补推对象是当前聚焦会话（应用级落点由它供给，不做回落）。
+	const bridgeSessionId = useBridgeSessionId();
+	const { requestResync: requestBridgeResync } = useBridgeResync(bridgeSessionId);
+	useEffect(() => {
+		if (!open) return;
+		requestBridgeResync({ force: true });
+	}, [open, requestBridgeResync]);
 
 	// 打开设置页即视为「已看过」更新圆点解释（无论从侧栏/toast/深链进入）：
 	// 用户已找到入口，coachmark 无需再弹（持久化标记，settings.update 幂等）。
@@ -90,25 +102,27 @@ export function SettingsFeatureRoot(props: SettingsFeatureRootProps) {
 			settings: props.settings,
 			piStatus: props.piUpdate.piStatus,
 			piChecking: props.piUpdate.piChecking,
+			piInstallations: props.piUpdate.piInstallations ?? [],
+			onChoosePiInstallation: props.piUpdate.choosePiInstallation,
+			onShellProbePiInstallations: () => void props.piUpdate.loadPiInstallations({ forceShellProbe: true }),
+			shellProbingPiInstallations: props.piUpdate.piInstallationsProbing,
+			applyingPiInstallationPath: props.piUpdate.applyingInstallationPath,
+			onRequestPiInstallations: () => void props.piUpdate.loadPiInstallations(),
+			onBrowsePiPath: () => void props.piUpdate.browsePiPath(),
+			browsingPiPath: props.piUpdate.browsingPiPath,
 			piProxyChecking: props.piUpdate.piProxyChecking,
 			piProxyNotice: props.piUpdate.piProxyNotice,
 			piProxyNoticeTone: props.piUpdate.piProxyNoticeTone,
 			webServiceChanging: props.webServiceChanging,
 			appInfo: props.appInfo,
-			customPiPath: props.piUpdate.customPiPath,
-			customPathValidating: props.piUpdate.customPathValidating,
-			customPathResult: props.piUpdate.customPathResult,
+			onAddPiCustomPath: props.piUpdate.addPiCustomPath,
+			onUpdatePiCustomPath: props.piUpdate.updatePiCustomPath,
+			onRemovePiCustomPath: props.piUpdate.removePiCustomPath,
 			updateChecking: false,
 			piUpdating: props.piUpdate.piUpdating,
 			piUpdateChecking: props.piUpdate.piUpdateChecking,
 			piUpdateCheck: props.piUpdate.piUpdateCheck,
 			piUpdateResult: props.piUpdate.piUpdateResult,
-			onCustomPathChange: (path: string) => {
-				props.piUpdate.setCustomPiPath(path);
-				props.piUpdate.setCustomPathResult(null);
-			},
-			onValidateCustomPath: props.piUpdate.validateCustomPiPath,
-			onClearCustomPath: props.piUpdate.clearCustomPiPath,
 			onCheckPi: props.piUpdate.checkPiInstallInline,
 			onTestPiProxy: props.piUpdate.testPiProxy,
 			onCheckUpdate: () => {
@@ -135,7 +149,7 @@ export function SettingsFeatureRoot(props: SettingsFeatureRootProps) {
 			},
 			// forceSystem=true：Web 服务页必须离开内置浏览器面板——面板在 Dialog 下层，
 			// 设置弹窗打开时会被遮挡；且外部端按桌面浏览器视口设计，系统浏览器体验更完整。
-			onOpenWebService: (port: string) => api.app.openExternal(`http://127.0.0.1:${port}`, true),
+			onOpenWebService: (url: string) => api.app.openExternal(url, true),
 			onClose: () => {
 				// 关闭时清掉未消费的深链，避免下次从侧栏打开仍跳到 Git 分区。
 				setFocus(null);
@@ -151,21 +165,27 @@ export function SettingsFeatureRoot(props: SettingsFeatureRootProps) {
 			props.settings,
 			props.piUpdate.piStatus,
 			props.piUpdate.piChecking,
+			props.piUpdate.piInstallations,
+			props.piUpdate.choosePiInstallation,
+			props.piUpdate.loadPiInstallations,
+			props.piUpdate.piInstallationsProbing,
+			props.piUpdate.applyingInstallationPath,
+			props.piUpdate.browsePiPath,
+			props.piUpdate.browsingPiPath,
 			props.piUpdate.piProxyChecking,
 			props.piUpdate.piProxyNotice,
 			props.piUpdate.piProxyNoticeTone,
 			props.webServiceChanging,
 			props.appInfo,
-			props.piUpdate.customPiPath,
-			props.piUpdate.customPathValidating,
-			props.piUpdate.customPathResult,
+			props.piUpdate.addPiCustomPath,
+			props.piUpdate.updatePiCustomPath,
+			props.piUpdate.removePiCustomPath,
 			props.piUpdate.piUpdateChecking,
 			props.piUpdate.piUpdateCheck,
 			props.piUpdate.piUpdateResult,
 			props.piUpdate.setCustomPiPath,
 			props.piUpdate.setCustomPathResult,
 			props.piUpdate.validateCustomPiPath,
-			props.piUpdate.clearCustomPiPath,
 			props.piUpdate.checkPiInstallInline,
 			props.piUpdate.testPiProxy,
 			props.piUpdate.checkPiCliUpdate,

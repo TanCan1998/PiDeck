@@ -15,6 +15,8 @@ test.use({
 		webServiceEnabled: true,
 		webServiceHost: "127.0.0.1",
 		webServicePort: 8765,
+		// 默认 requiresAuth=true（安全默认收紧后），e2e 无 token 直访需显式关闭
+		webServiceRequiresAuth: false,
 	},
 });
 

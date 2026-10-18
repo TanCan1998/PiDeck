@@ -8,7 +8,7 @@
  */
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, ChevronRight, Copy, Eye, EyeOff, GripVertical, Plus, Trash2 } from "lucide-react";
+import { ArrowUpDown, ChevronDown, ChevronRight, Copy, Eye, EyeOff, GripVertical, Plus, Trash2 } from "lucide-react";
 import { t } from "../i18n";
 import { desktopApi } from "../desktopApi";
 import { showNotice } from "../utils/notice";
@@ -28,6 +28,8 @@ import { ProviderMigrationButton } from "./ProviderMigrationButton";
 import { ConfirmDialog } from "../components/ui-shadcn/ConfirmDialog";
 import { AddDshProviderDialog } from "./AddDshProviderDialog";
 import { buildDshProviderFromDraft, type DshProviderDraft } from "./dshProviderDraft";
+import { DshHeadersEditor } from "./DshHeadersEditor";
+import { useDshProviderHeaders } from "./useDshProviderHeaders";
 import { applyProviderOrder } from "../utils/providerOrder";
 import { useProviderReorder } from "../hooks/useProviderReorder";
 
@@ -60,12 +62,13 @@ function ProviderRowHead(props: {
 	removeDisabled?: boolean;
 	removeTitle?: string;
 	extraActions?: ReactNode;
-	/** 行头左侧插槽（供应商排序的拖拽手柄与上移/下移按钮）。 */
+	/** 行头左侧插槽（供应商排序的拖拽手柄）。 */
 	leading?: ReactNode;
 }) {
 	return (
-		// group：上移/下移按钮靠 group-hover 浮现，避免行头常驻一排图标
-		<div data-provider-head="" className="group flex items-center gap-2 px-3 py-2">
+		// data-provider-head：拖拽落点按标题行中线判定（展开态卡片很高，拿整张卡中线会偏到折叠区），
+		// 也是拖拽影像克隆的根（拖起来拿着的是整条卡头）
+		<div data-provider-head="" className="flex items-center gap-2 px-3 py-2">
 			{props.leading}
 			<button type="button" className="flex min-w-0 flex-1 items-center gap-1.5 text-left" onClick={props.onToggle}>
 				{props.isOpen ? <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" /> : <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />}
@@ -175,7 +178,7 @@ function ApiKeyField(props: {
 			</span>
 			<div className="flex items-center gap-2">
 				<div className="relative max-w-sm flex-1">
-					<Input className="h-8 w-full pr-16 font-mono" type={revealed ? "text" : "password"} placeholder={configured ? t("config.dsh.keyStored") : t("config.dsh.keyPlaceholder")} value={value} disabled={!writable || busy} onChange={(event) => onChange(event.target.value)} />
+					<Input size="sm" className="w-full pr-16 font-mono" type={revealed ? "text" : "password"} placeholder={configured ? t("config.dsh.keyStored") : t("config.dsh.keyPlaceholder")} value={value} disabled={!writable || busy} onChange={(event) => onChange(event.target.value)} />
 					<div className="absolute inset-y-0 right-0.5 my-auto flex items-center gap-0.5">
 						<Button type="button" variant="ghost" size="icon-sm" className="size-7 text-muted-foreground" title={t("config.dsh.keyCopy")} aria-label={t("config.dsh.keyCopy")} disabled={!configured || busy} onClick={() => void copyValue()}>
 							<Copy className="size-3.5" aria-hidden="true" />
@@ -289,6 +292,7 @@ export function PiAiProvidersCard(props: {
 	const [addPageDirty, setAddPageDirty] = useState(false);
 	/** 密钥草稿：providerKey → 输入的新密钥（保存时统一 credentials.set）。 */
 	const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
+	const { headersDirty, readHeaders, updateHeaders, removeHeaderDraft, clearHeaderDrafts, headerMutations } = useDshProviderHeaders();
 	/**
 	 * 待删除的 provider 路由（点删除后本地隐藏，保存时才真正删除）。
 	 * 必须单独记录：settings.update 是 merge，patch 里删 key 不会让 host 删掉
@@ -300,8 +304,8 @@ export function PiAiProvidersCard(props: {
 	const [saving, setSaving] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 
-	/** 脏状态：settings 草稿、任一密钥草稿或待删除 provider 非空。 */
-	const dirty = Object.keys(draft).length > 0 || Object.values(keyDrafts).some((value) => value.trim()) || pendingRemovals.length > 0 || addPageDirty;
+	/** 请求头整表草稿独立于 merge patch，否则改名/清空无法落盘。 */
+	const dirty = Object.keys(draft).length > 0 || headersDirty || Object.values(keyDrafts).some((value) => value.trim()) || pendingRemovals.length > 0 || addPageDirty;
 	useEffect(() => {
 		sectionApi?.onDirtyChange(instanceId, dirty);
 		// 卸载时清掉本实例的脏来源，避免收起/切换后残留黄点
@@ -351,7 +355,12 @@ export function PiAiProvidersCard(props: {
 					// 同删除路径：静默写凭证，避免与末尾 onSave 的刷新叠加（保存闪两下）。
 					await desktopApi.sessions.setDshCredential(ref, trimmed);
 				}
+				if (headerMutations.length > 0) {
+					await desktopApi.sessions.mutateDshSettings(namespace.ns, headerMutations, namespace.revision);
+				}
+				// mutate-only 也刷新 namespace；失败时保留全部草稿，重试 set/unset 是幂等的。
 				await props.onSave(pruneEmptyObjects(saveDraft) as Record<string, unknown>);
+				clearHeaderDrafts();
 				setDraft({});
 				setKeyDrafts({});
 				setPendingRemovals([]);
@@ -368,7 +377,7 @@ export function PiAiProvidersCard(props: {
 				setSaving(false);
 			}
 		},
-		[dirty, keyDrafts, draft, pendingRemovals, namespace.ns, namespace.revision, namespace.value, ops.credentials, props.onSave],
+		[dirty, keyDrafts, draft, pendingRemovals, headerMutations, clearHeaderDrafts, namespace.ns, namespace.revision, namespace.value, ops.credentials, props.onSave],
 	);
 	const addPageSaveRef = useRef<(() => Promise<boolean>) | null>(null);
 	const registerAddPageSave = useCallback((save: (() => Promise<boolean>) | null) => {
@@ -451,6 +460,7 @@ export function PiAiProvidersCard(props: {
 		const key = removingKey;
 		if (!key) return;
 		setRemovingKey(null);
+		removeHeaderDraft(key);
 		setPendingRemovals((prev) => (prev.includes(key) ? prev : [...prev, key]));
 		setDraft((prev) => {
 			const next = structuredClone(prev) as Record<string, unknown>;
@@ -503,7 +513,7 @@ export function PiAiProvidersCard(props: {
 				<span className="text-caption font-semibold text-foreground">{namespace.ns}</span>
 				<span className="rounded-full border border-border-subtle px-2 py-0.5 text-micro text-muted-foreground">{t("config.dsh.providersCount", { count: orderedEntries.length })}</span>
 				{error && (
-					<span className="max-w-64 truncate text-micro text-danger" title={error}>
+					<span className="max-w-64 truncate text-micro text-danger" title={error} data-testid="dsh-save-error">
 						{error}
 					</span>
 				)}
@@ -523,11 +533,11 @@ export function PiAiProvidersCard(props: {
 
 				{/* 排序说明：顺序是 PiDeck 本地偏好（AppSettings.dshProviderOrder），不写回 DSH 配置文件 */}
 				{orderedKeys.length > 1 && (
-					<div className="mt-2 mb-2.5 flex items-start gap-2 text-[11px] leading-relaxed text-text-tertiary">
+					<div className="mt-2 mb-2.5 flex items-start gap-2 text-micro leading-relaxed text-text-tertiary">
 						<ArrowUpDown className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
 						<span className="min-w-0 flex-1">{t("config.dsh.providerOrderHint")}</span>
 						{(props.providerOrder?.length ?? 0) > 0 && props.onResetProviders && (
-							<Button type="button" variant="ghost" size="sm" className="h-5 shrink-0 px-1.5 text-[11px] font-normal text-text-tertiary hover:text-text-primary" onClick={props.onResetProviders}>
+							<Button type="button" variant="ghost" size="sm" className="h-5 shrink-0 px-1.5 text-micro font-normal text-text-tertiary hover:text-text-primary" onClick={props.onResetProviders}>
 								{t("config.providerOrderReset")}
 							</Button>
 						)}
@@ -559,37 +569,15 @@ export function PiAiProvidersCard(props: {
 					// 生效模型数：自定义 models 非空取自定义数，否则取内置目录数（dsh-web 同语义）
 					const modelCount = models.length > 0 ? models.length : (providerCatalog?.length ?? 0);
 					return (
-						<div key={entry.key} ref={(element) => providerReorder.registerCard(entry.key, element)} className={`relative rounded-md border border-border-subtle bg-bg-panel${providerReorder.draggingName === entry.key ? " opacity-50" : ""}`} {...providerReorder.cardProps(entry.key)}>
-							{/* 拖拽插入指示线：贴卡片内缘 */}
-							{providerReorder.dropTarget?.name === entry.key && <span className={`absolute ${providerReorder.dropTarget.position === "before" ? "top-0" : "bottom-0"} right-0 left-0 z-10 h-0.5 bg-[color:var(--color-accent)]`} />}
+						<div key={entry.key} ref={(element) => providerReorder.registerCard(entry.key, element)} className={`relative rounded-md border border-border-subtle bg-bg-panel${providerReorder.draggingName === entry.key ? " opacity-40 border-dashed" : ""}`} {...providerReorder.cardProps(entry.key)}>
+							{/* 拖拽插入指示线：贴卡片内缘；加粗 + 发光，落点一眼可见 */}
+							{providerReorder.dropTarget?.name === entry.key && <span className={`absolute ${providerReorder.dropTarget.position === "before" ? "top-0" : "bottom-0"} right-0 left-0 z-10 h-[3px] rounded-full bg-[color:var(--color-accent)] shadow-[0_0_8px_color-mix(in_srgb,var(--color-accent)_55%,transparent)]`} />}
 							<ProviderRowHead
 								leading={
 									<>
-										{/* 拖拽手柄：只有按住手柄才能拖动，避免与行内点击折叠抢手势；上移/下移悬停浮现，键盘聚焦也可见 */}
+										{/* 拖拽手柄：只有按住手柄才能拖动，避免与行内点击折叠抢手势；聚焦手柄后 ↑/↓ 也可微调（键盘接线在 hook 的 gripProps 里） */}
 										<Button type="button" variant="ghost" size="icon-sm" className="size-6 shrink-0 cursor-grab text-muted-foreground active:cursor-grabbing" title={t("config.dragProvider")} {...providerReorder.gripProps(entry.key)}>
 											<GripVertical className="size-3.5" aria-hidden="true" />
-										</Button>
-										<Button
-											type="button"
-											variant="ghost"
-											size="icon-sm"
-											className="size-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 disabled:opacity-30"
-											disabled={!providerReorder.canMove(entry.key, -1)}
-											title={t("config.moveProviderUp")}
-											onClick={() => providerReorder.moveBy(entry.key, -1)}
-										>
-											<ArrowUp className="size-3" aria-hidden="true" />
-										</Button>
-										<Button
-											type="button"
-											variant="ghost"
-											size="icon-sm"
-											className="size-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 disabled:opacity-30"
-											disabled={!providerReorder.canMove(entry.key, 1)}
-											title={t("config.moveProviderDown")}
-											onClick={() => providerReorder.moveBy(entry.key, 1)}
-										>
-											<ArrowDown className="size-3" aria-hidden="true" />
 										</Button>
 									</>
 								}
@@ -615,7 +603,7 @@ export function PiAiProvidersCard(props: {
 							/>
 
 							{isOpen && (
-								<div className="grid gap-3 border-t border-border/40 px-3 py-3">
+								<div className="grid gap-3 border-t border-border/40 px-3 py-3 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-fast">
 									<ApiKeyField ref={keyRef} value={keyDrafts[entry.key] ?? ""} onChange={(next) => setKeyDrafts((prev) => ({ ...prev, [entry.key]: next }))} ops={ops} />
 									<CustomSettings label={t("config.dsh.customSettings")}>
 										<p className="text-micro text-muted-foreground">{t("config.dsh.customSettingsHint")}</p>
@@ -623,6 +611,8 @@ export function PiAiProvidersCard(props: {
 										{visibleProfileFields.map((field) => (
 											<DshSchemaField key={field.name} schema={schema} ref={field.ref} path={[field.name]} value={entryValue(entry.key, [field.name])} secrets={namespace.secrets} onChange={(path, next) => updateEntry(entry.key, path, next)} writable={writable} />
 										))}
+										{/* 整表覆盖单独保存，不能走 updateEntry 的 merge 语义。 */}
+										<DshHeadersEditor value={readHeaders(entry.key, entryValue(entry.key, ["headers"]))} writable={writable && !saving} onChange={(next) => updateHeaders(entry.key, next)} />
 									</CustomSettings>
 									<DshModelsEditor models={models} savedModels={savedModels} catalog={providerCatalog} writable={writable} providerKey={entry.key} settingsNs={namespace.ns} baseURL={baseURL} api={api} apiKeyDraft={keyDrafts[entry.key]} onChange={(nextModels) => setProviderModels(entry.key, nextModels)} />
 								</div>
@@ -847,7 +837,7 @@ export function DeepseekRouteCard(props: {
 					/>
 
 					{open && (
-						<div className="grid gap-3 border-t border-border/40 px-3 py-3">
+						<div className="grid gap-3 border-t border-border/40 px-3 py-3 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-fast">
 							<ApiKeyField ref={keyRef} value={keyDraft} onChange={setKeyDraft} ops={ops} />
 							<CustomSettings label={t("config.dsh.customSettings")}>
 								<p className="text-micro text-muted-foreground">{t("config.dsh.customSettingsHint")}</p>

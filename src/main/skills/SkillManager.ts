@@ -56,6 +56,9 @@ export class SkillManager {
 	/** PiDeck 设置的读取/写入（禁用列表持久化）；未配置时开关仅写 frontmatter（旧行为）。 */
 	private settingsProvider: (() => AppSettings) | null = null;
 	private settingsPatcher: ((patch: Partial<AppSettings>) => Promise<AppSettings>) | null = null;
+	/** 原生配置开关/状态（A4：迁移完成后禁用列表不再是真值来源）。 */
+	private nativeToggle: ((skillPath: string, enabled: boolean) => Promise<{ ok: boolean; error?: string }>) | null = null;
+	private nativeEnabledReader: ((skillPath: string) => boolean | undefined) | null = null;
 	/**
 	 * 内置技能覆盖层目录提供器（SkillStoreUpdater 热更新落盘目录）：
 	 * 返回有效覆盖层时，安装模板优先读覆盖层里的 <name>/SKILL.md，实现技能修 bug/新增技能免发版。
@@ -75,7 +78,7 @@ export class SkillManager {
 		this.skillOverlayProvider = provider;
 	}
 
-	/** 注入 PiDeck 设置读写：启用后 toggle 同步持久化禁用列表（技能白名单模式的依据）。 */
+	/** 注入 PiDeck 设置读写：旧禁用列表的兼容通道（原生服务未装配时使用；迁移后为空）。 */
 	configureSettings(getSettings: () => AppSettings, patchSettings: (patch: Partial<AppSettings>) => Promise<AppSettings>) {
 		this.settingsProvider = getSettings;
 		this.settingsPatcher = patchSettings;
@@ -267,8 +270,16 @@ export class SkillManager {
 
 	async toggle(skillPath: string, enabled: boolean): Promise<PiSkillSummary> {
 		const skill = await this.findByPath(skillPath);
-		// PiDeck enabled 只由其禁用列表控制。Pi 的 disable-model-invocation 仅阻止模型自动调用，
-		// 用户仍可手动 /skill:name，因此作为独立 userOnly 状态展示。
+		// 原生配置优先：迁移完成后弃用列表已清空，开关直接写 pi 原生过滤规则
+		// （`-<path>` 停用 / `+<path>` 启用），与 TUI 的 pi config 等价。
+		if (this.nativeToggle) {
+			const result = await this.nativeToggle(skill.path, enabled);
+			if (!result.ok) throw new Error(this.translate("mainSkill.toggleFailed", { error: result.error ?? "unknown" }));
+			return this.findByPath(skill.path);
+		}
+		// 兼容路径（原生服务未装配）：仍写 PiDeck 私有禁用列表。
+		// Pi 的 disable-model-invocation 仅阻止模型自动调用，用户仍可手动 /skill:name，
+		// 因此作为独立 userOnly 状态展示。
 		if (this.settingsProvider && this.settingsPatcher) {
 			const current = this.settingsProvider().disabledSkills ?? [];
 			const nameKey = skill.name.toLowerCase();
@@ -277,6 +288,19 @@ export class SkillManager {
 			await this.settingsPatcher({ disabledSkills: nextList });
 		}
 		return this.findByPath(skill.path);
+	}
+
+	/**
+	 * 注入原生开关（`PiResourceConfigService.setFileResourceEnabled`）。
+	 * 装配后技能开关写 pi settings.json；未装配时退回旧禁用列表（见 toggle）。
+	 */
+	configureNativeToggle(toggle: (skillPath: string, enabled: boolean) => Promise<{ ok: boolean; error?: string }>): void {
+		this.nativeToggle = toggle;
+	}
+
+	/** 注入原生有效状态读取（迁移完成后以 pi 原生过滤为准）。 */
+	configureNativeEnabledReader(reader: (skillPath: string) => boolean | undefined): void {
+		this.nativeEnabledReader = reader;
 	}
 
 	async delete(skillPath: string): Promise<void> {
@@ -340,6 +364,14 @@ export class SkillManager {
 
 	async installImageGenTemplate(): Promise<{ success: true; path: string } | { success: false; error: string }> {
 		return this.installTemplate("image-gen");
+	}
+
+	/**
+	 * 安装内置「MCP 配置助手」技能模板（resources/skills/mcp-setup/SKILL.md）。
+	 * 用户在 MCP 页点「让 AI 帮你配」时安装；之后可在任意会话里让 AI 按官方文档代配任意 MCP 服务。
+	 */
+	async installMcpSetupTemplate(): Promise<{ success: true; path: string } | { success: false; error: string }> {
+		return this.installTemplate("mcp-setup");
 	}
 
 	/**
@@ -418,9 +450,10 @@ export class SkillManager {
 			sourceId: location.id,
 			sourceLabel: location.label,
 			type,
-			// PiDeck 完全禁用保存在 settings.disabledSkills，不改写 Pi 的自动调用语义。
+			// 完全禁用：优先读原生过滤投影（迁移后废弃 disabledSkills）；
+			// Pi 的 disable-model-invocation 是独立的「仅手动调用」语义，不改写。
 			userOnly: frontmatter["disable-model-invocation"] === "true",
-			enabled: !this.isDisabledInSettings(name),
+			enabled: this.nativeEnabledReader?.(skillPath) ?? !this.isDisabledInSettings(name),
 			valid: warnings.length === 0,
 			warnings,
 		};
@@ -506,7 +539,7 @@ export class SkillManager {
 		const newSkillPath = isDirectory ? join(newTarget, SKILL_FILE) : newTarget;
 		await writeFile(newSkillPath, this.setFrontmatterName(raw, displayName), "utf8");
 
-		// 禁用列表同步迁移：旧名条目替换为新名，避免孤儿数据与白名单双源漂移
+		// 禁用列表同步迁移：旧名条目替换为新名，避免孤儿数据与原生规则双源漂移
 		await this.migrateDisabledSkillName(skill.name, displayName);
 
 		// 找对应的 location（搜索所有 locations）

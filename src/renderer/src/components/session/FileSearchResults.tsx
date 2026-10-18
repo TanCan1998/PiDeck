@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, type ReactNode } from "react";
-import { Folder, Search, X } from "lucide-react";
+import { FileText, Folder, Search, X } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui-shadcn/button";
 import { getFileIconSeti, getFileIconColor } from "../../fileIcons";
 import { t } from "../../i18n";
 import { fileTreeNodeKey } from "../../utils/fileTreeLazy";
-import type { FileSearchResult, ProjectFileTarget } from "../../../../shared/types";
+import type { FileContentSearchHit, FileContentSearchResult, FileSearchResult, ProjectFileTarget } from "../../../../shared/types";
 import { findFileNameMatchIndex } from "../../utils/fileSearchFilter";
 
 /**
@@ -20,6 +20,9 @@ export function FileSearchResults(props: {
 	onQueryChange: (value: string) => void;
 	results: FileSearchResult[] | null;
 	isSearching: boolean;
+	/** 正文命中（Go sidecar）；null = 未就绪/失败/词太短，此时不渲染正文分区 */
+	contentResults: FileContentSearchResult | null;
+	isContentSearching: boolean;
 	onViewFile?: (path: string | ProjectFileTarget, openMode?: "preview" | "permanent") => void;
 	onFileContextMenu: (node: FileSearchResult, x: number, y: number) => void;
 	onClear: () => void;
@@ -77,13 +80,72 @@ export function FileSearchResults(props: {
 			<div className="file-search-list min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]">
 				{trimmed.length === 0 ? (
 					<div className="px-3 py-6 text-center text-xs text-muted-foreground">{t("drawer.fileSearchEmptyHint")}</div>
-				) : rows.length === 0 ? (
-					<div className="px-3 py-6 text-center text-xs text-muted-foreground">{isSearching ? t("drawer.fileSearchScanning") : t("drawer.fileSearchNoResults", { query: trimmed })}</div>
 				) : (
-					rows.map(({ item, index }) => <FileSearchRow key={fileTreeNodeKey(item)} item={item} matchIndex={index} matchLength={trimmed.length} onViewFile={props.onViewFile} onFileContextMenu={props.onFileContextMenu} />)
+					<>
+						{rows.length === 0 ? (
+							<div className="px-3 py-6 text-center text-xs text-muted-foreground">{isSearching ? t("drawer.fileSearchScanning") : t("drawer.fileSearchNoResults", { query: trimmed })}</div>
+						) : (
+							// 远端结果没有绝对 path：key 用 target/path 归一后的稳定键，避免 undefined 折叠。
+							rows.map(({ item, index }) => <FileSearchRow key={fileTreeNodeKey(item)} item={item} matchIndex={index} matchLength={trimmed.length} onViewFile={props.onViewFile} onFileContextMenu={props.onFileContextMenu} />)
+						)}
+						<FileContentSection query={trimmed} result={props.contentResults} isSearching={props.isContentSearching} onViewFile={props.onViewFile} onFileContextMenu={props.onFileContextMenu} />
+					</>
 				)}
 			</div>
 		</div>
+	);
+}
+
+/**
+ * 正文命中分区：名字结果之下另起一段，不与名字结果抢位置（名字毫秒级先出）。
+ * 没有命中且不在扫描中时整段不渲染——避免空白标题占地方。
+ * 行内 snippet 已由 Go 侧截好（含省略号），这里只做截断与等宽路径显示。
+ */
+function FileContentSection(props: { query: string; result: FileContentSearchResult | null; isSearching: boolean; onViewFile?: (path: string, openMode?: "preview" | "permanent") => void; onFileContextMenu: (node: FileSearchResult, x: number, y: number) => void }) {
+	const hits = props.result?.hits ?? [];
+	if (hits.length === 0 && !props.isSearching) return null;
+	return (
+		<div className="file-search-content mt-1 border-t border-border/40 pt-1">
+			<div className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-muted-foreground">
+				<FileText size={12} className="shrink-0" aria-hidden="true" />
+				<span className="uppercase tracking-wide">{t("drawer.fileSearchContentSection")}</span>
+				{props.isSearching && <span className="mini-loader animate-pideck-spin" aria-hidden="true" />}
+				{props.result?.truncated && <span className="ml-auto shrink-0">{t("drawer.fileSearchContentTruncated")}</span>}
+			</div>
+			{hits.length === 0 ? <div className="px-3 py-3 text-center text-xs text-muted-foreground">{t("drawer.fileSearchContentScanning")}</div> : null}
+			{hits.map((hit) => (
+				<FileContentRow key={`${hit.path}:${hit.line}`} hit={hit} onViewFile={props.onViewFile} onFileContextMenu={props.onFileContextMenu} />
+			))}
+		</div>
+	);
+}
+
+function FileContentRow(props: { hit: FileContentSearchHit; onViewFile?: (path: string, openMode?: "preview" | "permanent") => void; onFileContextMenu: (node: FileSearchResult, x: number, y: number) => void }) {
+	const { hit } = props;
+	// 右键菜单按文件树节点形状复用：路径类操作只关心 path/name，行号由 title 补充
+	const node: FileSearchResult = { name: hit.name, path: hit.path, relativePath: hit.relativePath, type: "file" };
+	return (
+		<button
+			type="button"
+			className="file-node-row flex w-full flex-col items-start gap-0.5 rounded-sm border-0 bg-transparent px-2 py-1 text-left text-body font-normal text-foreground transition-[background-color] duration-base hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset"
+			title={`${hit.relativePath}:${hit.line}`}
+			onClick={() => props.onViewFile?.(hit.path)}
+			onDoubleClick={(event) => {
+				event.preventDefault();
+				props.onViewFile?.(hit.path, "permanent");
+			}}
+			onContextMenu={(event) => {
+				event.preventDefault();
+				props.onFileContextMenu(node, event.clientX, event.clientY);
+			}}
+		>
+			<span className="flex w-full shrink-0 items-center gap-1.5">
+				<FileText size={13} className="shrink-0 text-muted-foreground" aria-hidden="true" />
+				<span className="truncate text-xs">{hit.relativePath}</span>
+				<span className="ml-auto shrink-0 text-[11px] tabular-nums text-muted-foreground">{hit.line}</span>
+			</span>
+			<span className="w-full shrink-0 truncate pl-[19px] text-[11px] text-muted-foreground">{hit.snippet}</span>
+		</button>
 	);
 }
 
@@ -107,7 +169,7 @@ function FileSearchRow(props: { item: FileSearchResult; matchIndex: number; matc
 		<button
 			type="button"
 			className={cn(
-				"file-node-row inline-flex h-[28px] w-full items-center justify-start gap-1.5 rounded-sm border-0 bg-transparent px-2 py-0 text-left text-body font-normal text-foreground transition-[background-color] duration-200 hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset",
+				"file-node-row inline-flex h-[28px] w-full items-center justify-start gap-1.5 rounded-sm border-0 bg-transparent px-2 py-0 text-left text-body font-normal text-foreground transition-[background-color] duration-base hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset",
 			)}
 			title={item.displayPath ?? item.relativePath}
 			onClick={() => fileActionTarget && props.onViewFile?.(fileActionTarget)}

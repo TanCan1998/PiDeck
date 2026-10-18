@@ -8,8 +8,8 @@
  * 4. check-dsh-asar --target-* 原生包在位断言与 pack 产物联动（win32 → sharp/koffi/rg
  *    平台包 + node-pty prebuilds 必须在位，防 libc 缺包复发）。
  *
- * 网络边界：交叉解析需要真实 registry 下载（~200MB tarball，prefer-offline 下命中
- * 本机 npm 缓存则秒级）。用 --dry-run 时脚本走到闭包收集 + npm install 后跳过打包，
+ * 网络边界：交叉解析需要真实 registry 下载（~200MB tarball，元数据 revalidate +
+ * 本机 npm 缓存命中 tarball 则秒级）。用 --dry-run 时脚本走到闭包收集 + npm install 后跳过打包，
  * 既能验证解析链路又不写 55MB 归档——本文件用 dry-run + 检查 npm 安装产物目录的方式，
  * 把完整打包验证留给 CI / 手动 runtime:check:boot。
  *
@@ -66,6 +66,14 @@ test(
 	},
 	{ timeout: 10 * 60 * 1000 },
 );
+
+test("交叉模式：不使用 --prefer-offline（stale packument 回归）", () => {
+	// 共享缓存可能留着上一个 dsh 大版本抓的 packument；--prefer-offline 会在 TTL 内信任
+	// 过期元数据而不 revalidate，npm 报出的 ETARGET/ERESOLVE 与实际版本冲突无关（误导性极强）。
+	// 只匹配 argv 里的字面量行（\s*"--prefer-offline",?），注释里提到的这几个字不算。
+	const source = readFileSync(packScript, "utf8");
+	assert.ok(!/^\s*"--prefer-offline",?\s*$/m.test(source), "禁止给交叉 npm install 加 --prefer-offline");
+});
 
 test("交叉模式：非法目标平台直接报错退出（不产出任何文件）", () => {
 	assert.throws(

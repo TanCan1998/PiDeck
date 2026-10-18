@@ -13,6 +13,9 @@ function loadCatalog(fsPromises = nodeRequire("node:fs/promises")) {
 	return loadTsCommonJs("src/main/sessions/SessionCatalog.ts", {
 		stubs: {
 			"node:fs/promises": fsPromises,
+			// 测试用假路径 C:/sessions/*.jsonl 模拟扫描到的既有文件；existsSync 只被
+			// 外部删除清理消费，恒真 = 「文件都在磁盘上」，避免清理把条目剔掉。
+			"node:fs": { existsSync: () => true },
 			"../logging/sharedLogger": { getAppLogger: () => null },
 		},
 	});

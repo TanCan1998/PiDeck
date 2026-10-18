@@ -276,3 +276,159 @@ test("vertical scroll walk matches overflowY, not the overflow shorthand", () =>
 	assert.equal(follow.isVerticallyScrollableOverflow("hidden auto"), false);
 	assert.equal(["scroll", "auto"].includes("hidden auto"), false);
 });
+
+test("chain cut is decided by overscroll-behavior-y contain/none", () => {
+	assert.equal(follow.isScrollChainCut("contain"), true);
+	assert.equal(follow.isScrollChainCut("none"), true);
+	// auto 时手势会物理链到外层，不能当断链
+	assert.equal(follow.isScrollChainCut("auto"), false);
+	assert.equal(follow.isScrollChainCut("visible"), false);
+});
+
+test("scroll container vs scroller: hidden 也是滚动容器（overscroll-behavior 对它生效）", () => {
+	assert.equal(follow.isScrollContainerOverflow("auto"), true);
+	assert.equal(follow.isScrollContainerOverflow("scroll"), true);
+	// hidden 不参与「能不能滚」，但仍是滚动容器：overscroll-behavior 对它照样生效
+	assert.equal(follow.isScrollContainerOverflow("hidden"), true);
+	assert.equal(follow.isScrollContainerOverflow("visible"), false);
+	assert.equal(follow.isScrollContainerOverflow("hidden auto"), false);
+});
+
+test("hasRoomAlong separates the direction, with a 1px device-scaling tolerance", () => {
+	const box = (scrollTop, scrollHeight, clientHeight) => ({ scrollTop, scrollHeight, clientHeight });
+	// 组体已到顶：往上没余量，往下有
+	assert.equal(follow.hasRoomAlong(box(0, 900, 320), "up"), false);
+	assert.equal(follow.hasRoomAlong(box(0, 900, 320), "down"), true);
+	// 中部：两向都有
+	assert.equal(follow.hasRoomAlong(box(300, 900, 320), "up"), true);
+	assert.equal(follow.hasRoomAlong(box(300, 900, 320), "down"), true);
+	// 已到底：往上还有，往下没有
+	assert.equal(follow.hasRoomAlong(box(580, 900, 320), "up"), true);
+	assert.equal(follow.hasRoomAlong(box(580, 900, 320), "down"), false);
+	// Windows 125%/150% 缩放：浮点舍入余 0.5px 不能算「还能滚」，否则手势被吞
+	assert.equal(follow.hasRoomAlong(box(0.5, 900, 320), "up"), false);
+	assert.equal(follow.hasRoomAlong(box(579.5, 900, 320), "down"), false);
+	// 内容不足（不可滚）时两向都没余量，靠 scrollableOverflow 先过滤掉
+	assert.equal(follow.hasRoomAlong(box(0, 100, 320), "up"), false);
+	assert.equal(follow.hasRoomAlong(box(0, 100, 320), "down"), false);
+});
+
+test("gesture owner: 只给时间线手势改跟随态", () => {
+	const link = (over) => ({ isTimeline: false, isScrollContainer: true, canScrollAlong: false, chainCut: false, ...over });
+	// 代码块到顶 ⊂ 已上滚的组体（探针 B）：浏览器滚组体，不是时间线
+	assert.equal(follow.resolveGestureOwner([link({ canScrollAlong: true }), link({ isTimeline: true })]), "nested");
+	// 组体到顶且 overscroll-contain（探针 B 的 cbA 位置）：谁都不得滚
+	assert.equal(follow.resolveGestureOwner([link({ chainCut: true }), link({ isTimeline: true })]), "nobody");
+	// 滚动容器（含 overflow:hidden）内容不溢出但 contain：链依旧断，不能外溢
+	assert.equal(follow.resolveGestureOwner([link({ canScrollAlong: false, chainCut: true }), link({ isTimeline: true })]), "nobody");
+	// 代码块到顶、链畅通（无 contain）：浏览器真的会链到时间线——既有行为不能丢
+	assert.equal(follow.resolveGestureOwner([link(), link({ isTimeline: true })]), "timeline");
+	// 手目录内无嵌套容器：时间线手势
+	assert.equal(follow.resolveGestureOwner([link({ isTimeline: true })]), "timeline");
+	// 非滚动容器（visible）只是过客：overscroll-behavior 对它不生效
+	assert.equal(follow.resolveGestureOwner([link({ isScrollContainer: false, chainCut: true }), link({ isTimeline: true })]), "timeline");
+	// 已到边不可滚 + 外层还有余量：浏览器滚外层
+	assert.equal(follow.resolveGestureOwner([link({ canScrollAlong: false }), link({ canScrollAlong: true }), link({ isTimeline: true })]), "nested");
+	// 起点不在时间线内（外部路由）由调用方补一个 timeline 尾巴，这里验证补法语义
+	assert.equal(follow.resolveGestureOwner([]), "timeline");
+});
+
+test("needsBottomUnlock：目标态已就位时不再解锁（React #185 幂等守卫）", () => {
+	// 已解锁（escapedFromLock=true 且 isAtBottom=false）：无需 setState
+	assert.equal(follow.needsBottomUnlock(true, false), false);
+	// 仍锁底：需要解锁
+	assert.equal(follow.needsBottomUnlock(false, true), true);
+	assert.equal(follow.needsBottomUnlock(false, false), true);
+	// 只逃了锁但 isAtBottom 还是 true（布尔分叉中间态）：也要入队修正
+	assert.equal(follow.needsBottomUnlock(true, true), true);
+});
+
+test("isFollowEscapeEdge：仅 true→false 的沿触发 stopScroll", () => {
+	assert.equal(follow.isFollowEscapeEdge(true, false), true);
+	assert.equal(follow.isFollowEscapeEdge(false, false), false);
+	assert.equal(follow.isFollowEscapeEdge(false, true), false);
+	assert.equal(follow.isFollowEscapeEdge(true, true), false);
+});
+
+test("isFollowSnapshotFresh：提交快照必须与引擎实况一致", () => {
+	// 两侧都新鲜：可以上报
+	assert.equal(follow.isFollowSnapshotFresh(true, true), true);
+	assert.equal(follow.isFollowSnapshotFresh(false, false), true);
+	// 两侧过期：relock / unlock 共用同一判定，不允许按方向漏判
+	assert.equal(follow.isFollowSnapshotFresh(false, true), false);
+	assert.equal(follow.isFollowSnapshotFresh(true, false), false);
+});
+
+/**
+ * #185 周期-2 振荡的提交级模型：MessageScroller 的 followOutput layout effect +
+ * onFollowChange passive effect + controller autoScroll + 引擎可变单例。
+ *
+ * 一次 commit = 取本次渲染的 followOutput / 已提交快照 → layout effect 翻转引擎 →
+ * passive effect 上报并回写 controller；有 state 变化才进入下一次提交。
+ * 只保留决定收敛性的字段，判定规则全部复用 followState 的纯函数（与产量代码同源）。
+ */
+function simulateFollowReportCascade({ freshnessGuard, relockGuard = false, start, maxCommits = 60 }) {
+	const world = { ...start };
+	const commits = [];
+	for (let index = 0; index < maxCommits; index += 1) {
+		const { autoScroll: followOutput, committedAtBottom: snapshot, previousFollowOutput } = world;
+		world.previousFollowOutput = followOutput;
+		let scheduled = false;
+		if (!followOutput) {
+			// MessageScroller 的 false 分支：仅 true→false 沿解锁引擎（引擎侧还有 needsBottomUnlock 幂等守卫）
+			if (follow.isFollowEscapeEdge(previousFollowOutput, followOutput) && follow.needsBottomUnlock(world.escapedFromLock, world.engineAtBottom)) {
+				world.escapedFromLock = true;
+				if (world.engineAtBottom) {
+					world.engineAtBottom = false;
+					scheduled = true;
+				}
+				if (world.committedAtBottom) {
+					world.committedAtBottom = false;
+					scheduled = true;
+				}
+			}
+		} else if (!relockGuard || !world.engineAtBottom) {
+			// true 分支：scrollToBottom 锁底。issue 建议的 needsBottomRelock 只在已锁底时跳过 setState
+			if (!world.engineAtBottom) {
+				world.engineAtBottom = true;
+				scheduled = true;
+			}
+			if (!world.committedAtBottom) {
+				world.committedAtBottom = true;
+				scheduled = true;
+			}
+		}
+		// passive effect 上报：过期快照直接丢弃，否则回写 controller（autoScroll = 快照）
+		const fresh = !freshnessGuard || follow.isFollowSnapshotFresh(snapshot, world.engineAtBottom);
+		if (fresh && world.autoScroll !== snapshot) {
+			world.autoScroll = snapshot;
+			scheduled = true;
+		}
+		commits.push({ followOutput, snapshot, engineAtBottom: world.engineAtBottom, autoScroll: world.autoScroll });
+		if (!scheduled) return { converged: true, commits };
+		// 周期-2 检测：真实 React 里这条链会一路嵌套到 50 层才抛 #185，这里提前判定不收敛
+		if (index >= 3) {
+			const same = (left, right) => left.followOutput === right.followOutput && left.snapshot === right.snapshot && left.engineAtBottom === right.engineAtBottom && left.autoScroll === right.autoScroll;
+			if (same(commits[index], commits[index - 2]) && same(commits[index - 1], commits[index - 3])) return { converged: false, commits };
+		}
+	}
+	return { converged: false, commits };
+}
+
+test("上报新鲜度守卫覆盖 relock/unlock 两侧：缺守卫时周期-2 振荡直到 React #185", () => {
+	// 两个入口是同一 cascade 的两帧：relock 后提交快照仍说 false / unlock 后提交快照仍说 true。
+	const entries = {
+		"stale relock report": { engineAtBottom: false, escapedFromLock: true, committedAtBottom: false, autoScroll: true, previousFollowOutput: true },
+		"stale unlock report": { engineAtBottom: true, escapedFromLock: false, committedAtBottom: true, autoScroll: false, previousFollowOutput: true },
+	};
+	for (const start of Object.values(entries)) {
+		// v0.9.0（无新鲜度守卫）：relock / unlock 两个方向都周期-2 永不收敛。
+		assert.equal(simulateFollowReportCascade({ freshnessGuard: false, start }).converged, false);
+		// issue 建议的 needsBottomRelock 只跳过「已锁底」的同值 setState，翻转本身是真的，止不住振荡。
+		assert.equal(simulateFollowReportCascade({ freshnessGuard: false, relockGuard: true, start }).converged, false);
+		// dev 的新鲜度守卫：两侧的过期上报都丢弃，最多三次提交收敛。
+		const guarded = simulateFollowReportCascade({ freshnessGuard: true, start });
+		assert.equal(guarded.converged, true);
+		assert.ok(guarded.commits.length <= 3, `expected <= 3 commits, got ${guarded.commits.length}`);
+	}
+});

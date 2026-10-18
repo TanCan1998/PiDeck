@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { useAtomValue, useSetAtom } from "jotai";
 import { Quote } from "lucide-react";
@@ -19,7 +19,7 @@ const TOOLBAR_HEIGHT = 28;
  * 2. 草稿末尾追加 #q<id> token（composer 内渲染为 ❝ 引用 chip）；
  * 3. 清除浏览器选区并聚焦本栏 composer。
  */
-export function SelectionToolbar(props: { quote: TimelineSelectionQuote | null; sessionId: string; onConsume: () => void }) {
+export function SelectionToolbar(props: { quote: TimelineSelectionQuote | null; sessionId: string; onConsume: () => void; toolbarRef: RefObject<HTMLButtonElement | null> }) {
 	const drafts = useAtomValue(sessionDraftByIdAtom);
 	const setDraft = useSetAtom(setSessionDraftAtom);
 	const setQuotes = useSetAtom(setSessionQuotesAtom);
@@ -58,9 +58,13 @@ export function SelectionToolbar(props: { quote: TimelineSelectionQuote | null; 
 
 	return createPortal(
 		<button
+			ref={props.toolbarRef}
 			type="button"
+			// 挂载点标记：useTimelineSelection 的 pointerdown 守卫用它识别「点击浮层自身」，
+			// 避免先收起导致随后的 click 拿不到 quote。改名前先同步两处。
+			data-quote-toolbar="true"
 			// 紧凑工具条（Codex 同款形态）：悬浮卡片 + 毛玻璃，hover 微亮、按下微缩
-			className="fixed z-[80] inline-flex h-7 cursor-pointer items-center gap-1 rounded-lg border border-border-subtle bg-bg-panel/90 px-2 text-caption font-medium text-text-primary shadow-[0_6px_20px_rgba(0,0,0,0.16)] backdrop-blur-md transition-[background-color,border-color] duration-150 hover:border-border hover:bg-bg-hover"
+			className="fixed z-[80] inline-flex h-7 cursor-pointer items-center gap-1 rounded-lg border border-border-subtle bg-bg-panel/90 px-2 text-caption font-medium text-text-primary shadow-[var(--shadow-popover)] backdrop-blur-md transition-[background-color,border-color] duration-fast hover:border-border hover:bg-bg-hover"
 			style={{ top: position.top, left: position.left }}
 			onClick={handleInsert}
 		>

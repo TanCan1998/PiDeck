@@ -34,6 +34,7 @@ test("session manager table primitives use project semantic tokens", () => {
 test("dead session-manager CSS was removed while live embedded rules remain", () => {
 	assert.doesNotMatch(timeline, /\.session-manager-(row|modal|action-btn)/);
 	assert.doesNotMatch(timeline, /\.session-source-btn/);
-	assert.match(timeline, /\.rpc-log-modal--embedded,/);
+	// RPC 日志已改为右侧抽屉面板（rpc-log-panel），旧的模态内嵌选择器不再存在
+	assert.doesNotMatch(timeline, /\.rpc-log-modal/);
 	assert.match(timeline, /\.update-modal--embedded \{/);
 });

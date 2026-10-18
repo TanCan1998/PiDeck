@@ -1,7 +1,7 @@
 /**
  * 配置备份（config-backup）共享类型：主进程 / preload / 渲染层共同依赖的契约。
  *
- * 备份对象：pi 配置文件（models.json / auth.json / settings.json / mcp.json）
+ * 备份对象：pi 配置文件（models.json / auth.json / settings.json / mcp.json / mcp-auth.json）
  * 与 PiDeck 设置（userData/settings.json）。备份以单文件 JSON 包落盘，
  * 内部键带命名空间前缀（`pi/`、`pideck/`），避免两个同名 settings.json 冲突。
  */

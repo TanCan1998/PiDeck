@@ -11,8 +11,8 @@ const fs = require("node:fs");
 const { finished } = require("node:stream");
 const path = require("node:path");
 const asar = require("@electron/asar");
-const { dirSize, rmDir } = require("./after-pack-file-utils");
-const { assertNodePtyRuntimeArtifact, cleanNodePtyCompileTimeDirectories } = require("./after-pack-node-pty");
+const { dirSize, renameWithRetry, rmDir } = require("./after-pack-file-utils");
+const { assertLinuxNativeBaseline, assertNodePtyRuntimeArtifact, cleanNodePtyCompileTimeDirectories } = require("./after-pack-node-pty");
 const { patchSharpIndexCjs } = require("./patch-sharp-index");
 
 /** 要保留的语言包列表（小写，无 .pak 后缀） */
@@ -373,7 +373,7 @@ exports.default = async function (context) {
 			const tmpAsar = asarPath + ".tmp";
 			await packAsarPreservingUnpacked(extractDir, tmpAsar, unpackedPatterns);
 			const oldSize = fs.statSync(asarPath).size;
-			fs.renameSync(tmpAsar, asarPath);
+			await renameWithRetry(tmpAsar, asarPath);
 			// @electron/asar 会按路径缓存 header；重命名新归档后必须失效旧缓存，
 			// 否则同一 afterPack 进程后续读取仍会看到被删除的文档和旧 unpack 标记。
 			asar.uncache(asarPath);
@@ -484,5 +484,8 @@ exports.default = async function (context) {
 	if (context.verifyNodePtyRuntime !== false && fs.existsSync(asarPath)) {
 		const artifact = assertNodePtyRuntimeArtifact(asarPath, CURRENT_PLATFORM);
 		console.log(`[afterPack] node-pty runtime: 已验证 ${artifact.relativePath}`);
+		// Linux 还要核对 glibc 基线：产物「在包里」不等于「目标发行版加载得起来」，见
+		// assertLinuxNativeBaseline 注释。
+		if (CURRENT_PLATFORM.startsWith("linux")) assertLinuxNativeBaseline(artifact.unpackedPath);
 	}
 };

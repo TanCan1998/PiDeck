@@ -1,7 +1,7 @@
 import type { McpProbeResult, McpServerDefinition, McpServerTransport } from "../../shared/types/mcp";
 import type { ResourceImportCandidate, ResourceImportSourceStatus, StoredResourceImportCandidate } from "../../shared/types/resourceImport";
 import { addUnique, isRecord, redactPreviewArgs, redactPreviewUrl, safeMessage, PROBE_CONCURRENCY, PROBE_TIMEOUT_MS, redactPreviewCommand, redactSensitiveList, redactSensitiveText, PREVIEW_TEXT_MAX } from "./common";
-import { isMcpServerName, normalizeMcpServerDefinition, validateMcpConfigFile } from "../config/mcpConfig";
+import { isMcpServerName, validateMcpServerValue } from "../config/mcpConfig";
 import { parseCodexToml } from "./toml";
 
 export type McpSourceParse = Record<string, unknown>;
@@ -92,8 +92,9 @@ export function convertMcpDefinition(raw: Record<string, unknown>, codex: boolea
 		blockers.push("Transport type is empty.");
 		return null;
 	}
-	if (type && type !== "http" && type !== "stdio" && type !== "socket") {
-		blockers.push(`Unsupported transport: ${type}`);
+	// pi 0.99 只支持 stdio / http（streamable-http 为 http 的别名）；socket 与 legacy SSE 都不再受支持。
+	if (type && type !== "http" && type !== "streamable-http" && type !== "stdio") {
+		blockers.push(type === "socket" ? "Socket transport is not supported; use a stdio command or an HTTP URL." : `Unsupported transport: ${type}`);
 		return null;
 	}
 
@@ -101,11 +102,19 @@ export function convertMcpDefinition(raw: Record<string, unknown>, codex: boolea
 	const url = typeof raw.url === "string" && raw.url.trim() ? raw.url : undefined;
 	const socket = typeof raw.socket === "string" && raw.socket.trim() ? raw.socket : undefined;
 	const transportCount = Number(Boolean(command)) + Number(Boolean(url)) + Number(Boolean(socket));
+	if (socket) {
+		blockers.push("Socket transport is not supported; use a stdio command or an HTTP URL.");
+		return null;
+	}
 	if (transportCount !== 1) {
 		blockers.push("Exactly one transport is required.");
 		return null;
 	}
-	if ((type === "http" && !url) || (type === "stdio" && !command) || (type === "socket" && !socket)) {
+	if ((type === "http" || type === "streamable-http") && !url) {
+		blockers.push("Transport type does not match the configured fields.");
+		return null;
+	}
+	if (type === "stdio" && !command) {
 		blockers.push("Transport type does not match the configured fields.");
 		return null;
 	}
@@ -160,31 +169,56 @@ export function convertMcpDefinition(raw: Record<string, unknown>, codex: boolea
 			convertedOrReportedKeys.add("http_headers");
 		}
 	}
-	if (socket) {
-		definition.socket = socket;
-		convertedOrReportedKeys.add("socket");
+	// 原生字段：description / exposure / toolExposure / oauth 能表达就保留，否则上报警告。
+	if (typeof raw.description === "string" && raw.description.trim()) {
+		definition.description = raw.description;
+		convertedOrReportedKeys.add("description");
+	} else if (raw.description !== undefined) {
+		addUnique(warnings, "Server description was not a non-empty string and was omitted.");
+		convertedOrReportedKeys.add("description");
+	}
+	if (typeof raw.exposure === "string") {
+		definition.exposure = raw.exposure as McpServerDefinition["exposure"];
+		convertedOrReportedKeys.add("exposure");
+	}
+	if (isRecord(raw.toolExposure) && Object.values(raw.toolExposure).every((item) => typeof item === "string")) {
+		definition.toolExposure = { ...raw.toolExposure } as McpServerDefinition["toolExposure"];
+		convertedOrReportedKeys.add("toolExposure");
+	} else if (raw.toolExposure !== undefined) {
+		addUnique(warnings, "toolExposure was not a map of exposure values and was omitted.");
+		convertedOrReportedKeys.add("toolExposure");
+	}
+	if (typeof raw.timeout === "number" && raw.timeout > 0) {
+		definition.timeout = raw.timeout;
+		convertedOrReportedKeys.add("timeout");
+	} else if (raw.timeout !== undefined) {
+		addUnique(warnings, "Timeout was not a positive number and was omitted.");
+		convertedOrReportedKeys.add("timeout");
+	}
+	if (isRecord(raw.oauth)) {
+		definition.oauth = { ...raw.oauth } as McpServerDefinition["oauth"];
+		convertedOrReportedKeys.add("oauth");
 	}
 	if (codex && typeof raw.enabled === "boolean") {
-		// PiDeck is enabled by default, so both Codex boolean states have a direct
-		// representation: only the non-default false value needs an explicit field.
-		if (raw.enabled === false) definition.disabled = true;
+		// 原生唯一开关是 `enabled`：Codex 的 false → `enabled:false`；true 是默认值，不写。
+		if (raw.enabled === false) definition.enabled = false;
 		convertedOrReportedKeys.add("enabled");
 	}
+	// 旧客户端字段 `disabled` 只在明确提供时迁移成原生 `enabled:false`，冲突则报告。
 	if (!codex && typeof raw.disabled === "boolean") {
-		definition.disabled = raw.disabled;
+		if (raw.disabled === true && definition.enabled === undefined) definition.enabled = false;
+		else if (raw.disabled === true && definition.enabled === true) addUnique(warnings, "Conflicting enabled/disabled values; enabled was kept.");
 		convertedOrReportedKeys.add("disabled");
 	}
 
 	for (const key of Object.keys(raw)) {
 		if (!convertedOrReportedKeys.has(key)) addUnique(warnings, `Field not preserved: ${key.replace(/[\r\n]/g, " ").slice(0, 80)}`);
 	}
-	if ("token" in raw || "api_key" in raw || "apiKey" in raw || "bearer_token" in raw || "oauth" in raw) {
+	if ("token" in raw || "api_key" in raw || "apiKey" in raw || "bearer_token" in raw) {
 		addUnique(warnings, "Authentication values require manual verification.");
 	}
 
-	const validationError = validateMcpConfigFile({
-		mcpServers: { candidate: normalizeMcpServerDefinition(definition) ?? definition },
-	});
+	const validationError = validateMcpServerValue("candidate", definition);
 	if (validationError) {
 		blockers.push("Converted MCP definition is invalid.");
 		return null;
@@ -198,9 +232,9 @@ function looksUnresolved(value: string): boolean {
 
 export function mcpTransportOf(definition: McpServerDefinition | null): McpServerTransport | undefined {
 	if (!definition) return undefined;
+	// pi 0.99 不支持 socket 传输：转换器已在入口拦截，这里不会产生 socket 定义。
 	if (definition.command) return "stdio";
 	if (definition.url) return "http";
-	if (definition.socket) return "socket";
 	return undefined;
 }
 

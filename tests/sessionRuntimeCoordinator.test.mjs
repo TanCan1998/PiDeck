@@ -71,6 +71,7 @@ function createHarness(options = {}) {
 		createInputs: [],
 		restart: 0,
 		stop: 0,
+		stopWait: 0,
 		abort: 0,
 		compact: 0,
 		runtimeState: 0,
@@ -187,6 +188,15 @@ function createHarness(options = {}) {
 			const index = tabs.findIndex((tab) => tab.id === agentId);
 			if (index >= 0) tabs.splice(index, 1);
 		},
+		// 只给需要的用例挂「等进程退出」能力：其余用例继续验证老网关回退路径。
+		...(options.stopAndWait
+			? {
+					stopAndWaitForExit: async (agentId, timeoutMs) => {
+						calls.stopWait += 1;
+						return options.stopAndWait(agentId, timeoutMs);
+					},
+				}
+			: {}),
 		abort: async () => {
 			calls.abort += 1;
 			if (options.abortError) throw new Error(options.abortError);
@@ -440,7 +450,8 @@ test("dispatch lease blocks restart, direct bind, and catalog scan until send se
 	const sending = coordinator.send(prompt());
 	await started.promise;
 	assert.throws(() => coordinator.bindExistingAgent("session-1", "agent-2"), /prompt dispatch is in progress/);
-	await assert.rejects(coordinator.restartSession("session-1", "agent-1"), /prompt dispatch is in progress/);
+	// restart 与在途 dispatch 并发时不再立即硬失败：等待 lease 释放（瞬态窗口宽限）后成功
+	const restartedWhileDispatching = coordinator.restartSession("session-1", "agent-1");
 	assert.equal(
 		coordinator.attachCatalogRuntimes([
 			{
@@ -451,14 +462,51 @@ test("dispatch lease blocks restart, direct bind, and catalog scan until send se
 		]).length,
 		0,
 	);
-	assert.equal(harness.calls.restart, 0);
-
 	release.resolve();
 	const result = await sending;
 	assert.equal(result.accepted, true);
-	const restarted = await coordinator.restartSession("session-1", "agent-1");
+	const restarted = await restartedWhileDispatching;
 	assert.equal(restarted.id, "agent-restarted");
 	assert.equal(harness.calls.restart, 1);
+});
+
+test("restart still fails when dispatch lease is held beyond grace window", async () => {
+	const { SessionRuntimeCoordinator } = loadCoordinator();
+	const started = deferred();
+	const harness = createHarness({
+		sender: async () => {
+			started.resolve();
+			await new Promise(() => {});
+		},
+	});
+	const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender);
+	coordinator.bindExistingAgent("session-1", "agent-1");
+	const sending = coordinator.send(prompt());
+	await started.promise;
+	// lease 永不释放：等满宽限窗口（2s）后仍走原有硬失败语义
+	await assert.rejects(coordinator.restartSession("session-1", "agent-1"), /prompt dispatch is in progress/);
+});
+
+test("stopRuntime 不被在途 prompt 回合的 dispatch lease 挡住：关闭是卡死回合的唯一恢复出口", async () => {
+	const { SessionRuntimeCoordinator } = loadCoordinator();
+	const started = deferred();
+	const harness = createHarness({
+		sender: async () => {
+			started.resolve();
+			// 回合永不返回：模拟 opencode/ACP 卡死（session/prompt 悬挂到 10 分钟超时），
+			// 过去 stopRuntime 会在此期间报 SESSION_RUNTIME_BUSY（「会话正在处理其他操作」），用户无法关闭
+			await new Promise(() => {});
+		},
+	});
+	const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender);
+	const generation = coordinator.bindExistingAgent("session-1", "agent-1");
+	const sending = coordinator.send(prompt());
+	await started.promise;
+	const stopped = await coordinator.stopRuntime({ sessionId: "session-1", agentId: "agent-1", runtimeGeneration: generation });
+	assert.equal(stopped.ok, true);
+	assert.equal(harness.calls.stop, 1);
+	// lease 本身未被放宽：非 stop 路径（如重新绑定）仍被在途 dispatch 挡住，语义不变
+	assert.throws(() => coordinator.bindExistingAgent("session-1", "agent-1"), /prompt dispatch is in progress/);
 });
 
 test("dispatch lease is released when sender throws", async () => {
@@ -1280,6 +1328,24 @@ test("runtime model preference is not persisted when AgentManager fails", async 
 	assert.deepEqual(harness.entry.model, previousModel);
 	assert.equal(harness.calls.update, 0);
 	assert.equal(harness.calls.setModel, 1);
+	assert.equal(harness.calls.publishRuntimeState, 0, "a rejected model selection must not publish new context usage");
+});
+
+test("a runtime-state refresh failure does not turn an applied model selection into a command failure", async () => {
+	const { SessionRuntimeCoordinator } = loadCoordinator();
+	const harness = createHarness({ tabs: [{ id: "agent-a", status: "idle", createdAt: 1 }] });
+	harness.agents.publishRuntimeState = async () => {
+		harness.calls.publishRuntimeState += 1;
+		throw new Error("Runtime refresh unavailable");
+	};
+	const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender);
+	const runtimeGeneration = coordinator.bindExistingAgent("session-1", "agent-a");
+
+	const result = await coordinator.setRuntimeModel({ sessionId: "session-1", agentId: "agent-a", runtimeGeneration }, "openai", "gpt-test");
+
+	assert.equal(result.ok, true);
+	assert.equal(harness.entry.model?.modelId, "gpt-test");
+	assert.equal(harness.calls.publishRuntimeState, 1);
 });
 
 test("runtime thinking falls back to the requested level when no Pi snapshot is available", async () => {
@@ -1416,6 +1482,7 @@ test("reselecting an already-applied model or thinking level skips duplicate run
 	assert.equal(harness.calls.setModel, 1);
 	assert.equal(harness.calls.setThinking, 1);
 	assert.equal(harness.calls.runtimeState, 0);
+	assert.equal(harness.calls.publishRuntimeState, 1, "reselecting the applied model must not repeat the context refresh");
 });
 
 test("DSH model change preserves the recorded thinking preference", async () => {
@@ -1610,9 +1677,9 @@ test("stop invalidates the target and restart replaces it with a higher generati
 	assert.equal(restarted.value.session.id, "session-1");
 });
 
-test("releaseRuntimeForDelete unbinds immediately and stops the agent in the background", async () => {
+test("releaseRuntimeForDelete unbinds immediately and waits for the process exit before returning", async () => {
 	const { SessionRuntimeCoordinator } = loadCoordinator();
-	const stopGate = deferred();
+	const exitGate = deferred();
 	const harness = createHarness({
 		tabs: [
 			{
@@ -1625,17 +1692,69 @@ test("releaseRuntimeForDelete unbinds immediately and stops the agent in the bac
 				createdAt: 1,
 			},
 		],
-		stopDelay: stopGate.promise,
+		stopAndWait: () => exitGate.promise,
 	});
 	const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender);
 	coordinator.bindExistingAgent("session-1", "agent-a");
-	const pending = coordinator.releaseRuntimeForDelete("session-1");
-	// 删除路径不能等 stop 完成：侧栏要立刻解绑，agent 在后台停。
+	let released = false;
+	const pending = coordinator.releaseRuntimeForDelete("session-1").then(() => {
+		released = true;
+	});
+	// 解绑是同步完成的：侧栏立刻可以移除该行，不必等进程退出；但删除必须等退出真正完成（issue #364）。
 	assert.equal(coordinator.getTarget("session-1"), undefined);
-	assert.equal(harness.calls.stop, 1);
-	stopGate.resolve();
+	assert.equal(harness.calls.stopWait, 1);
+	assert.equal(released, false);
+	exitGate.resolve(true);
 	await pending;
-	assert.equal(coordinator.getTarget("session-1"), undefined);
+	assert.equal(released, true);
+});
+
+test("releaseRuntimeForDelete resolves after a bounded wait when the process exit times out", async () => {
+	const { SessionRuntimeCoordinator } = loadCoordinator();
+	const warnings = [];
+	const harness = createHarness({
+		tabs: [
+			{
+				id: "agent-a",
+				projectId: "project-1",
+				cwd: "C:/project",
+				title: "Session",
+				status: "running",
+				sessionPath: "C:/sessions/session-1.jsonl",
+				createdAt: 1,
+			},
+		],
+		stopAndWait: async () => false,
+	});
+	const logger = { info: () => undefined, warn: (_scope, message) => warnings.push(message), error: () => undefined };
+	const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender, logger);
+	coordinator.bindExistingAgent("session-1", "agent-a");
+	await coordinator.releaseRuntimeForDelete("session-1");
+	// 超时不能挡住删除（否则又变成「删不掉」），只留一条可诊断的 warn。
+	assert.equal(harness.calls.stopWait, 1);
+	assert.deepEqual(warnings, ["Agent exit timed out before session delete"]);
+});
+
+test("releaseRuntimeForDelete falls back to a plain stop for gateways without exit waiting", async () => {
+	const { SessionRuntimeCoordinator } = loadCoordinator();
+	const harness = createHarness({
+		tabs: [
+			{
+				id: "agent-a",
+				projectId: "project-1",
+				cwd: "C:/project",
+				title: "Session",
+				status: "running",
+				sessionPath: "C:/sessions/session-1.jsonl",
+				createdAt: 1,
+			},
+		],
+	});
+	const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender);
+	coordinator.bindExistingAgent("session-1", "agent-a");
+	await coordinator.releaseRuntimeForDelete("session-1");
+	assert.equal(harness.calls.stop, 1);
+	assert.equal(harness.calls.stopWait, 0);
 });
 
 test("commandFailure classifies message-not-found separately from session-not-found", () => {
@@ -1714,6 +1833,35 @@ test("catalog message mutation writes the file only after the runtime is stopped
 		harness.calls.mutatePersisted.map((item) => item.operation),
 		["edit", "delete", "resend"],
 	);
+});
+
+test("catalog image removal refuses live runtime and forwards a stopped session target", async () => {
+	const { SessionRuntimeCoordinator } = loadCoordinator();
+	const harness = createHarness({ entry: catalogEntry({ filePath: "C:/sessions/session-1.jsonl", status: "active" }), tabs: [{ id: "agent-a", status: "idle", createdAt: 1 }] });
+	const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender);
+	const runtimeGeneration = coordinator.bindExistingAgent("session-1", "agent-a");
+	const imageTarget = { index: 1, expectedImageCount: 2, expectedHash: "a".repeat(64) };
+	const live = await coordinator.removeCatalogMessageImage("session-1", "message-1", imageTarget, "entry-1");
+	assert.equal(live.ok, false);
+	assert.equal(live.error.code, "SESSION_RUNTIME_BUSY");
+	assert.equal(harness.calls.mutatePersisted.length, 0);
+	assert.equal((await coordinator.stopRuntime({ sessionId: "session-1", agentId: "agent-a", runtimeGeneration })).ok, true);
+	assert.equal((await coordinator.removeCatalogMessageImage("session-1", "message-1", imageTarget, "entry-1")).ok, true);
+	assert.equal(harness.calls.mutatePersisted.length, 1);
+	assert.equal(harness.calls.mutatePersisted[0].operation, "remove-image");
+	assert.equal(harness.calls.mutatePersisted[0].extra.entryId, "entry-1");
+	assert.deepEqual(harness.calls.mutatePersisted[0].extra.imageTarget, imageTarget);
+});
+
+test("catalog image removal rejects non-pi and anonymous sessions without writing", async () => {
+	for (const entry of [catalogEntry({ backend: "dsh" }), catalogEntry({ backend: "imagegen" }), catalogEntry({ backend: "acp" }), catalogEntry({ filePath: undefined })]) {
+		const { SessionRuntimeCoordinator } = loadCoordinator();
+		const harness = createHarness({ entry });
+		const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender);
+		const result = await coordinator.removeCatalogMessageImage("session-1", "message-1", { index: 0, expectedImageCount: 1, expectedHash: "a".repeat(64) });
+		assert.equal(result.ok, false);
+		assert.equal(harness.calls.mutatePersisted.length, 0);
+	}
 });
 
 test("catalog message mutation refuses DSH sessions", async () => {
@@ -2047,4 +2195,116 @@ test("过大错误经协调器映射后能渲染出带体积的中文文案", ()
 	// 两个占位符都必须被替换掉（漏掉会把模板串展示给用户）
 	assert.doesNotMatch(zh, /\{\w+\}/);
 	assert.doesNotMatch(en, /\{\w+\}/);
+});
+
+test("catalog mutation returns success when runtime re-activates mid-write (file already persisted)", async () => {
+	const { SessionRuntimeCoordinator } = loadCoordinator();
+	const harness = createHarness({
+		entry: catalogEntry({ filePath: "C:/sessions/session-1.jsonl", status: "active" }),
+		tabs: [{ id: "agent-a", status: "idle", createdAt: 1 }],
+	});
+	const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender);
+	const generation = coordinator.bindExistingAgent("session-1", "agent-a");
+	const stopped = await coordinator.stopRuntime({ sessionId: "session-1", agentId: "agent-a", runtimeGeneration: generation });
+	assert.equal(stopped.ok, true);
+
+	// 模拟「写盘期间用户点发送重新激活」：桩执行时重新绑定运行实例，
+	// 写后复检 requireStoppedForFileMutation 会发现 busy。
+	// 2026-10 修复前：此时报 SESSION_RUNTIME_BUSY，但文件已改（用户被误导重试 → 二次编辑）。
+	const original = harness.agents.mutatePersistedSessionMessage;
+	harness.agents.mutatePersistedSessionMessage = async (...args) => {
+		coordinator.bindExistingAgent("session-1", "agent-a");
+		return original.apply(harness.agents, args);
+	};
+	const result = await coordinator.editCatalogMessage("session-1", "message-1", "updated");
+	assert.equal(result.ok, true, "文件已持久化的变更应按成功返回，而不是误导性的 BUSY");
+	assert.equal(harness.calls.mutatePersisted.length, 1);
+});
+
+/** 记录 coordinator 自己发起的 detach 推送（拷贝一份，避免断言时读到被后续改写的对象）。 */
+function collectDetachedBindings(coordinator) {
+	const detached = [];
+	coordinator.setDetachedNotifier((binding) => detached.push({ ...binding }));
+	return detached;
+}
+
+/** 绑定 session-1 → agent-a 的测试前置：catalog 有文件路径，agent 行按用例给状态。 */
+function bindTerminalHarness(tabs, logger) {
+	const { SessionRuntimeCoordinator } = loadCoordinator();
+	const harness = createHarness({ entry: catalogEntry({ filePath: "C:/sessions/session-1.jsonl", status: "active" }), tabs });
+	const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender, logger);
+	const runtimeGeneration = coordinator.bindExistingAgent("session-1", "agent-a");
+	return { harness, coordinator, runtimeGeneration };
+}
+
+for (const [label, tabs] of [
+	["error 且进程已死", [{ id: "agent-a", status: "error", sessionPath: "C:/sessions/session-1.jsonl", createdAt: 1 }]],
+	["closed", [{ id: "agent-a", status: "closed", sessionPath: "C:/sessions/session-1.jsonl", createdAt: 1 }]],
+	["agent 已从列表消失", []],
+]) {
+	test(`终态惰性解绑推 detach：${label}`, () => {
+		// 回归（2026-10）：getAgentId 在查询路径里静默解绑终态 agent，渲染层快照因而永远停在
+		// error——红点常亮、「关闭 Agent」对着不存在的运行实例反复失败。解绑必须推 detach。
+		const { coordinator, runtimeGeneration } = bindTerminalHarness(tabs);
+		const detached = collectDetachedBindings(coordinator);
+
+		assert.equal(coordinator.getTarget("session-1"), undefined);
+		assert.deepEqual(detached, [{ sessionId: "session-1", agentId: "agent-a", runtimeGeneration }]);
+
+		// 幂等：绑定已丢，重复查询不得反复推（渲染层不需要重复收敛）
+		assert.equal(coordinator.getAgentId("session-1"), undefined);
+		assert.equal(detached.length, 1);
+	});
+}
+
+test("live runtime 与「复活成功」的 error runtime 都不推 detach", () => {
+	const live = bindTerminalHarness([{ id: "agent-a", status: "idle", sessionPath: "C:/sessions/session-1.jsonl", createdAt: 1 }]);
+	const liveDetached = collectDetachedBindings(live.coordinator);
+	assert.equal(live.coordinator.getTarget("session-1").agentId, "agent-a");
+	assert.deepEqual(liveDetached, []);
+
+	// 回复级错误（Issue #218）进程仍存活：先复活复用原进程，同样不得推 detach 把绑定打掉
+	const revived = bindTerminalHarness([{ id: "agent-a", status: "error", sessionPath: "C:/sessions/session-1.jsonl", createdAt: 1 }]);
+	revived.harness.agents.reviveIfProcessAlive = (agentId) => {
+		const tab = revived.harness.tabs.find((candidate) => candidate.id === agentId);
+		if (!tab) return false;
+		tab.status = "idle";
+		return true;
+	};
+	const revivedDetached = collectDetachedBindings(revived.coordinator);
+	assert.equal(revived.coordinator.getTarget("session-1").agentId, "agent-a");
+	assert.deepEqual(revivedDetached, []);
+});
+
+test("detach 推送抛错不连带让查询失败（解绑发生在读写盘 IPC 路径里）", () => {
+	const warns = [];
+	const logger = {
+		info: () => {},
+		warn: (scope, message, detail) => warns.push({ scope, message, detail }),
+		error: () => {},
+	};
+	const { coordinator, runtimeGeneration } = bindTerminalHarness([{ id: "agent-a", status: "closed", sessionPath: "C:/sessions/session-1.jsonl", createdAt: 1 }], logger);
+	coordinator.setDetachedNotifier(() => {
+		throw new Error("webContents destroyed");
+	});
+
+	assert.doesNotThrow(() => coordinator.getTarget("session-1"));
+	assert.equal(coordinator.getRuntimeBinding("agent-a"), undefined);
+	assert.equal(warns.length, 1);
+	assert.equal(warns[0].scope, "session-runtime");
+	assert.equal(warns[0].message, "Runtime detach notification failed");
+	assert.deepEqual({ ...warns[0].detail, error: undefined }, { sessionId: "session-1", agentId: "agent-a", runtimeGeneration, error: undefined });
+	// 沙箱内 Error 与本进程不是同一构造器，错误文本按 String(error) 形态断言
+	assert.match(String(warns[0].detail.error), /webContents destroyed/);
+});
+
+test("main 装配把惰性解绑接成 sessions:runtime-detach 推送", () => {
+	const mainSource = readFileSync("src/main/index.ts", "utf8");
+	const coordinatorSource = readFileSync("src/main/sessions/SessionRuntimeCoordinator.ts", "utf8");
+
+	// 装配层必须注入通知器，且走既有的 detach 信封（渲染层只认这一条协议）
+	assert.match(mainSource, /sessionRuntimeCoordinator\.setDetachedNotifier\(\(binding\)\s*=>\s*emitSessionRuntimeDetach\(binding\)\)/);
+	// 只在终态惰性解绑这一处推：stop/restart/删除的解绑由调用方推送，重复推会打乱代际判定
+	assert.match(coordinatorSource, /this\.unbindTerminalAgent\(agentId\);\s*\/\/[^\n]*\n\s*if \(binding\) this\.notifyRuntimeDetached\(\{ \.\.\.binding, agentId \}\);/);
+	assert.equal(coordinatorSource.match(/notifyRuntimeDetached\(/g).length, 2, "notifyRuntimeDetached 只应有定义 + 终态解绑一处调用");
 });

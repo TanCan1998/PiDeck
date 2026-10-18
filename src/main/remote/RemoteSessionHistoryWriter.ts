@@ -46,7 +46,7 @@
  * 而不是靠注释声明（时间戳也用同一份 `now` 注入，保证墓碑 ts 可比）。
  */
 
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { buildRemoteSessionWriteGuardCommand, isRemoteSessionWriteGuardUntrustedOutput, parseRemoteSessionWriteGuardResult, REMOTE_SESSION_WRITE_GUARD_CODES, REMOTE_SESSION_WRITE_MAX_BYTES, type RemoteSessionFileRevision } from "./RemoteSessionWriteGuard";
 // hostId 与 ssh 身份判据只允许有一份：与持久化边界共用 shared 的权威取值域。
 import { PROJECT_HOST_ID_PATTERN, readSshSessionLocator, type SshSessionLocator } from "../../shared/projectLocation";
@@ -290,8 +290,10 @@ export type RemoteSessionHistoryWriterPorts = {
 	project?: RemoteSessionHistoryProjector;
 	/** 相对身份需要它；缺失时相对 identity 以 `PATH_UNRESOLVED` fail-closed（绝不猜会话根）。 */
 	resolveSessionRoot?: RemoteSessionHistoryRootPort;
-	/** 墓碑时间戳（测试注入固定时钟，好与本机编辑器逐字节比对）。 */
+	/** 墓碑/context_edit 时间戳（测试注入固定时钟，好与本机编辑器逐字节比对）。 */
 	now?: () => number;
+	/** context_edit 记录 id（测试注入固定序列做逐字节比对；缺省 randomUUID）。 */
+	createUuid?: () => string;
 	/** 只允许调小（测试用）；缺省 256 KiB。 */
 	maxFileBytes?: number;
 	/** 只允许调小（测试用）；缺省 96 KiB。 */
@@ -598,49 +600,95 @@ function isProcessNode(entry: JsonlEntry | undefined): entry is JsonlEntry {
 	return hasThinking && !textOf(content).trim();
 }
 
+/**
+ * 会话文件当前叶节点（新追加条目的 parentId）：跳过 `session` 头，取最后一条带 id 的条目。
+ * 与 `SessionFileEditor.currentLeafId` / pi `SessionManager._buildIndex` 同一条规则：
+ * 编辑/删除之后追加的 `context_edit` 才是真正的叶，跳过它会把新记录挂成平行分支。
+ */
+function currentLeafId(document: JsonlDocument): string | null {
+	for (let index = document.lines.length - 1; index >= 0; index -= 1) {
+		const entry = document.lines[index].entry;
+		if (!entry || entry.type === "session") continue;
+		const candidate = entryIdOf(entry);
+		if (candidate) return candidate;
+	}
+	return null;
+}
+
+/**
+ * 追加一条 pi 原生 `context_edit` 记录（pi docs/session-format.md#context_edit）。
+ *
+ * 形状与顺序必须与本机 `SessionFileEditor.appendContextEdit` 逐字节一致（含 JSON key 顺序）：
+ * 远端与本地写的是同一份会话历史，两种格式会让同一条消息在两个入口里表现不同。
+ * 连续追加多条时按顺序串成 parent 链——都挂在同一个 parent 上会让后一条成为侧分支而静默失效。
+ */
+function appendContextEdit(document: JsonlDocument, targetId: string, replacement: { content: unknown } | null, now: number, createUuid: () => string): void {
+	const entry: JsonlEntry = {
+		type: "context_edit",
+		id: createUuid(),
+		parentId: currentLeafId(document),
+		timestamp: new Date(now).toISOString(),
+		targetId,
+		replacement,
+	};
+	const eol = document.lines.length > 0 ? document.lines[document.lines.length - 1].eol || "\n" : "\n";
+	document.lines.push({ content: JSON.stringify(entry), eol, entry });
+	document.entryLineById.set(entry.id as string, document.lines.length - 1);
+}
+
+/**
+ * 「只改文本」的替换内容（保留图片 / 工具块等其它块）：与 `SessionFileEditor.replaceTextInContent` 同语义。
+ * 不能直接拿 newText 当 content：pi 会用 replacement.content **整体**替换消息内容，图片会被纯文本顶掉。
+ */
+function replaceTextInContent(content: unknown, text: string): unknown {
+	if (typeof content === "string") return text;
+	if (!Array.isArray(content)) return [{ type: "text", text }];
+	const next: unknown[] = [];
+	let replaced = false;
+	for (const candidate of content) {
+		const isText = Boolean(isRecord(candidate) && candidate.type === "text");
+		if (!isText) {
+			next.push(candidate);
+			continue;
+		}
+		if (replaced) continue;
+		next.push({ ...candidate, text });
+		replaced = true;
+	}
+	if (!replaced) next.push({ type: "text", text });
+	return next;
+}
+
 /** 三种改写的规则（与本机 `SessionFileEditor.applyMutation` 逐条对应）。 */
-function applyMutation(document: JsonlDocument, located: LocatedEntry, kind: RemoteSessionMessageOperation, now: number, newText?: string): void {
+function applyMutation(document: JsonlDocument, located: LocatedEntry, kind: RemoteSessionMessageOperation, now: number, newText: string | undefined, createUuid: () => string): void {
 	if (kind === "edit") {
 		const message = messageOf(located.entry);
 		if (!message || (message.role !== "user" && message.role !== "assistant")) throw stable(REMOTE_SESSION_HISTORY_WRITER_CODES.roleInvalid);
-		setMessageText(message, newText ?? "");
-		replaceLine(document, located.lineIndex, located.entry);
+		// 2026-11 语义（与本机 SessionFileEditor 同步）：改写不是原地改文本，而是追加 pi 原生
+		// `context_edit` —— 原文行保留（可追溯/可撤销），只有模型下次看到的上下文被替换。
+		appendContextEdit(document, located.entryId, { content: replaceTextInContent(message.content, newText ?? "") }, now, createUuid);
 		return;
 	}
 
 	if (kind === "delete") {
-		const parentId = parentIdOf(located.entry);
-		let reparentTarget: string | null = parentId ?? null;
+		const targets = [located.entryId];
 		if (roleOf(located.entry) === "assistant") {
-			// 沿父链上溯，遇到 user 或带文本的 assistant（上一段回答）即停：那些是用户要保留的边界。
-			const processIds = new Set<string>();
+			// 同一轮的过程链（toolResult / thinking-only assistant）必须一起移出上下文：
+			// 留着会被 groupToolMessages 并进下一轮回答（用户反馈过的串台）。
+			// 沿父链上溯，遇到 user 或带文本的 assistant（上一段回答）即停：那是用户要保留的边界。
 			let cursor = parentIdOf(located.entry);
 			while (cursor) {
 				const lineIndex = document.entryLineById.get(cursor);
 				if (lineIndex === undefined) break;
 				const ancestor = document.lines[lineIndex].entry;
-				if (!isProcessNode(ancestor)) break;
-				processIds.add(cursor);
-				reparentTarget = parentIdOf(ancestor) ?? null;
+				if (!ancestor || !isProcessNode(ancestor)) break;
+				targets.push(cursor);
 				cursor = parentIdOf(ancestor);
 			}
-			for (const id of processIds) {
-				const lineIndex = document.entryLineById.get(id);
-				if (lineIndex === undefined) continue;
-				const processEntry = document.lines[lineIndex].entry;
-				if (!processEntry) continue;
-				replaceLine(document, lineIndex, tombstone(id, now, parentIdOf(processEntry)));
-			}
 		}
-		// 直接子节点重挂到被删条目的父节点：否则它们会挂在一个墓碑上，从活动分支上脱落。
-		for (let index = 0; index < document.lines.length; index += 1) {
-			if (index === located.lineIndex) continue;
-			const child = document.lines[index].entry;
-			if (!child || child.type === "deleted" || parentIdOf(child) !== located.entryId) continue;
-			child.parentId = reparentTarget;
-			replaceLine(document, index, child);
-		}
-		replaceLine(document, located.lineIndex, tombstone(located.entryId, now, parentId));
+		// 删除 = 追加 `replacement: null`（把目标移出模型上下文）。目标行不改写，
+		// 所以子节点不需要重挂——重挂只对「把目标行替换成墓碑」的旧语义成立。
+		for (const targetId of targets) appendContextEdit(document, targetId, null, now, createUuid);
 		return;
 	}
 
@@ -692,10 +740,11 @@ export function createRemoteSessionHistoryWriter(ports: RemoteSessionHistoryWrit
 	const readChunkBytes = ports.readChunkBytes ?? REMOTE_SESSION_HISTORY_READ_CHUNK_BYTES;
 	const writeChunkBytes = ports.writeChunkBytes ?? REMOTE_SESSION_HISTORY_WRITE_CHUNK_BYTES;
 	const now = ports.now ?? Date.now;
+	const createUuid = ports.createUuid ?? randomUUID;
 	if (!Number.isSafeInteger(maxFileBytes) || maxFileBytes < 1 || maxFileBytes > REMOTE_SESSION_HISTORY_WRITE_MAX_BYTES) throw stable(REMOTE_SESSION_HISTORY_WRITER_OPTIONS_INVALID);
 	if (!Number.isSafeInteger(readChunkBytes) || readChunkBytes < 1 || readChunkBytes > REMOTE_SESSION_HISTORY_READ_CHUNK_BYTES) throw stable(REMOTE_SESSION_HISTORY_WRITER_OPTIONS_INVALID);
 	if (!Number.isSafeInteger(writeChunkBytes) || writeChunkBytes < 1 || writeChunkBytes > REMOTE_SESSION_HISTORY_WRITE_CHUNK_BYTES) throw stable(REMOTE_SESSION_HISTORY_WRITER_OPTIONS_INVALID);
-	if (typeof now !== "function") throw stable(REMOTE_SESSION_HISTORY_WRITER_OPTIONS_INVALID);
+	if (typeof now !== "function" || typeof createUuid !== "function") throw stable(REMOTE_SESSION_HISTORY_WRITER_OPTIONS_INVALID);
 
 	/** hostId 要在发帧前就能当诊断身份与传输键用；非法值不回显（与读取侧同判据）。 */
 	function readHostId(value: unknown): string | undefined {
@@ -852,11 +901,11 @@ export function createRemoteSessionHistoryWriter(ports: RemoteSessionHistoryWrit
 			}
 			if (operation === "resend") {
 				const snapshot = extractResendContent(messageOf(located.entry)?.content);
-				applyMutation(document, located, "resend", now());
+				applyMutation(document, located, "resend", now(), undefined, createUuid);
 				await writeRemoteFile(hostId, nodePath, remotePath, serializeDocument(document), original);
 				return { text: snapshot.text, ...(snapshot.images === undefined ? {} : { images: snapshot.images }) };
 			}
-			applyMutation(document, located, operation, now(), input.newText ?? "");
+			applyMutation(document, located, operation, now(), input.newText ?? "", createUuid);
 			await writeRemoteFile(hostId, nodePath, remotePath, serializeDocument(document), original);
 			return undefined;
 		},

@@ -79,7 +79,8 @@ export async function verifyRemoteGitRead(input: { window: Page; credentials: Re
 	const panel = window.getByTestId("remote-git-panel");
 	const select = async (path: string) =>
 		remoteProjectRow(window, path.split("/").pop() ?? "")
-			.locator(".project-draggable")
+			.locator(".conversation-title")
+			.first()
 			.click();
 	await select(root);
 	await window.locator(".header-drawer-toggle").first().click();

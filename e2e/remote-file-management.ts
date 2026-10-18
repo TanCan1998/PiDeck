@@ -11,7 +11,8 @@ async function remoteTest(credentials: RemoteAcceptanceCredentials, script: stri
 /** 项目行 → 中心 no-session 远端面板（与「远端文本编辑」同一入口，不新建会话）。 */
 async function openProjectPanel(window: Page, projectPath: string): Promise<void> {
 	await remoteProjectRow(window, projectPath.split("/").at(-1) ?? "")
-		.locator(".project-draggable")
+		.locator(".conversation-title")
+		.first()
 		.click();
 	await expect(window.getByTestId("remote-file-toolbar")).toBeVisible();
 }

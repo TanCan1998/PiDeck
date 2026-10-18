@@ -16,7 +16,8 @@ test("streaming signal: text_delta sets isStreaming locally, flush pushes lightw
 
 	// 1) 本地流式标志集合存在，并在 getRuntimeState 里并入（轮询兜底）
 	assert.match(agentManager, /private readonly streamingAgents = new Set<string>\(\)/);
-	assert.match(agentManager, /isStreaming: state\?\.isStreaming \|\| this\.streamingAgents\.has\(agentId\)/);
+	// 2027-02 拆分后写法显式 === true 收窄类型（state?.isStreaming 可为 undefined）
+	assert.match(agentManager, /isStreaming: state\?\.isStreaming === true \|\| this\.streamingAgents\.has\(agentId\)/);
 
 	// 2) message_start / text_delta / thinking_delta 置位流式标志
 	assert.match(agentManager, /this\.streamingAgents\.add\(agentId\)/);

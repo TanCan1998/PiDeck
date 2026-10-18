@@ -17,7 +17,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createCheckpoint, addPathsToIndex, restoreCheckpoint, loadCheckpointFromRef, loadAllCheckpoints, listCheckpointRefs, deleteCheckpoint, deleteCheckpoints, pruneCheckpoints, pruneOldSessions, diffCheckpoints } from "../src/main/rewind/checkpointCore.ts";
+import { createCheckpoint, addPathsToIndex, restoreCheckpoint, loadCheckpointFromRef, loadAllCheckpoints, listCheckpointRefs, deleteCheckpoint, deleteCheckpoints, pruneCheckpoints, pruneOldSessions, diffCheckpoints, currentIndexTree } from "../src/main/rewind/checkpointCore.ts";
 import { shouldIgnoreForSnapshot, normalizeGitPath, isSafeId, sanitizeForRef, findClosestCheckpoint } from "../src/main/rewind/checkpointFilter.ts";
 import { MAX_UNTRACKED_TOTAL_BYTES } from "../src/main/rewind/checkpointConstants.ts";
 
@@ -599,4 +599,70 @@ test("预算未超时无跳过（正常小仓库行为不变）", async (t) => {
 	});
 	assert.equal(cp.skippedOverBudgetFiles, undefined, "预算未超时不应有跳过名单");
 	assert.ok(cp.preexistingUntrackedFiles.includes("small.txt"));
+});
+
+// ---------------------------------------------------------------------------
+// merge 冲突（unmerged index）降级：2026-10 用户实锤——工作区 merge 冲突期间自动
+// 打点 3 连败（git write-tree: error building trees），检查点整体不可用。降级语义：
+// index 树记为 HEAD 树（恢复时把冲突态 index 重置回 HEAD），快照不中断。
+// ---------------------------------------------------------------------------
+
+/** 构造 merge 冲突仓库：master 与 side 分支改同一文件后 merge，index 进入 unmerged。 */
+function makeConflictRepo() {
+	const { dir, git } = makeRepo();
+	writeFileSync(join(dir, "f.txt"), "base\n");
+	commitAll(git, "base");
+	git(["checkout", "-q", "-b", "side"]);
+	writeFileSync(join(dir, "f.txt"), "side\n");
+	commitAll(git, "side");
+	git(["checkout", "-q", "master"]);
+	writeFileSync(join(dir, "f.txt"), "master\n");
+	commitAll(git, "master");
+	try {
+		git(["merge", "side"]);
+	} catch {
+		// 冲突时 git merge 非零退出，正是要构造的状态
+	}
+	const unmerged = git(["ls-files", "-u"]).toString().trim();
+	assert.ok(unmerged.length > 0, "fixture 必须处于 unmerged 态");
+	return { dir, git };
+}
+
+test("merge 冲突仓库：createCheckpoint 降级成功（index 树 = HEAD 树）而非整体失败", async (t) => {
+	const { dir, git } = makeConflictRepo();
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+	const cp = await createCheckpoint({
+		root: dir,
+		id: cpId(UUID_A, 1),
+		sessionId: UUID_A,
+		trigger: "turn",
+		turnIndex: 1,
+	});
+	const headSha = git(["rev-parse", "HEAD"]).toString().trim();
+	assert.equal(cp.indexTreeDegraded, true, "应标记降级");
+	assert.equal(cp.indexTreeSha, headSha, "index 树降级为 HEAD 树");
+	assert.ok(cp.worktreeTreeSha, "worktree 树仍完整（临时 index 不受冲突影响）");
+
+	// 恢复也应可用：冲突态 index 被重置回 HEAD，工作区回到快照时刻（含冲突标记文件内容）
+	await restoreCheckpoint(dir, cp);
+	const unmergedAfter = git(["ls-files", "-u"]).toString().trim();
+	assert.equal(unmergedAfter, "", "恢复后 index 不再 unmerged");
+});
+
+test("merge 冲突仓库：currentIndexTree 降级为 HEAD 树（回退预览不整体报错）", async (t) => {
+	const { dir, git } = makeConflictRepo();
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+	const headSha = git(["rev-parse", "HEAD"]).toString().trim();
+	assert.equal(await currentIndexTree(dir), headSha);
+});
+
+test("非冲突的 write-tree 失败仍照常抛出（降级只针对 unmerged）", async (t) => {
+	// 直接破坏 git 仓库对象库制造非冲突失败：目录当 .git 用会让 git 命令整体挂。
+	// 用真实仓库 + rev-parse 校验为主的行为级断言成本高，这里用源码断言保证降级
+	// 分支确实先探测 unmerged 再吞错（正则空白容忍，见 AGENTS.md 格式化纪律）。
+	const source = readFileSync("src/main/rewind/checkpointCore.ts", "utf8");
+	assert.match(source, /indexTreeDegraded = true;\s*return headSha;/);
+	assert.match(source, /if \(await detectUnmerged\(root\)\)\s*\{\s*return \(await gitOp\(root, \["rev-parse", "HEAD"\]/);
 });

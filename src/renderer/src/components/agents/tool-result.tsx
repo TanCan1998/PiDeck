@@ -34,7 +34,8 @@ export interface ToolResultProps {
 	defaultOpen?: boolean;
 	onOpenChange?: (open: boolean) => void;
 	collapseOnComplete?: boolean;
-	maxHeight?: number;
+	/** `null` = 不限高不自转滚轮：[PiDeck local] 外层已自带滚轮时（过程组组体）让内层让位，避免双层滚动条。 */
+	maxHeight?: number | null;
 	copyText?: string;
 	onCopy?: () => void | Promise<void>;
 	onRetry?: () => void;
@@ -138,6 +139,10 @@ export function ToolResult({ tool = null, title, children, status = "running", k
 	const currentOpen = open ?? internalOpen;
 	const running = status === "running";
 	const canCopy = Boolean(copyText || onCopy);
+	// maxHeight 为 null（外层已自带滚轮，如过程组组体）时不限高、不自转滚轮：避免双层滚动条。
+	// 只影响这一处容器，外层已有滚轮承载滚动，内层再截断没有意义（详见 file-diff.tsx 同款注释）。
+	const maxHeightStyle = maxHeight === null ? undefined : { maxHeight };
+	const scrollClass = maxHeight === null ? "" : "scrollbar-hide overflow-y-auto";
 	const titleKey = getSwapKey(title, status);
 	const metaKey = getSwapKey(meta, `${status}-meta`);
 	const toolKey = getSwapKey(tool, `${status}-tool`);
@@ -239,7 +244,7 @@ export function ToolResult({ tool = null, title, children, status = "running", k
             standalone beUI header gutter here would produce a double indent. */}
 				<div className={cn("pt-1.5", showHeader && "pl-6")}>
 					<div className={cn("min-w-0", showHeader && "overflow-hidden rounded-xl bg-muted/80")}>
-						<div ref={viewportRef} role="log" aria-live="polite" className="scrollbar-hide overflow-y-auto" style={{ maxHeight }}>
+						<div ref={viewportRef} role="log" aria-live="polite" className={scrollClass} style={maxHeightStyle}>
 							<div className={cn(showHeader ? "p-3" : "py-1", contentClassName)}>{children}</div>
 						</div>
 

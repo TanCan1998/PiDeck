@@ -7,8 +7,20 @@ import type { FeishuBotConfig, FeishuTestResult } from "../../shared/types";
 import type { LarkSDK, LarkClient, FeishuCardActionEvent } from "./types";
 import { feishuT, type FeishuLocale } from "./FeishuI18n";
 import { getDecryptedBotAppSecret } from "./FeishuConfig";
+import { getAppLogger } from "../logging/sharedLogger";
 
+/** 包装约定（AGENTS.md：日志走主进程 logging 模块）：所有出口必须同时落 appLogger
+ *  （feishu scope）——打包版主进程的 stdout 不落盘，console-only 会让长连接断开
+ *  （WSClient onError）、消息处理异常等关键故障在诊断报告里不可见。console 保留供
+ *  dev 终端直接可见；EPIPE 兑底仅保护 console 侧（appLogger 落盘不经 stdout）。 */
+const toAppLog = (level: "info" | "warn" | "error", args: unknown[]) => {
+	const [first, ...rest] = args;
+	const message = first instanceof Error ? first.message : String(first ?? "");
+	const detail = rest.length === 1 ? rest[0] : rest.length > 0 ? rest : undefined;
+	getAppLogger()?.[level]("feishu", message, detail);
+};
 const log = (...args: unknown[]) => {
+	toAppLog("info", args);
 	try {
 		console.log(...args);
 	} catch {
@@ -16,6 +28,7 @@ const log = (...args: unknown[]) => {
 	}
 };
 const warn = (...args: unknown[]) => {
+	toAppLog("warn", args);
 	try {
 		console.warn(...args);
 	} catch {
@@ -23,6 +36,7 @@ const warn = (...args: unknown[]) => {
 	}
 };
 const logErr = (...args: unknown[]) => {
+	toAppLog("error", args);
 	try {
 		console.error(...args);
 	} catch {
@@ -97,13 +111,20 @@ export class FeishuConnection {
 				},
 			});
 			this.wsClient = ws;
-			ws.start({ eventDispatcher: dispatcher });
+			// SDK 的 start() 返回 Promise：连接建立是异步的，不 await 但必须兜 rejection，
+			// 否则握手失败会变成 unhandledRejection（onError 只覆盖建立后的连接异常）。
+			void ws.start({ eventDispatcher: dispatcher }).catch((startErr: unknown) => {
+				logErr("[飞书 Bridge] WSClient 启动失败:", startErr);
+			});
+			// 对外建立常驻长连接（带机器人凭据），起停必须落应用日志而不只是 console
+			getAppLogger()?.info("feishu", "Feishu connection started", { appId });
 			log("[飞书 Bridge] WSClient 已启动");
 
 			return { botOpenId };
 		} catch (error) {
 			const detail = error instanceof Error ? error.message : String(error);
 			const message = feishuT(this.locale, "connection.failed");
+			getAppLogger()?.error("feishu", "Feishu connection start failed", { appId, error: detail });
 			logErr("[飞书 Bridge] 启动失败:", detail);
 			throw new Error(message + " (" + detail + ")", { cause: error });
 		}
@@ -117,6 +138,7 @@ export class FeishuConnection {
 			} catch {}
 		this.wsClient = null;
 		this.client = null;
+		getAppLogger()?.info("feishu", "Feishu connection stopped", { appId: this.botConfig.appId });
 		log("[Feishu Bridge] stopped");
 	}
 

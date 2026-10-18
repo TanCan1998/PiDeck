@@ -60,6 +60,9 @@ test("生图图片落盘：blob 存储 + pideck-img 协议 + CSP 允许", () => 
 	assert.match(protocol, /protocol\.handle\(IMAGE_BLOB_PROTOCOL/);
 	assert.match(protocol, /blobs\.resolvePath\(ref\)/);
 	assert.match(blobStore, /IMAGE_BLOB_REF_RE/);
+	// 读取字节上界（AGENTS.md 生图硬约束）：两条读取路径（readPayload + 协议）都必须先 stat 拦截超大文件
+	assert.match(blobStore, /const info = await stat\(file\);[\s\S]*?IMAGE_BLOB_MAX_BYTES\)[\s\S]*?return null/);
+	assert.match(protocol, /info\.size > IMAGE_PROTOCOL_MAX_BYTES[\s\S]*?413/);
 	// 会话存储：字节水位 + 旧格式自愈 + base64 不落 JSONL + 追加不重写
 	assert.match(sessionStore, /MAX_SESSION_BYTES/);
 	assert.match(sessionStore, /MAX_READ_BYTES/);
@@ -97,8 +100,8 @@ test("IPC 入参校验：model/prompt 非空，prompt ≤ 4000，provider 可空
 	assert.match(imagegenIpc, /parseImageGenReferenceImages/);
 });
 
-test("ComposerAgentMode 含 imagegen 与 goal", () => {
-	assert.match(agentTypes, /ComposerAgentMode = "normal" \| "plan" \| "imagegen" \| "goal"/);
+test("ComposerAgentMode 含 imagegen、videogen 与 goal", () => {
+	assert.match(agentTypes, /ComposerAgentMode = "normal" \| "plan" \| "imagegen" \| "videogen" \| "goal"/);
 });
 
 test("composer 生图底栏用独立配置，不读会话 LLM", () => {
@@ -108,7 +111,12 @@ test("composer 生图底栏用独立配置，不读会话 LLM", () => {
 	const configUi = readFileSync("src/renderer/src/components/config/ImageGenSection.tsx", "utf8");
 	assert.match(composerComponents, /imageGenOptions\?:/);
 	assert.match(composerComponents, /ComposerImageGenOptions/);
-	assert.match(composerComponents, /isImageGenMode \? null/);
+	// 生图/生视频底栏屏蔽会话 LLM 控件：判据 2026-10（222f19abd）从「只按 mode」扩到
+	// 「mode 或 backend」——引导页没有 record，选了生图/生视频后端时 mode 仍是 normal，
+	// 只看 mode 会漏屏蔽（见 ComposerComponents.tsx 里 isMediaComposer 的注释）。
+	// 断言写到新判据上并做空白容忍，避免再被格式化/换行弄红。
+	assert.match(composerComponents, /const\s+isMediaComposer\s*=[^;]*isImageGenMode\s*\|\|\s*isVideoGenMode[^;]*"imagegen"/);
+	assert.match(composerComponents, /\{\s*isMediaComposer\s*\?\s*null\s*:/);
 	assert.match(options, /IMAGE_GEN_SIZE_PRESETS/);
 	assert.match(options, /IMAGE_GEN_SIZE_UNSET/);
 	assert.match(options, /ImageGenSizeCombobox/);

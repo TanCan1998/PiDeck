@@ -23,7 +23,7 @@ export type { AutoUpdaterLike, AutoUpdaterEventHandlers } from "./autoUpdaterTyp
 export const UPDATE_FEED_URL_ENV = "PIDEK_UPDATE_FEED_URL";
 
 /** 兜底更新缓存目录名，与 electron-builder 默认规则（name + "-updater"）对齐。 */
-export const DEFAULT_UPDATER_CACHE_DIR_NAME = "pi-desktop-updater";
+export const DEFAULT_UPDATER_CACHE_DIR_NAME = "pideck-updater";
 
 /** 自动生成的兜底配置文件文件名，存放在应用 userData 目录中。 */
 export const FALLBACK_APP_UPDATE_CONFIG_FILENAME = "pideck-fallback-app-update.yml";
@@ -198,6 +198,11 @@ export function createRealAutoUpdater(options?: { feedUrl?: string; isAutoDownlo
 				// （electron-updater 的 setFeedURL 是运行时安全的：clientPromise 直接替换，无需重启。）
 				autoUpdater.setFeedURL({ provider: "github", owner: UPDATE_REPO_OWNER, repo: UPDATE_REPO });
 			}
+		},
+		setAllowPrerelease: (enabled: boolean) => {
+			// electron-updater 的 allowPrerelease 默认按当前版本号是否含 prerelease 段推断；
+			// 显式赋值是声明式保障（dev 恒 true / stable 恒 false，见 UpdateService.applyUpdateSource）。
+			autoUpdater.allowPrerelease = enabled;
 		},
 		checkForUpdates: async () => {
 			const result = await autoUpdater.checkForUpdates();

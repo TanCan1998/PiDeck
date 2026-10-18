@@ -2,8 +2,25 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
-const { applyPiProxyMode, aggregateDshProxyMode, buildHostProxyEnvPatch, applyProxyEnvPatch, PROXY_ENV_KEYS, resolveModelProxyMode, resolveListedProxyMode, resolveEffectiveSessionProxyMode, resolveDshHostProxyMode, applyPiProxyModeWithProvider, computeGenProxyKey, buildPiProxyEnvPatch } =
-	loadTsCommonJs("src/main/sessions/sessionProxyPolicy.ts");
+const {
+	applyPiProxyMode,
+	aggregateDshProxyMode,
+	buildHostProxyEnvPatch,
+	applyProxyEnvPatch,
+	PROXY_ENV_KEYS,
+	PIDECK_PI_PROXY_SCOPE,
+	PIDECK_PI_PROXY_SCOPE_MODEL_ONLY,
+	resolveModelProxyMode,
+	resolveListedProxyMode,
+	resolveEffectiveSessionProxyMode,
+	resolveDshHostProxyMode,
+	applyPiProxyModeWithProvider,
+	computeGenProxyKey,
+	buildPiProxyEnvPatch,
+} = loadTsCommonJs("src/main/sessions/sessionProxyPolicy.ts");
+
+// 名单启用判据与设置页共用（设置页据此置灰主开关）。
+const { hasPiProxyListFilter } = loadTsCommonJs("src/shared/piProxyList.ts");
 
 // 注：loadTsCommonJs 跨 vm realm 加载，对象原型与本地不同，deepEqual 会因 prototype
 // 不等而失败；统一用逐字段断言。
@@ -132,6 +149,28 @@ test("applyPiProxyModeWithProvider: 模型名单内即使全局关闭也强制�
 	assert.equal(applyPiProxyModeWithProvider(noList, "follow", "openai", "gpt-4o"), noList);
 });
 
+test("hasPiProxyListFilter: 为真 ⟺ 主开关不再参与决策（设置页置灰判据与策略同源）", () => {
+	const cases = [
+		{ providers: [], models: [] },
+		{ providers: [], models: ["openai/gpt-4o"] },
+		{ providers: ["openai"], models: [] },
+		{ providers: ["openai"], models: ["anthropic/claude-3-5-sonnet"] },
+	];
+	for (const { providers, models } of cases) {
+		const listActive = hasPiProxyListFilter(providers, models);
+		for (const provider of ["openai", "anthropic"]) {
+			for (const modelId of ["gpt-4o", "claude-3-5-sonnet"]) {
+				const base = { piProxyUrl: "http://127.0.0.1:7890", piProxyProviders: providers, piProxyModels: models };
+				const off = applyPiProxyModeWithProvider({ ...base, piProxyEnabled: false }, "follow", provider, modelId);
+				const on = applyPiProxyModeWithProvider({ ...base, piProxyEnabled: true }, "follow", provider, modelId);
+				const switchMatters = off.piProxyEnabled !== on.piProxyEnabled;
+				// 名单非空 → 开关彻底失效（置灰是诚实的）；名单为空 → 开关决定结果（不能误置灰）。
+				assert.equal(switchMatters, !listActive, `名单 ${JSON.stringify({ providers, models })} 在 ${provider}/${modelId} 上主开关应${listActive ? "失效" : "生效"}`);
+			}
+		}
+	}
+});
+
 test("computeGenProxyKey: 序列化实际生效的代理状态（含名单命中/绕过列表）", () => {
 	const base = { piProxyEnabled: false, piProxyUrl: "http://127.0.0.1:7890", piProxyBypass: "", piProxyModels: ["openai/gpt-4o"] };
 	// 全局关但名单命中 → 强制 on（指纹 on + URL）
@@ -192,6 +231,7 @@ test("buildPiProxyEnvPatch: 开启代理必须带 NODE_USE_ENV_PROXY=1（否则 
 	assert.ok(patch, "开启且 URL 非空时必须返回 patch");
 	// 回归核心：这一项缺失 = 用户的代理设置对 pi 的模型请求完全无效。
 	assert.equal(patch.NODE_USE_ENV_PROXY, "1");
+	assert.equal(patch[PIDECK_PI_PROXY_SCOPE], PIDECK_PI_PROXY_SCOPE_MODEL_ONLY);
 	// 标准代理键大小写双份（覆盖 win/mac/linux 工具链）
 	for (const key of PROXY_ENV_KEYS) assert.equal(patch[key], "http://127.0.0.1:7890");
 	// 未配 bypass 时不注入 NO_PROXY，避免空值把系统既有绕过规则清掉

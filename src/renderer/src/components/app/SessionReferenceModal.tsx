@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { X } from "lucide-react";
+import { Loader2, X } from "lucide-react";
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from "../ui-shadcn/dialog";
 import { Button } from "../ui-shadcn/button";
 import { cn } from "../../lib/utils";
@@ -163,7 +163,7 @@ export function SessionReferenceModal(props: { session: SessionSummary; onClose:
 		<Dialog open onOpenChange={(next) => !next && props.onClose()}>
 			<DialogContent
 				showCloseButton={false}
-				className={cn("flex h-[min(650px,calc(100vh-48px))] w-[min(780px,calc(100vw-48px))] max-w-[min(780px,calc(100vw-48px))] flex-col gap-0 overflow-hidden rounded-lg border border-border bg-bg-panel p-0 shadow-[var(--shadow-xl)]", "animate-in fade-in-0 slide-in-from-bottom-2 duration-150")}
+				className={cn("flex h-[min(650px,calc(100vh-48px))] w-[min(780px,calc(100vw-48px))] max-w-[min(780px,calc(100vw-48px))] flex-col gap-0 overflow-hidden rounded-lg border border-border bg-bg-panel p-0 shadow-[var(--shadow-modal)]", "animate-in fade-in-0 slide-in-from-bottom-2 duration-fast")}
 			>
 				<DialogHeader className="flex-row items-center justify-between px-4 py-3">
 					<DialogTitle>{`${t("sessionRef.title")}: ${props.session.name ?? props.session.filePath}`}</DialogTitle>
@@ -175,7 +175,12 @@ export function SessionReferenceModal(props: { session: SessionSummary; onClose:
 				</DialogHeader>
 
 				<div className="min-h-0 flex-1 overflow-y-auto px-3 py-2.5">
-					{loading && <div className="flex items-center justify-center px-4 py-10 text-caption text-text-tertiary">{t("common.loading")}...</div>}
+					{loading && (
+						<div className="flex items-center justify-center gap-2 px-4 py-10 text-caption text-text-tertiary">
+							<Loader2 size={14} className="animate-pideck-spin" aria-hidden="true" />
+							{t("common.loading")}...
+						</div>
+					)}
 					{error && (
 						<div className="flex items-center justify-center px-4 py-10 text-caption text-[var(--color-error)]">
 							{t("sessionRef.loadError")}: {error}

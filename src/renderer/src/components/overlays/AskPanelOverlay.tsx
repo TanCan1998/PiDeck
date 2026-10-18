@@ -4,6 +4,7 @@ import { Check, ChevronDown, ChevronRight, Clipboard, CornerDownLeft, Loader2, M
 import removeMarkdown from "remove-markdown";
 import { useAskPanel } from "../../hooks/useAskPanel";
 import { claimSessionRuntimeUiResponseAtom, rollbackSessionRuntimeUiResponseAtom, sessionMessageCacheBySessionIdAtomFamily } from "../../atoms/session-atoms";
+import { recordAskEchoAtom } from "../../atoms/ask-echo-atoms";
 import { sessionRuntimeBySessionIdAtomFamily, sessionRuntimeUiBySessionIdAtomFamily } from "../../atoms/session-selectors";
 import { setSessionDraftAtom } from "../../atoms/composer-atoms";
 import { Input } from "../ui-shadcn/input";
@@ -50,6 +51,7 @@ export function AskPanelOverlay() {
 	const sessionRuntimeUi = useAtomValue(sessionRuntimeUiBySessionIdAtomFamily(sessionId ?? ""));
 	const claimSessionUiResponse = useSetAtom(claimSessionRuntimeUiResponseAtom);
 	const rollbackSessionUiResponse = useSetAtom(rollbackSessionRuntimeUiResponseAtom);
+	const setRecordAskEcho = useSetAtom(recordAskEchoAtom);
 	const runtimeRef = useRef(runtime);
 	runtimeRef.current = runtime;
 
@@ -78,9 +80,11 @@ export function AskPanelOverlay() {
 			claim: claimSessionUiResponse,
 			rollback: rollbackSessionUiResponse,
 			send: (input) => desktopApi.sessions.sendUiResponse(input),
+			// 与 SessionRuntimeInjector 同源：应答成功后捕获 DSH 时间线回显（atom 内部按 backend 门控）
+			onAccepted: (request, response) => setRecordAskEcho({ sessionId, request, response }),
 			onError: (error) => showNotice(error instanceof Error ? error.message : String(error), 4000),
 		});
-	}, [claimSessionUiResponse, rollbackSessionUiResponse, runtime?.agentId, runtime?.runtimeGeneration, sessionId]);
+	}, [claimSessionUiResponse, rollbackSessionUiResponse, setRecordAskEcho, runtime?.agentId, runtime?.runtimeGeneration, sessionId]);
 
 	// 会话切换（新的并行问询）时收起上次的详情浮层并回到默认位置
 	useEffect(() => {
@@ -232,13 +236,13 @@ export function AskPanelOverlay() {
 						<div className="min-w-0">
 							<div className="truncate text-sm font-medium">{t("askPanel.title")}</div>
 							{questionSummary || summary ? (
-								<div className="truncate text-[11px] text-muted-foreground" title={questionSummary || summary}>
+								<div className="truncate text-micro text-muted-foreground" title={questionSummary || summary}>
 									{questionSummary || summary}
 								</div>
 							) : null}
 						</div>
 						{running ? (
-							<span className="inline-flex shrink-0 items-center gap-1 text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
+							<span className="inline-flex shrink-0 items-center gap-1 text-micro font-medium text-emerald-600 dark:text-emerald-400">
 								<span className="size-1.5 animate-pulse rounded-full bg-emerald-500" aria-hidden="true" />
 								{t("askPanel.running")}
 							</span>
@@ -293,7 +297,7 @@ export function AskPanelOverlay() {
 							submitFollowUp();
 						}}
 					>
-						<Input className="min-w-0 flex-1 h-8 rounded-md px-2.5 py-1 text-sm focus-visible:ring-0" value={followUpText} onChange={(event) => setFollowUpText(event.target.value)} placeholder={t("askPanel.followUpPlaceholder")} aria-label={t("askPanel.followUpPlaceholder")} disabled={panel.creating} />
+						<Input size="sm" className="min-w-0 flex-1 rounded-md px-2.5 py-1 text-sm focus-visible:ring-0" value={followUpText} onChange={(event) => setFollowUpText(event.target.value)} placeholder={t("askPanel.followUpPlaceholder")} aria-label={t("askPanel.followUpPlaceholder")} disabled={panel.creating} />
 						<button type="submit" className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/60 hover:text-foreground disabled:opacity-40" aria-label={t("askPanel.sendFollowUp")} title={t("askPanel.sendFollowUp")} disabled={panel.creating || !followUpText.trim()}>
 							<Send size={13} aria-hidden="true" />
 						</button>

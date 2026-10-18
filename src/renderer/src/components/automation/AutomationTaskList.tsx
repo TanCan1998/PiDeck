@@ -54,16 +54,13 @@ function runStatusLabel(status: AutomationRun["status"]): string {
 	}
 }
 
-function runStatusTone(status: AutomationRun["status"]): string {
-	if (status === "succeeded") return "border-emerald-500/30 bg-emerald-500/15 text-emerald-500";
-	if (status === "failed" || status === "timed-out" || status === "budget-exhausted" || status === "interrupted") {
-		return "border-destructive/30 bg-destructive/15 text-destructive";
-	}
-	if (status === "aborted") return "border-amber-500/30 bg-amber-500/15 text-amber-500";
-	if (status === "queued" || status === "starting" || status === "running") {
-		return "border-sky-500/30 bg-sky-500/15 text-sky-500";
-	}
-	return "border-border bg-muted/50 text-muted-foreground";
+/** 运行状态 → badge 语义档：色值与尺寸都由 Badge 承担，这里只做角色映射。 */
+function runStatusVariant(status: AutomationRun["status"]): "success" | "danger" | "warning" | "info" | "neutral" {
+	if (status === "succeeded") return "success";
+	if (status === "failed" || status === "timed-out" || status === "budget-exhausted" || status === "interrupted") return "danger";
+	if (status === "aborted") return "warning";
+	if (status === "queued" || status === "starting" || status === "running") return "info";
+	return "neutral";
 }
 
 /**
@@ -144,7 +141,7 @@ export function AutomationTaskList({ projectId, onEditTask, onCreateTask }: Auto
 				<span className="text-xs text-muted-foreground">
 					{t("automation.tasksTab")} ({tasks.length})
 				</span>
-				<span className="text-[11px] text-muted-foreground">{t("automation.freshSessionHint")}</span>
+				<span className="text-micro text-muted-foreground">{t("automation.freshSessionHint")}</span>
 			</div>
 
 			<div className="overflow-hidden rounded-lg border border-border/60 bg-bg-panel/30">
@@ -174,13 +171,17 @@ export function AutomationTaskList({ projectId, onEditTask, onCreateTask }: Auto
 											<div className="flex min-w-0 items-center gap-1.5">
 												<span className="truncate text-xs font-medium text-foreground">{task.name}</span>
 												{task.mode === "plan" && (
-													<Badge variant="outline" className="h-5 px-1.5 text-[10px] font-normal">
+													<Badge variant="outline" size="sm">
 														{t("app.composerModePlan")}
 													</Badge>
 												)}
-												{task.mode === "goal" && <Badge className="h-5 border-amber-500/30 bg-amber-500/15 px-1.5 text-[10px] font-normal text-amber-600">{t("app.composerModeGoal")}</Badge>}
+												{task.mode === "goal" && (
+													<Badge variant="warning" size="sm">
+														{t("app.composerModeGoal")}
+													</Badge>
+												)}
 											</div>
-											<p className="max-w-80 truncate font-mono text-[11px] text-muted-foreground" title={task.prompt}>
+											<p className="max-w-80 truncate font-mono text-micro text-muted-foreground" title={task.prompt}>
 												{task.prompt}
 											</p>
 										</div>
@@ -191,30 +192,32 @@ export function AutomationTaskList({ projectId, onEditTask, onCreateTask }: Auto
 										</TableCell>
 									)}
 									<TableCell>
-										<span className="font-mono text-[11px] text-muted-foreground" title={schedule}>
+										<span className="font-mono text-micro text-muted-foreground" title={schedule}>
 											{schedule}
 										</span>
 									</TableCell>
 									<TableCell>
-										<Badge className={`h-5 border px-1.5 text-[10px] font-normal ${isRunning ? "animate-pulse border-sky-500/30 bg-sky-500/15 text-sky-500" : task.enabled ? "border-emerald-500/30 bg-emerald-500/15 text-emerald-500" : "border-border bg-muted/50 text-muted-foreground"}`}>
+										<Badge variant={isRunning ? "info" : task.enabled ? "success" : "neutral"} size="sm" className={isRunning ? "animate-pulse" : undefined}>
 											{isRunning ? t("automation.running") : task.enabled ? t("automation.enabled") : t("automation.disabled")}
 										</Badge>
 									</TableCell>
-									<TableCell className="text-[11px] text-muted-foreground">{task.nextRunAt ? formatTime(task.nextRunAt) : t("automation.manualTrigger")}</TableCell>
+									<TableCell className="text-micro text-muted-foreground">{task.nextRunAt ? formatTime(task.nextRunAt) : t("automation.manualTrigger")}</TableCell>
 									<TableCell>
 										{latestRun ? (
 											<div className="flex flex-col gap-1">
-												<Badge className={`h-5 w-fit border px-1.5 text-[10px] font-normal ${runStatusTone(latestRun.status)}`}>{runStatusLabel(latestRun.status)}</Badge>
-												<span className="text-[11px] text-muted-foreground">{formatTime(latestRun.updatedAt)}</span>
+												<Badge variant={runStatusVariant(latestRun.status)} size="sm">
+													{runStatusLabel(latestRun.status)}
+												</Badge>
+												<span className="text-micro text-muted-foreground">{formatTime(latestRun.updatedAt)}</span>
 											</div>
 										) : (
-											<span className="text-[11px] text-muted-foreground">{t("automation.neverRun")}</span>
+											<span className="text-micro text-muted-foreground">{t("automation.neverRun")}</span>
 										)}
 									</TableCell>
 									<TableCell>
 										<div className="flex items-center justify-end gap-1">
 											<Switch checked={task.enabled} onCheckedChange={(checked) => handleToggleEnable(task, checked)} aria-label={task.enabled ? t("automation.enabled") : t("automation.disabled")} />
-											<Button type="button" variant="ghost" size="icon-sm" className="size-7 text-emerald-500 hover:bg-emerald-500/10 hover:text-emerald-500" disabled={isRunning || isTriggering} title={t("automation.runNow")} aria-label={t("automation.runNow")} onClick={() => handleRunNow(task)}>
+											<Button type="button" variant="ghost" size="icon-sm" className="size-7 text-success hover:bg-success/10 hover:text-success" disabled={isRunning || isTriggering} title={t("automation.runNow")} aria-label={t("automation.runNow")} onClick={() => handleRunNow(task)}>
 												<Play className="size-3.5" />
 											</Button>
 											<Button type="button" variant="ghost" size="icon-sm" className="size-7 text-muted-foreground hover:bg-muted hover:text-foreground" title={t("automation.editTask")} aria-label={t("automation.editTask")} onClick={() => onEditTask(task)}>

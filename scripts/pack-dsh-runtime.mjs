@@ -416,16 +416,13 @@ function resolveClosureNodeModulesRoot() {
 	console.log(`[pack-dsh-runtime] 交叉解析: ${target.os}-${target.arch}` + (target.libc ? ` libc=${target.libc}` : "") + ` （${keys.length} 个 lock 条目，--ignore-scripts）`);
 	// 交叉解析只下 prebuild 与 JS，不需要任何 install 脚本；--ignore-scripts 同时
 	// 是供应链面收窄（不在用户机上跑第三方 postinstall）。
-	const npmArgs = [
-		"install",
-		"--no-audit",
-		"--no-fund",
-		...npmPlatformArgs(target),
-		"--cache",
-		resolve(join(projectRoot, "node_modules/.cache/dsh-cross-npm")),
-		// 优先本地缓存/离线；首次运行仍会真实下载，但不会跳过 registry 校验。
-		"--prefer-offline",
-	];
+	// ⚠不要加 --prefer-offline：共享缓存 node_modules/.cache/dsh-cross-npm 可能留着
+	// 上一个 dsh 大版本（0.1.5-rc.1）抓的 packument，--prefer-offline 会在 TTL 内直接信任
+	// 过期元数据而不 revalidate。2026-09-30 实证：缓存里 @deepseek-ai/cosmokit 的 packument
+	// 停更在 1.8.3，dsh 0.2.0-rc.2 要求 ~1.8.5 → npm 报 ETARGET/cosmokit，同时把
+	// dsh-agent-preset 的 peer cordis 报成「cordis@undefined」的 ERESOLVE（误导性极强，
+	// 实际与版本无关）。默认行为会 revalidate 元数据（缓存命中时 <1s）且 tarball 仍走缓存。
+	const npmArgs = ["install", "--no-audit", "--no-fund", ...npmPlatformArgs(target), "--cache", resolve(join(projectRoot, "node_modules/.cache/dsh-cross-npm"))];
 	try {
 		execFileSync("npm", npmArgs, { cwd: crossWorkspace, stdio: "inherit", shell: process.platform === "win32" });
 	} catch (error) {
@@ -553,7 +550,7 @@ const manifest = {
 	maxAppVersion: "",
 	// 见文件头说明：归档哈希由下载源索引提供，这里留空。
 	archiveSha256: "",
-	// 0.1.5（Typert Remote 迁移，见 docs/dsh-0.1.5-typert-migration.md）：
+	// Typert Remote 契约（见 docs/dsh-remote-contract.md）：
 	// dsh-host-apiproxy 已废，fetch 半在 dsh-client-connection，网关在
 	// dsh-api-gateway（base 补丁自带），领域端点在 dsh-api-session-controller。
 	requiredPackages: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-app-boot", "@deepseek-ai/dsh-cmdline", "@deepseek-ai/dsh-client-connection", "@deepseek-ai/dsh-api-gateway", "@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-api-session-controller"],

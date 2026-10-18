@@ -40,7 +40,8 @@ export function FetchedModelCombobox(props: { models: FetchedModel[]; value: str
 					value={filter}
 					onChange={(e) => setFilter(e.target.value)}
 					placeholder={t("config.modelSearchPlaceholder")}
-					className="h-7 min-w-0 flex-1 rounded-sm border border-border-subtle bg-bg-popover px-2.5 text-control text-text-primary outline-none transition-[border-color,box-shadow,background-color] duration-150 focus:border-[var(--color-accent)] focus:shadow-[var(--focus-ring)]"
+					size="sm"
+					className="min-w-0 flex-1 rounded-sm border border-border-subtle bg-bg-popover px-2.5 text-control text-text-primary outline-none transition-[border-color,box-shadow,background-color] duration-150 focus:border-[var(--color-accent)] focus:shadow-[var(--focus-ring)]"
 				/>
 				<Button
 					type="button"
@@ -60,7 +61,7 @@ export function FetchedModelCombobox(props: { models: FetchedModel[]; value: str
 					{allSelectableSelected ? t("common.deselectAll") : t("common.selectAll")}
 				</Button>
 			</div>
-			<div className="text-[11px] text-text-tertiary">
+			<div className="text-micro text-text-tertiary">
 				<span>
 					{t("config.modelFetchSelectionSummary", {
 						selected: selectedModels.length,
@@ -82,9 +83,9 @@ export function FetchedModelCombobox(props: { models: FetchedModel[]; value: str
 							aria-pressed={selected}
 						>
 							<span className="min-w-0 truncate font-medium">{model.name ?? model.id}</span>
-							{model.name && model.name !== model.id && <span className="truncate text-[11px] text-text-tertiary">{model.id}</span>}
+							{model.name && model.name !== model.id && <span className="truncate text-micro text-text-tertiary">{model.id}</span>}
 							{selected && !configured && <Check size={12} className="shrink-0" />}
-							{configured && <span className="shrink-0 rounded-sm bg-bg-muted px-1.5 py-0.5 text-[11px] leading-tight text-text-tertiary">{t("config.configured")}</span>}
+							{configured && <span className="shrink-0 rounded-sm bg-bg-muted px-1.5 py-0.5 text-micro leading-tight text-text-tertiary">{t("config.configured")}</span>}
 						</button>
 					);
 				})}

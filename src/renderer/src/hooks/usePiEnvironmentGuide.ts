@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { t } from "../i18n";
-import type { PiInstallExecResult, PiRuntimeNodeStatus } from "../../../shared/types";
+import type { PiInstallation, PiInstallExecResult, PiRuntimeNodeStatus } from "../../../shared/types";
 import type { PiDesktopApi } from "../../../preload";
 
 /**
@@ -30,6 +30,11 @@ export function usePiEnvironmentGuide(api: PiDesktopApi) {
 	const [piInstalling, setPiInstalling] = useState(false);
 	const [piInstallResult, setPiInstallResult] = useState<PiInstallExecResult | null>(null);
 	const [piInstallDone, setPiInstallDone] = useState(false);
+	/**
+	 * 引导安装被主进程拦下时的现场：本机已经装了 pi，因此没有安装新副本。
+	 * 非空时面板不再展示安装按钮（用户没有东西可装）。
+	 */
+	const [piAlreadyInstalled, setPiAlreadyInstalled] = useState<PiInstallation[]>([]);
 
 	const mountedRef = useRef(true);
 	useEffect(() => {
@@ -118,9 +123,17 @@ export function usePiEnvironmentGuide(api: PiDesktopApi) {
 	const installPiForGuide = useCallback(async () => {
 		setPiInstalling(true);
 		setPiInstallResult(null);
+		// 每次开始安装都先清掉「已存在」提示：否则上一轮的提示会盖住本轮的真实结果。
+		setPiAlreadyInstalled([]);
 		try {
 			const result = await api.pi.runtimePiInstall(piUseMirror);
 			if (!mountedRef.current) return;
+			// 主进程的硬约束：本机已有 pi 就直接不装（不只是 UI 不展示引导），
+			// 把现场（已有哪几份）带回来给用户看，避免他以为「没装成功」而反复点。
+			if (result.alreadyInstalled && result.alreadyInstalled.length > 0) {
+				setPiAlreadyInstalled(result.alreadyInstalled);
+				return;
+			}
 			setPiInstallResult(result);
 			if (result.success && result.exitCode === 0) {
 				setPiInstallDone(true);
@@ -151,6 +164,7 @@ export function usePiEnvironmentGuide(api: PiDesktopApi) {
 		setPiInstalling(false);
 		setPiInstallResult(null);
 		setPiInstallDone(false);
+		setPiAlreadyInstalled([]);
 	}, []);
 
 	return {
@@ -166,6 +180,7 @@ export function usePiEnvironmentGuide(api: PiDesktopApi) {
 		piInstalling,
 		piInstallResult,
 		piInstallDone,
+		piAlreadyInstalled,
 		// setters
 		setPiUseMirror,
 		// commands

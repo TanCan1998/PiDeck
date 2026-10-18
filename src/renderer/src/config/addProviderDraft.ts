@@ -30,6 +30,19 @@ export type AddProviderDraft = {
 	};
 	/** 弹窗内维护的模型草稿（新增=空；编辑=现有模型；获取模型勾选后追加）。 */
 	models: ModelItem[];
+	/**
+	 * 逐模型 UA 覆盖（models.json 的 provider.modelOverrides，按 modelId 建键）。
+	 * 三态：undefined = 表单不管这项（保留原 provider 的值）；`{}` = 显式清空；有值 = 以它为准。
+	 */
+	modelOverrides?: Record<string, Record<string, unknown>>;
+	/**
+	 * 新增页缓冲的「每模型默认思考档位」（modelId → 档位）：新增时 provider 还没有名字，
+	 * 写不进 settings.json 的 `provider/modelId` 键，确认时由 ConfigModal 按最终名字落盘。
+	 * 只有新增页会填；编辑页即时写回（同一个宿主回调），不重复落盘。
+	 */
+	modelThinkingLevelDefaults?: Record<string, string>;
+	/** 新增页缓冲的「要隐藏的模型 id」（确认时并入 AppSettings.hiddenModels；编辑页即时生效）。 */
+	hiddenModelIds?: string[];
 };
 
 /**
@@ -60,6 +73,32 @@ export function resolveInitialReasoningContentReplay(
 }
 
 /**
+ * 供应商编辑页的初始化重置键：重置只由「页面模式 + 编辑对象身份」决定，与 initial 的
+ * 引用无关。ModelsTab 在 JSX 内联构造预填对象，父组件刷新会传内容相同、引用不同的
+ * initial；初始化 effect 若按引用做依赖，会把用户未保存的 API 类型 / User-Agent 草稿
+ * 和测试结果整体冲回旧配置（issue #311）。键语义：
+ *  - 同一供应商同一模式内的父组件刷新 → 键不变，不重置（保草稿与测试结果）；
+ *  - 切换供应商 / add↔edit / 编辑对象消失 → 键变化，重新初始化。
+ * 参数只取结构子集（不依赖 UI 层的 ProviderDialogInitial），因此可在单测直接调用。
+ */
+export function providerDialogResetKey(mode: "add" | "edit", initial: { name: string } | undefined): string {
+	return `${mode}:${mode === "edit" ? (initial?.name ?? "") : ""}`;
+}
+
+/**
+ * 「获取模型」成功后的 baseUrl 归一化：检测侧若走通了版本路径（/v1 等）而草稿
+ * 仍是不带版本的根路径，会返回 suggestedBaseUrl（见 ConfigManager.fetchProviderModels）。
+ * pi 会话原样使用 models.json 的 baseUrl，不改写则「拉取正常、会话 404」。
+ * 与设置页展开卡片的 applySuggestedBaseUrl 同一语义，抽成纯函数便于单测。
+ */
+export function resolveFetchedBaseUrl(currentBaseUrl: string, suggestedBaseUrl?: string): { baseUrl: string; changed: boolean } {
+	const next = (suggestedBaseUrl ?? "").trim().replace(/\/+$/, "");
+	const current = (currentBaseUrl ?? "").trim().replace(/\/+$/, "");
+	if (!next || next === current) return { baseUrl: currentBaseUrl, changed: false };
+	return { baseUrl: next, changed: true };
+}
+
+/**
  * 弹窗草稿 → models.json provider 配置。
  * 空字段不写入（与手写 models.json 一致）；User-Agent 走 headers；
  * compat 全 false 不写（与 pi 默认一致）；baseUrl 去除首尾空白。
@@ -73,6 +112,8 @@ export function resolveInitialReasoningContentReplay(
  */
 export function buildProviderConfigFromDraft(draft: AddProviderDraft): ProviderConfig {
 	const provider: ProviderConfig = { models: draft.models ?? [] };
+	// 新增页自己维护逐模型 UA（与展开卡片写同一存储位置 provider.modelOverrides）
+	if (draft.modelOverrides && Object.keys(draft.modelOverrides).length > 0) provider.modelOverrides = draft.modelOverrides;
 	if (draft.baseUrl.trim()) provider.baseUrl = draft.baseUrl.trim();
 	if (draft.api) provider.api = draft.api;
 	if (draft.apiKey.trim()) provider.apiKey = draft.apiKey.trim();
@@ -99,21 +140,28 @@ export function buildProviderConfigFromDraft(draft: AddProviderDraft): ProviderC
 /**
  * 编辑供应商页保存：以原 provider 为基底合并草稿，保留表单不拥有的字段。
  *
- * 为什么不能用 buildProviderConfigFromDraft 重建：那会把 oauth / authHeader /
- * modelOverrides / 自定义字段以及除 User-Agent 外的自定义 headers 静默丢掉
+ * 为什么不能用 buildProviderConfigFromDraft 重建：那会把 oauth / authHeader
+ * 以及除 User-Agent、modelOverrides 外的自定义字段与自定义 headers 静默丢掉
  * （展开卡片的内联编辑是原地改同一个对象，不会丢——两条入口行为不一致）。
  * 这里统一为「加载的 models.json 是 source of truth，表单只覆盖它拥有的字段」
  * （与 JSON Merge Patch / Kubernetes patch 的保真思路一致）：
  * - models / baseUrl / api / apiKey：表单拥有，空值 = 删除字段；
  * - headers：逐键合并，只覆盖 User-Agent，保留 X-App-URL / 鉴权头等自定义头；
  * - compat：合并两个已知布尔并保留未知子键；原本没有 compat 且两项都 false 时不凭空创建；
- * - 其余字段（oauth / authHeader / modelOverrides / 未知字段）原样透传。
+ * - modelOverrides（逐模型 UA）：表单拥有，草稿带值就整体覆盖（见字段三态注释）；
+ * - 其余字段（oauth / authHeader / 未知字段）原样透传。
  * original 为空（新增模式）时等价于 buildProviderConfigFromDraft。
  */
 export function mergeProviderDraft(original: ProviderConfig | undefined, draft: AddProviderDraft): ProviderConfig {
 	if (!original) return buildProviderConfigFromDraft(draft);
 	const next: ProviderConfig = { ...original };
 	next.models = draft.models ?? [];
+	// modelOverrides：表单拥有（编辑页草稿初值就是原 provider 的值），三态语义见 AddProviderDraft。
+	// 原来靠「其余字段透传」保留它，现在由弹窗读写，必须显式处理清空（`{}`）与不管（undefined）。
+	if (draft.modelOverrides !== undefined) {
+		if (Object.keys(draft.modelOverrides).length > 0) next.modelOverrides = draft.modelOverrides;
+		else delete next.modelOverrides;
+	}
 	if (draft.baseUrl.trim()) next.baseUrl = draft.baseUrl.trim();
 	else delete next.baseUrl;
 	if (draft.api) next.api = draft.api;

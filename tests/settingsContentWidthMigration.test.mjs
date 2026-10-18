@@ -71,7 +71,7 @@ test("UI 2.0: messages and composer share inline width, not parent padding", () 
 	assert.match(composerArea, /className="composer[^"]*px-0 pb-2"/);
 	assert.match(timelineCss, /\.composer \{[\s\S]*?padding-inline: 0;/);
 	assert.doesNotMatch(timelineCss, /\.composer \{[\s\S]*?padding: var\(--space-1\) var\(--space-2\)/);
-	assert.match(timeline, /className="message-list min-w-0 w-full mx-auto transition-opacity duration-150"/);
+	assert.match(timeline, /className="message-list min-w-0 w-full mx-auto transition-opacity duration-fast"/);
 	assert.match(composerPanels, /<ComposerWidgetFrame[\s\S]*?className="queued-track"/);
 	assert.match(runtimeOverlay, /ask-inline-bar ask-inline-bar--active w-full/);
 });

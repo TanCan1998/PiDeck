@@ -201,7 +201,12 @@ test("startup prefetch hydrates capabilities after WSL configuration", () => {
 	assert.match(indexSource, /syncWslConfig\(\)\s*\.?\s*then\(async \(\) =>/);
 	assert.match(indexSource, /piModelCapabilityCache\?\.watchConfigDirectory\(\)/);
 	assert.match(indexSource, /await piModelCapabilityCache\?\.ensure\(\)/);
-	assert.doesNotMatch(indexSource, /getCachedModelList\(\)/);
+	// 启动 prefetch 链必须异步水合，不得用同步 getCachedModelList() 顶替；
+	// getCachedModelList 允许出现在新会话预选路径（05fe4f3ef 有意引入），
+	// 所以只锁 prefetch 片段而不是整个文件。
+	const prefetchBlock = indexSource.match(/void syncWslConfig\(\)[\s\S]*?watchConfigDirectory\(\);/)?.[0] ?? "";
+	assert.ok(prefetchBlock.length > 100, "prefetch block not found in index.ts");
+	assert.doesNotMatch(prefetchBlock, /getCachedModelList\(\)/);
 });
 
 test("older pi unknown-option and empty CLI fall back to local models.json", () => {
@@ -260,8 +265,13 @@ test("welcome page explicit model/thinking selections persist and are promoted i
 	// 模型偏好按后端写到各自的键（issue #253）：DSH 的 route 名不能进 pi 的偏好。
 	assert.match(picker, /localStorage\.setItem\(\s*isDshSession \? WELCOME_DSH_MODEL_KEY : WELCOME_MODEL_KEY/);
 	assert.match(picker, /localStorage\.setItem\(WELCOME_THINKING_KEY, level\)/);
-	assert.match(components, /readWelcomeThinkingPreference\(\)\?\.thinkingLevel/);
-	assert.match(components, /fallback: welcomeThinking \?\? props\.defaultThinkingLevel/);
+	// 思考展示直接消费唯一偏好 owner；底栏不再自己计算另一份默认值。
+	assert.match(pickerHost, /current=\{preference\.currentThinkingLevel\}/);
+	assert.match(components, /thinkingControl=\{props\.thinkingControl\}/);
+	assert.match(picker, /readWelcomeThinkingPreference\(\)\?\.thinkingLevel/);
+	// 每模型默认插在显式点选与全局默认之间，必须按当前展示的模型查表。
+	assert.match(picker, /modelThinkingLevelOfMap\(\s*options\.modelThinkingLevels,\s*resolvedLiveModel\.provider,\s*resolvedLiveModel\.modelId\s*\)/);
+	assert.match(picker, /fallback:\s*welcomeThinking\s*\?\?\s*perModelThinkingDefault\s*\?\?\s*options\.defaultThinkingLevel\s*\?\?\s*currentModelEntry\?\.defaultEffort/);
 	assert.match(app, /const welcomeThinking = readWelcomeThinkingPreference\(\)\?\.thinkingLevel/);
 	assert.match(app, /welcomeThinking \? \{ thinkingLevel: welcomeThinking \} : \{\}/);
 	// 通用新建会话 action 只接收调用方显式 preferences，不应暗中读取欢迎页 localStorage。

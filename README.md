@@ -11,7 +11,7 @@
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![Electron](https://img.shields.io/badge/Electron-38-47848f)
 ![React](https://img.shields.io/badge/React-19-61dafb)
-![Version](https://img.shields.io/badge/version-0.7.7-blue)
+![Version](https://img.shields.io/badge/version-0.9.1-blue)
 
 国内 AtomGit 托管：https://atomgit.com/ayuayue/PiDeck
 <!-- 预留 AtomGit G-Star 徽章位（替换占位链接后启用）
@@ -61,7 +61,7 @@
   - [📑 目录](#-目录)
   - [✨ 核心亮点](#-核心亮点)
   - [📋 更新日志](#-更新日志)
-    - [v0.7.7 更新亮点](#v077-更新亮点)
+    - [v0.7.8 更新亮点](#v078-更新亮点)
   - [🧩 功能总览](#-功能总览)
     - [工作区与项目](#工作区与项目)
     - [会话与对话](#会话与对话)
@@ -80,6 +80,7 @@
   - [🤝 参与贡献](#-参与贡献)
   - [💬 社区交流](#-社区交流)
   - [🔒 安全与隐私](#-安全与隐私)
+  - [🛒 作者的小店](#-作者的小店)
   - [☕ 赞助](#-赞助)
   - [License](#license)
 
@@ -100,25 +101,11 @@
 
 ## 📋 更新日志
 
-> **最新版本 v0.7.7**（2026-09-22）
+> **最新版本 v0.9.1 (2026-10-14)**（2026-10-14）
 
-### v0.7.7 更新亮点
-- 🚀 **工作区文件按名称搜索（#215）**
-- 🚀 **从其他目录导入会话（项目移动 / 改名后找回历史）**
-- 🚀 **外部资源导入（MCP / 技能 / 提示词）**
-- 🚀 **严格工具采样可显式开关（`compat.supportsStrictMode`）**
-- 🚀 **供应商、模型与认证的隐藏与自定义排序**
-- 🚀 **新增「切换模型」与「思考强度循环」快捷键（Ctrl+M / Ctrl+T，macOS ⌘⌥M / ⌘⌥T）**
-- 🚀 **会话 Tab 悬停提示显示工作区**
-- 🚀 **长时间任务的耗时显示小时档**
-- 🚀 **DSH host 可手动停止（跨重启持久）**
-- 🚀 **pi 环境引导支持一键安装便携 Node 与 pi CLI**
-- 🚀 **DSH runtime 改为单 runner 交叉打包全平台**
-- 🚀 **模型目录更新到 pi 0.86.1（1443 个模型）**
-- ✨ **第三方中转站拉不到模型 / 手填模型也用不了已修复**
-- ✨ **Provider 的 User-Agent 收敛为单个可输入下拉并扩充预设**
-- ✨ **DSH 配置目录共用风险现在会明确提示（#189）**
-- ✨ **公告提醒不再反复弹**
+### v0.9.1 (2026-10-14) 更新亮点
+- ✨ **macOS 安装包在 Apple Silicon 上无法启动**
+- ✨ **局域网访问与终端 SSH 恢复正常**
 
 [查看完整更新日志 →](CHANGELOG.zh-CN.md)
 
@@ -167,7 +154,7 @@
 |---|---|
 | **可视化配置管理** | 编辑器管理 pi 的 `models.json`、`auth.json`、`settings.json`：Provider 卡片 + 模型网格 + 类型感知键值编辑 + 源文件原始 JSON，保存后按需重启 Agent 生效。 |
 | **连接测试** | Provider 卡片一键测试连接，模型验证不再把配置回退误判为成功。 |
-| **模型能力自适应** | 兼容 pi 0.84.3：上下文窗口 / maxTokens / 思考档位按端点返回自适应，模型目录支持手动刷新，新模型不再不可见。 |
+| **模型能力自适应** | 兼容 pi 0.84.3：上下文窗口 / maxTokens / 思考档位按端点返回自适应，模型目录自动刷新（后台检测到新版本即拉取，设置里可关闭，也可手动检查），新模型不再不可见。 |
 | **用量查询** | 供应商余额/额度查询（内置 OpenRouter、Moonshot-Kimi、通用 OpenAI 兼容网关模板，支持多账号与独立端点），卡片直接显示用量，支持自定义探针配置。 |
 | **用量统计** | 基于用量统计插件的本地统计：累计概览、活跃热力图、每日用量、模型与项目维度。 |
 | **代理设置** | pi agent 子进程代理与桌面端代理独立配置，模型拉取与连接测试可走桌面端代理。 |
@@ -189,7 +176,7 @@
 | **系统托盘** | 关闭窗口默认最小化到托盘，托盘右键菜单，双击恢复窗口。 |
 | **桌面宠物** | 把多 Agent 的运行状态化作桌面上的一只小精灵：状态聚合、置顶、缩放，支持 petdex 社区宠物。 |
 | **主题与外观** | 浅色 / 暗色 / 跟随系统一键循环切换（侧栏底栏），语义化设计 token，暗色模式自然适配。 |
-| **通知** | 全局通知升级为卡片 toast，Ask 并行问询有独立系统通知开关，后台问题可保持静默。 |
+| **通知** | 全局通知升级为卡片 toast，Ask 并行问询有独立系统通知开关，后台问题可保持静默；可开启「仅失焦时提醒」，窗口在前台时不弹通知、不响铃。 |
 | **主动更新** | 应用更新始终后台检查，`autoDownloadUpdates` 默认开启；下载完成后由用户在设置页确认「重启并安装」。Windows/Linux 使用包内 updater，macOS 打开 GitHub Release 手动安装；Pi CLI 检查独立运行。 |
 | **飞书机器人** | 会话可绑定飞书机器人，在飞书群里同步消息与状态。 |
 | **局域网 Web 服务** | 设置中启动本机 Web 服务，局域网设备通过 IP + 端口访问网页版，支持双后端会话浏览与 DSH 工具面板。 |
@@ -254,6 +241,15 @@ PiDeck
 
 > PiDeck 需要单独安装 `pi` CLI 并确保其加入系统 `PATH`。
 
+### 开发版（PiDeck Dev）
+
+除正式版（PiDeck）外，项目同时发布**开发版（PiDeck Dev）**安装包，用于提前体验预发布功能：
+
+- **获取入口**：[GitHub Releases](https://github.com/ayuayue/PiDeck/releases) 中标记为 *Pre-release* 的版本（版本号带 `-beta` 或 `-beta.N` 后缀，如 `v0.7.8-beta`、`v0.8.0-beta.1`）。
+- **并行安装**：PiDeck Dev 与正式版使用独立的应用标识（appId）、安装目录与快捷方式，可同时安装、互不影响。
+- **数据模式二选一**：首次启动 PiDeck Dev 时可选择「与正式版共用数据」或「独立数据目录」，后续可在应用内切换并按引导迁移数据。
+- **协议差异**：开发版注册 `pideck-dev://` 深度链接协议，与正式版的 `pideck://` 互不抢占。
+
 环境要求：
 
 - 系统 `PATH` 中可访问 `pi` 命令
@@ -265,6 +261,16 @@ PiDeck
 pi --version
 pi --mode rpc
 ```
+
+从源码构建开发版：
+
+```bash
+npm run dist:win:dev   # Windows（NSIS + portable + zip）
+npm run dist:mac:dev   # macOS（DMG + zip）
+npm run dist:linux:dev # Linux（AppImage + deb + tar.gz）
+```
+
+产物名带 `PiDeck-Dev-` 前缀，可与 stable 包并存安装。注意 `npm run dist:win` 等 stable 系打包命令**不会**注入 dev 通道标记——版本号含 `-beta` 也不改变通道判定（通道由构建命令决定，不由版本号决定）。
 
 ---
 
@@ -323,6 +329,9 @@ A：欢迎加入文末 QQ 群 / 微信群反馈（也可加作者微信 `caoayu9
 | `npm run dist:win` | 打包 Windows（NSIS + portable + zip） |
 | `npm run dist:mac` | 打包 macOS（DMG + zip） |
 | `npm run dist:linux` | 打包 Linux（AppImage + deb + tar.gz） |
+| `npm run dist:win:dev` | 打包开发版 Windows（PiDeck Dev，dev 通道 + 独立应用身份） |
+| `npm run dist:mac:dev` | 打包开发版 macOS（PiDeck Dev，dev 通道 + 独立应用身份） |
+| `npm run dist:linux:dev` | 打包开发版 Linux（PiDeck Dev，dev 通道 + 独立应用身份） |
 | `npm run test:e2e` | 运行 Playwright 端到端测试 |
 | `npm run docs:dev` | 本地预览官网（docs-site） |
 | `npm run make-icon` | 生成图标资源到 `build/icon.svg` |
@@ -357,7 +366,7 @@ src/
 │     ├─ atoms/          # Jotai 状态（session-first）
 │     ├─ components/     # session / sidebar / workspace / ui-shadcn 等
 │     ├─ hooks/          # 渲染层 hooks
-│     ├─ i18n/           # 文案（zh-CN / en-US）
+│     ├─ i18n/           # 文案（zh-CN / zh-TW / en-US，繁体由 scripts/genZhTwCopy.mjs 生成）
 │     └─ styles/         # 按域拆分的样式 + 语义 token
 │
 └─ shared/            # 主/渲染共享类型与 IPC 通道定义
@@ -397,6 +406,16 @@ src/
 ## 🔒 安全与隐私
 
 本应用启动本地 `pi` 进程并通过 Electron IPC 暴露有限的文件操作。请仅运行你信任的源码。应用默认发送匿名、低频的 `app_heartbeat` 使用统计，用于了解版本分布、平台兼容性和活跃安装数量，可在设置中关闭；不会收集项目路径、代码、消息内容、会话内容或文件名，也不会上传文件。第三方统计服务会接收请求元数据。pi agent 子进程代理和桌面端模型拉取/测试代理可独立配置；系统浏览器打开的外部链接仍由系统浏览器网络设置决定。
+
+---
+
+## 🛒 作者的小店
+
+顺手打个广告：需要充值 ChatGPT Plus / Pro、Claude 的同学可以找我 —— 官网直充、保订阅，成品号质保订阅，可开发票（加 6% 税点）。
+
+<p align="center">
+  <a href="docs/images/gpt-recharge-price.png"><img src="docs/images/gpt-recharge-price.png" alt="GPT 充值价目表" width="420" /></a>
+</p>
 
 ---
 

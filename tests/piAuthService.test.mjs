@@ -11,7 +11,7 @@ import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
-const { PiAuthService, filterSupportedAuthProviders } = loadTsCommonJs("src/main/pi/auth/PiAuthService.ts");
+const { PiAuthService, filterSupportedAuthProviders, MAX_AUTH_HOST_LINE_CHARS } = loadTsCommonJs("src/main/pi/auth/PiAuthService.ts");
 
 const OK_LAUNCH = { ok: true, nodeExe: "node", helperPath: "/tmp/pi-auth-host.mjs", sdkEntry: "/tmp/pi/dist/index.js", env: { PIDECK_PI_SDK_ENTRY: "/tmp/pi/dist/index.js" } };
 
@@ -29,12 +29,11 @@ function createHarness() {
 	const writes = [];
 	child.stdout = stdout;
 	child.stderr = stderr;
-	child.stdin = {
-		destroyed: false,
-		write: (chunk) => {
-			writes.push(String(chunk));
-			return true;
-		},
+	child.stdin = new EventEmitter();
+	child.stdin.destroyed = false;
+	child.stdin.write = (chunk) => {
+		writes.push(String(chunk));
+		return true;
 	};
 	child.killed = false;
 	child.kill = () => {
@@ -48,6 +47,9 @@ function createHarness() {
 		commands: () => writes.map((line) => JSON.parse(line)),
 		emitLine: (message) => stdout.write(`${JSON.stringify(message)}\n`),
 		emitRawLine: (line) => stdout.write(`${line}\n`),
+		/** 原样写字节：用于构造跨 chunk 半帧、CRLF 与缺尾 LF 等分帧场景。 */
+		emitRaw: (text) => stdout.write(text),
+		emitEnd: () => stdout.end(),
 		emitSpawnError: (error) => child.emit("error", error),
 		emitClose: (code) => child.emit("close", code),
 	};
@@ -69,6 +71,37 @@ function createService(overrides = {}) {
 	});
 	return { service, harnesses, spawnCalls, latest: () => harnesses.at(-1) };
 }
+
+test("stdin 同步错误：立即结算当前认证并吸收回收后的迟到错误", async (t) => {
+	const { service, latest } = createService();
+	t.after(() => service.dispose());
+	const pending = service.login({ providerId: "kimi", method: "oauth" });
+	const harness = latest();
+	harness.child.stdin.write = () => {
+		throw new Error("sync EPIPE");
+	};
+	assert.doesNotThrow(() => service.answerPrompt("prompt-1", "answer"));
+	const result = await pending;
+	assert.equal(result.ok, false);
+	assert.equal(result.errorKind, "protocol");
+	assert.equal(result.error, "认证助手输入管道错误：sync EPIPE");
+	assert.equal(harness.child.killed, true);
+	assert.doesNotThrow(() => harness.child.stdin.emit("error", new Error("late pipe error")));
+});
+
+test("stdin 异步错误：安全结算当前认证并吸收回收后的迟到错误", async (t) => {
+	const { service, latest } = createService();
+	t.after(() => service.dispose());
+	const pending = service.listProviders();
+	const harness = latest();
+	assert.doesNotThrow(() => harness.child.stdin.emit("error", new Error("write EPIPE")));
+	const result = await pending;
+	assert.equal(result.ok, false);
+	assert.equal(result.errorKind, "protocol");
+	assert.equal(result.error, "认证助手输入管道错误：write EPIPE");
+	assert.equal(harness.child.killed, true);
+	assert.doesNotThrow(() => harness.child.stdin.emit("error", new Error("late pipe error")));
+});
 
 test("listProviders: 写 list 指令、回读供应商、结束即回收进程", async () => {
 	const { service, spawnCalls, latest } = createService();
@@ -243,6 +276,24 @@ test("助手异常退出（未给结果）时带上退出码收尾", async () =>
 	assert.match(result.error, /code 1/);
 });
 
+test("已结算的旧助手迟到 error：必须安全吸收且不影响下一次认证", async () => {
+	const { service, latest } = createService();
+	const firstPending = service.listProviders();
+	const old = latest();
+	old.emitLine({ type: "providers", providers: [] });
+	const first = await firstPending;
+	assert.equal(first.ok, true);
+	assert.equal(old.child.killed, true);
+
+	const secondPending = service.listProviders();
+	const current = latest();
+	assert.notEqual(current, old);
+	assert.doesNotThrow(() => old.emitSpawnError(new Error("late old auth host error")));
+	current.emitLine({ type: "providers", providers: [] });
+	const second = await secondPending;
+	assert.equal(second.ok, true);
+});
+
 test("dispose 会结算进行中的登录并回收进程", async () => {
 	const { service, latest } = createService({ loginTimeout: 5_000 });
 	const pending = service.login({ providerId: "kimi", method: "oauth" });
@@ -273,4 +324,80 @@ test("非协议输出（非 JSON / 空行 / 未知消息）不会打断流程", 
 	const result = await pending;
 	assert.equal(result.ok, true);
 	assert.deepEqual(plain(result.list.providers), []);
+});
+
+// ---------------------------------------------------------------------------
+// stdout 分帧回归
+//
+// 旧实现用 node:readline 切行，而 readline 把 U+2028/U+2029 也当行边界；
+// JSON.stringify 不转义这两个字符（它们不在必须转义的控制字符范围内），
+// 于是协议负载里一旦出现就会被切成两段非法 JSON、消息双双丢失，
+// 用户看到的现象是「助手明明回了结果却报超时」（2026-09 排查记录）。
+// 这一组用例在 readline 实现下必然失败，是分帧方式本身的守卫。
+// ---------------------------------------------------------------------------
+
+test("stdout 分帧：负载含 U+2028/U+2029 时不被拆帧", async () => {
+	const { service, latest } = createService();
+	const updates = [];
+	service.setFlowSink((update) => updates.push(update));
+	const pending = service.login({ providerId: "kimi", method: "oauth" });
+	const message = "第一段\u2028第二段\u2029结尾";
+	const payload = { type: "event", event: { type: "info", message } };
+	// 前提断言：这两个字符确实原样进入帧（否则本用例就失去意义）。
+	assert.ok(JSON.stringify(payload).includes("\u2028"), "前提：JSON.stringify 不转义 U+2028");
+	assert.ok(JSON.stringify(payload).includes("\u2029"), "前提：JSON.stringify 不转义 U+2029");
+	latest().emitLine(payload);
+	latest().emitLine({ type: "result", ok: true, cancelled: false, providerId: "kimi" });
+	const result = await pending;
+	assert.equal(result.ok, true);
+	assert.deepEqual(plain(updates), [{ kind: "event", event: { type: "info", message } }]);
+});
+
+test("stdout 分帧：结果帧含 U+2028 时仍能结算，不退化成超时", async () => {
+	const { service, latest } = createService({ shortTimeout: 120 });
+	const pending = service.login({ providerId: "kimi", method: "oauth" });
+	latest().emitLine({ type: "result", ok: false, error: { message: "供应商拒绝\u2028请重试" } });
+	const result = await pending;
+	assert.equal(result.ok, false);
+	assert.equal(result.errorKind, "login-failed");
+	assert.match(result.error, /请重试/);
+});
+
+test("stdout 分帧：一帧跨两次 data 到达时仍能解析", async () => {
+	const { service, latest } = createService();
+	const pending = service.listProviders();
+	const frame = `${JSON.stringify({ type: "providers", providers: [{ id: "kimi", name: "Kimi" }] })}\n`;
+	latest().emitRaw(frame.slice(0, 12));
+	latest().emitRaw(frame.slice(12));
+	const result = await pending;
+	assert.equal(result.ok, true);
+	assert.deepEqual(plain(result.list.providers.map((provider) => provider.id)), ["kimi"]);
+});
+
+test("stdout 分帧：容忍 CRLF 结尾", async () => {
+	const { service, latest } = createService();
+	const pending = service.listProviders();
+	latest().emitRaw(`${JSON.stringify({ type: "providers", providers: [] })}\r\n`);
+	const result = await pending;
+	assert.equal(result.ok, true);
+});
+
+test("stdout 分帧：末帧缺 LF 时在 stdout 结束时补发", async () => {
+	const { service, latest } = createService();
+	const pending = service.listProviders();
+	latest().emitRaw(JSON.stringify({ type: "providers", providers: [] }));
+	latest().emitEnd();
+	const result = await pending;
+	assert.equal(result.ok, true);
+});
+
+test("stdout 分帧：无换行的失控输出按协议错误结算并回收进程", async () => {
+	const { service, latest } = createService({ shortTimeout: 5_000 });
+	const pending = service.listProviders();
+	latest().emitRaw("x".repeat(MAX_AUTH_HOST_LINE_CHARS + 16));
+	const result = await pending;
+	assert.equal(result.ok, false);
+	assert.equal(result.errorKind, "protocol");
+	assert.match(result.error, /行缓冲溢出/);
+	assert.equal(latest().child.killed, true);
 });

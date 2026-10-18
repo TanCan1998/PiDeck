@@ -130,8 +130,8 @@ export const CodeDiffView = memo(function CodeDiffView(props: { oldContent: stri
 		return (
 			<div className="flex h-full items-center justify-center overflow-auto bg-[var(--color-bg-panel)]">
 				<div className="px-4 text-center text-[var(--color-text-secondary)]">
-					<p className="mb-1 text-[13px] font-medium">{t("editor.diffTooLarge")}</p>
-					<p className="text-[12px]">
+					<p className="mb-1 text-control font-medium">{t("editor.diffTooLarge")}</p>
+					<p className="text-caption">
 						{t("editor.diffTooLargeDetail", {
 							old: oldLines.toLocaleString(),
 							new: newLines.toLocaleString(),

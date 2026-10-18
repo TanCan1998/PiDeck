@@ -20,10 +20,13 @@ function ScrollBar({ className, orientation = "vertical", ...props }: React.Comp
 		<ScrollAreaPrimitive.ScrollAreaScrollbar
 			data-slot="scroll-area-scrollbar"
 			orientation={orientation}
-			className={cn("flex touch-none p-px transition-colors select-none", orientation === "vertical" && "h-full w-2.5 border-l border-l-transparent", orientation === "horizontal" && "h-2.5 flex-col border-t border-t-transparent", className)}
+			// 对齐全局原生滚动条语言（scrollbar-color: --color-border-strong / thin）：
+			// 细槽位 + border-strong 滑块，hover 加深一档；shadcn 默认 bg-border 粗滑块
+			// 会与全应用其他滚动区形成两套视觉（2027-10 精致度审查）。
+			className={cn("flex touch-none p-px transition-colors select-none", orientation === "vertical" && "h-full w-2 border-l border-l-transparent", orientation === "horizontal" && "h-2 flex-col border-t border-t-transparent", className)}
 			{...props}
 		>
-			<ScrollAreaPrimitive.ScrollAreaThumb data-slot="scroll-area-thumb" className="relative flex-1 rounded-full bg-border" />
+			<ScrollAreaPrimitive.ScrollAreaThumb data-slot="scroll-area-thumb" className="relative flex-1 rounded-full bg-border-strong/80 hover:bg-muted-foreground/60" />
 		</ScrollAreaPrimitive.ScrollAreaScrollbar>
 	);
 }

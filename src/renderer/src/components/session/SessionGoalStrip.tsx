@@ -79,8 +79,8 @@ export function SessionGoalStrip(props: { sessionId: string }) {
 		<ComposerWidgetFrame data-testid="session-goal-strip" aria-label={t("sessionGoal.aria")}>
 			<div className="flex h-9 w-full items-center gap-2.5 px-3">
 				<Target size={14} aria-hidden="true" className="shrink-0 text-text-tertiary" />
-				<span className="shrink-0 text-[13px] font-medium leading-6 text-foreground">{phaseLabel}</span>
-				<span className="min-w-0 flex-1 truncate text-[13px] leading-5 text-text-tertiary" title={goal.objective}>
+				<span className="shrink-0 text-control font-medium leading-6 text-foreground">{phaseLabel}</span>
+				<span className="min-w-0 flex-1 truncate text-control leading-5 text-text-tertiary" title={goal.objective}>
 					{goal.objective}
 				</span>
 				<div className="flex shrink-0 items-center gap-0.5">

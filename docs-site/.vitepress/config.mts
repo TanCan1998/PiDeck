@@ -1,4 +1,5 @@
 import { defineConfig } from "vitepress";
+import { sharedGuideDocsPlugin } from "./sharedGuideDocs";
 import { sharedReadmeImagesPlugin } from "./sharedReadmeImages";
 
 // 自定义域名部署在站点根路径；本地/兼容旧 github.io 子路径时可用 VITEPRESS_BASE=/PiDeck/
@@ -17,8 +18,9 @@ export default defineConfig({
 
   // README 与官网共用的图片（如微信群二维码）以 docs/images 为唯一数据源，
   // dev / build 启动时由插件同步进 public/images，避免同一张图两边各存一份。
+  // 插件开发指南同理：docs/host-plugin-dev-guide.md 同步为 /guide/host-plugins 页面。
   vite: {
-    plugins: [sharedReadmeImagesPlugin()],
+    plugins: [sharedReadmeImagesPlugin(), sharedGuideDocsPlugin()],
   },
 
   // ===== 多语言：key 必须用 root / en（不是 / 和 /en/）=====
@@ -32,13 +34,23 @@ export default defineConfig({
       themeConfig: {
         nav: [
           { text: "首页", link: "/" },
-          { text: "全景指南", link: "/guide/ultimate-guide" },
-          { text: "原理解析", link: "/guide/architecture-deep-dive" },
-          { text: "使用指南", link: "/guide/usage-guide" },
-          { text: "功能手册", link: "/guide/feature-reference" },
-          { text: "FAQ", link: "/guide/faq" },
-          { text: "问题排查", link: "/guide/troubleshooting" },
-          { text: "产品对比", link: "/guide/comparison" },
+          {
+            text: "指南",
+            items: [
+              { text: "全景指南", link: "/guide/ultimate-guide" },
+              { text: "快速开始", link: "/guide/getting-started" },
+              { text: "功能手册", link: "/guide/feature-reference" },
+              { text: "原理解析", link: "/guide/architecture-deep-dive" },
+            ],
+          },
+          {
+            text: "帮助",
+            items: [
+              { text: "FAQ", link: "/guide/faq" },
+              { text: "问题排查", link: "/guide/troubleshooting" },
+              { text: "产品对比", link: "/guide/comparison" },
+            ],
+          },
           { text: "更新日志", link: "/changelog" },
           { text: "下载", link: "https://github.com/ayuayue/PiDeck/releases" },
           {
@@ -61,6 +73,7 @@ export default defineConfig({
                 { text: "功能介绍", link: "/guide/features" },
                 { text: "功能操作手册", link: "/guide/feature-reference" },
                 { text: "配置与 Skills", link: "/guide/settings" },
+                { text: "宿主插件开发指南", link: "/guide/host-plugins" },
                 { text: "常见问题", link: "/guide/faq" },
                 { text: "问题排查指南", link: "/guide/troubleshooting" },
                 { text: "产品对比", link: "/guide/comparison" },
@@ -96,13 +109,23 @@ export default defineConfig({
       themeConfig: {
         nav: [
           { text: "Home", link: "/en/" },
-          { text: "Ultimate Guide", link: "/guide/ultimate-guide" },
-          { text: "Deep Dive", link: "/guide/architecture-deep-dive" },
-          { text: "Guide", link: "/en/guide/usage-guide" },
-          { text: "Feature Reference", link: "/en/guide/feature-reference" },
-          { text: "FAQ", link: "/en/guide/faq" },
-          { text: "Troubleshooting", link: "/en/guide/troubleshooting" },
-          { text: "Comparison", link: "/en/guide/comparison" },
+          {
+            text: "Guide",
+            items: [
+              { text: "Ultimate Guide", link: "/guide/ultimate-guide" },
+              { text: "Quick Start", link: "/en/guide/getting-started" },
+              { text: "Feature Reference", link: "/en/guide/feature-reference" },
+              { text: "Deep Dive", link: "/guide/architecture-deep-dive" },
+            ],
+          },
+          {
+            text: "Help",
+            items: [
+              { text: "FAQ", link: "/en/guide/faq" },
+              { text: "Troubleshooting", link: "/en/guide/troubleshooting" },
+              { text: "Comparison", link: "/en/guide/comparison" },
+            ],
+          },
           { text: "Changelog", link: "/en/changelog" },
           { text: "Download", link: "https://github.com/ayuayue/PiDeck/releases" },
           {

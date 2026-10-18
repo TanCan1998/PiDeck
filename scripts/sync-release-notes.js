@@ -120,7 +120,11 @@ function generateReadmeBlock(data, lang) {
 	return lines.join("\n");
 }
 
-function updateReadme(readmePath, newBlock) {
+/**
+ * 计算 README 同步结果（不写盘、不打印）：ok=false 表示找不到亮点区块；
+ * changed=false 表示区块已与 CHANGELOG 同步。apply 与 --check 共用，保证两条路径判定一致。
+ */
+function computeReadmeUpdate(readmePath, newBlock) {
 	const content = fs.readFileSync(readmePath, "utf8");
 	const lines = content.split("\n");
 
@@ -144,8 +148,7 @@ function updateReadme(readmePath, newBlock) {
 	}
 
 	if (blockStart === -1) {
-		console.error(`  ⚠️  Could not find changelog block in ${readmePath}`);
-		return false;
+		return { ok: false, changed: false, newContent: content };
 	}
 
 	// 计算实际替换范围：从 start 到 "查看完整更新日志" 行之后
@@ -159,25 +162,41 @@ function updateReadme(readmePath, newBlock) {
 
 	const oldBlock = lines.slice(blockStart, endLine).join("\n");
 	const newContent = content.replace(oldBlock, newBlock);
+	return { ok: true, changed: newContent !== content, newContent };
+}
 
-	if (newContent === content) {
+function updateReadme(readmePath, newBlock) {
+	const result = computeReadmeUpdate(readmePath, newBlock);
+	if (!result.ok) {
+		console.error(`  ⚠️  Could not find changelog block in ${readmePath}`);
+		return false;
+	}
+	if (!result.changed) {
 		console.error(`  ⚠️  No changes made to ${readmePath}`);
 		return false;
 	}
 
-	fs.writeFileSync(readmePath, newContent);
+	fs.writeFileSync(readmePath, result.newContent);
 	return true;
 }
 
-function updateDocsSite(data) {
+/**
+ * 计算 docs-site/changelog.md 同步结果（不写盘、不打印）：apply 与 --check 共用。
+ * 内含两段防御逻辑（v0.6.6 重复清理 / 同版本替换），注释见函数体。
+ */
+function computeDocsSiteUpdate(data, fileContent) {
 	const { version, date, majorFeatures, improvements } = data;
 	const filePath = path.join(ROOT, "docs-site", "changelog.md");
-	let content = fs.readFileSync(filePath, "utf8");
+	// fileContent：单测注入 fixture 用；缺省读真实文件（apply / --check 路径）。
+	let content = fileContent ?? fs.readFileSync(filePath, "utf8");
 
 	// 清理重复的 v0.6.6 条目：历史遗留的 v0.6.6-beta 与正式 v0.6.6 曾同时存在，
 	// 此处只保留第一份。绝不能无条件删除——v0.6.6 是唯一一份时删掉会丢失整段
 	// 历史（含贡献者致谢），曾因此误删（2026-08-15）。
-	const versionMatches = [...content.matchAll(/^##\s+v0\./gm)];
+	// 正则必须匹配整行：matchAll 的 m[0] 只含被匹配部分，若只匹配 `^## v0\.` 前缀，
+	// m[0] 恒为 "## v0."，下面的全行 filter 永不命中、去重变死代码（2026-10-06
+	// 单测发现；只防回归，不改其他行为）。
+	const versionMatches = [...content.matchAll(/^##\s+v0\.[^\r\n]*/gm)];
 	const v066Matches = versionMatches.filter((m) => /^## v0\.6\.6(?:-beta\.\d+)?$/.test(m[0]));
 	if (v066Matches.length > 1) {
 		const second = v066Matches[1];
@@ -191,8 +210,7 @@ function updateDocsSite(data) {
 	// 找到第一个版本号行（v0.6.5 或更早），在其前面插入新条目
 	const firstVersionIdx = lines.findIndex((l) => /^##\s+v0/.test(l));
 	if (firstVersionIdx === -1) {
-		console.error("  ⚠️  Could not find version entry in docs-site/changelog.md");
-		return false;
+		return { ok: false, changed: false, newContent: content, filePath };
 	}
 
 	// 生成新条目
@@ -211,17 +229,35 @@ function updateDocsSite(data) {
 	// 补 Ctrl+P 命令面板条目时就撞上）——纯插入会让文档站出现两份同名版本段落。
 	// 这与上面 v0.6.6 的历史重复是同一类问题，只是那次是版本号改名（beta → 正式）造成的。
 	// 替换时保持原位置，不打乱「新版本在上」的倒序。
-	const existingIdx = lines.findIndex((l) => l.trimEnd() === `## ${version}`);
+	// 同版本判定必须忽略尾部的发布日期：把当期版本的日期从 10-12 改成 10-13 后重跑同步，
+	// 按整行（含日期）比对认不出既有段落，会再插一份同名版本（2026-10-13 发版实测），
+	// 因此这里改写「同版本替换」原实现（此前只认完全相同的整行）。
+	const versionBase = (line) => line.trimEnd().replace(/\s*\(\d{4}-\d{2}-\d{2}\)$/, "");
+	const targetVersion = versionBase(`## ${version}`);
+	const existingIdx = lines.findIndex((l) => /^##\s+v0\./.test(l) && versionBase(l) === targetVersion);
 	const startIdx = existingIdx === -1 ? firstVersionIdx : existingIdx;
 	let endIdx = firstVersionIdx;
 	if (existingIdx !== -1) {
-		const nextIdx = lines.findIndex((l, i) => i > existingIdx && /^##\s+v0/.test(l));
+		// 跳到下一个「不同版本」的段落头：同版本的重复段（日期改名或手工插入留下的）一并被替换掉。
+		const nextIdx = lines.findIndex((l, i) => i > existingIdx && /^##\s+v0\./.test(l) && versionBase(l) !== targetVersion);
 		endIdx = nextIdx === -1 ? lines.length : nextIdx;
 	}
 
 	const newContent = [...lines.slice(0, startIdx), ...newEntry, ...lines.slice(endIdx)].join("\n");
+	return { ok: true, changed: newContent !== content, newContent, filePath };
+}
 
-	fs.writeFileSync(filePath, newContent);
+function updateDocsSite(data) {
+	const result = computeDocsSiteUpdate(data);
+	if (!result.ok) {
+		console.error("  ⚠️  Could not find version entry in docs-site/changelog.md");
+		return false;
+	}
+	if (!result.changed) {
+		console.error(`  ⚠️  No changes made to ${result.filePath}`);
+		return false;
+	}
+	fs.writeFileSync(result.filePath, result.newContent);
 	return true;
 }
 
@@ -230,11 +266,12 @@ function updateDocsSite(data) {
 function main() {
 	const args = process.argv.slice(2);
 	const apply = args.includes("--apply");
+	const check = args.includes("--check");
 	const versionFilter = args.find((a) => a.startsWith("--version="));
 	const targetVersion = versionFilter ? versionFilter.split("=")[1] : null;
 
 	console.log("=== 发行说明同步工具 ===");
-	console.log(`模式: ${apply ? "应用" : "预览"}${targetVersion ? ` (版本: ${targetVersion})` : ""}`);
+	console.log(`模式: ${check ? "检查" : apply ? "应用" : "预览"}${targetVersion ? ` (版本: ${targetVersion})` : ""}`);
 	console.log("");
 
 	// 解析中英文 CHANGELOG
@@ -258,6 +295,31 @@ function main() {
 	// 生成 README 区块
 	const zhBlock = generateReadmeBlock(zhData, "zh");
 	const enBlock = generateReadmeBlock(enData, "en");
+
+	// --check：不写盘，只判断三处是否与 CHANGELOG 同步（release-preflight 调用）。
+	// 任何一处 changed 或找不到区块 → 退出码 1，同步门禁才会在 CI/发版前拦住。
+	if (check) {
+		const zhReadme = path.join(ROOT, "README.md");
+		const enReadme = path.join(ROOT, "README.en.md");
+		const zhResult = computeReadmeUpdate(zhReadme, zhBlock);
+		const enResult = computeReadmeUpdate(enReadme, enBlock);
+		const docsResult = computeDocsSiteUpdate(zhData);
+
+		const staleTargets = [
+			{ name: "README.md", result: zhResult },
+			{ name: "README.en.md", result: enResult },
+			{ name: "docs-site/changelog.md", result: docsResult },
+		].filter((t) => !t.result.ok || t.result.changed);
+
+		if (staleTargets.length === 0) {
+			console.log("  ✅ README / docs-site changelog 均与 CHANGELOG 同步");
+			process.exit(0);
+		}
+		for (const target of staleTargets) {
+			console.log(`  ❌ ${target.name} ${target.result.ok ? "存在未同步的改动" : "找不到亮点区块"}——跑 node scripts/sync-release-notes.js --apply 后重试`);
+		}
+		process.exit(1);
+	}
 
 	console.log("=== 中文 README 区块 ===");
 	console.log(zhBlock);
@@ -306,7 +368,7 @@ function stripEmojiPrefix(text) {
 }
 
 // 导出核心函数供单测使用；CLI 直接执行时只跑 main()
-module.exports = { stripEmojiPrefix };
+module.exports = { stripEmojiPrefix, computeReadmeUpdate, computeDocsSiteUpdate };
 
 if (require.main === module) {
 	main();

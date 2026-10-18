@@ -32,8 +32,11 @@ test("in-app brand surfaces use the Pi glyph, not the spider mark", () => {
 	assert.match(canvas, /event\?\.stopPropagation\(\)/);
 	assert.match(about, /<PiLogoCanvas size=\{40\} playOnClick \/>/);
 	assert.doesNotMatch(about, /autoPlay/);
-	// beUI 两行字标（5fcca0b8）：wordmark 由 TextShimmer 承载，不再用 aria-hidden span
-	assert.match(lockup, />\s*PiDeck\s*<\/TextShimmer>/);
+	// beUI 两行字标（5fcca0b8）：wordmark 由 TextShimmer 承载，不再用 aria-hidden span；
+	// 文本改为「应用显示名称」（设置项 appDisplayName，缺省 PiDeck），不再写死字面量。
+	assert.match(lockup, /const displayName = useAppDisplayName\(\)/);
+	assert.match(lockup, />\s*\{displayName\}\s*<\/TextShimmer>/);
+	assert.match(about, /\{displayName\}\s*<\/div>/);
 	// 侧栏字标扫光必须几分钟一轮；回退到 60s 会让常驻品牌位太勤。
 	assert.match(lockup, /REST_MS = 5 \* 60_000/);
 	assert.doesNotMatch(lockup, /REST_MS = 60_000/);
@@ -49,7 +52,8 @@ test("in-app brand surfaces use the Pi glyph, not the spider mark", () => {
 	assert.match(app, PI_GLYPH);
 	assert.match(boot, /id="boot-logo-silver"/);
 	assert.match(boot, PI_GLYPH);
-	assert.match(webBrand, /<PiLogoCanvas size=\{18\} playOnClick \/>/);
+	// Web 品牌位与桌面同构：按 logoStyle 分支（Web 无人写入 → 恒取默认 pi-tui 三色像素标）。
+	assert.match(webBrand, /logoStyle === "pi-tui"\s*\?\s*<PiTuiLogoCanvas size=\{18\} playOnClick \/>\s*:\s*<PiLogoCanvas size=\{18\} playOnClick \/>/);
 	assert.doesNotMatch(webBrand, /autoPlay/);
 	assert.match(webBrand, />\s*PiDeck\s*</);
 	assert.match(webTimeline, /<LogoMark size=\{66\} \/>/);

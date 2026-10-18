@@ -305,3 +305,56 @@ test("trajectory header turn count follows the unified round contract", () => {
 	assert.doesNotMatch(view, /count: model\.turns\.length/);
 	assert.doesNotMatch(view, /countDialogueTurns/);
 });
+
+test("model traces land in their user turns as point records", () => {
+	const { buildTrajectory } = loadModule();
+	const model = buildTrajectory([msg({ id: "u1", role: "user", text: "first", timestamp: 1000 }), msg({ id: "a1", role: "assistant", text: "ok", timestamp: 1500 }), msg({ id: "u2", role: "user", text: "second", timestamp: 3000 }), msg({ id: "a2", role: "assistant", text: "done", timestamp: 3500 })], Date.now(), {
+		modelTraces: [
+			// 乱序传入：内部按 time 归轮，不得依赖入参顺序
+			{ traceId: "t2", agentId: "ag1", time: 3100, model: "glm-5.3", provider: "openai", messageCount: 8, toolCount: 28, payloadBytes: 61234, truncated: false },
+			{ traceId: "t1", agentId: "ag1", time: 1050, model: "glm-5.3", provider: "openai", messageCount: 4, toolCount: 28, payloadBytes: 56800 },
+		],
+	});
+	const requests = model.records.filter((r) => r.kind === "modelRequest");
+	assert.equal(requests.length, 2);
+	const first = requests.find((r) => r.id === "model:t1");
+	const second = requests.find((r) => r.id === "model:t2");
+	assert.equal(first?.turnIndex, 0);
+	assert.equal(second?.turnIndex, 1);
+	// 请求快照是时间点：起止同刻，不得伪造区间
+	assert.equal(first?.startedAt, first?.endedAt);
+	assert.equal(first?.durationMs, undefined);
+	assert.equal(first?.lane, "model");
+	// 摘要携带体积与计数（账本时长列改显体积）
+	assert.match(second?.summary ?? "", /8 msgs/);
+	assert.match(second?.summary ?? "", /28 tools/);
+	assert.match(second?.summary ?? "", /59\.8 KB|1\.5 MB/);
+	// 回读指针完整保留：agentId/messageCount/truncated 供检查器使用
+	assert.equal(first?.modelTrace?.agentId, "ag1");
+	assert.equal(second?.modelTrace?.truncated, false);
+	assert.equal(first?.modelTrace?.messageCount, 4);
+});
+
+test("model trace before the first user message falls into turn 0; without messages it forms its own turn", () => {
+	const { buildTrajectory } = loadModule();
+	const early = buildTrajectory([msg({ id: "u1", role: "user", text: "hi", timestamp: 2000 })], Date.now(), {
+		modelTraces: [{ traceId: "t0", time: 1500 }],
+	});
+	const earlyRecord = early.records.find((r) => r.kind === "modelRequest");
+	assert.equal(earlyRecord?.turnIndex, 0);
+	assert.ok(early.turns[0].records.some((r) => r.id === "model:t0"));
+
+	const empty = buildTrajectory([], Date.now(), { modelTraces: [{ traceId: "solo", time: 5000 }] });
+	assert.equal(empty.turns.length, 1);
+	assert.equal(empty.records[0]?.kind, "modelRequest");
+	assert.equal(empty.records[0]?.startedAt, empty.records[0]?.endedAt);
+});
+
+test("modelRequest ledger wiring: kindLabel key, size label in duration column, full-request entry", () => {
+	// 展示层接线契约：kind 标签、时长列改显体积、检查器可回读完整请求体
+	const view = readFileSync("src/renderer/src/components/session/trajectory/SessionTrajectoryView.tsx", "utf8");
+	assert.match(view, /session\.trajectory\.kind\.modelRequest/);
+	assert.match(view, /traceSizeLabel/);
+	assert.match(view, /viewFullRequest/);
+	assert.match(view, /ModelTraceDetail/);
+});

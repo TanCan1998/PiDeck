@@ -105,7 +105,8 @@ function resultStatusLabel(status: ResourceImportReport["results"][number]["stat
 export function ResourceImportDialog(props: {
 	kind: ResourceImportKind;
 	sourceProjectId?: string;
-	projects: ResourceImportProject[];
+	/** 技能导入的项目目标数据源；MCP 导入只写全局层。 */
+	projects?: ResourceImportProject[];
 	/** When set, the skill importer is hosted by a project resource page and must stay there. */
 	fixedProjectId?: string;
 	triggerLabel: string;
@@ -230,6 +231,7 @@ export function ResourceImportDialog(props: {
 							{state.report ? t("common.close") : t("common.cancel")}
 						</Button>
 						<Button onClick={() => void state.apply()} disabled={state.report !== null || state.applying || state.loading || state.selected.size === 0}>
+							{state.applying ? <Loader2 size={14} className="animate-pideck-spin" aria-hidden="true" /> : null}
 							{state.applying ? t("config.import.importing") : t("config.import.confirm", { count: state.selected.size })}
 						</Button>
 					</DialogFooter>

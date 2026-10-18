@@ -78,7 +78,8 @@ export async function verifyRemoteGitSync(input: { window: Page; credentials: Re
 
 	await test.step("同步条显示分支与上游全名，且从不显示远端路径", async () => {
 		await remoteProjectRow(window, root.split("/").pop() ?? "")
-			.locator(".project-draggable")
+			.locator(".conversation-title")
+			.first()
 			.click();
 		await window.getByRole("button", { name: "打开右侧边栏", exact: true }).click();
 		await window.getByTestId("drawer-rail-git").click();

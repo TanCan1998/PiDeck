@@ -15,6 +15,16 @@ export function stripAnsi(text: string): string {
 	return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
 }
 
+/** RPC/JSON 边界收窄：unknown → Record<string, unknown>（非对象返回 undefined；数组会收窄成 Record，调用方按需另判 Array.isArray）。 */
+export function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+}
+
+/** 边界收窄：unknown → 非空 string（其余返回 undefined）。 */
+export function nonEmptyString(value: unknown): string | undefined {
+	return typeof value === "string" && value ? value : undefined;
+}
+
 /** 从参数列表中取首个有效数字。 */
 export function pickNumber(...values: unknown[]): number | undefined {
 	for (const value of values) {

@@ -5,13 +5,17 @@
  * quitAndInstall；manual（当前无 Developer ID 签名的 macOS）：仅检查 GitHub
  * Release，UI 引导用户手动下载，绝不承诺无法稳定完成的应用内替换。
  *
+ * 更新通道（deps.channel）：dev 构建无论设置 updateSource 为何都强制官方 GitHub
+ * 源并开启 prerelease（镜像只分发 stable 产物，dev 的 0.8.0-beta.* 仅存在于
+ * GitHub Releases）；stable 语义与历史行为一致。
+ *
  * 生命周期：start() 装配启动调度与事件订阅；stop() 在退出路径清理（配对清理）。
  */
 
 import type { AppSettings } from "../../shared/types/settings";
-import type { AppUpdateDeliveryMode, AppUpdateDownloadState, AppUpdateStatusSnapshot } from "../../shared/types/app";
+import type { AppUpdateDeliveryMode, AppUpdateDownloadState, AppUpdateStatusSnapshot, UpdateChannel } from "../../shared/types/app";
 import type { PiUpdateCheckResult } from "../../shared/types";
-import type { CatalogCheckResult } from "../../shared/types/catalog";
+import type { CatalogCheckResult, CatalogUpdateResult } from "../../shared/types/catalog";
 import type { SettingsStore } from "../settings/SettingsStore";
 import { normalizeUpdateSource, normalizeCustomMirrorHost, updateSourceFeedUrl, updateSourceLatestReleaseUrl } from "./updateSources";
 import type { AutoUpdaterLike } from "./autoUpdaterTypes";
@@ -31,12 +35,19 @@ export type UpdateServiceDeps = {
 	checkPiUpdate?: () => Promise<PiUpdateCheckResult>;
 	/** 内置模型目录（pi-ai-catalog）远端检查（PiAiCatalogUpdater.checkRemote 注入）。 */
 	checkCatalogUpdate?: () => Promise<CatalogCheckResult>;
+	/**
+	 * 后台检查发现目录新版本时自动拉取（设置 `catalogAutoUpdate`，默认开）。
+	 * 与设置页「更新到最新」是同一入口（下载 → manifest 校验 → 备份 → 原子替换）。
+	 */
+	updateCatalog?: () => Promise<CatalogUpdateResult>;
 	/** 推送给渲染层（mainWindow.webContents.send 注入）。 */
 	sendToRenderer?: (snapshot: AppUpdateStatusSnapshot) => void;
 	log?: (level: "info" | "warn", message: string, details?: Record<string, unknown>) => void;
 	getCurrentVersion: () => string;
 	/** 当前发行物的更新交付能力；省略时保持既有自动升级默认值。 */
 	deliveryMode?: AppUpdateDeliveryMode;
+	/** 更新通道：dev 强制 GitHub 源 + allowPrerelease；省略视为 stable（历史行为）。 */
+	channel?: UpdateChannel;
 	/** automatic 模式的 electron-updater 封装（真实实例见 createAutoUpdater；测试传 fake）。 */
 	autoUpdater?: AutoUpdaterLike;
 	/** 安装前的主进程退出准备（例如关闭到托盘开启时先置 isQuitting）。 */
@@ -76,6 +87,7 @@ function emptyDownloadState(): AppUpdateDownloadState {
 export class UpdateService {
 	private readonly deps: UpdateServiceDeps;
 	private readonly deliveryMode: AppUpdateDeliveryMode;
+	private readonly channel: UpdateChannel;
 	private timer: ReturnType<typeof setTimeout> | null = null;
 	private installWatchdog: ReturnType<typeof setTimeout> | null = null;
 	private installPreparationApplied = false;
@@ -90,6 +102,7 @@ export class UpdateService {
 	constructor(deps: UpdateServiceDeps) {
 		this.deps = deps;
 		this.deliveryMode = deps.deliveryMode ?? "automatic";
+		this.channel = deps.channel ?? "stable";
 		if (this.deliveryMode === "automatic") this.subscribeAutoUpdater();
 		else this.getManualChecker(); // Fail at composition time instead of silently disabling macOS checks.
 	}
@@ -131,6 +144,9 @@ export class UpdateService {
 				const error = toErrorMessage(catalogResult.reason);
 				void this.deps.log?.("warn", "Catalog update check failed", { error });
 			}
+			// 检测到新版本就按设置自动拉取（设置页手动更新的同一条链路）；
+			// 内部已兜底，失败不会影响本轮 app/pi 两路结果。
+			await this.autoApplyCatalogUpdate();
 			// 检查时间持久化（低频写，2h 一次），供 UI 显示上次检查时间。
 			await this.deps.settingsStore.update({ updateLastCheckAt: Date.now() }).catch(() => undefined);
 			this.pushSnapshot();
@@ -210,13 +226,17 @@ export class UpdateService {
 	/**
 	 * 切换更新源（设置保存后立即调用）：镜像 → generic feed URL；
 	 * 回 GitHub → setFeedUrl(null) 恢复原生 provider。
+	 * dev 通道覆盖设置恒用官方 GitHub 源并允许 prerelease：AtomGit 镜像只分发
+	 * stable 产物，dev 的 0.8.0-beta.* 仅存在于 GitHub Releases；stable 显式重置
+	 * false（声明式保障，防 electron-updater 按版本段推断的残留）。
 	 */
 	applyUpdateSource(): void {
 		if (this.deliveryMode !== "automatic") return;
 		const settings = this.deps.settingsStore.get();
-		const source = normalizeUpdateSource(settings.updateSource);
-		const feedUrl = updateSourceFeedUrl(source);
-		this.getAutoUpdater().setFeedUrl(feedUrl);
+		const effectiveSource = this.channel === "dev" ? "github" : normalizeUpdateSource(settings.updateSource);
+		this.getAutoUpdater().setFeedUrl(updateSourceFeedUrl(effectiveSource));
+		// dev 恒 true；stable 恒 false（显式重置，防设置残留）。
+		this.getAutoUpdater().setAllowPrerelease(this.channel === "dev");
 	}
 
 	/** 记录「已提示过该版本」（渲染层 toast 展示后调用，实现每版本只提示一次）。 */
@@ -394,7 +414,8 @@ export class UpdateService {
 	private async checkApp(): Promise<AppCheckResult> {
 		if (this.deliveryMode === "manual") {
 			const settings = this.deps.settingsStore.get();
-			const source = normalizeUpdateSource(settings.updateSource);
+			// dev 通道强制官方 GitHub 源：镜像 latestReleaseUrl 指向 stable latest，不适用 dev prerelease（checker 内部走 releases 列表）。
+			const source = this.channel === "dev" ? "github" : normalizeUpdateSource(settings.updateSource);
 			const releaseUrl = updateSourceLatestReleaseUrl(source);
 			const result = await this.getManualChecker()(releaseUrl ?? undefined);
 			this.lastApp = result;
@@ -423,6 +444,37 @@ export class UpdateService {
 	private async checkCatalog(): Promise<CatalogCheckResult | null> {
 		if (!this.deps.checkCatalogUpdate) return null;
 		return this.deps.checkCatalogUpdate();
+	}
+
+	/**
+	 * 检测到目录新版本后自动更新（设置 `catalogAutoUpdate` 为 false 时关闭，默认开）。
+	 *
+	 * 自动与手动共用 PiAiCatalogUpdater.update：下载双源兜底、manifest 校验不过不上盘、
+	 * 写覆盖层前备份上一版，所以「自动」只是省掉一次点击，不降低任何安全边界。
+	 * 失败或远端并不更新时保留「有更新」快照，用户仍可在设置页手动重试；
+	 * 成功则改写快照为已生效，避免设置页常驻一条已经处理掉的提示。
+	 */
+	private async autoApplyCatalogUpdate(): Promise<void> {
+		const checked = this.lastCatalog;
+		if (!this.deps.updateCatalog || !checked?.ok || !checked.hasUpdate) return;
+		if (this.deps.settingsStore.get().catalogAutoUpdate === false) return;
+		try {
+			const applied = await this.deps.updateCatalog();
+			if (!applied.ok) {
+				void this.deps.log?.("warn", "Catalog auto update failed", { code: applied.code, message: applied.message });
+				return;
+			}
+			if (!applied.updated) {
+				// 远端不高于当前生效版本（例如另一实例刚更新过）：保留检查结果交给用户判断。
+				void this.deps.log?.("info", "Catalog auto update skipped: no newer catalog", { remote: checked.remoteVersion });
+				return;
+			}
+			this.lastCatalog = { ok: true, remoteVersion: checked.remoteVersion, localVersion: checked.remoteVersion, hasUpdate: false };
+			void this.deps.log?.("info", "Catalog auto updated", { version: checked.remoteVersion });
+		} catch (error) {
+			// 自动更新绝不能把后台检查变成失败：只记日志，快照保持「有更新」。
+			void this.deps.log?.("warn", "Catalog auto update failed", { error: toErrorMessage(error) });
+		}
 	}
 
 	private getAutoUpdater(): AutoUpdaterLike {

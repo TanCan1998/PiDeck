@@ -11,7 +11,7 @@
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![Electron](https://img.shields.io/badge/Electron-38-47848f)
 ![React](https://img.shields.io/badge/React-19-61dafb)
-![Version](https://img.shields.io/badge/version-0.7.7-blue)
+![Version](https://img.shields.io/badge/version-0.9.1-blue)
 
 <!-- star-history:start -->
 <picture>
@@ -42,7 +42,7 @@
   - [📑 Table of Contents](#-table-of-contents)
   - [✨ Highlights](#-highlights)
   - [📋 Changelog](#-changelog)
-    - [v0.7.7 Release Highlights](#v077-release-highlights)
+    - [v0.7.8 Release Highlights](#v078-release-highlights)
   - [🧩 Features](#-features)
     - [Workspace & Projects](#workspace--projects)
     - [Sessions & Conversation](#sessions--conversation)
@@ -81,25 +81,11 @@
 
 ## 📋 Changelog
 
-> **Latest: v0.7.7** (2026-09-22)
+> **Latest: v0.9.1 (2026-10-14)** (2026-10-14)
 
-### v0.7.7 Release Highlights
-- 🚀 **Search workspace files by name (#215)**
-- 🚀 **Import sessions from another directory (recover history after a move or rename)**
-- 🚀 **Import external resources (MCP / skills / prompt templates)**
-- 🚀 **Strict tool sampling can be switched explicitly (`compat.supportsStrictMode`)**
-- 🚀 **Hide and reorder providers, models and auth entries**
-- 🚀 **New “cycle model” and “cycle thinking effort” shortcuts (Ctrl+M / Ctrl+T, macOS ⌘⌥M / ⌘⌥T)**
-- 🚀 **Session tab hover tooltips show the workspace**
-- 🚀 **Hour-scale durations for long tasks**
-- 🚀 **DSH host can be stopped manually (persisted across restarts)**
-- 🚀 **The pi environment guide installs portable Node and the pi CLI in one click**
-- 🚀 **DSH runtime archives are cross-packed from a single runner**
-- 🚀 **The model catalogue moves to pi 0.86.1 (1443 models)**
-- ✨ **Third-party relays no longer fail to list models — or to use a manually typed one**
-- ✨ **Provider User-Agent collapsed into a single editable dropdown, with a much fuller preset list**
-- ✨ **Shared DSH config directory is now called out (#189)**
-- ✨ **Announcement toasts no longer repeat forever**
+### v0.9.1 (2026-10-14) Release Highlights
+- ✨ **macOS app would not launch on Apple Silicon**
+- ✨ **Local network access and terminal SSH work again**
 
 [View Full Changelog →](CHANGELOG.md)
 
@@ -170,7 +156,7 @@
 | **System Tray** | Closing the window minimizes to tray by default; tray context menu; double-click to restore. |
 | **Desktop Pet** | Turn multi-agent status into a little companion on your desktop: aggregated states, always-on-top, scaling, petdex community pets. |
 | **Themes & Appearance** | One-click cycle through light / dark / follow-system (sidebar footer); semantic design tokens with natural dark-mode support. |
-| **Notifications** | Global notifications as card toasts; a dedicated Ask system-notification toggle keeps background queries silent. |
+| **Notifications** | Global notifications as card toasts; a dedicated Ask system-notification toggle keeps background queries silent, and "notify only when unfocused" stays quiet while the window is in front. |
 | **Application Updates** | App-update checks always run in the background and `autoDownloadUpdates` defaults to enabled; after download, the user confirms **Restart and install** in Settings. Windows/Linux use the bundled updater, while macOS opens the GitHub Release for manual installation; Pi CLI checks run independently. |
 | **Feishu Bot** | Bind a session to a Feishu bot to sync messages and status into a Feishu group. |
 | **LAN Web Service** | Start a local web service from Settings and open the web edition from any device on the LAN, with dual-backend session browsing and the DSH tool panel. |
@@ -235,6 +221,15 @@ Prebuilt packages for **Windows**, **macOS**, and **Linux** are published on Git
 
 > PiDeck requires the `pi` CLI to be installed separately and available in your system `PATH`.
 
+### Dev Edition (PiDeck Dev)
+
+Besides the stable edition (PiDeck), the project also publishes **dev edition (PiDeck Dev)** packages for trying out pre-release features:
+
+- **Where to get it**: versions marked as *Pre-release* on [GitHub Releases](https://github.com/ayuayue/PiDeck/releases) (version numbers carry a `-beta` or `-beta.N` suffix, e.g. `v0.7.8-beta` or `v0.8.0-beta.1`).
+- **Side-by-side install**: PiDeck Dev uses its own app identity (appId), install directory and shortcuts, so it can be installed alongside the stable edition without interference.
+- **Data mode (choose one)**: on first launch PiDeck Dev asks whether to share data with the stable edition or use a separate data directory; you can switch later in-app and follow the guided migration.
+- **Protocol difference**: the dev edition registers the `pideck-dev://` deep-link protocol, which does not collide with the stable edition's `pideck://`.
+
 Requirements:
 
 - `pi` command available in system `PATH`
@@ -246,6 +241,16 @@ Verify pi is available:
 pi --version
 pi --mode rpc
 ```
+
+Build the dev edition from source:
+
+```bash
+npm run dist:win:dev   # Windows (NSIS + portable + zip)
+npm run dist:mac:dev   # macOS (DMG + zip)
+npm run dist:linux:dev # Linux (AppImage + deb + tar.gz)
+```
+
+Artifacts carry the `PiDeck-Dev-` prefix and can be installed alongside stable packages. Note that stable packaging commands such as `npm run dist:win` do **not** inject the dev channel marker — a `-beta` version number does not change the channel either (the channel is decided by the build command, not the version number).
 
 ---
 
@@ -304,6 +309,9 @@ A: Join the QQ / WeChat group at the bottom of this page (or add the author's We
 | `npm run dist:win` | Package for Windows (NSIS + portable + zip) |
 | `npm run dist:mac` | Package for macOS (DMG + zip) |
 | `npm run dist:linux` | Package for Linux (AppImage + deb + tar.gz) |
+| `npm run dist:win:dev` | Package dev edition for Windows (PiDeck Dev, dev channel + separate app identity) |
+| `npm run dist:mac:dev` | Package dev edition for macOS (PiDeck Dev, dev channel + separate app identity) |
+| `npm run dist:linux:dev` | Package dev edition for Linux (PiDeck Dev, dev channel + separate app identity) |
 | `npm run test:e2e` | Run Playwright end-to-end tests |
 | `npm run docs:dev` | Preview the docs-site locally |
 | `npm run make-icon` | Generate icon assets to `build/icon.svg` |

@@ -7,8 +7,10 @@ const toolCalls = readFileSync("src/renderer/src/components/session/ToolCallComp
 const timelineFormat = readFileSync("src/renderer/src/components/session/TimelineFormat.ts", "utf8");
 const toolResult = readFileSync("src/renderer/src/components/agents/tool-result.tsx", "utf8");
 const runtimeInjector = readFileSync("src/renderer/src/components/session/SessionRuntimeInjector.tsx", "utf8");
-const app = readFileSync("src/renderer/src/App.tsx", "utf8");
+// 文件链接打开路由（含栏级上下文 projectId 闸门）已迁入 useSessionFileLinks。
+const app = readFileSync("src/renderer/src/hooks/workspace/useSessionFileLinks.ts", "utf8");
 const fileEditor = readFileSync("src/renderer/src/hooks/useFileEditor.ts", "utf8");
+const sessionFilePathOpener = readFileSync("src/renderer/src/hooks/useSessionFilePathOpener.ts", "utf8");
 
 test("tool-call rendering stays isolated behind the SurfaceComponents facade", () => {
 	assert.match(toolCalls, /export const ToolCard = memo/);
@@ -91,10 +93,15 @@ test("edit/write diff cards expose an accessible open-file action", () => {
 	assert.match(runtimeInjector, /services\.onOpenFile\(path, line, paneFileContext\)/);
 	assert.match(app, /if \(context && !projectId\)/);
 	assert.match(app, /resolveFileLinkPath\(path, baseDir, projectRoot\)/);
-	assert.match(app, /viewFilePath\(resolved, undefined, line, fileAccessScope\)/);
-	assert.match(app, /readBase64\(resolved, undefined, fileAccessScope\)/);
-	assert.match(app, /mimeType: imageMimeTypeFromPath\(resolved\)/);
-	assert.doesNotMatch(app, /dataUrl\.match\(\/\^data:/);
+	// 打开方式已抽到 hook：既校验 App 传递本栏授权，也校验 hook 消费同一份快照，
+	// 不能继续只扫描旧 App 闭包，或只证明 hook 存在而漏掉实际接线。
+	assert.match(app, /const\s+openSessionFilePath\s*=\s*useSessionFilePathOpener\(\{\s*onPreviewImage:\s*setPreviewImage,\s*viewFilePath\s*\}\)/);
+	assert.match(app, /await\s+openSessionFilePath\(\s*resolved,\s*\{\s*line,\s*scope:\s*projectId\s*\?\s*\{\s*projectId\s*\}\s*:\s*undefined\s*\}\s*\)/);
+	assert.match(sessionFilePathOpener, /viewFilePath\(\s*path,\s*undefined,\s*options\.line,\s*options\.scope,\s*options\.readOnly\s*===\s*true\s*\)/);
+	// 预览读图必须带字节上界（COMPOSER_IMAGE_MAX_BYTES），不能无界 readBase64。
+	assert.match(sessionFilePathOpener, /readBase64\(\s*path,\s*COMPOSER_IMAGE_MAX_BYTES,\s*options\.scope\s*\)/);
+	assert.match(sessionFilePathOpener, /mimeType:\s*imageMimeTypeFromPath\(\s*path\s*\)/);
+	assert.doesNotMatch(sessionFilePathOpener, /dataUrl\.match\(\/\^data:/);
 	// 授权随 editor tab 固化，异步加载不能改用后来聚焦的项目。
 	assert.match(fileEditor, /fileAccessScope\?: ProjectFileAccessScope/);
 	assert.match(fileEditor, /readFileContent\(path, maxBytes, scope\)/);
@@ -110,7 +117,10 @@ test("thinking and tool logos keep a distinct color even on the default zinc the
 	assert.match(foundation, /--color-thinking:\s*#6366f1/);
 	assert.match(foundation, /--color-thinking:\s*#818cf8/);
 	assert.match(css, /\.thinking-row-icon \{[\s\S]*?color:\s*var\(--color-thinking\)/);
-	assert.match(css, /\.tool-card-icon \{[\s\S]*?color:\s*var\(--color-info\)/);
+	// #115 后工具 logo 走身份色 --color-tool（与思考靛紫成对、与状态色解耦，皮肤可覆盖），
+	// 默认主题里它仍落回 info 蓝——锌灰主题下依然与 tertiary 拉开对比。
+	assert.match(css, /\.tool-card-icon \{[\s\S]*?color:\s*var\(--color-tool\)/);
+	assert.match(foundation, /--color-tool:\s*var\(--color-info\)/);
 	const skillIcon = css.match(/\.tool-card--skill \.tool-card-icon \{[\s\S]*?\n\}/)?.[0] ?? "";
 	assert.match(skillIcon, /color:\s*var\(--color-thinking\)/);
 	assert.doesNotMatch(skillIcon, /--color-brand-purple/);
@@ -126,14 +136,15 @@ test("tool card renders tri-state status badges with icons and i18n labels", () 
 	// 三态共用 shadcn Badge 组件
 	assert.match(toolCalls, /import \{ Badge \} from "\.\.\/ui-shadcn\/badge"/);
 	// running：outline + 琥珀色警示位 + spinner（随 trigger 行紧凑化收紧内边距）
-	assert.match(toolCalls, /variant="outline" className="gap-1 border-warning\/40 px-1 py-0 text-micro text-warning"/);
+	// 徽章字号走会话正文轨道（text-chat-detail = 正文 −4px，默认档仍是 11px）
+	assert.match(toolCalls, /variant="outline" className="gap-1 border-warning\/40 px-1 py-0 text-chat-detail text-warning"/);
 	assert.match(toolCalls, /t\("tool\.statusRunning"\)/);
 	// error：soft 红 outline（danger-soft 底 + danger 字 + 描边，与 running 琥珀同构）
-	assert.match(toolCalls, /variant="outline" className="gap-1 border-danger\/40 bg-danger-soft px-1 py-0 text-micro text-danger"/);
+	assert.match(toolCalls, /variant="outline" className="gap-1 border-danger\/40 bg-danger-soft px-1 py-0 text-chat-detail text-danger"/);
 	assert.match(toolCalls, /<CircleX size=\{9\}/);
 	assert.match(toolCalls, /t\("tool\.statusError"\)/);
 	// done：secondary 低强调 + CircleCheck 图标；ask_question 已回答时文案替换为「已回答」
-	assert.match(toolCalls, /variant="secondary" className="gap-1 px-1 py-0 text-micro"/);
+	assert.match(toolCalls, /variant="secondary" className="gap-1 px-1 py-0 text-chat-detail"/);
 	assert.match(toolCalls, /<CircleCheck size=\{9\}/);
 	assert.match(toolCalls, /askCard\?\.answered \? t\("ask\.answered"\) : t\("tool\.statusDone"\)/);
 	// 旧实现「完成后不显示状态」的空文案分支已移除

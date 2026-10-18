@@ -1,4 +1,5 @@
-import * as pty from "node-pty";
+import type { IPty } from "node-pty";
+import { loadNodePty } from "./nodePtyRuntime";
 import { existsSync } from "node:fs";
 import type { TerminalShell } from "../../shared/types/terminal";
 import { toWindowsHostPath, toWslLinuxPath } from "../wsl/WslPaths";
@@ -105,7 +106,10 @@ export class LocalTerminalSessionLauncher {
 		];
 	}
 
-	spawn(input: { cwd: string; preferredShell?: TerminalShell }): { shell: TerminalShell; pty: pty.IPty } {
+	spawn(input: { cwd: string; preferredShell?: TerminalShell }): { shell: TerminalShell; pty: IPty } {
+		// Native module is loaded here, BEFORE the per-candidate try: a missing/incompatible node-pty must
+		// surface as NodePtyUnavailableError instead of being masked by the last candidate shell error.
+		const nodePty = loadNodePty();
 		const candidates = this.candidates();
 		// 如果有首选 shell，先在候选列表中查找匹配项
 		const ordered = input.preferredShell ? [...candidates.filter((c) => c.shell === input.preferredShell), ...candidates.filter((c) => c.shell !== input.preferredShell)] : candidates;
@@ -131,7 +135,7 @@ export class LocalTerminalSessionLauncher {
 						this.log(`Failed to convert WSL terminal cwd: ${error instanceof Error ? error.message : String(error)}`);
 					}
 				}
-				const terminal = pty.spawn(candidate.command, args, {
+				const terminal = nodePty.spawn(candidate.command, args, {
 					name: "xterm-256color",
 					cols: 80,
 					rows: 24,

@@ -58,7 +58,7 @@ function createManagerWithRunningAsk() {
 
 	// 模拟当前有一个挂起的 ask_question 请求
 	const raisedAt = Date.now() - 2_000;
-	manager.pendingUIRequests.set(
+	manager.uiGate.pendingUIRequests.set(
 		"agent-1",
 		new Map([
 			[
@@ -98,14 +98,14 @@ test("sendPrompt 在存在 pending UI 请求时应自动取消 Ask，解除底�
 	assert.equal(uiCancelEvent.args[0].cancelled, true);
 
 	// 3. 主进程 pendingUIRequests 应已被清除
-	const pending = manager.pendingUIRequests.get("agent-1");
+	const pending = manager.uiGate.pendingUIRequests.get("agent-1");
 	assert.equal(pending?.size ?? 0, 0, "pendingUIRequests 应该已被清空");
 
 	// 4. 应标记 abortedDuringAsk 集合，以便工具卡片显示为已取消
 	assert.equal(manager.abortedDuringAsk.has("agent-1"), true, "应记录 abortedDuringAsk 标记");
 
 	// 5. 等待时长应结算并计入 askWaitMsByAgent
-	const waitMs = manager.askWaitMsByAgent.get("agent-1") ?? 0;
+	const waitMs = manager.uiGate.askWaitMsByAgent.get("agent-1") ?? 0;
 	assert.ok(waitMs >= 2_000, `等待时长应已结算，实际为 ${waitMs}ms`);
 
 	// 6. 新 prompt 请求正常发出

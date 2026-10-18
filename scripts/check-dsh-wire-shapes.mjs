@@ -20,7 +20,6 @@ const zod = require("zod");
 
 /** 我们实际调用的端点（与 src/main/dsh/dshRemoteClient.ts 保持同步）。 */
 const USED = [
-	"agentPresets/deletePreset",
 	"agentPresets/list",
 	"credentials/describe",
 	"credentials/set",
@@ -36,6 +35,7 @@ const USED = [
 	"session/modelCatalog",
 	"session/page",
 	"session/prompt",
+	"session/projections",
 	"session/rename",
 	"session/search",
 	"session/selectModel",
@@ -45,7 +45,6 @@ const USED = [
 	"settings/openSettingsDocument",
 	"settings/update",
 	"skills/list",
-	"subagents/list",
 	"workspace/create",
 ];
 
@@ -147,3 +146,5 @@ for (const endpoint of USED) {
 	}
 }
 console.log(`\n共 ${USED.filter((e) => found.has(e)).length}/${USED.length} 个端点导出形状`);
+// 缺端点必须阻断门禁，不能只打印警告后返回成功。
+if (USED.some((endpoint) => !found.has(endpoint))) process.exitCode = 1;

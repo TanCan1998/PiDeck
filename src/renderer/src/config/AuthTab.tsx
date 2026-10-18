@@ -1,6 +1,7 @@
 import { Button } from "../components/ui-shadcn/button";
+import { Separator } from "../components/ui-shadcn/separator";
 import { useCallback, useEffect, useState } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronDown, ChevronRight, Copy, ExternalLink, Eye, EyeOff, GripVertical, Trash2 } from "lucide-react";
+import { ArrowUpDown, Check, ChevronDown, ChevronRight, Copy, ExternalLink, Eye, EyeOff, GripVertical, Trash2 } from "lucide-react";
 import { t } from "../i18n";
 import type { AuthFile, ModelsFile } from "./configTypes";
 import { ConfigSelect, openDocsInSystemBrowser, SecretInput } from "./ConfigShared";
@@ -32,7 +33,7 @@ const PRESET_PROVIDERS = [
 	{ value: "cloudflare-ai-gateway", label: "Cloudflare AI Gateway", env: "CLOUDFLARE_API_KEY", url: "https://dash.cloudflare.com/" },
 	{ value: "cloudflare-workers-ai", label: "Cloudflare Workers AI", env: "CLOUDFLARE_API_KEY", url: "https://dash.cloudflare.com/" },
 	{ value: "vercel-ai-gateway", label: "Vercel AI Gateway", env: "AI_GATEWAY_API_KEY", url: "https://vercel.com/" },
-	{ value: "azure-openai-responses", label: "Azure OpenAI", env: "AZURE_OPENAI_API_KEY", url: "https://portal.azure.com/" },
+	{ value: "azure", label: "Azure OpenAI", env: "AZURE_OPENAI_API_KEY", url: "https://portal.azure.com/" },
 	{ value: "zai", label: "Z.AI", env: "ZAI_API_KEY", url: "" },
 	{ value: "zai-coding-cn", label: "Z.AI Coding (China)", env: "ZAI_CODING_CN_API_KEY", url: "" },
 	{ value: "opencode", label: "OpenCode Zen", env: "OPENCODE_API_KEY", url: "" },
@@ -125,7 +126,7 @@ export function AuthTab(props: {
 	return (
 		<div className="config-auth-tab">
 			<div className="mb-3 flex items-center justify-between gap-3">
-				<span className="font-mono text-xs tabular-nums text-text-tertiary">{t("config.count.auth", { count: allProviders.length })}</span>
+				<span className="font-mono text-xs tabular-nums text-muted-foreground">{t("config.count.auth", { count: allProviders.length })}</span>
 				<div className="flex min-w-0 items-center gap-1.5">
 					<Button
 						size="sm"
@@ -143,6 +144,9 @@ export function AuthTab(props: {
 					<Button size="sm" variant="outline" onClick={() => setShowGuide(!showGuide)} disabled={saving}>
 						{t("config.authGuide")}
 					</Button>
+					{/* 批量删除把整份 auth.json 条目批量移除，不可撤销：与普通工具按钮之间留一道分隔，
+					    避免「使用指南」紧挨红色按钮被误点（UI 走查 A7）。 */}
+					<Separator orientation="vertical" className="mx-0.5 h-5" />
 					<Button
 						size="sm"
 						variant="destructive"
@@ -179,11 +183,11 @@ export function AuthTab(props: {
 
 			{/* 排序说明：与模型页共用同一份顺序，写明白用户才知道拖完为什么另一页也跟着变 */}
 			{visibleProviders.length > 1 && (
-				<div className="mb-2.5 flex items-start gap-2 text-[11px] leading-relaxed text-text-tertiary">
+				<div className="mb-2.5 flex items-start gap-2 text-micro leading-relaxed text-text-tertiary">
 					<ArrowUpDown size={12} className="mt-0.5 shrink-0" aria-hidden="true" />
 					<span className="min-w-0 flex-1">{t("config.providerOrderHint")}</span>
 					{(props.providerOrder?.length ?? 0) > 0 && props.onResetProviders && (
-						<Button variant="ghost" size="sm" className="h-5 shrink-0 px-1.5 text-[11px] font-normal text-text-tertiary hover:text-text-primary" onClick={props.onResetProviders} disabled={saving}>
+						<Button variant="ghost" size="sm" className="h-5 shrink-0 px-1.5 text-micro font-normal text-text-tertiary hover:text-text-primary" onClick={props.onResetProviders} disabled={saving}>
 							{t("config.providerOrderReset")}
 						</Button>
 					)}
@@ -251,8 +255,8 @@ export function AuthTab(props: {
 											</span>
 										)}
 									</div>
-									<span className="mt-0.5 font-mono text-[11px] text-text-tertiary">{provider.value}</span>
-									{alreadyConfigured && <span className="mt-1.5 rounded-[4px] bg-[color:color-mix(in_srgb,var(--color-accent)_10%,transparent)] px-1.5 py-px text-[11px] text-[color:var(--color-accent)]">{t("config.configured")}</span>}
+									<span className="mt-0.5 font-mono text-micro text-text-tertiary">{provider.value}</span>
+									{alreadyConfigured && <span className="mt-1.5 rounded-xs bg-[color:color-mix(in_srgb,var(--color-accent)_10%,transparent)] px-1.5 py-px text-micro text-[color:var(--color-accent)]">{t("config.configured")}</span>}
 								</button>
 							);
 						})}
@@ -289,8 +293,8 @@ export function AuthTab(props: {
 													</span>
 												)}
 											</div>
-											<span className="mt-0.5 font-mono text-[11px] text-text-tertiary">{t("config.fromModels")}</span>
-											{alreadyConfigured && <span className="mt-1.5 rounded-[4px] bg-[color:color-mix(in_srgb,var(--color-accent)_10%,transparent)] px-1.5 py-px text-[11px] text-[color:var(--color-accent)]">{t("config.configured")}</span>}
+											<span className="mt-0.5 font-mono text-micro text-text-tertiary">{t("config.fromModels")}</span>
+											{alreadyConfigured && <span className="mt-1.5 rounded-xs bg-[color:color-mix(in_srgb,var(--color-accent)_10%,transparent)] px-1.5 py-px text-micro text-[color:var(--color-accent)]">{t("config.configured")}</span>}
 										</button>
 									);
 								})}
@@ -320,9 +324,9 @@ export function AuthTab(props: {
 					<div className="mt-3 flex items-center gap-2 border-t border-border-subtle pt-2.5">
 						{selectedProvider && presetProvider && (
 							<div className="flex flex-1 items-center gap-1.5 text-xs text-text-tertiary">
-								{t("config.authEnvVar")}: <code className="rounded-[4px] bg-bg-hover px-1.5 py-px font-mono text-[11px]">{presetProvider.env}</code>
+								{t("config.authEnvVar")}: <code className="rounded-xs bg-bg-hover px-1.5 py-px font-mono text-micro">{presetProvider.env}</code>
 								{presetProvider.url && (
-									<a href={presetProvider.url} onClick={openDocsInSystemBrowser(presetProvider.url)} className="inline-flex items-center gap-0.5 text-[11px] text-[color:var(--color-accent)] no-underline">
+									<a href={presetProvider.url} onClick={openDocsInSystemBrowser(presetProvider.url)} className="inline-flex items-center gap-0.5 text-micro text-[color:var(--color-accent)] no-underline">
 										{t("config.authGetKey")} <ExternalLink size={10} />
 									</a>
 								)}
@@ -357,45 +361,16 @@ export function AuthTab(props: {
 						<div
 							key={name}
 							ref={(element) => providerReorder.registerCard(name, element)}
-							className={`relative rounded-lg border border-border-subtle bg-bg-panel transition-[border-color,box-shadow,background-color,opacity] duration-150${providerReorder.draggingName === name ? " opacity-50" : ""}${isExpanded ? " border-[color-mix(in_srgb,var(--color-accent)_32%,var(--color-border-subtle))] shadow-[var(--shadow-border)]" : ""}`}
+							className={`relative rounded-lg border border-border-subtle bg-bg-panel transition-[border-color,box-shadow,background-color,opacity] duration-150${providerReorder.draggingName === name ? " opacity-40 border-dashed" : ""}${isExpanded ? " border-[color-mix(in_srgb,var(--color-accent)_32%,var(--color-border-subtle))] shadow-[var(--shadow-border)]" : ""}`}
 							{...providerReorder.cardProps(name)}
 						>
-							{/* 插入指示线：拖拽落点在上下哪侧就画在卡片哪侧 */}
-							{providerReorder.dropTarget?.name === name && <span className={`absolute ${providerReorder.dropTarget.position === "before" ? "top-0" : "bottom-0"} right-0 left-0 z-10 h-0.5 bg-[color:var(--color-accent)]`} />}
-							<div data-provider-head="" className="group flex cursor-pointer items-center gap-2.5 rounded-t-lg px-3.5 py-2 transition-colors duration-150 hover:bg-bg-hover" onClick={() => props.onToggleAuth(name)}>
-								{/* 拖拽手柄：draggable 只落在手柄上，避免抢整行点击展开；上移/下移悬停浮现 */}
+							{/* 插入指示线：拖拽落点在上下哪侧就画在卡片哪侧；加粗 + 发光，落点一眼可见 */}
+							{providerReorder.dropTarget?.name === name && <span className={`absolute ${providerReorder.dropTarget.position === "before" ? "top-0" : "bottom-0"} right-0 left-0 z-10 h-[3px] rounded-full bg-[color:var(--color-accent)] shadow-[0_0_8px_color-mix(in_srgb,var(--color-accent)_55%,transparent)]`} />}
+							<div data-provider-head="" className="flex cursor-pointer items-center gap-2.5 rounded-t-lg px-3.5 py-2 transition-colors duration-150 hover:bg-bg-hover" onClick={() => props.onToggleAuth(name)}>
+								{/* 拖拽手柄：draggable 只落在手柄上，避免抢整行点击展开；聚焦手柄后 ↑/↓ 也可微调（键盘接线在 hook 的 gripProps 里） */}
 								<Button variant="ghost" size="icon-sm" className="size-6 shrink-0 cursor-grab text-muted-foreground active:cursor-grabbing" title={t("config.dragProvider")} {...providerReorder.gripProps(name)} onClick={(event) => event.stopPropagation()}>
 									<GripVertical size={14} />
 								</Button>
-								{/* 上移/下移：悬停浮现（键盘聚焦也可见），到顶/到底禁用 */}
-								<div className="flex shrink-0 items-center">
-									<Button
-										variant="ghost"
-										size="icon-sm"
-										className="size-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-										disabled={!providerReorder.canMove(name, -1)}
-										title={t("config.moveProviderUp")}
-										onClick={(event) => {
-											event.stopPropagation();
-											providerReorder.moveBy(name, -1);
-										}}
-									>
-										<ArrowUp size={13} />
-									</Button>
-									<Button
-										variant="ghost"
-										size="icon-sm"
-										className="size-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-										disabled={!providerReorder.canMove(name, 1)}
-										title={t("config.moveProviderDown")}
-										onClick={(event) => {
-											event.stopPropagation();
-											providerReorder.moveBy(name, 1);
-										}}
-									>
-										<ArrowDown size={13} />
-									</Button>
-								</div>
 								{batchMode && (
 									<Label className="mr-2.5 inline-flex size-4 shrink-0 items-center justify-center" onClick={(e) => e.stopPropagation()}>
 										<Checkbox
@@ -436,6 +411,9 @@ export function AuthTab(props: {
 											<EyeOff size={14} className="text-muted-foreground" />
 										</Button>
 									)}
+									{/* 删除是不可撤销动作，和上面的「隐藏/Migration/用量」用竖线隔开：
+									    图标按钮只有 4px gap 时，误点一次就删掉一组凭据。 */}
+									<Separator orientation="vertical" className="mx-0.5 h-4" />
 									<Button
 										variant="ghost"
 										size="icon-sm"
@@ -452,7 +430,7 @@ export function AuthTab(props: {
 								</div>
 							</div>
 							{isExpanded && (
-								<div className="mx-4 my-3.5 grid gap-2.5 rounded-lg border border-border-subtle bg-bg-panel p-3.5">
+								<div className="mx-4 my-3.5 grid gap-2.5 rounded-lg border border-border-subtle bg-bg-panel p-3.5 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-fast">
 									<div className="grid grid-cols-[90px_1fr] items-center gap-2.5">
 										<Label className="pl-0.5 text-left text-xs font-medium text-text-secondary">{t("config.field.type")}</Label>
 										<ConfigSelect value={auth.type ?? "api_key"} options={AUTH_TYPE_OPTIONS} onChange={(v) => props.onUpdate(name, "type", v)} />
@@ -477,7 +455,7 @@ export function AuthTab(props: {
 						</button>
 						{hiddenSectionOpen && (
 							<div className="border-t border-border-subtle px-3.5 py-2">
-								<p className="mb-2 text-[11px] leading-relaxed text-text-tertiary">{t("config.hiddenAuthsHint")}</p>
+								<p className="mb-2 text-micro leading-relaxed text-text-tertiary">{t("config.hiddenAuthsHint")}</p>
 								<div className="flex flex-col gap-1">
 									{hiddenProviderNames.map((hiddenName) => (
 										<div key={hiddenName} className="flex items-center justify-between gap-2 rounded-sm bg-bg-muted px-2.5 py-1.5">

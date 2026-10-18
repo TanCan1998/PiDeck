@@ -4,7 +4,7 @@
  * 形态（docs/dsh-agent-backend-plan.md §3.2 形态 b）：utilityProcess 承载 DSH host，
  * 主进程侧客户端把请求经 MessagePort（utilityProcess.postMessage / parentPort）桥接。
  *
- * 0.1.5 迁移（docs/dsh-0.1.5-typert-migration.md）：旧 dsh-host-apiproxy 已废，
+ * Typert Remote 契约（docs/dsh-remote-contract.md）：旧 dsh-host-apiproxy 已废，
  * unary RPC 走官方 Connection wire 协议（POST /api/<endpoint>，ClientRequest/
  * ServerResponse JSON 信封），仍用 fetch-* 帧；流式（Gateway Remote stream，
  * 含 $events 转发事件与瀑布）走新增 stream-* 帧，帧形状与官方

@@ -81,6 +81,54 @@ export type DshPluginLifecycleInput = {
 	mode?: "run" | "update";
 };
 
+/** 插件市场搜索结果条目（双源：官方 dsh 目录 / npm）。 */
+export type DshPluginMarketEntry = {
+	/** npm 包名（官方目录纯 repo 条目无 npm 包，不会出现在这里）。 */
+	name: string;
+	version?: string;
+	description?: string;
+	/** 主要提供 DSH Web 界面功能（headless host 无可见效果，安装前警示）。 */
+	uiOnly: boolean;
+	source: "market" | "npm";
+};
+
+/** 插件市场搜索结果（单源失败降级为 warnings，不阻断）。 */
+export type DshPluginMarketSearchResult = {
+	entries: DshPluginMarketEntry[];
+	warnings: string[];
+};
+
+/** 用户插件安装结果（幂等：重复安装 alreadyRegistered=true）。 */
+export type DshUserPluginInstallResult = {
+	/** 安装的 npm 包名。 */
+	name: string;
+	version?: string;
+	/** 用户补丁层行 id（<去 scope 包名>/host）。 */
+	rowId: string;
+	/** Loader 入口（file:// URL，指向受管目录内插件主入口）。 */
+	entryUrl: string;
+	/** 插件落位目录（userData/dsh-plugins 受管根内）。 */
+	destDir: string;
+	/** UI-only 插件（主要提供 DSH Web 界面功能，headless 无可见效果）。 */
+	uiOnly: boolean;
+	/** 补丁层已有同 id 行（本次跳过登记）。 */
+	alreadyRegistered: boolean;
+	/** 依赖闭包补齐后仍缺失的裸包名（插件加载可能失败，提示用）。 */
+	missingDeps: string[];
+};
+
+/** 用户补丁层清单行（安装服务视角：受管目录内的行补全包信息）。 */
+export type DshUserPluginListEntry = {
+	/** 补丁层行 id。 */
+	rowId: string;
+	/** Loader 行 name（file:// URL 或路径）。 */
+	moduleName: string;
+	/** 受管目录内时补全；手工安装行缺省。 */
+	packageName?: string;
+	version?: string;
+	uiOnly?: boolean;
+};
+
 /** 桥 RPC 响应（主进程 rawFetch 解析用；{ ok:false } 时主进程抛 error 文本）。 */
 export type DshPluginBridgeResponse<T> = { ok: true; value: T } | { ok: false; error: string };
 

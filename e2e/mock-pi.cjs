@@ -391,6 +391,100 @@ function simulateRetry(userText) {
 	runCycle(failOnly ? 1 : 3);
 }
 
+/* ── PiDeck #262 前台子代理 widget 帧重放（E2E：subagents-foreground.spec.ts）──
+ * 真实链路里这些帧由内置桥接扩展 resources/extensions/pi-deck-subagents.ts 在
+ * subagents:started / subagents:completed 事件上经 ctx.ui.setWidget 推送；mock 不跑
+ * pi 的扩展加载器，改为直接重放该生产文件本身（typescript 转译 + 最小扩展 API），
+ * 再以 pi 原生 extension_ui_request{method:"setWidget"} 帧发给桌面端。
+ * 帧在桥接回调触发瞬间转发（含桥接自身 200ms 去抖），mock 不设任何本地定时器。
+ * 载荷形状对齐 @gotgenes/pi-subagents 21.7.4（#262 记录的版本：前台 spawnAndWait 只发
+ * started、无 created，载荷仅 id/type/description；completed 自带 result/toolUses/
+ * durationMs/tokens）——该包**不参与运行时**，E2E 不安装/不执行它，形状只是夹具依据；
+ * 生产桥接顶部 docstring 里的 @tintinweb/pi-subagents 是项目内旧署名，此处以 #262 的
+ * @gotgenes 记录为准。帧由生产函数生成，桥接逻辑一改帧就跟着变，不是手写静态 JSON。
+ */
+const SUBAGENT_FG_MARKER = "SUBAGENTS_FG";
+const SUBAGENT_FG_ENTRY_ID = "fg-e2e-262";
+let subagentReplay = null;
+
+function createSubagentReplay() {
+	const ts = require("typescript");
+	const { createRequire } = require("node:module");
+	const bridgePath = path.join(__dirname, "..", "resources", "extensions", "pi-deck-subagents.ts");
+	const source = fs.readFileSync(bridgePath, "utf8");
+	const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } });
+	const bridgeModule = {};
+	// 以桥接文件自身为模块解析基准：桥接将来新增相对 import 时不会错误地按 e2e/ 目录解析
+	new Function("exports", "require", outputText)(bridgeModule, createRequire(bridgePath));
+	const handlers = new Map();
+	const lifecycle = new Map();
+	// 最小 pi 扩展 API（与 tests/piSubagentsBridge.test.mjs 的 createMockPi 同构）
+	bridgeModule.default({
+		events: { on: (name, cb) => handlers.set(name, cb) },
+		on: (name, cb) => lifecycle.set(name, cb),
+		appendEntry: () => {},
+	});
+	// 桥接真正调用 ctx.ui.setWidget 时**立即**转发为 pi 原生 RPC——不猜去抖时间、
+	// 不复制帧。下一帧的 requestId + 期望状态在 started/completed 触发前登记，回调
+	// 按登记消费；未登记的回调（session_start 的初始空帧）忽略。帧状态与阶段不符时
+	// 直接抛错（响亮失败），避免把错阶段的帧贴上本阶段的 requestId 蒙混过关。
+	let pendingFrame = null;
+	const ctx = {
+		ui: {
+			setWidget: (key, lines) => {
+				const pending = pendingFrame;
+				pendingFrame = null;
+				if (!pending) return;
+				const snapshot = JSON.parse(lines[0]);
+				const entry = (snapshot.agents ?? []).find((agent) => agent.id === SUBAGENT_FG_ENTRY_ID);
+				if (entry?.status !== pending.expectStatus) {
+					throw new Error(`#262 重放帧与阶段不符：期望 ${pending.expectStatus}，实际 ${entry?.status ?? "<无条目>"}（${lines[0]}）`);
+				}
+				emit({ type: "extension_ui_request", id: pending.requestId, method: "setWidget", widgetKey: key, widgetLines: lines });
+			},
+		},
+	};
+	lifecycle.get("session_start")({ type: "session_start" }, ctx);
+	return {
+		started() {
+			pendingFrame = { requestId: "subagents-fg-running", expectStatus: "running" };
+			handlers.get("subagents:started")({ id: SUBAGENT_FG_ENTRY_ID, type: "Explore", description: "查找认证相关文件" });
+		},
+		completed() {
+			pendingFrame = { requestId: "subagents-fg-completed", expectStatus: "completed" };
+			handlers.get("subagents:completed")({
+				id: SUBAGENT_FG_ENTRY_ID,
+				type: "Explore",
+				description: "查找认证相关文件",
+				status: "completed",
+				result: "找到 3 个认证文件",
+				toolUses: 5,
+				durationMs: 42000,
+				tokens: { input: 100, output: 200, total: 300 },
+			});
+		},
+	};
+}
+
+/** #262 重放的 run 外壳：started 期间 UI 处于运行中；终态帧后正常收尾本轮。 */
+function beginSubagentReplayRun() {
+	streaming = true;
+	emit({ type: "agent_start" });
+	emit({ type: "message_start", message: { role: "assistant", content: [{ type: "text", text: "" }] } });
+}
+
+function finishSubagentReplayRun(userText) {
+	streaming = false;
+	const reply = "前台子代理已完成。";
+	appendSessionMessages(userText, reply);
+	// 与 startStream 正常收尾一致：内存对话同步更新，get_messages 才能返回本轮
+	conversationMessages.push({ role: "user", content: [{ type: "text", text: userText }] }, { role: "assistant", content: [{ type: "text", text: reply }] });
+	const full = { role: "assistant", content: [{ type: "text", text: reply }], stopReason: "stop" };
+	emit({ type: "message_end", message: full });
+	emit({ type: "agent_end", messages: [full] });
+	emit({ type: "agent_settled" });
+}
+
 function stopStream(settled) {
 	if (streamTimer) {
 		clearTimeout(streamTimer);
@@ -409,6 +503,16 @@ function startStream(userText, options = {}) {
 	// BURST 模式：模拟真实 LLM 突发输出——前 6 个 chunk 慢速（250ms），
 	// 之后 15ms 密集推送（复现「开头吐字、后面蹦字」）。
 	const burst = userText.includes("BURST");
+	// TOOLMANY 模式（过程组内部跟底 e2e 用）：`TOOLMANY <n>` 会**逐个**推 n 次工具调用，
+	// 每次之间隔 manyToolDelayMs，用于制造「组体已展开、成员仍在继续到达」的增长窗口。
+	// 刻意不夹中间文本（tool 之间没有 text_delta）——一旦夹了，分组层会把它们切成多个组
+	// （中间回复是组边界），组体就撑不出内部滚动，测不到跟底。
+	const manyToolCount = (() => {
+		const match = /TOOLMANY\s+(\d+)/.exec(userText);
+		return match ? Number(match[1]) : 0;
+	})();
+	const manyToolDelayMs = Math.max(streamIntervalMs, 250);
+	let manyToolEmitted = 0;
 	// prompt 含 "MDEMO" 时回复富 markdown，用于截图巡检渲染元素（链接/代码/表格/引用）
 	// raw 模式（Ask 回答回显）：不套模板、不截断，保证长 JSON 答案完整回传
 	const reply = userText.startsWith("MATH_REPRO\n")
@@ -480,7 +584,7 @@ function startStream(userText, options = {}) {
 			});
 		}
 	}
-	if (userText.includes("TOOL")) {
+	if (manyToolCount === 0 && userText.includes("TOOL")) {
 		emit({
 			type: "tool_execution_start",
 			toolName: "bash",
@@ -512,6 +616,16 @@ function startStream(userText, options = {}) {
 		return true;
 	};
 	const emitChunk = () => {
+		// TOOLMANY：先把 n 个工具调用逐个推完，再进入正文流。
+		// 每个 tick 只推一个，组体在这段时间里持续增高（跟底用例的增长窗口）。
+		if (manyToolEmitted < manyToolCount) {
+			const id = `tool-e2e-many-${manyToolEmitted}`;
+			emit({ type: "tool_execution_start", toolName: "bash", toolCallId: id, args: { command: `echo step-${manyToolEmitted}` } });
+			emit({ type: "tool_execution_end", toolCallId: id });
+			manyToolEmitted += 1;
+			streamTimer = setTimeout(emitChunk, manyToolDelayMs);
+			return;
+		}
 		if (streamStep >= streamChunks.length) {
 			streamTimer = null;
 			const full = {
@@ -617,6 +731,19 @@ function handleCommand(cmd) {
 					});
 					setTimeout(() => process.exit(1), 80);
 				}, 80);
+				return;
+			}
+			// PiDeck #262：前台子代理 started/completed widget 帧重放。
+			// 放在 streaming 排队判断之前——终态帧由第二条 prompt（..._DONE）触发。
+			if (text.includes(SUBAGENT_FG_MARKER)) {
+				subagentReplay = subagentReplay ?? createSubagentReplay();
+				if (text.includes(`${SUBAGENT_FG_MARKER}_DONE`)) {
+					subagentReplay.completed();
+					finishSubagentReplayRun(text);
+				} else {
+					beginSubagentReplayRun();
+					subagentReplay.started();
+				}
 				return;
 			}
 			if (text.includes("RETRY_OK") || text.includes("RETRY_FAIL")) {

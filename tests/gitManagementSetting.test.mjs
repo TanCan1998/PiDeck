@@ -19,7 +19,8 @@ describe("optional Git management entry", () => {
 		assert.match(sharedTypes, /enableGitManagement:\s*boolean/);
 		assert.match(settingsStore, /enableGitManagement:\s*true/);
 		assert.match(previewApi, /enableGitManagement:\s*true/);
-		assert.match(app, /enableGitManagement:\s*true/);
+		// App 首屏默认值已抽到 shared/types/settings.ts 的 createDefaultAppSettings（App.tsx 只调用工厂）
+		assert.match(sharedTypes, /enableGitManagement:\s*true/);
 	});
 
 	test("exposes a localized settings switch", () => {

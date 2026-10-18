@@ -288,11 +288,15 @@ test("IPC 行为：get 回快照、save 只收数组、open-file 先建文件再
 
 const readSource = (file) => readFileSync(file, "utf8");
 
-test("底栏接线：安全控制位右侧渲染 props.quickMessagesControl，且生图模式一并屏蔽", () => {
+test("底栏接线：安全控制位右侧渲染 props.quickMessagesControl，且生图/生视频一并屏蔽", () => {
 	const source = readSource("src/renderer/src/components/session/ComposerComponents.tsx");
 	assert.match(source, /quickMessagesControl\?: ReactNode/);
-	// 生图模式没有对话 runtime，两个控制位都不该出现；分开判断是为了防止将来只屏蔽一个。
-	assert.match(source, /isImageGenMode \? null : \(\s*<>\s*\{props\.securityControl\}\s*\{props\.quickMessagesControl\}/);
+	// isMediaComposer 必须同时按「模式 or 后端」判定：引导页选了生图/生视频后端时 mode 仍是 normal，
+	// 只按 mode 判会漏屏蔽。
+	assert.match(source, /const isMediaComposer = [^;]*isImageGenMode[^;]*isVideoGenMode[^;]*props\.backend === "imagegen"[^;]*props\.backend === "videogen"/, "isMediaComposer 必须同时覆盖模式与后端");
+	// 生图/生视频后端没有对话 runtime，飞书镜像/安全等级/DSH 权限/快捷消息四个控制位都不该出现；
+	// 一起判断是为了防止将来只屏蔽其中几个。
+	assert.match(source, /isMediaComposer \? null : \(\s*<>\s*\{props\.feishuIndicator\}\s*\{props\.securityControl\}\s*\{props\.quickMessagesControl\}/);
 });
 
 test("ComposerArea：把 controller 的 pickers/delivery 接进快捷消息入口", () => {
@@ -325,7 +329,7 @@ test("弹框：清单来自配置文件（useQuickMessages），不再订阅 set
 test("弹框：每次打开都从磁盘重读（手工编辑配置文件后无需重启应用）", () => {
 	const menu = readSource("src/renderer/src/components/session/QuickMessageMenu.tsx");
 	// 重读落在 hook 的开合写入口上：点击入口与快捷键入口共用它，两边都会重读
-	assert.match(menu, /useQuickMessagePopover\(\{ sessionId: props\.sessionId, refresh \}\)/, "打开时应重读文件");
+	assert.match(menu, /useQuickMessagePopover\(\{\s*sessionId: props\.sessionId,\s*refresh:/, "打开时应重读文件");
 	assert.match(readSource("src/renderer/src/hooks/useQuickMessagePopover.ts"), /if \(next\) void refresh\(\)/, "hook 的 setOpen 负责打开时重读");
 	const hook = readSource("src/renderer/src/hooks/useQuickMessages.ts");
 	assert.match(hook, /const refresh = useCallback\(async \(\) => \{/);
@@ -519,7 +523,7 @@ test("浮层开合：状态与「打开前重读文件」双入口共用同一�
 	// 切换式开合：呼出类快捷键再按一次应收起
 	assert.match(hook, /setOpen\(!openRef\.current\)/);
 	const menu = readSource("src/renderer/src/components/session/QuickMessageMenu.tsx");
-	assert.match(menu, /useQuickMessagePopover\(\{ sessionId: props\.sessionId, refresh \}\)/, "浮层状态由 hook 持有");
+	assert.match(menu, /useQuickMessagePopover\(\{\s*sessionId: props\.sessionId,\s*refresh:/, "浮层状态由 hook 持有");
 	// 组件里不该再声明开合 state（注释里提 useState 不算，要查真实声明）
 	assert.ok(!/const \[[a-zA-Z]+, set[A-Z]\w*\] = useState/.test(menu), "开合不该再在组件里另起一份 state（会与快捷键状态分叉）");
 });

@@ -1,12 +1,17 @@
+import { touchRecentSessionAtom, forgetRecentSessionAtom } from "./recent-session-atoms";
+import { advanceSessionActivityAnchorAtom, forgetSessionActivityAnchorAtom } from "./sessionActivityAtoms";
+import { sessionSendStateByIdAtom, setSessionSendStateAtom } from "./composer-atoms";
 import { atom } from "jotai";
 import type { Getter, Setter } from "jotai";
 import { atomFamily, selectAtom } from "jotai/utils";
 import type { AgentBackend, AgentRuntimeState, AgentStatus, AgentUiBatchQuestion, AgentUiRequest, ChatMessage, SessionHistoryUnavailableReason, SessionMessagePage, SessionRecord, SessionRuntimeEvent, SessionRuntimeInfo } from "../../../shared/types";
 import { mergeAgentRuntimeState } from "../utils/agentRuntimeState";
+import { isSessionTurnRunning } from "../utils/sessionActivityClock";
 import { findLastUserMessageIndex, shouldRefreshOutlineForRuntimeUpsert } from "./outlineRevision";
 import { releaseSessionOutlineProjection } from "./outlineProjectionCache";
 import { sameProjectSessionList } from "../utils/sessionRecordIdentity";
 import { resolveStreamingTextUpdate, shouldHoldLiveText, shouldReleaseHeldLiveText } from "../utils/liveTextHandoff";
+import type { BridgeOverlayOptions, BridgeTone, BridgeUINode, BridgeUpdate } from "../../../shared/types/bridge";
 
 /**
  * 渲染层会话消息缓存上限（LRU）。
@@ -49,6 +54,8 @@ export type SessionRuntimeViewState = {
 	title?: string;
 	piSessionId?: string;
 	sessionPath?: string;
+	/** PiDeck 会话身份（agents:state / sessions:runtime 事件与 listRuntimes 透传）：侧栏 ACP「agent↔会话」配对用，缺它会把同一会话画成两行。 */
+	deckSessionId?: string;
 	createdAt?: number;
 	compactionCount?: number;
 	noSession?: boolean;
@@ -128,6 +135,32 @@ export type SessionRuntimeUiState = {
 	runtimeGeneration: number;
 	requests: Record<string, SessionRuntimeUiRequestState>;
 	widgets: Record<string, string[]>;
+	/**
+	 * GUI 扩展桥的落点树（§8.2 A 组）。
+	 *
+	 * 键是落点 id（`header` / `footer` / `editor` / `widget:<key>` / `gui:<slot>:<key>`），
+	 * 值是桥推来的 UINode 树（null 表示该落点无内容 → 渲染层不占位）。
+	 * 与 `widgets` 分开存放：`widgets` 是 pi 原生的字符串行 widget（保持原路，§14.4），
+	 * 这里是桥接管的组件树，两者互不干扰。
+	 */
+	bridgeTargets?: Record<string, BridgeUINode | null>;
+	/** 桥的状态栏条目（多 key 共存）。 */
+	bridgeStatus?: Record<string, string>;
+	/**
+	 * 状态条目的语义色（与 `bridgeStatus` 同键，值是桥侧量化后的 tone）。
+	 *
+	 * 与文本分开存：`bridgeStatus` 保持「key → 净文本」的原语义（老读者/老断言不受影响），
+	 * tone 是**增量**能力 —— 桥侧把 ANSI 配色量化成 tone 后单独下发（方案 B：保色）。
+	 */
+	bridgeStatusTone?: Record<string, BridgeTone>;
+	/** 桥的流式状态行（setWorkingMessage / setWorkingVisible / setWorkingIndicator）；`tone` 是文案的语义色。 */
+	bridgeWorking?: { message?: string; tone?: BridgeTone; visible?: boolean; frames?: string[] };
+	/** 桥的会话标题（setTitle）。 */
+	bridgeTitle?: string;
+	/** 桥的折叠思考块标签（setHiddenThinkingLabel）。 */
+	bridgeThinkingLabel?: string;
+	/** 桥的覆盖层（ctx.gui.custom 的 overlay / modal）。 */
+	bridgeOverlays?: Record<string, { node: BridgeUINode; options?: BridgeOverlayOptions }>;
 	notification?: {
 		requestId: string;
 		message: string;
@@ -159,6 +192,7 @@ export const sidebarRuntimeAtom = selectAtom(sessionRuntimeByIdAtom, (full) => {
 	return slim;
 });
 export const sessionRuntimeUiByIdAtom = atom<Record<string, SessionRuntimeUiState>>({});
+
 /**
  * 会话级缓存命中率快照历史（仅存数值，最多 50 条）：
  * 用于展示「当前会话平均缓存命中率」，弥补只显示最新一次 assistant 命中率的不足。
@@ -175,7 +209,7 @@ function allocateSessionMessageOutlineRevision(): number {
 }
 
 /** 时间线改写过程遮罩：停 Agent / 写 JSONL / 重载 / 激活 / fork，按 sessionId 隔离。 */
-export type SessionHistoryMutationOverlayKind = "stopping" | "mutating" | "reloading" | "activating" | "forking";
+export type SessionHistoryMutationOverlayKind = "stopping" | "mutating" | "reloading" | "activating" | "forking" | "editing" | "resending";
 
 export const sessionHistoryMutationOverlayByIdAtom = atom<Record<string, SessionHistoryMutationOverlayKind>>({});
 
@@ -328,8 +362,8 @@ function disposeStreamingThinkingFamily(thinkingId: string) {
 
 /**
  * 「新一轮开始」信号：composer 发送成功后 +1（sessionId 键）。
- * TurnRow 订阅本会话 tick：变化时非最新轮强制收起（设置② collapsePrevRunsOnNewTurn 开启时），
- * 含用户手动展开的轮次。tick 低频（每轮一次），跨会话订阅经 family selectAtom 隔离。
+ * TurnRow 订阅本会话 tick：变化时非最新轮强制收起（含用户手动展开的轮次）；
+ * tick 低频（每轮一次），跨会话订阅经 family selectAtom 隔离。
  */
 export const newTurnCollapseTickByIdAtom = atom<Record<string, number>>({});
 
@@ -425,6 +459,15 @@ export const currentSessionRuntimeUiAtom = atom((get) => {
 	return sessionId ? get(sessionRuntimeUiByIdAtom)[sessionId] : undefined;
 });
 
+/**
+ * 按会话取 GUI 扩展桥的落点树（§8.2 A 组）。
+ *
+ * `selectAtom` + `Object.is`：外层 map 在任何会话推帧时整体重建，但**本会话**的落点表
+ * 引用不变 → 别的会话推帧不会拖着本栏重渲。落点组件只订自己要渲染的那个 sessionId
+ * （AGENTS.md「多实例必须按 session 订阅」，PR 评审 §2.3）。
+ */
+export const sessionBridgeUiFamily = atomFamily((sessionId: string) => selectAtom(sessionRuntimeUiByIdAtom, (map) => map[sessionId]?.bridgeTargets, Object.is));
+
 export const currentSessionMessagesAtom = atom((get) => {
 	const sessionId = get(currentSessionIdAtom);
 	return sessionId ? (get(sessionMessagesCacheAtom)[sessionId]?.messages ?? []) : [];
@@ -437,6 +480,10 @@ export const replaceSessionRuntimesAtom = atom(null, (get, set, runtimes: Sessio
 		const existing = current[runtime.sessionId];
 		if (existing && existing.runtimeGeneration > runtime.runtimeGeneration) continue;
 		const bindingChanged = existing?.agentId !== runtime.agentId || existing.runtimeGeneration !== runtime.runtimeGeneration;
+		// 启动/恢复的快照可能先于状态事件到达；以实际绑定补记，重复刷新不改顺序。
+		if (bindingChanged && runtime.agentId && !runtime.noSession && (runtime.status === "starting" || runtime.status === "running" || runtime.status === "idle")) {
+			set(touchRecentSessionAtom, { sessionId: runtime.sessionId, projectId: runtime.projectId });
+		}
 		next[runtime.sessionId] = {
 			...(bindingChanged ? {} : existing),
 			agentId: runtime.agentId,
@@ -453,6 +500,8 @@ export const replaceSessionRuntimesAtom = atom(null, (get, set, runtimes: Sessio
 			// 与 `agents:state` 那条路径同源：远端 trust 现状在 runtime 快照里也要带，
 			// 否则「渲染层重载 + runtime 空闲」时提示要等下一次状态推送才出现。
 			remoteTrustUnhandled: runtime.remoteTrustUnhandled === true ? true : undefined,
+			// listRuntimes 快照可能落后于事件流（或旧主进程未带此字段）：不冲掉已知身份。
+			deckSessionId: runtime.deckSessionId ?? existing?.deckSessionId,
 		};
 	}
 	set(sessionRuntimeByIdAtom, next);
@@ -996,6 +1045,104 @@ function tryReleaseLiveThinkingAfterHistory(get: Getter, set: Setter, sessionId:
 	disposeStreamingThinkingFamily(liveId);
 }
 
+/**
+ * 应用一帧 GUI 扩展桥更新（§8.2 A 组）。
+ *
+ * 纯函数：入参 base 与 payload，返回新 state。桥的每种更新只动自己那个字段，
+ * 其余字段原样保留 —— 保证「只追加」（§7.4）在渲染层也成立。
+ *
+ * 未知 `update.type` 一律忽略（前向兼容：桥升级后推的新类型不会让旧 PiDeck 崩）。
+ */
+function applyBridgeUpdate(base: SessionRuntimeUiState, payload: Record<string, unknown>, revision: number): SessionRuntimeUiState {
+	// 桥帧的 ANSI 净化**不在这里**：桥侧出帧口（`pi-deck-gui-bridge-runtime.ts` 的净化通路）
+	// 与主进程边界（`AgentManager.handleBridgeUpdate` → `shared/bridgeText.ts`）各收一次，
+	// 本函数拿到的已经是净文本，因此渲染层各分支不需要各自 stripAnsi。
+	const update = payload.bridgeUpdate as BridgeUpdate | undefined;
+	if (!update || typeof update !== "object" || typeof update.type !== "string") return { ...base, revision };
+
+	switch (update.type) {
+		case "ui-update": {
+			const targetId = typeof update.targetId === "string" ? update.targetId : "";
+			if (!targetId) return { ...base, revision };
+			const targets = { ...(base.bridgeTargets ?? {}) };
+			if (update.node === null || update.node === undefined) {
+				// 落点无内容 → 删键（渲染层据此「不占位」，§8.4 C）
+				delete targets[targetId];
+			} else {
+				targets[targetId] = update.node;
+			}
+			return { ...base, revision, bridgeTargets: targets };
+		}
+		case "status": {
+			const key = typeof update.key === "string" ? update.key : "";
+			if (!key) return { ...base, revision };
+			const status = { ...(base.bridgeStatus ?? {}) };
+			const tones = { ...(base.bridgeStatusTone ?? {}) };
+			if (update.text === undefined || update.text === null) {
+				delete status[key];
+				delete tones[key];
+			} else {
+				status[key] = String(update.text);
+				// tone 是可选增量：扩展这一帧没给颜色就把旧色撤掉，避免「改了文案还在用旧色」
+				if (update.tone) tones[key] = update.tone;
+				else delete tones[key];
+			}
+			return { ...base, revision, bridgeStatus: status, bridgeStatusTone: tones };
+		}
+		case "working": {
+			// 字段是「可选增量」语义：只覆盖本次带来的字段，未带的保持原值
+			const next = { ...(base.bridgeWorking ?? {}) };
+			if ("message" in update) {
+				next.message = update.message;
+				next.tone = update.tone;
+			}
+			if ("visible" in update) next.visible = update.visible;
+			if ("frames" in update) next.frames = update.frames;
+			return { ...base, revision, bridgeWorking: next };
+		}
+		case "title":
+			return { ...base, revision, bridgeTitle: typeof update.title === "string" ? update.title : undefined };
+		case "thinking-label":
+			return { ...base, revision, bridgeThinkingLabel: typeof update.label === "string" ? update.label : undefined };
+		case "overlay": {
+			const elementId = typeof update.elementId === "string" ? update.elementId : "";
+			if (!elementId) return { ...base, revision };
+			const overlays = { ...(base.bridgeOverlays ?? {}) };
+			if (update.node === null || update.node === undefined) delete overlays[elementId];
+			else overlays[elementId] = { node: update.node, options: update.options };
+			return { ...base, revision, bridgeOverlays: overlays };
+		}
+		case "overlay-update": {
+			const elementId = typeof update.elementId === "string" ? update.elementId : "";
+			if (!elementId || !update.node) return { ...base, revision };
+			const overlays = { ...(base.bridgeOverlays ?? {}) };
+			const existing = overlays[elementId];
+			overlays[elementId] = { node: update.node, options: existing?.options };
+			return { ...base, revision, bridgeOverlays: overlays };
+		}
+		case "resync": {
+			// 全量重推的**清场**（PR 评审 §3）：桥收到 resync 请求后紧接着会把当前还活着的
+			// 贡献逐条推回来（`pi-deck-gui-bridge-runtime.ts` 的 resync()：先推 resync，
+			// 再推 status / working / title / thinking-label / 各落点 / ctx.gui 贡献）。
+			// 只加 revision 的话，扩展撤回某个贡献却没推 `node: null` 时，旧节点会永久留在渲染层。
+			// 保留 requests / widgets（RPC 链路的状态，不在桥的重推范围内）。
+			return {
+				...base,
+				revision,
+				bridgeTargets: undefined,
+				bridgeOverlays: undefined,
+				bridgeStatus: undefined,
+				bridgeStatusTone: undefined,
+				bridgeWorking: undefined,
+				bridgeTitle: undefined,
+				bridgeThinkingLabel: undefined,
+			};
+		}
+		default:
+			return { ...base, revision };
+	}
+}
+
 function applySessionRuntimeUiEvent(current: SessionRuntimeUiState | undefined, event: SessionRuntimeEvent, payload: Record<string, unknown>, bindingChanged: boolean): SessionRuntimeUiState | undefined {
 	const base =
 		!current || bindingChanged || current.agentId !== event.agentId || current.runtimeGeneration !== event.runtimeGeneration
@@ -1067,6 +1214,10 @@ function applySessionRuntimeUiEvent(current: SessionRuntimeUiState | undefined, 
 		if (request.widgetLines?.length) widgets[widgetKey] = request.widgetLines;
 		else delete widgets[widgetKey];
 		return { ...base, revision, widgets };
+	}
+	// GUI 扩展桥：一帧 UI 更新 → 写进 bridgeTargets / bridgeStatus / …（§8.2 A 组）
+	if (request.method === "bridge:update") {
+		return applyBridgeUpdate(base, payload, revision);
 	}
 	if (!["select", "confirm", "input", "editor", "batch_ask"].includes(request.method)) {
 		return { ...base, revision };
@@ -1152,26 +1303,45 @@ export const applySessionRuntimeEventAtom = atom(null, (get, set, event: Session
 
 	if ((event.sourceChannel === "agents:state" || event.sourceChannel === "sessions:runtime") && payload) {
 		const status = payload.status;
+		// 只在实际运行状态边沿更新最近列表；不让流式token或历史扫描不断写存储。
+		if (status !== currentRuntime.status && (status === "starting" || status === "running" || (currentRuntime.status === "running" && status === "idle"))) {
+			const record = get(sessionRecordsAtom)[event.sessionId];
+			if (record && !record.noSession) set(touchRecentSessionAtom, { sessionId: record.id, projectId: record.projectId });
+		}
 		if (status === "starting" || status === "idle" || status === "running" || status === "error" || status === "closed") {
 			nextRuntime = {
 				...nextRuntime,
 				status,
 				// 终态（error/closed）会话不再需要运行时状态（goal/todos/model 上下文等），
-				// 清空以释放渲染进程内存；历史消息在 sessionMessagesCacheAtom 中不受影响。
-				state: status === "error" || status === "closed" ? undefined : nextRuntime.state,
+				// 清空以释放渲染进程内存；但上下文超限是一个可操作的恢复态：
+				// 即使会话进入 error，圆环仍必须保留这个最小标记，才能提供「压缩后重试」入口。
+				state: status === "error" || status === "closed" ? (nextRuntime.state?.contextOverflow ? { contextOverflow: true } : undefined) : nextRuntime.state,
 				projectId: typeof payload.projectId === "string" ? payload.projectId : nextRuntime.projectId,
 				cwd: typeof payload.cwd === "string" ? payload.cwd : nextRuntime.cwd,
 				title: typeof payload.title === "string" ? payload.title : nextRuntime.title,
 				piSessionId: typeof payload.sessionId === "string" ? payload.sessionId : nextRuntime.piSessionId,
 				sessionPath: typeof payload.sessionPath === "string" ? payload.sessionPath : nextRuntime.sessionPath,
+				deckSessionId: typeof payload.deckSessionId === "string" ? payload.deckSessionId : nextRuntime.deckSessionId,
 				createdAt: typeof payload.createdAt === "number" ? payload.createdAt : nextRuntime.createdAt,
 				compactionCount: typeof payload.compactionCount === "number" ? payload.compactionCount : nextRuntime.compactionCount,
 				noSession: payload.noSession === true || nextRuntime.noSession,
-				backend: payload.backend === "dsh" ? "dsh" : (nextRuntime.backend ?? "pi"),
+				// backend 只在运行时事件里透传（dsh=DSH host 会话；acp=ACP CLI 会话，tab 侧栏徽章与配对依赖它），
+				// 其余一律回落本地状态，防止旧事件把已知后端冲掉。
+				backend: payload.backend === "dsh" || payload.backend === "acp" ? payload.backend : (nextRuntime.backend ?? "pi"),
 				// 远端 trust 标记只在远端会话上出现；旧 main 的载荷没有这个字段（undefined）。
 				// 同一绑定内 sticky（会话身份含 hostId，不会本地↔远端跳变），避免 refresh 抖动。
 				remoteTrustUnhandled: payload.remoteTrustUnhandled === true || nextRuntime.remoteTrustUnhandled,
 			};
+		}
+		// ACP 首回合：sessions:prompt IPC 要等整个回合结束才返回，而 sendState 的 activating→sending
+		// 转换原本只有「发送前 runtime 已存在」和 IPC 结算两处——首条消息会全程卡在 activating
+		//（时间线显示启动中、composer 禁用；CLI 回合挂死时表现为永久启动中）。
+		// runtime 绑定事件把会话推进到 starting/idle/running 即证明激活完成，立即推进发送态为
+		// sending；后续进度由 runtime 状态事件表达，最终结算仍由 useSessionSend 的 IPC 结果负责。
+		// requestId 必须保留：结算路径 isCurrentRequest() 靠它识别本次发送。
+		const pendingSend = get(sessionSendStateByIdAtom)[event.sessionId];
+		if (pendingSend?.status === "activating" && (status === "starting" || status === "idle" || status === "running")) {
+			set(setSessionSendStateAtom, { sessionId: event.sessionId, state: { status: "sending", requestId: pendingSend.requestId } });
 		}
 	} else if (event.sourceChannel === "agents:runtime-state" && payload?.state) {
 		// 终态之后主进程仍可能有迟到的 runtime-state 事件回填旧 state；
@@ -1379,6 +1549,16 @@ export const applySessionRuntimeEventAtom = atom(null, (get, set, event: Session
 		}
 	}
 
+	// 侧栏计时点：只认「本轮开始（用户输入落地）/ 本轮结束（turn 结束）」两个边沿。
+	// 流式 token、工具调用、标题回写、catalog 刷新都不推进——否则计时器会被无限重置
+	// （文件 mtime 版就是这样，永远显示「刚刚」）。规则见 utils/sessionActivityClock.ts。
+	set(advanceSessionActivityAnchorAtom, {
+		sessionId: event.sessionId,
+		// 换绑（新 agent 接管旧会话）时上一代的运行态不代表本轮，按「未知=空闲」处理：
+		// 新绑定若已在跑，会在下一跳改成 true 并推进计时点。
+		previousRunning: bindingChanged ? false : isSessionTurnRunning(currentRuntime.state, currentRuntime.status),
+		running: isSessionTurnRunning(nextRuntime.state, nextRuntime.status),
+	});
 	const terminalEnvelope = !bindingChanged && currentRuntime.status === "closed";
 	const nextUi = payload && !(terminalEnvelope && event.sourceChannel === "agents:ui-request") ? applySessionRuntimeUiEvent(get(sessionRuntimeUiByIdAtom)[event.sessionId], event, payload, bindingChanged) : undefined;
 	if (nextUi) {
@@ -1387,6 +1567,9 @@ export const applySessionRuntimeEventAtom = atom(null, (get, set, event: Session
 			[event.sessionId]: nextUi,
 		});
 	}
+	// 应用级桥落点不在这里记任何锚点：它们由「当前聚焦会话」供给（见 BridgeSlot 的
+	// useBridgeSessionId）。曾经用「最后一个推过 bridge:update 的会话」回落，多会话并发
+	// 推帧会变成「后写者为胜」，会话删除/关闭后还会留下悬空 id（PR 评审 §3）。
 	// 2026-08 治理：无实质变化的推送跳过 atom 写入（emitStreamingStatePatch 在
 	// 流式期间每 50ms 一推且状态相同）。sessionRuntimeByIdAtom 的订阅者含整个
 	// timeline，新对象写入 = 100/s 级全量重渲染（O(消息数) + 分配压力），
@@ -1406,6 +1589,8 @@ export const applySessionRuntimeEventAtom = atom(null, (get, set, event: Session
 		currentRuntime.createdAt === nextRuntime.createdAt &&
 		currentRuntime.compactionCount === nextRuntime.compactionCount &&
 		currentRuntime.noSession === nextRuntime.noSession &&
+		currentRuntime.backend === nextRuntime.backend &&
+		currentRuntime.deckSessionId === nextRuntime.deckSessionId &&
 		// 远端 trust 标记参与「无变化」判定：它在同一绑定内首次出现时若被跳过写入，
 		// 本会话就永远看不到那条提示（本机会话两个值都是 undefined，不影响原行为）。
 		currentRuntime.remoteTrustUnhandled === nextRuntime.remoteTrustUnhandled;
@@ -1499,6 +1684,10 @@ export const bindSessionRuntimeAtom = atom(
 			return;
 		}
 		const bindingChanged = Boolean(current?.agentId && current.agentId !== input.agentId);
+		const record = get(sessionRecordsAtom)[input.sessionId];
+		if (record && !record.noSession && (input.status === "running" || current?.agentId !== input.agentId)) {
+			set(touchRecentSessionAtom, { sessionId: record.id, projectId: record.projectId });
+		}
 		if (bindingChanged) {
 			const ui = { ...get(sessionRuntimeUiByIdAtom) };
 			delete ui[input.sessionId];
@@ -1525,6 +1714,8 @@ export const bindSessionRuntimeAtom = atom(
 );
 
 export const removeSessionStateAtom = atom(null, (get, set, sessionId: string) => {
+	set(forgetRecentSessionAtom, sessionId);
+	set(forgetSessionActivityAnchorAtom, sessionId);
 	const records = { ...get(sessionRecordsAtom) };
 	const session = records[sessionId];
 	delete records[sessionId];
@@ -1559,6 +1750,8 @@ export const removeSessionStateAtom = atom(null, (get, set, sessionId: string) =
 	processGroupOpenBySessionIdAtomFamily.remove(sessionId);
 	streamingTextBySessionIdAtomFamily.remove(sessionId);
 	sessionMessageCacheBySessionIdAtomFamily.remove(sessionId);
+	// 桥落点按会话订阅（PR 评审 §3）：实例同样跟着会话删除一起释放。
+	sessionBridgeUiFamily.remove(sessionId);
 	set(streamingTextByIdAtom, (prevMap) => {
 		if (!(sessionId in prevMap)) return prevMap;
 		const nextMap = { ...prevMap };
@@ -1580,3 +1773,10 @@ export const removeSessionStateAtom = atom(null, (get, set, sessionId: string) =
 	set(sessionMessageLoadStateAtom, loadState);
 	if (get(currentSessionIdAtom) === sessionId) set(currentSessionIdAtom, undefined);
 });
+
+/**
+ * 待消费的消息跳转（跨会话正文搜索点击后）：侧栏搜索结果点击时写入
+ * {sessionId, messageId}，目标会话 pane 聚焦挂载 jumpToMessageRef 后消费并清空。
+ * 生命周期短暂（点击→pane 挂载），切走即由消费方/写入方覆盖。
+ */
+export const pendingMessageJumpAtom = atom<{ sessionId: string; messageId: string } | null>(null);

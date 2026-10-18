@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rename as renameFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rename as renameFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import test from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
@@ -33,6 +33,19 @@ function summary(overrides = {}) {
 		source: "pi",
 		...overrides,
 	};
+}
+
+/**
+ * 物化一个最小合法会话文件（首行 type 头），返回正斜杠绝对路径。
+ * mergeScanned 的外部删除清理（21c1c056b 起）会把「磁盘不存在且无存活运行时」的
+ * pi 条目当外部删除剔掉——涉及「扫描条目需跨多次 mergeScanned / 重载存活」的
+ * 用例必须用真实文件；假路径会被清理逻辑误删，导致 ID 断言失败。
+ */
+async function realSessionFile(dir, relativePath) {
+	const absolute = join(dir, relativePath);
+	await mkdir(dirname(absolute), { recursive: true });
+	await writeFile(absolute, '{"type":"session"}\n', "utf8");
+	return absolute.replace(/\\/g, "/");
 }
 
 test("catalog records expose canonical SSH locators without a stale local file path", async () => {
@@ -82,11 +95,14 @@ test("catalog records expose canonical SSH locators without a stale local file p
 		assert.equal(persisted.sessions[0].piSessionId, undefined);
 		assert.equal(catalog.getLocator("session-ssh")?.kind, "ssh");
 		assert.throws(() => catalog.getLocalFilePath("session-ssh"), /UNSUPPORTED_PROJECT_LOCATION/);
-		const scanned = await catalog.mergeScanned("project-1", [summary({ filePath: "C:/stale/local/session.jsonl", id: "C:/stale/local/session.jsonl" })]);
+		// 外部删除清理要求扫描条目对应真实文件（dev 的 mergeScanned：磁盘不存在且无存活运行时按外部删除剔除），
+		// 所以这里物化本地会话文件；远端条目的 stale filePath 已在 load 时被 locator 归一化清空。
+		const localSessionPath = await realSessionFile(dir, "local/session.jsonl");
+		const scanned = await catalog.mergeScanned("project-1", [summary({ filePath: localSessionPath, id: localSessionPath })]);
 		assert.equal(scanned.length, 2);
 		assert.equal(scanned.find((candidate) => candidate.id === "session-ssh")?.filePath, undefined);
 		assert.equal(
-			scanned.some((candidate) => candidate.id !== "session-ssh" && candidate.filePath === "C:/stale/local/session.jsonl"),
+			scanned.some((candidate) => candidate.id !== "session-ssh" && candidate.filePath === localSessionPath),
 			true,
 		);
 	} finally {
@@ -164,6 +180,102 @@ test("keeps dsh drafts across reload while clearing pi drafts", async () => {
 		assert.ok(persistedIds.includes("dsh-draft"), "dsh draft persisted after cleanup");
 		assert.ok(persistedIds.includes("dsh-draft-with-session"), "dsh mid-state draft persisted after cleanup");
 		assert.ok(!persistedIds.includes("pi-draft"), "pi draft not persisted after cleanup");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+// 回归：ACP 草稿必须跨重启保留（同 dsh 例外）。ACP 会话数据由外部 agent 侧持久化，
+// catalog 只是映射；激活失败兜底（SessionRuntimeCoordinator 不带 promoteToActive）留下的
+// draft+acpSessionId 若在 load() 被清，agent 侧会话孤儿化且 acpSessionId 永久丢失。
+// 探测集合（staleDrafts）排除了 acp，但剔除 filter 只豁免 dsh —— 两个过滤器自相矛盾。
+test("keeps acp drafts across reload while clearing pi drafts", async () => {
+	const { SessionCatalog } = loadCatalog();
+	const dir = await mkdtemp(join(tmpdir(), "pideck-catalog-acp-draft-"));
+	const filePath = join(dir, "sessions.json");
+	const now = Date.now();
+	const entry = (overrides) => ({
+		projectId: "project-1",
+		title: "Entry",
+		source: "pi",
+		environment: "native",
+		status: "active",
+		createdAt: now,
+		updatedAt: now,
+		...overrides,
+	});
+	const catalogFile = {
+		version: 1,
+		sessions: [
+			entry({ id: "acp-draft", title: "ACP draft", backend: "acp", status: "draft" }),
+			entry({
+				id: "acp-draft-attach-fallback",
+				title: "ACP draft (attach fallback)",
+				backend: "acp",
+				status: "draft",
+				acpSessionId: "agent-side-orphan",
+			}),
+			entry({ id: "pi-draft", title: "Pi draft", status: "draft" }),
+		],
+	};
+	try {
+		await writeFile(filePath, JSON.stringify(catalogFile), "utf8");
+		const catalog = new SessionCatalog(filePath);
+		await catalog.load();
+		const ids = new Map(catalog.listEntries().map((item) => [item.id, item]));
+		assert.ok(ids.has("acp-draft"), "acp draft must survive reload");
+		assert.ok(ids.get("acp-draft-attach-fallback")?.status === "draft" && ids.get("acp-draft-attach-fallback")?.acpSessionId === "agent-side-orphan", "acp draft with acpSessionId (attach fallback) must survive reload");
+		assert.equal(ids.get("pi-draft"), undefined, "pi draft still cleared");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+// 回归：备份自愈后的启动补写失败不得阻断 load()。主文件损坏、从 .bak 恢复
+// （skipNextBackup=true）时 load() 末尾会 writeSnapshot 落盘恢复结果；磁盘满/
+// 目录只读会让 rename 失败 —— load() 若 reject，whenReady 的 Promise.all 中断、
+// 窗口永不出现（与 SessionCatalog 损坏兜底注释声明的失败模式一致）。
+test("backup-restore snapshot write failure must not reject load()", async () => {
+	const real = nodeRequire("node:fs/promises");
+	const epirmRename = new Proxy(real, {
+		get(target, prop, receiver) {
+			if (prop === "rename") {
+				return async () => {
+					const err = new Error("epipe-like: rename blocked by test (EPERM)");
+					Object.assign(err, { code: "EPERM" });
+					throw err;
+				};
+			}
+			return Reflect.get(target, prop, receiver);
+		},
+	});
+	const { SessionCatalog } = loadCatalog(epirmRename);
+	const dir = await mkdtemp(join(tmpdir(), "pideck-catalog-restore-write-"));
+	const filePath = join(dir, "sessions.json");
+	const now = Date.now();
+	const backup = {
+		version: 1,
+		sessions: [
+			{
+				id: "restored-active",
+				projectId: "project-1",
+				title: "Restored",
+				source: "pi",
+				environment: "native",
+				status: "active",
+				createdAt: now,
+				updatedAt: now,
+			},
+		],
+	};
+	try {
+		await writeFile(filePath, "{corrupt json", "utf8");
+		await writeFile(`${filePath}.bak`, JSON.stringify(backup), "utf8");
+		const catalog = new SessionCatalog(filePath);
+		// 当前缺陷：writeSnapshot rename 失败 → load() reject → whenReady 中断
+		await catalog.load();
+		const ids = catalog.listEntries().map((item) => item.id);
+		assert.ok(ids.includes("restored-active"), "memory must hold restored entries after failed self-heal write");
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
@@ -335,6 +447,116 @@ test("attachRuntime does not clear a DSH delete tombstone unless restoreDismisse
 	}
 });
 
+// 回归（#314）：runtime 事件风暴会反复 attach 同一会话的相同路径/ID。attachRuntime
+// 必须幂等：无实际变化不得刷新 updatedAt——活动区排序/时间戳用 updatedAt，
+// 重复刷新会让已停止/空闲会话被顶到最前且时间显示不断跳动。
+test("attachRuntime is idempotent: identical re-attach must not bump updatedAt", async () => {
+	const { SessionCatalog } = loadCatalog();
+	const dir = await mkdtemp(join(tmpdir(), "pideck-catalog-attach-idempotent-"));
+	try {
+		const catalog = new SessionCatalog(join(dir, "sessions.json"));
+		await catalog.load();
+		const draft = await catalog.createDraft({
+			projectId: "project-1",
+			title: "Idle session",
+			environment: "native",
+		});
+		await catalog.attachRuntime({
+			sessionId: draft.id,
+			filePath: "C:\\Sessions\\idle.jsonl",
+			piSessionId: "pi-1",
+		});
+		const attachedAt = catalog.getRecord(draft.id)?.updatedAt;
+		assert.ok(typeof attachedAt === "number");
+		// 分离时钟：两次 attach 不落在同一毫秒，避免同值 Date.now() 假绿。
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		// 同一路径、同一 pi 会话 ID 的重复 attach（runtime 事件风暴的真实形态）。
+		await catalog.attachRuntime({
+			sessionId: draft.id,
+			filePath: "C:\\Sessions\\idle.jsonl",
+			piSessionId: "pi-1",
+		});
+		assert.equal(catalog.getRecord(draft.id)?.updatedAt, attachedAt, "重复 attach 相同数据不得刷新 updatedAt");
+		// 分隔符/大小写形态差异（native 规范化后等价）同样视为未变。
+		await catalog.attachRuntime({
+			sessionId: draft.id,
+			filePath: "C:/sessions/IDLE.jsonl",
+			piSessionId: "pi-1",
+		});
+		assert.equal(catalog.getRecord(draft.id)?.updatedAt, attachedAt, "canonical 等价路径不得刷新 updatedAt");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("attachRuntime still refreshes updatedAt when runtime metadata actually changes", async () => {
+	const { SessionCatalog } = loadCatalog();
+	const dir = await mkdtemp(join(tmpdir(), "pideck-catalog-attach-changed-"));
+	try {
+		const catalog = new SessionCatalog(join(dir, "sessions.json"));
+		await catalog.load();
+		const draft = await catalog.createDraft({
+			projectId: "project-1",
+			title: "Live session",
+			environment: "native",
+		});
+		await catalog.attachRuntime({
+			sessionId: draft.id,
+			filePath: "C:\\Sessions\\live.jsonl",
+			piSessionId: "pi-1",
+		});
+		const firstAt = catalog.getRecord(draft.id)?.updatedAt;
+		assert.ok(typeof firstAt === "number");
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		await catalog.attachRuntime({
+			sessionId: draft.id,
+			filePath: "C:\\Sessions\\live.jsonl",
+			piSessionId: "pi-2",
+		});
+		const secondAt = catalog.getRecord(draft.id)?.updatedAt;
+		assert.ok(typeof secondAt === "number" && secondAt > firstAt, "piSessionId 变化必须刷新 updatedAt");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+// 墓碑清除发生在 enqueueMutation 回调内：若不计入 changed，内存里已删但快照不落盘，
+// 重启后墓碑复活。restoreDismissed 必须无条件计入 changed。
+test("attachRuntime restoreDismissed persists even when nothing else changes", async () => {
+	const { SessionCatalog } = loadCatalog();
+	const dir = await mkdtemp(join(tmpdir(), "pideck-catalog-attach-restore-"));
+	try {
+		const catalog = new SessionCatalog(join(dir, "sessions.json"));
+		await catalog.load();
+		const draft = await catalog.createDraft({
+			projectId: "project-1",
+			title: "Restored session",
+			environment: "native",
+			backend: "dsh",
+		});
+		await catalog.rememberDismissedDshSession("session-old");
+		await catalog.attachRuntime({
+			sessionId: draft.id,
+			dshSessionId: "session-old",
+		});
+		const firstAt = catalog.getRecord(draft.id)?.updatedAt;
+		assert.ok(typeof firstAt === "number");
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		await catalog.attachRuntime({
+			sessionId: draft.id,
+			dshSessionId: "session-old",
+			restoreDismissed: true,
+		});
+		const secondAt = catalog.getRecord(draft.id)?.updatedAt;
+		assert.ok(typeof secondAt === "number" && secondAt > firstAt, "清除墓碑必须刷新 updatedAt 计入 changed");
+		const reloaded = new SessionCatalog(join(dir, "sessions.json"));
+		await reloaded.load();
+		assert.equal(reloaded.listDismissedDshSessionIds().has("session-old"), false, "墓碑清除必须随快照落盘");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
 // 回归：外部会话重复导入（自动同步与手动导入并发、配置页重复点击、host-ready 重放）
 // 必须幂等吸收——同一 dshSessionId 只保留一条记录，后续导入只更新标题/项目归属，
 // 否则侧栏出现两条同 host 会话记录（「重复导入」用户问题）。
@@ -415,15 +637,19 @@ test("keeps a draft desktop session ID after Pi assigns a file path", async () =
 			model: { provider: "openai", modelId: "gpt-test" },
 			thinkingLevel: "high",
 		});
+		// 真实文件 + 大小写变体：外部删除清理要求文件存在，同时保留「同一文件不同
+		// 大小写/分隔符写法必须折叠到同一 originKey」的原始意图（Windows CI 文件系统
+		// 大小写不敏感，existsSync 对变体路径同样成立）。
+		const realPath = await realSessionFile(dir, "Example.jsonl");
 		await catalog.attachRuntime({
 			sessionId: draft.id,
-			filePath: "C:\\Sessions\\Example.jsonl",
+			filePath: realPath.replace("Example.jsonl", "Example.jsonl").replace(/\//g, "\\"),
 			piSessionId: "pi-123",
 		});
 		const records = await catalog.mergeScanned("project-1", [
 			summary({
-				filePath: "c:/sessions/example.jsonl",
-				id: "c:/sessions/example.jsonl",
+				filePath: realPath.toLowerCase(),
+				id: realPath.toLowerCase(),
 			}),
 		]);
 		assert.equal(records.length, 1);
@@ -432,12 +658,13 @@ test("keeps a draft desktop session ID after Pi assigns a file path", async () =
 		assert.equal(records[0].model?.provider, "openai");
 		assert.equal(records[0].model?.modelId, "gpt-test");
 		assert.equal(records[0].thinkingLevel, "high");
+		// 合并后本用例改用真实文件（dev 的外部删除清理）：mergeScanned 以扫描到的规范路径为准。
 		assert.deepEqual(
 			{ ...records[0].locator },
 			{
 				kind: "local",
 				environment: "native",
-				filePath: "c:/sessions/example.jsonl",
+				filePath: realPath.toLowerCase(),
 			},
 		);
 	} finally {
@@ -534,16 +761,19 @@ test("folds a scanner-created duplicate into the original draft ID", async () =>
 			title: "New session",
 			environment: "native",
 		});
+		// 外部删除清理会剔掉磁盘不存在的条目：raced.jsonl 必须真实存在
+		const racedPath = await realSessionFile(dir, "raced.jsonl");
 		const scanned = summary({
-			filePath: "C:/sessions/raced.jsonl",
-			id: "C:/sessions/raced.jsonl",
+			filePath: racedPath,
+			id: racedPath,
 		});
 		const duringRace = await catalog.mergeScanned("project-1", [scanned]);
 		assert.equal(duringRace.length, 2);
 
 		await catalog.attachRuntime({
 			sessionId: draft.id,
-			filePath: "C:/sessions/raced.jsonl",
+			// 同一文件的反斜杠写法：attach 与扫描路径形式不同也必须折叠到同一条目
+			filePath: racedPath.replace(/\//g, "\\"),
 			piSessionId: "pi-raced",
 		});
 		const afterAttach = await catalog.mergeScanned("project-1", [scanned]);
@@ -854,13 +1084,19 @@ test("maps scanned child parent paths to desktop session IDs and survives reload
 	try {
 		const catalog = new SessionCatalog(filePath);
 		await catalog.load();
+		// 真实文件：重载后的第二次 mergeScanned 不会把条目当外部删除剔掉
+		const parentPath = await realSessionFile(dir, "parent.jsonl");
+		const childPath = await realSessionFile(dir, "parent/child.jsonl");
+		// POSIX 路径是大小写敏感身份（2026-10-08 回归修复）：parent 引用必须与父条目
+		// filePath 逐字一致才能映射；旧实现把 native 一律折小写，Linux 上会把两个
+		// 不同文件误折叠成同一 originKey（侧栏去重错乱/误删）。
 		const first = await catalog.mergeScanned("project-1", [
-			summary({ filePath: "C:/sessions/parent.jsonl", id: "C:/sessions/parent.jsonl", name: "Parent" }),
+			summary({ filePath: parentPath, id: parentPath, name: "Parent" }),
 			summary({
-				filePath: "C:/sessions/parent/child.jsonl",
-				id: "C:/sessions/parent/child.jsonl",
+				filePath: childPath,
+				id: childPath,
 				name: "Child",
-				parentSessionPath: "c:/sessions/parent.jsonl",
+				parentSessionPath: parentPath,
 			}),
 		]);
 		const parent = first.find((record) => record.title === "Parent");
@@ -868,15 +1104,16 @@ test("maps scanned child parent paths to desktop session IDs and survives reload
 		assert.ok(parent);
 		assert.equal(child?.parentSessionId, parent?.id);
 
+		// 重载后同一路径再次扫描：父子映射不丢（本测试核心意图）。
 		const reloaded = new SessionCatalog(filePath);
 		await reloaded.load();
 		const second = await reloaded.mergeScanned("project-1", [
-			summary({ filePath: "c:/sessions/parent.jsonl", id: "c:/sessions/parent.jsonl", name: "Parent" }),
+			summary({ filePath: parentPath, id: parentPath, name: "Parent" }),
 			summary({
-				filePath: "c:/sessions/parent/child.jsonl",
-				id: "c:/sessions/parent/child.jsonl",
+				filePath: childPath,
+				id: childPath,
 				name: "Child",
-				parentSessionPath: "C:/sessions/parent.jsonl",
+				parentSessionPath: parentPath,
 			}),
 		]);
 		assert.equal(second.find((record) => record.title === "Parent")?.id, parent?.id);
@@ -1136,13 +1373,16 @@ test("attachRuntime absolutizes a relative pi sessionFile and folds the scanned 
 	const { SessionCatalog } = loadCatalog();
 	const dir = await mkdtemp(join(tmpdir(), "pideck-catalog-"));
 	try {
-		const catalog = new SessionCatalog(join(dir, "sessions.json"), {}, absolutePathResolver("D:\\Project\\PiDeck"));
+		const catalog = new SessionCatalog(join(dir, "sessions.json"), {}, absolutePathResolver(dir));
 		await catalog.load();
 		const draft = await catalog.createDraft({
 			projectId: "project-1",
 			title: "PiDeck agent",
 			environment: "native",
 		});
+		// 解析基点用真实临时目录，且文件真实存在——否则外部删除清理会把折叠后的
+		// draft 条目当外部删除剔掉（扫描器只能看到真实存在的文件）。
+		const absoluteScanned = await realSessionFile(dir, ".pi/sessions/2026-08-08T10-47-19-239Z_abc.jsonl");
 
 		// pi 返回相对 cwd 的 sessionFile（sessionDir 配置为 ".pi/sessions"）
 		await catalog.attachRuntime({
@@ -1153,8 +1393,8 @@ test("attachRuntime absolutizes a relative pi sessionFile and folds the scanned 
 
 		// 后台扫描发现同一文件的绝对路径（修复前这里会产生第二条记录）
 		const scanned = summary({
-			id: "D:\\Project\\PiDeck\\.pi\\sessions\\2026-08-08T10-47-19-239Z_abc.jsonl",
-			filePath: "D:\\Project\\PiDeck\\.pi\\sessions\\2026-08-08T10-47-19-239Z_abc.jsonl",
+			id: absoluteScanned,
+			filePath: absoluteScanned,
 			name: "从用户输入推断的会话名",
 		});
 		const records = await catalog.mergeScanned("project-1", [scanned]);
@@ -1286,17 +1526,21 @@ test("nameless scanned summaries keep existing titles and use the file stem for 
 	try {
 		const catalog = new SessionCatalog(join(dir, "sessions.json"));
 		await catalog.load();
+		// 外部删除清理要求文件真实存在，否则条目被剔、ID 每轮变
+		const knownPath = await realSessionFile(dir, "known.jsonl");
+		await realSessionFile(dir, "2026-08-08T10-47-19-239Z_abc.jsonl");
+		await realSessionFile(dir, "2026-08-08T11-00-00-000Z_def.jsonl");
 		const [named] = await catalog.mergeScanned("project-1", [
 			summary({
-				filePath: "C:/sessions/known.jsonl",
-				id: "C:/sessions/known.jsonl",
+				filePath: knownPath,
+				id: knownPath,
 				name: "Saved title",
 			}),
 		]);
 		const [kept] = await catalog.mergeScanned("project-1", [
 			summary({
-				filePath: "C:/sessions/known.jsonl",
-				id: "C:/sessions/known.jsonl",
+				filePath: knownPath,
+				id: knownPath,
 				name: undefined,
 				preview: "",
 				messageCount: 0,
@@ -1308,8 +1552,8 @@ test("nameless scanned summaries keep existing titles and use the file stem for 
 
 		const records = await catalog.mergeScanned("project-1", [
 			summary({
-				filePath: "C:/sessions/2026-08-08T10-47-19-239Z_abc.jsonl",
-				id: "C:/sessions/2026-08-08T10-47-19-239Z_abc.jsonl",
+				filePath: knownPath.replace("known.jsonl", "2026-08-08T10-47-19-239Z_abc.jsonl"),
+				id: knownPath.replace("known.jsonl", "2026-08-08T10-47-19-239Z_abc.jsonl"),
 				name: undefined,
 			}),
 		]);
@@ -1320,17 +1564,17 @@ test("nameless scanned summaries keep existing titles and use the file stem for 
 		// 扫描器若仍把 sessionName=文件名带进 summary.name，也不能盖掉用户已有标题。
 		const afterStemName = await catalog.mergeScanned("project-1", [
 			summary({
-				filePath: "C:/sessions/known.jsonl",
-				id: "C:/sessions/known.jsonl",
+				filePath: knownPath,
+				id: knownPath,
 				name: "2026-08-08T10-47-19-239Z_abc",
 			}),
 		]);
-		assert.equal(afterStemName.find((record) => record.filePath === "C:/sessions/known.jsonl")?.title, "Saved title");
+		assert.equal(afterStemName.find((record) => record.filePath === knownPath)?.title, "Saved title");
 
 		const withStemName = await catalog.mergeScanned("project-1", [
 			summary({
-				filePath: "C:/sessions/2026-08-08T11-00-00-000Z_def.jsonl",
-				id: "C:/sessions/2026-08-08T11-00-00-000Z_def.jsonl",
+				filePath: knownPath.replace("known.jsonl", "2026-08-08T11-00-00-000Z_def.jsonl"),
+				id: knownPath.replace("known.jsonl", "2026-08-08T11-00-00-000Z_def.jsonl"),
 				name: "2026-08-08T11-00-00-000Z_def",
 			}),
 		]);
@@ -1382,6 +1626,9 @@ test("mergeScanned drops legacy subagent-artifacts entries", async () => {
 	const filePath = join(dir, "sessions.json");
 	try {
 		const now = Date.now();
+		// goodEntry 指向真实存在的文件——外部删除清理只剔磁盘缺失的条目；
+		// 脱条目仍用假路径（位于 subagent-artifacts 目录，按路径规则剔除，无需存在）。
+		const goodPath = await realSessionFile(dir, "real.jsonl");
 		const dirtyEntry = {
 			id: "dirty-artifact",
 			projectId: "project-1",
@@ -1401,8 +1648,8 @@ test("mergeScanned drops legacy subagent-artifacts entries", async () => {
 			source: "pi",
 			environment: "native",
 			status: "active",
-			originKey: "pi:native:c:/users/x/.pi/agent/sessions/--c--repo--/real.jsonl",
-			filePath: "C:\\Users\\X\\.pi\\agent\\sessions\\--C--repo--\\real.jsonl",
+			originKey: `pi:native:${goodPath.toLowerCase()}`,
+			filePath: goodPath,
 			createdAt: now,
 			updatedAt: now,
 		};
@@ -1437,23 +1684,29 @@ test("removeWithDescendants drops nested subagent catalog entries with the paren
 	try {
 		const catalog = new SessionCatalog(filePath);
 		await catalog.load();
+		// 真实文件：后续多次 mergeScanned 的外部删除清理不能把这些条目剔掉
+		const parentPath = await realSessionFile(dir, "parent.jsonl");
+		const childPath = await realSessionFile(dir, "parent/child.jsonl");
+		const nestedPath = await realSessionFile(dir, "parent/child/nested.jsonl");
+		const otherPath = await realSessionFile(dir, "other.jsonl");
+		const keepPath = await realSessionFile(dir, "other-project/keep.jsonl");
 		const records = await catalog.mergeScanned("project-1", [
-			summary({ filePath: "C:/sessions/parent.jsonl", id: "C:/sessions/parent.jsonl", name: "Parent" }),
+			summary({ filePath: parentPath, id: parentPath, name: "Parent" }),
 			summary({
-				filePath: "C:/sessions/parent/child.jsonl",
-				id: "C:/sessions/parent/child.jsonl",
+				filePath: childPath,
+				id: childPath,
 				name: "Child",
-				parentSessionPath: "c:/sessions/parent.jsonl",
+				parentSessionPath: parentPath.toLowerCase(),
 			}),
 			summary({
-				filePath: "C:/sessions/parent/child/nested.jsonl",
-				id: "C:/sessions/parent/child/nested.jsonl",
+				filePath: nestedPath,
+				id: nestedPath,
 				name: "Grandchild",
-				parentSessionPath: "C:/sessions/parent/child.jsonl",
+				parentSessionPath: childPath,
 			}),
-			summary({ filePath: "C:/sessions/other.jsonl", id: "C:/sessions/other.jsonl", name: "Unrelated" }),
+			summary({ filePath: otherPath, id: otherPath, name: "Unrelated" }),
 		]);
-		await catalog.mergeScanned("project-2", [summary({ filePath: "C:/other-project/keep.jsonl", id: "C:/other-project/keep.jsonl", name: "Other project" })]);
+		await catalog.mergeScanned("project-2", [summary({ filePath: keepPath, id: keepPath, name: "Other project" })]);
 		const parent = records.find((record) => record.title === "Parent");
 		const child = records.find((record) => record.title === "Child");
 		const grandchild = records.find((record) => record.title === "Grandchild");
@@ -1473,7 +1726,7 @@ test("removeWithDescendants drops nested subagent catalog entries with the paren
 
 		const oneId = await catalog.remove(unrelated.id);
 		assert.equal(oneId, true, "remove() remains a single-id operation");
-		await catalog.mergeScanned("project-1", [summary({ filePath: "C:/sessions/other.jsonl", id: "C:/sessions/other.jsonl", name: "Unrelated" })]);
+		await catalog.mergeScanned("project-1", [summary({ filePath: otherPath, id: otherPath, name: "Unrelated" })]);
 		const restoredUnrelated = catalog.listEntries().find((entry) => entry.title === "Unrelated");
 		assert.ok(restoredUnrelated, "unrelated session can still be merged back");
 
@@ -1500,6 +1753,80 @@ test("removeWithDescendants drops nested subagent catalog entries with the paren
 		assert.ok(persistedTitles.includes("Unrelated"));
 		assert.ok(persistedTitles.includes("Saved draft"));
 		assert.ok(persistedTitles.includes("Other project"));
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("external connection channel sticks to the session and unknown channel values are dropped on load", async () => {
+	const { SessionCatalog } = loadCatalog();
+	const dir = await mkdtemp(join(tmpdir(), "pideck-catalog-channel-"));
+	const filePath = join(dir, "sessions.json");
+	try {
+		const catalog = new SessionCatalog(filePath);
+		await catalog.load();
+		const wechat = await catalog.createDraft({ projectId: "project-1", title: "微信 1234", environment: "native", source: "pi", channel: "wechat" });
+		const desktop = await catalog.createDraft({ projectId: "project-1", title: "Desktop", environment: "native", source: "pi" });
+		// 未提交草稿在下次 load 会被清理（另有用例守着）：先转 active 才能验证跨重启的落盘字段
+		await catalog.promoteToActive(wechat.id);
+		await catalog.promoteToActive(desktop.id);
+		assert.equal(catalog.getRecord(wechat.id)?.channel, "wechat");
+		assert.equal(catalog.getRecord(desktop.id)?.channel, undefined);
+
+		// 渠道标志随快照落盘，重启后侧栏标志不能丢
+		const persisted = JSON.parse(await readFile(filePath, "utf8"));
+		assert.equal(persisted.sessions.find((entry) => entry.id === wechat.id)?.channel, "wechat");
+		const reloaded = new SessionCatalog(filePath);
+		await reloaded.load();
+		assert.equal(reloaded.getRecord(wechat.id)?.channel, "wechat");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("unknown channel values in the catalog file are dropped without breaking the load", async () => {
+	const { SessionCatalog } = loadCatalog();
+	const dir = await mkdtemp(join(tmpdir(), "pideck-catalog-channel-raw-"));
+	const filePath = join(dir, "sessions.json");
+	try {
+		const first = await realSessionFile(dir, "sessions/first.jsonl");
+		const second = await realSessionFile(dir, "sessions/second.jsonl");
+		await writeFile(
+			filePath,
+			JSON.stringify({
+				version: 1,
+				sessions: [
+					{ id: "unknown-channel", projectId: "project-1", title: "Telegram", source: "pi", environment: "native", filePath: first, status: "active", createdAt: 1, updatedAt: 1, channel: "telegram" },
+					{ id: "wechat-channel", projectId: "project-1", title: "WeChat", source: "pi", environment: "native", filePath: second, status: "active", createdAt: 1, updatedAt: 1, channel: "wechat" },
+				],
+			}),
+			"utf8",
+		);
+		const catalog = new SessionCatalog(filePath);
+		await catalog.load();
+		assert.equal(catalog.get("unknown-channel")?.channel, undefined);
+		assert.equal(catalog.get("wechat-channel")?.channel, "wechat");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("a session created without a locked title can still be auto-named by the model extension", async () => {
+	const { SessionCatalog } = loadCatalog();
+	const dir = await mkdtemp(join(tmpdir(), "pideck-catalog-auto-title-"));
+	const filePath = join(dir, "sessions.json");
+	try {
+		const catalog = new SessionCatalog(filePath);
+		await catalog.load();
+		// 外部连接（ensureSession 的 autoTitle）不写 titleOrigin：留一次自动命名机会
+		const wechat = await catalog.createDraft({ projectId: "project-1", title: "微信 1234", environment: "native", source: "pi", channel: "wechat" });
+		const named = await catalog.applyAutomaticTitle(wechat.id, "微信纯文本通道问候", "auto");
+		assert.equal(named.title, "微信纯文本通道问候");
+
+		// 桌面端草稿的标题是权威名：迟到的自动命名不得覆盖
+		const desktop = await catalog.createDraft({ projectId: "project-1", title: "Desktop", environment: "native", source: "pi", titleOrigin: "manual" });
+		const kept = await catalog.applyAutomaticTitle(desktop.id, "不该生效", "auto");
+		assert.equal(kept.title, "Desktop");
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}

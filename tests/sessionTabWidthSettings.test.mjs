@@ -71,8 +71,8 @@ test("SessionTabsBar：CSS 变量注入且不再硬编码 max-w 像素值", () =
 
 test("App 装配层把 settings.sessionTabMaxWidth 传给 SessionTabsBar", () => {
 	assert.match(app, /tabMaxWidth: settings\.sessionTabMaxWidth/);
-	// 首拉 settings 前的本地兜底状态也要有同源默认值
-	assert.match(app, /sessionTabMaxWidth: SESSION_TAB_MAX_WIDTH_DEFAULT/);
+	// 首拉 settings 前的本地兜底默认值已抽到 shared/types/settings.ts 的 createDefaultAppSettings
+	assert.match(settingsType, /sessionTabMaxWidth: SESSION_TAB_MAX_WIDTH_DEFAULT/);
 });
 
 test("AppearanceTab：窗口样式区滑杆使用 shared 边界常量并本地夹取", () => {

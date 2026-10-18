@@ -50,7 +50,7 @@ export function ComposerImageGenOptions(props: {
 					props.onSelectionChange(next.providerId, next.modelId);
 				}}
 			>
-				<SelectTrigger size="sm" className="composer-bar-btn h-7 max-w-[16rem] gap-1 rounded-md border-transparent px-1.5 text-control font-medium text-foreground hover:bg-muted/60" title={t("imagegen.providerModel")} aria-label={t("imagegen.providerModel")}>
+				<SelectTrigger size="sm" className="composer-bar-btn h-7 max-w-[16rem] gap-1 rounded-md border-transparent bg-transparent px-1.5 text-control font-medium text-foreground hover:bg-muted/60 data-[state=open]:bg-muted/60" title={t("imagegen.providerModel")} aria-label={t("imagegen.providerModel")}>
 					<SelectValue placeholder={t("imagegen.providerModel")}>
 						<span className="min-w-0 truncate">{triggerLabel || t("imagegen.providerModel")}</span>
 					</SelectValue>
@@ -76,7 +76,7 @@ export function ComposerImageGenOptions(props: {
 			{extra.size ? <ImageGenSizeCombobox value={props.size} disabled={props.disabled} onChange={props.onSizeChange} /> : null}
 			{extra.output_format ? (
 				<Select value={outputFormat} disabled={props.disabled} onValueChange={props.onOutputFormatChange}>
-					<SelectTrigger size="sm" className="composer-bar-btn h-7 max-w-[5.5rem] gap-1 rounded-md border-transparent px-1.5 text-control font-medium uppercase text-foreground hover:bg-muted/60" title={t("imagegen.outputFormatHint")} aria-label={t("imagegen.outputFormat")}>
+					<SelectTrigger size="sm" className="composer-bar-btn h-7 max-w-[5.5rem] gap-1 rounded-md border-transparent bg-transparent px-1.5 text-control font-medium uppercase text-foreground hover:bg-muted/60 data-[state=open]:bg-muted/60" title={t("imagegen.outputFormatHint")} aria-label={t("imagegen.outputFormat")}>
 						<SelectValue placeholder={t("imagegen.outputFormat")} />
 					</SelectTrigger>
 					<SelectContent align="start">
@@ -89,7 +89,7 @@ export function ComposerImageGenOptions(props: {
 				</Select>
 			) : null}
 			{extra.watermark ? (
-				<label className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-md px-1.5 text-control text-foreground hover:bg-muted/60 has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50" title={t("imagegen.watermarkHint")}>
+				<label className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-md px-1.5 text-control text-foreground transition-colors hover:bg-muted/60 has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50" title={t("imagegen.watermarkHint")}>
 					<Switch size="sm" checked={props.watermark} disabled={props.disabled} onCheckedChange={props.onWatermarkChange} aria-label={t("imagegen.watermark")} />
 					<span className="whitespace-nowrap">{t("imagegen.watermark")}</span>
 				</label>
@@ -133,7 +133,7 @@ function ImageGenSizeCombobox(props: { value: string; disabled?: boolean; onChan
 			<PopoverTrigger asChild>
 				<Button type="button" variant="ghost" size="sm" disabled={props.disabled} className="composer-bar-btn h-7 max-w-[9.5rem] gap-1 rounded-md px-1.5 text-control font-medium text-foreground hover:bg-muted/60" title={t("imagegen.sizeHint")} aria-label={t("imagegen.size")}>
 					<span className="min-w-0 truncate">{sizeTriggerLabel(props.value)}</span>
-					<ChevronDown size={12} aria-hidden="true" className={`flex-none text-muted-foreground transition-transform duration-150${open ? " rotate-180" : ""}`} />
+					<ChevronDown size={12} aria-hidden="true" className={`flex-none text-muted-foreground transition-transform duration-fast${open ? " rotate-180" : ""}`} />
 				</Button>
 			</PopoverTrigger>
 			<PopoverContent align="start" side="top" className="w-52 p-0">

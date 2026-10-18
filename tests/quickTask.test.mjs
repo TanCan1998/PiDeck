@@ -71,6 +71,8 @@ function windowStub() {
 		setMinimumSize: (w, h) => {
 			minimum = [w, h];
 		},
+		setAlwaysOnTop() {},
+		setSkipTaskbar() {},
 		setBounds: (v) => {
 			bounds = { ...v };
 		},

@@ -2,7 +2,7 @@ import { useAtomValue } from "jotai";
 import { selectAtom } from "jotai/utils";
 import { useReducedMotion } from "motion/react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { ComponentProps, ReactNode, RefObject } from "react";
+import type { ComponentProps, ReactNode, Ref, RefObject } from "react";
 import type { ChatMessage, ImageContent } from "../../../../shared/types";
 import { MarkdownStream } from "./MarkdownStream";
 import { replaceExpandedRefBlocksWithLabels } from "./composer/quoteChip";
@@ -14,6 +14,7 @@ import { writeClipboardImage } from "../../utils/clipboard";
 import { useTimelineSelection } from "../../hooks/useTimelineSelection";
 import { SelectionToolbar } from "./timeline/SelectionToolbar";
 import { deriveTimelineRunActivity } from "./timeline/timelineRunActivity";
+import { BridgeWorkingLine } from "../bridge/BridgeSlot";
 import { canLoadSessionTimelineMore, deriveSessionSurfaceRuntime, type SessionTimelineController } from "../../hooks/useSessionTimelineController";
 import { t } from "../../i18n";
 import { cn } from "../../lib/utils";
@@ -23,7 +24,10 @@ import { isLiveRuntimeStatus } from "../../utils/sessionCommands";
 import { composeFailureNotice, isRetryStatusMessage, reduceFailureNoticePass, type FailureNoticePassState } from "./timelineFailureNotice";
 import { SessionStartSurface } from "./SessionStartSurface";
 import { NotifyMessageCard, shouldRenderNotifyCard } from "./NotifyMessageCard";
+import { ExtensionEntryCard } from "./ExtensionEntryCard";
 import { MessageScroller } from "../agents/message-scroller";
+import { askEchoBySessionIdAtomFamily } from "../../atoms/ask-echo-atoms";
+import { injectAskEchoMessage } from "../../utils/askUi";
 import { resolveFreshTailIds } from "../../lib/pinTurnScroll";
 import { chatContentWidthStyle } from "./chatContentWidth";
 import { useSessionVisionBridgeExpected } from "../../hooks/useSessionVisionBridgeExpected";
@@ -74,6 +78,7 @@ function showFailureToast(message: ChatMessage): void {
 }
 
 type TimelineInteractionProps = {
+	instantSessionSwitch?: boolean;
 	hasProject: boolean;
 	onCreateSession: () => void;
 	showThinking: boolean;
@@ -86,6 +91,7 @@ type TimelineInteractionProps = {
 	onResendUserMessage?: UserBubbleProps["onResendUserMessage"];
 	onEditMessage?: TurnRowProps["onEditMessage"];
 	onDeleteMessage?: TurnRowProps["onDeleteMessage"];
+	onRemoveMessageImage?: UserBubbleProps["onRemoveMessageImage"];
 	onForkMessage?: UserBubbleProps["onForkMessage"];
 	onRewindToMessage?: UserBubbleProps["onRewindToMessage"];
 	forkingMessageId?: string | null;
@@ -94,6 +100,8 @@ type TimelineInteractionProps = {
 	onQuickPrompt?: (prompt: string) => void;
 	/** 当前会话的阻塞式交互（如 ask_question），由时间线统一承载滚动与底部定位。 */
 	runtimeUi?: ReactNode;
+	/** 最新回复后唯一的动作落点；内容由本栏 composer 投入，不给历史每轮复制按钮。 */
+	replyActionsRef?: Ref<HTMLDivElement>;
 };
 
 export type SessionMessageTimelineProps = TimelineInteractionProps & {
@@ -116,6 +124,9 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 	// DSH host 被用户手动停止：历史暂时读不了（main 侧降级成带原因的空页）。
 	// 与普通读盘失败分开渲染——DSH 会话没有 pi 会话文件，重试也永远不会自愈。
 	const dshHostStopped = messageLoadState?.status === "error" && messageLoadState.reason === "dsh-host-stopped";
+	// 会话文件还不存在（新建会话/外部连接建的会话，在发出第一条消息前 pi 不落盘）：
+	// 这不是故障，是「还没有内容」——给友好空态，不显示错误原因，也不落到起始页。
+	const sessionFileMissing = messageLoadState?.status === "error" && messageLoadState.reason === "file-missing";
 	const [startingDshHost, setStartingDshHost] = useState(false);
 	/** 专态主按钮：显式启动 host（唯一能解开手动停止标记的路径）+ 重载本会话历史。 */
 	const startDshHostAndRetry = useCallback(async () => {
@@ -160,7 +171,7 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 	const showSurfaceEmptyState = !hasActiveConversation || (!isConversationLoading && activeMessages.length === 0);
 	const canLoadMoreMessages = canLoadSessionTimelineMore(modernSurfaceState.isStarting, activeMessages.length);
 	// 划选引用：选区落在同一条消息内时在选区上方提供「引用并提问」按钮
-	const { quote: selectionQuote, clear: clearSelectionQuote } = useTimelineSelection(timelineRef);
+	const { quote: selectionQuote, clear: clearSelectionQuote, toolbarRef: selectionToolbarRef } = useTimelineSelection(timelineRef);
 	const activeRuntimeState = runtime?.state;
 	const activeConversationStatus = modernSurfaceState.status;
 	// 只订 live id：思考正文由 ThinkingStep 叶子订阅，避免 50ms 戳醒整条 timeline。
@@ -209,10 +220,6 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 	const turnSettleScrollTimerRef = useRef<number | undefined>(undefined);
 	/** 已排定流水线的 run id：同 run 重复 arm 直接复用，避免双调度。 */
 	const turnSettleIdleLastRunRef = useRef<string | undefined>(undefined);
-	/** 已发出过 autoCollapseTick 的 run id（跨切走保留）：切回补挂 arm 的幂等标记——
-	 *  用户手动重新展开的最新轮（memory 恢复）不应被切回后的新一轮 tick 再收起
-	 *  （对抗审查 P2-②「记忆优先」）。 */
-	const settleTickConsumedRunRef = useRef<string | undefined>(undefined);
 	const latestRunIdRef = useRef<string | undefined>(undefined);
 	// 会话内容就绪淡入：isConversationLoading true→false（切会话历史加载完成）时，
 	// 给 MessageScroller 挂一次 160ms 淡入动画类，与骨架屏消失衔接，避免整块瞬间出现。
@@ -221,11 +228,11 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 	const [contentEntering, setContentEntering] = useState(false);
 	const prevConversationLoadingRef = useRef(isConversationLoading);
 	useLayoutEffect(() => {
-		if (prevConversationLoadingRef.current && !isConversationLoading) {
+		if (!props.instantSessionSwitch && prevConversationLoadingRef.current && !isConversationLoading) {
 			setContentEntering(true);
 		}
 		prevConversationLoadingRef.current = isConversationLoading;
-	}, [isConversationLoading]);
+	}, [isConversationLoading, props.instantSessionSwitch]);
 	// 动画播完清理类（非视觉关键路径，放 useEffect 避免 layout 阶段多一次重渲染）
 	useEffect(() => {
 		if (!contentEntering) return;
@@ -353,13 +360,31 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 		return groups;
 	}, [runtimeHistoryMessages, isTurnRunning]);
 	// The window segment follows the same turn-level activity rule as history.
-	const groupedWindowRuns = useMemo(() => groupToolMessages(controller.messages, { agentBusy: isTurnRunning }), [controller.messages, isTurnRunning]);
+	// DSH 已作答回显内联注入：应答时记录的锚点（最后一条消息 id）即提问阻塞的
+	// 工具调用位置，把回显合成为 ask_question 工具消息插在其后，走 pi _askCard
+	// 同一分组/渲染路径。只在派生层注入——DSH 历史由 host 全量折叠投影，任何写
+	// 进缓存的合成消息都会被下次投影冲掉。runtime 换代即作废；锚点被压缩/重投影
+	// 改写找不到时不注入（错位的回显比没有更糟）。
+	const askEchoEntry = useAtomValue(askEchoBySessionIdAtomFamily(sessionId));
+	const askEchoPlacement = useMemo(() => {
+		if (!askEchoEntry) return undefined;
+		if (runtime?.agentId !== askEchoEntry.agentId || runtime.runtimeGeneration !== askEchoEntry.runtimeGeneration) return undefined;
+		return {
+			echo: askEchoEntry.echo,
+			agentId: askEchoEntry.agentId,
+			...(askEchoEntry.anchorMessageId ? { anchorMessageId: askEchoEntry.anchorMessageId } : {}),
+			answeredAt: askEchoEntry.answeredAt,
+		};
+	}, [askEchoEntry, runtime?.agentId, runtime?.runtimeGeneration]);
+	const echoedWindowMessages = useMemo(() => injectAskEchoMessage(controller.messages, askEchoPlacement), [controller.messages, askEchoPlacement]);
+	const echoedPaginatedMessages = useMemo(() => injectAskEchoMessage(paginatedMessages, askEchoPlacement), [paginatedMessages, askEchoPlacement]);
+	const groupedWindowRuns = useMemo(() => groupToolMessages(echoedWindowMessages, { agentBusy: isTurnRunning }), [echoedWindowMessages, isTurnRunning]);
 	const renderedRuns = useMemo(() => {
 		if (groupedHistoryRuns) {
 			return [...groupedHistoryRuns, ...groupedWindowRuns];
 		}
-		return groupToolMessages(paginatedMessages, { agentBusy: isTurnRunning });
-	}, [groupedHistoryRuns, groupedWindowRuns, paginatedMessages, isTurnRunning]);
+		return groupToolMessages(echoedPaginatedMessages, { agentBusy: isTurnRunning });
+	}, [groupedHistoryRuns, groupedWindowRuns, echoedPaginatedMessages, isTurnRunning]);
 	// 阶段0补强：对未变化的 run 复用旧对象引用，历史 run 的 memo 比较退化为 O(1)
 	const prevRenderedRunsRef = useRef<RenderMessage[] | undefined>(undefined);
 	const reconciledRuns = useMemo(() => {
@@ -465,52 +490,12 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 		latestRunIdRef.current = latestRun?.kind === "agent-run" ? latestRun.id : undefined;
 	}, [displayRuns, lastAgentRunIndex]);
 
-	const scrollFinalAnswerToUpperMiddle = controller.scrollFinalAnswerToUpperMiddle;
-	// 布局稳定窗口：折叠动画（Collapsible 高度变化）基本结束后再读取最终位置。
-	// 定时器不需要被输入事件取消——scrollFinalAnswerToUpperMiddle 会按触发时的
-	// autoScroll/ownerKey/几何守卫决定跳过，输入不参与取消（2026-09 状态驱动）。
-	const scheduleFinalAnswerSettle = useCallback(
-		(runId: string) => {
-			if (turnSettleScrollTimerRef.current !== undefined) {
-				window.clearTimeout(turnSettleScrollTimerRef.current);
-				turnSettleScrollTimerRef.current = undefined;
-			}
-			turnSettleScrollTimerRef.current = window.setTimeout(() => {
-				turnSettleScrollTimerRef.current = undefined;
-				scrollFinalAnswerToUpperMiddle(runId);
-			}, TURN_SETTLE_SCROLL_DELAY_MS);
-		},
-		[scrollFinalAnswerToUpperMiddle],
-	);
-	// 统一流水线：1.5s 阅读停顿 → 折叠执行过程（若仍展开）→ 布局稳定后定位。
-	// 定位不依赖「是否真的发生折叠」；同 run 已在途时复用，避免双调度。
-	const armSettledReposition = useCallback(
-		(runId: string | undefined) => {
-			if (!runId) return;
-			if (turnSettleIdleTimerRef.current !== undefined && turnSettleIdleLastRunRef.current === runId) {
-				return;
-			}
-			turnSettleIdleLastRunRef.current = runId;
-			if (turnSettleIdleTimerRef.current !== undefined) {
-				window.clearTimeout(turnSettleIdleTimerRef.current);
-				turnSettleIdleTimerRef.current = undefined;
-			}
-			turnSettleIdleTimerRef.current = window.setTimeout(() => {
-				turnSettleIdleTimerRef.current = undefined;
-				// tick 已发出：该 run 的自动收起/定位已完成一次；切回时不再重复 arm
-				//（否则用户手动重新展开的轮次会被再次收起并清 memory）。
-				settleTickConsumedRunRef.current = runId;
-				setLatestTurnAutoCollapseTick((tick) => tick + 1);
-				scheduleFinalAnswerSettle(runId);
-			}, TURN_SETTLE_IDLE_COLLAPSE_MS);
-		},
-		[scheduleFinalAnswerSettle],
-	);
-
+	// 回复完结后不再「自动滚回答案开头」（旧"安静收起"/完结定位已删除）。
+	// 自动滚动只发生在「发送那一刻」：由 controller 对新 user 行做一次性置顶动画。
+	// 完结后视口应保持用户在离开时的位置不变；会话切换由 controller 的恢复逻辑负责。
 	useEffect(() => {
 		const wasBusy = wasRuntimeBusyRef.current;
 		wasRuntimeBusyRef.current = isRuntimeBusy;
-
 		const clearIdle = () => {
 			if (turnSettleIdleTimerRef.current !== undefined) {
 				window.clearTimeout(turnSettleIdleTimerRef.current);
@@ -522,52 +507,27 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 			}
 			turnSettleIdleLastRunRef.current = undefined;
 		};
-
-		if (isRuntimeBusy || !hasLiveRuntime) {
-			// 实例结束或新一轮开始时作废旧定位；只在动画仍在途时恢复跟随。
-			// 用户正在读历史（无在途动画）则不打扰。
-			controller.cancelSettledRepositionForNewRun();
+		if (isRuntimeBusy || !hasLiveRuntime || !controller.autoScroll) {
 			clearIdle();
 			return;
 		}
-		if (!controller.autoScroll) {
-			clearIdle();
-			return;
-		}
-		// 只处理「运行中 → 停转」边沿；历史会话挂载/切回由下方补齐 effect 处理。
 		if (!wasBusy) return;
-
-		// 最新轮结束且仍在跟随：arm 1.5s 阅读停顿流水线。
-		// 不再监听任何全局输入事件——鼠标移动/键盘/其他面板滚动与本轮是否结束无关,
-		// 不得参与取消（2026-09 收敛为状态驱动）。
-		armSettledReposition(latestRunIdRef.current);
-
-		return clearIdle;
-	}, [controller.autoScroll, controller.cancelSettledRepositionForNewRun, hasLiveRuntime, isRuntimeBusy, runtime?.agentId, runtime?.runtimeGeneration, sessionId, armSettledReposition]);
-
-	// 跟随状态变化（回底/下滚重锁）会作废在途的 settle 布局定时：不能让刚回底的
-	// 视口在 320ms 后又被定位拉到 30% 高度。定位动画开始后 autoScroll 恒为 false，
-	// 不会误清自身已触发的定时器；挂载首帧的 autoScroll true 不会清掉尚未排定的定时器。
-	useEffect(() => {
-		if (turnSettleScrollTimerRef.current !== undefined) {
-			window.clearTimeout(turnSettleScrollTimerRef.current);
-			turnSettleScrollTimerRef.current = undefined;
+		// 「运行中 → 停转」边沿仅用于让旧的 settled 流水线失效；不再调度任何定位。
+		// 仍保留「1.5s 阅读停顿 → 自动收起最新轮」的让读不托苏。
+		const latestRunId = latestRunIdRef.current;
+		if (!latestRunId) return clearIdle;
+		if (turnSettleIdleTimerRef.current !== undefined) {
+			window.clearTimeout(turnSettleIdleTimerRef.current);
 		}
-	}, [controller.autoScroll]);
+		turnSettleIdleLastRunRef.current = latestRunId;
+		turnSettleIdleTimerRef.current = window.setTimeout(() => {
+			turnSettleIdleTimerRef.current = undefined;
+			if (turnSettleIdleLastRunRef.current !== latestRunId) return;
+			setLatestTurnAutoCollapseTick((tick) => tick + 1);
+		}, TURN_SETTLE_IDLE_COLLAPSE_MS);
+		return clearIdle;
+	}, [controller.autoScroll, hasLiveRuntime, isRuntimeBusy, runtime?.agentId, runtime?.runtimeGeneration, sessionId]);
 
-	// 最新轮已结束且仍绑定存活 Agent（切会话切回 / 启动历史会话实例）：不经过 busy 边沿，
-	// 若该会话仍停在最新尾部（跟随），按同一流水线补齐定位。effect 依赖不含
-	// controller.autoScroll：回底（autoScroll false→true）不重跑本 effect，避免
-	// 「刚点回底又被拉去 30%」；守卫只在触发瞬间读一次快照，过期由函数内最新
-	// autoScrollRef 再拦截一次。
-	const latestSettledRunId = latestAgentRunId !== undefined && !isRuntimeBusy ? latestAgentRunId : undefined;
-	useEffect(() => {
-		if (!hasLiveRuntime || !latestSettledRunId || !controller.autoScroll) return;
-		// 幂等：该 run 的 tick 已消费过（自动收起/定位已完成）不再重复 arm——
-		// 否则切回时会把用户手动重新展开的最新轮再收起并清 memory（P2-②）。
-		if (settleTickConsumedRunRef.current === latestSettledRunId) return;
-		armSettledReposition(latestSettledRunId);
-	}, [hasLiveRuntime, latestSettledRunId, armSettledReposition, runtime?.agentId, runtime?.runtimeGeneration, sessionId]);
 	const turnWindowActive = shouldWindowTimelineTurns(countAgentRunItems(reconciledRuns), turnWindowTurns);
 	// 方案 C（2026-12）渐进扩展：把「窗口是否仍可扩展」同步给 controller 的滚动监听——
 	// 接近窗口顶部且还有未挂载的已加载数据时，先自动扩窗口（本地 DOM，无网络往返），
@@ -722,7 +682,7 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 
 	return (
 		<MessageScroller
-			className={cn("message-timeline-host h-full min-h-0", contentEntering && "timeline-content-enter")}
+			className={cn("message-timeline-host h-full min-h-0", !props.instantSessionSwitch && contentEntering && "timeline-content-enter")}
 			viewportClassName="message-timeline"
 			// 宽度约束落在内层 [role=log] 而非 scroller 宿主：视口撑满整个面板，
 			// 原生滚动条贴面板最右侧；内容列仍与 composer 同宽居中（见 chatContentWidth）。
@@ -801,7 +761,7 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 			{controller.loadMoreError && (
 				<div className="flex flex-col items-center gap-1 px-6 pb-3 text-center">
 					<p className="text-xs font-medium text-destructive">{t("timeline.loadMoreFailed")}</p>
-					<p className="max-w-[560px] text-[11px] text-muted-foreground" title={controller.loadMoreError}>
+					<p className="max-w-[560px] text-micro text-muted-foreground" title={controller.loadMoreError}>
 						{t("timeline.loadMoreFailedHint")}
 					</p>
 				</div>
@@ -840,12 +800,12 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
           也不裸显示起始页误导——明确错误文案 + 重试（2026-08 生图会话文件缺失）。
           DSH host 被手动停止走下面的专态分支：DSH 会话没有 pi 会话文件，说成
           「文件可能已被删除」会把用户引向错误方向，而且重试永远无效。 */}
-			{messageLoadState?.status === "error" && activeMessages.length === 0 && !dshHostStopped && (
+			{messageLoadState?.status === "error" && activeMessages.length === 0 && !dshHostStopped && !sessionFileMissing && (
 				<div className="flex flex-col items-center gap-3 px-6 py-10 text-center">
 					<p className="text-sm font-medium">{t("timeline.loadFailed")}</p>
-					<p className="max-w-[560px] text-xs text-muted-foreground" title={messageLoadState.error ?? ""}>
-						{t("timeline.loadFailedHint")}
-					</p>
+					<p className="max-w-[560px] text-xs text-muted-foreground">{t("timeline.loadFailedHint")}</p>
+					{/* 解析/读取错误不等于文件丢失：直接展示原因，避免误导用户删除合法会话。 */}
+					{messageLoadState.error && <p className="max-w-[560px] whitespace-pre-wrap break-all text-xs text-muted-foreground">{messageLoadState.error}</p>}
 					<Button type="button" variant="outline" size="sm" onClick={() => void controller.reloadFromDisk()}>
 						{t("common.retry")}
 					</Button>
@@ -871,16 +831,28 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 				</div>
 			)}
 
+			{/* 空会话（文件尚未创建）专态：只说「还没有内容」+ 怎么产生内容，不展示 ENOENT，
+			    也不渲染起始页——新建会话/外部连接会话打开时就应该是这一屏。 */}
+			{messageLoadState?.status === "error" && activeMessages.length === 0 && sessionFileMissing && (
+				<div className="flex flex-col items-center gap-3 px-6 py-10 text-center">
+					<p className="text-sm font-medium">{t("timeline.emptySessionFile")}</p>
+					<p className="max-w-[560px] text-xs text-muted-foreground">{t("timeline.emptySessionFileHint")}</p>
+					<Button type="button" variant="outline" size="sm" onClick={() => void controller.reloadFromDisk()}>
+						{t("common.retry")}
+					</Button>
+				</div>
+			)}
+
 			{!hasActiveConversation && <EmptyState hasProject={props.hasProject} onCreate={props.onCreateSession} />}
 
-			{hasActiveConversation && !isConversationLoading && activeMessages.length === 0 && <SessionStartSurface sessionId={sessionId} />}
+			{hasActiveConversation && !isConversationLoading && activeMessages.length === 0 && !sessionFileMissing && <SessionStartSurface sessionId={sessionId} />}
 
 			{/* 长会话渲染治理：
           - 不再使用 content-visibility 估算高度（展开工具会抖）。
           - 学 Proma：总折叠压缩单行 DOM；另在贴底时只挂尾部 N 个 agent-run
             （见 turnRenderWindow），上滚放开。分页仍做数据窗口治理。 */}
 			{hasActiveConversation && !isConversationLoading && activeMessages.length > 0 && (
-				<div className="message-list min-w-0 w-full mx-auto transition-opacity duration-150">
+				<div className="message-list min-w-0 w-full mx-auto transition-opacity duration-fast">
 					{displayRuns.map((item, index) => {
 						if (item.kind === "agent-run") {
 							// Only an active model turn keeps its latest run live. Context
@@ -896,6 +868,8 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 									sessionId={sessionId}
 									// 行头署名与后端一致：DSH 会话的回复标 dsh，而非 pi
 									backend={session?.backend ?? "pi"}
+									// ACP 会话的回复行头用工具自己的品牌 logo（分不清是哪个 CLI 就失去署名意义）
+									acpToolId={session?.acpToolId}
 									fresh={freshMessageIds.has(item.id)}
 									topFresh={topFreshIds.has(item.id)}
 									onPreviewImage={props.onPreviewImage}
@@ -925,6 +899,7 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 								<UserBubble
 									key={message.id}
 									message={message}
+									onRemoveMessageImage={props.onRemoveMessageImage}
 									fresh={freshMessageIds.has(message.id)}
 									topFresh={topFreshIds.has(message.id)}
 									onPreviewImage={props.onPreviewImage}
@@ -951,11 +926,16 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 							return <DiagnosticMessageCard key={message.id} message={message} />;
 						}
 						if (message.role === "system") {
-							const meta = message.meta as any;
+							const meta = message.meta && typeof message.meta === "object" ? (message.meta as { type?: string }) : undefined;
 							if (meta?.type === "askQuestion") {
 								// Pending extension UI is rendered once in the timeline footer.
 								// Legacy in-memory messages may still contain this placeholder.
 								return null;
+							}
+							// 扩展输出条目（pi appendEntry / type:"custom"）：主进程读侧投影的可见性补齐卡，
+							// 不是回合边界，只让 /btw 这类扩展输出到达用户（issue #285）。
+							if (meta?.type === "customEntry") {
+								return <ExtensionEntryCard key={message.id} message={message} />;
 							}
 							// 扩展 custom 消息（pi custom_message 条目）：只有面向用户的通知类白名单
 							// 才渲染成卡片（如子代理后台任务完成），其余（display:false 的内部上下文
@@ -983,7 +963,14 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 						return null;
 					})}
 
-					{hasActiveConversation && !cancellingUi && isRuntimeBusy && <RespondingIndicator isCompacting={isCompacting} isStarting={activeConversationStatus === "starting"} isExecutingTool={activeRuntimeState?.isExecutingTool} liveTextStreaming={liveTextStreaming} liveThinkingStreaming={liveThinkingStreaming} />}
+					{hasActiveConversation && !cancellingUi && isRuntimeBusy && (
+						<RespondingIndicator isCompacting={isCompacting} isStarting={activeConversationStatus === "starting"} isExecutingTool={activeRuntimeState?.isExecutingTool} executingToolName={activeRuntimeState?.executingToolName} liveTextStreaming={liveTextStreaming} liveThinkingStreaming={liveThinkingStreaming} />
+					)}
+					{/* GUI 扩展桥：流式状态行（ctx.ui.setWorkingMessage / setWorkingVisible / setWorkingIndicator）。
+					    **旁插**在原生指示器之后 —— 保留原生形态，不顶替（§8.2 A 组 / §7.4 只追加）。
+					    无桥贡献时该组件返回 null，不占位。 */}
+					<BridgeWorkingLine sessionId={sessionId} />
+					{props.replyActionsRef ? <div key={sessionId} ref={props.replyActionsRef} data-session-id={sessionId} data-testid="session-reply-actions-target" className="min-w-0 empty:hidden" /> : null}
 				</div>
 			)}
 
@@ -992,12 +979,13 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 			    这里仍用正常流布局而不是 sticky/z-index，避免覆盖最后一条工具调用或回答。 */}
 			{props.runtimeUi ? <div className="session-runtime-ui mx-auto w-full min-w-0 empty:hidden">{props.runtimeUi}</div> : null}
 
-			{/* 发送清屏垫片（pin-to-top）已于 2026 移除：其与流式跟随有冲突、偶发页面抖动。 */}
+			{/* 发送定位垫片：让长历史下的新消息即使尚未有足够自然内容，也能平滑到视口顶部。 */}
+			<div aria-hidden="true" data-send-scroll-spacer="true" className="shrink-0" />
 
 			{multiSelectOpen && <MultiSelectModal renderedRuns={reconciledRuns} onClose={() => setMultiSelectOpen(false)} onCopy={copySelectedMessages} />}
 
 			{/* 划选引用浮层：portal 到 body，fixed 定位；空会话起始页无消息不出现 */}
-			{!showSurfaceEmptyState && sessionId && <SelectionToolbar quote={selectionQuote} sessionId={sessionId} onConsume={clearSelectionQuote} />}
+			{!showSurfaceEmptyState && sessionId && <SelectionToolbar quote={selectionQuote} sessionId={sessionId} onConsume={clearSelectionQuote} toolbarRef={selectionToolbarRef} />}
 		</MessageScroller>
 	);
 }

@@ -2,7 +2,7 @@ import type { ProjectFileAccessScope, ProjectFileTarget } from "../../../../shar
 import { lazy, Suspense, useCallback, useEffect, useId, useRef, useState } from "react";
 import { useSetAtom } from "jotai";
 import { t } from "../../i18n";
-import { ArrowLeft, Maximize, Minimize2, Rows2, SquareSplitHorizontal, X, Eye, FileCode } from "lucide-react";
+import { ArrowLeft, Maximize, Minimize2, Rows2, SquareSplitHorizontal, X, Eye, FileCode, Loader2 } from "lucide-react";
 import { Button } from "../ui-shadcn/button";
 import { cn } from "../../lib/utils";
 import { MarkdownStream } from "../session/MarkdownStream";
@@ -10,7 +10,10 @@ import { defaultUrlTransform } from "../session/MarkdownLinkCore";
 import { defaultRehypePlugins } from "streamdown";
 import rehypeKatex from "rehype-katex";
 import { remarkGfmNoSingleTilde } from "../../utils/markdownPlugins";
-import { CodeMirrorEditor } from "./CodeMirrorEditor";
+// CodeMirrorEditor 静态链上挂着整个 CodeMirror 6 全家桶（view/state/commands/
+// autocomplete/search/lint/lang-json），经 WorkbenchContent 静态 import 进主 chunk，
+// App 启动即解析。与 CodeDiffView 同款懒加载：首次打开编辑器才拉 chunk。
+const CodeMirrorEditor = lazy(() => import("./CodeMirrorEditor").then((m) => ({ default: m.CodeMirrorEditor })));
 // CodeDiffView 静态链上挂着 @pierre/diffs + shiki（WASM 重库），懒加载后这些模块
 // 移出首屏初始 chunk（约 -500KB 解析量），仅在用户打开 diff 时才拉取。
 const CodeDiffView = lazy(() => import("./CodeDiffView").then((m) => ({ default: m.CodeDiffView })));
@@ -35,6 +38,8 @@ function fileLoadErrorMessage(error: unknown): string {
 }
 
 export function FileDiffViewer(props: {
+	active?: boolean;
+	onDirty?: () => void;
 	filePath: string;
 	fileTarget?: ProjectFileTarget;
 	mode?: ViewMode;
@@ -211,7 +216,9 @@ export function FileDiffViewer(props: {
 				mediaUrlRef.current = url;
 				setMediaUrl(url);
 			} catch (e) {
-				if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+				// 主进程的 FILE_TOO_LARGE 结构化前缀经 fileLoadErrorMessage 转 i18n 文案；
+				// 直接展示 e.message 会把 FILE_TOO_LARGE:size:max 裸码给用户。
+				if (!cancelled) setError(fileLoadErrorMessage(e));
 			}
 		}
 		void load();
@@ -332,11 +339,11 @@ export function FileDiffViewer(props: {
 	);
 
 	useEffect(() => {
-		if (!isDiffMode) {
+		if (!isDiffMode && props.active !== false) {
 			window.addEventListener("keydown", handleKeyDown);
 			return () => window.removeEventListener("keydown", handleKeyDown);
 		}
-	}, [isDiffMode, handleKeyDown]);
+	}, [isDiffMode, props.active, handleKeyDown]);
 
 	// 卸载时取消挂起的自动保存 timer + 释放媒体 Blob URL（生命周期配对）
 	useEffect(() => {
@@ -355,9 +362,10 @@ export function FileDiffViewer(props: {
 			contentRef.current = value;
 			setContent(value);
 			setDirty(true);
+			props.onDirty?.();
 			scheduleAutoSave();
 		},
-		[scheduleAutoSave],
+		[scheduleAutoSave, props.onDirty],
 	);
 
 	// 编辑器选中文本 → 右键「引用选中内容」：以 pi 的 read 语法 @path:start-end 派发到输入框。
@@ -470,7 +478,15 @@ export function FileDiffViewer(props: {
 				</div>
 			</div>
 			<div className="file-diff-body">
-				{loading && <div className="file-diff-loading">{t("common.loading")}</div>}
+				{/* 加载态补 spinner，与 Git 树 ResourceRow 的 Loader2 动效同语言；外层 .file-diff-loading 是 grid 居中，内层用 inline-flex 排图标+文案 */}
+				{loading && (
+					<div className="file-diff-loading">
+						<span className="inline-flex items-center gap-2">
+							<Loader2 size={14} className="animate-pideck-spin" aria-hidden="true" />
+							{t("common.loading")}
+						</span>
+					</div>
+				)}
 				{error && <div className="file-diff-error">{error}</div>}
 				{!loading && !error && (
 					<>
@@ -500,7 +516,24 @@ export function FileDiffViewer(props: {
 						{/* view 模式、非预览：常规编辑器（CodeMirror 6） */}
 						{!isDiffMode && !preview && (
 							<div style={{ height: "100%", flexDirection: "column" }}>
-								<CodeMirrorEditor value={content} language={language} readOnly={false} initialLine={props.initialLine} onChange={handleEditorChange} onAttachSelection={handleAttachSelection} />
+								{/* lazy 边界：首次打开编辑器才拉取 CodeMirror chunk，期间轻量占位 */}
+								<Suspense
+									fallback={
+										<div
+											style={{
+												height: "100%",
+												display: "grid",
+												placeItems: "center",
+											}}
+											className="flex items-center justify-center gap-2 text-caption text-foreground/50"
+										>
+											<Loader2 size={14} className="animate-pideck-spin" aria-hidden="true" />
+											{t("common.loading")}
+										</div>
+									}
+								>
+									<CodeMirrorEditor value={content} language={language} readOnly={false} initialLine={props.initialLine} onChange={handleEditorChange} onAttachSelection={handleAttachSelection} />
+								</Suspense>
 							</div>
 						)}
 						{/* diff 模式：只读差异对比（分栏 / 单栏由 sideBySide 切换），
@@ -516,8 +549,9 @@ export function FileDiffViewer(props: {
 												display: "grid",
 												placeItems: "center",
 											}}
-											className="text-caption text-foreground/50"
+											className="flex items-center justify-center gap-2 text-caption text-foreground/50"
 										>
+											<Loader2 size={14} className="animate-pideck-spin" aria-hidden="true" />
 											{t("common.loading")}
 										</div>
 									}

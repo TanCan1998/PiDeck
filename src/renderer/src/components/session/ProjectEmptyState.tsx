@@ -71,7 +71,7 @@ export function ProjectEmptyState(props: {
 			bootstrapProjectId={props.activeProject.id}
 			projectSwitcher={
 				<Select value={props.activeProject.id} onValueChange={props.onSelectProject}>
-					<SelectTrigger aria-label={t("app.guideProjectPicker")} className="h-9 gap-2 border-0 bg-transparent px-2.5 text-sm font-normal text-text-secondary shadow-none hover:bg-accent/50 focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:hover:bg-accent/50">
+					<SelectTrigger aria-label={t("app.guideProjectPicker")} className="gap-2 border-0 bg-transparent px-2.5 text-sm font-normal text-text-secondary shadow-none hover:bg-accent/50 focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:hover:bg-accent/50">
 						<FolderGit2 size={15} aria-hidden="true" className="shrink-0 text-text-tertiary" />
 						<SelectValue />
 					</SelectTrigger>

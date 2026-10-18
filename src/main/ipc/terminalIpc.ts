@@ -3,6 +3,7 @@ import { ipcChannels } from "../../shared/ipc";
 import type { SessionCommandError, TerminalAgentTarget, TerminalShell, TerminalTarget } from "../../shared/types";
 import type { AppLogger } from "../logging/AppLogger";
 import type { ProjectStore } from "../projects/ProjectStore";
+import { listSystemFontFamilies } from "../fonts/SystemFonts";
 import type { SessionRuntimeCoordinator } from "../sessions/SessionRuntimeCoordinator";
 import type { RemoteTerminalSessionManager } from "../terminal/RemoteTerminalSessionManager";
 import { isRemoteProject } from "../../shared/projectLocation";
@@ -57,16 +58,6 @@ function parseTerminalShell(value: unknown): TerminalShell | undefined {
 
 function parseTerminalTabId(value: unknown): string {
 	if (typeof value !== "string" || !value.trim() || value.length > 128) throw new Error("INVALID_TERMINAL_TAB_ID");
-	return value;
-}
-
-function parseTerminalInput(value: unknown): string {
-	if (typeof value !== "string") throw new Error("INVALID_TERMINAL_INPUT");
-	return value;
-}
-
-function parseTerminalDimension(value: unknown): number {
-	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 10_000) throw new Error("INVALID_TERMINAL_SIZE");
 	return value;
 }
 
@@ -141,21 +132,22 @@ export function registerTerminalIpc({ appLogger, projectStore, sessionRuntimeCoo
 		return result;
 	});
 	ipcMain.handle(ipcChannels.terminalInput, (event, rawTabId: unknown, rawData: unknown) => {
-		const id = parseTerminalTabId(rawTabId),
-			data = parseTerminalInput(rawData);
-		if (remoteTerminalManager?.has(id)) {
+		// 入参类型校验（dev 语义）：data 直达 pty.write（原生调用），非字符串会同步 throw 变成
+		// 渲染层 rejection；无效载荷属于渲染层 bug，与 manager 侧「迟到输入静默忽略」保持同一哲学。
+		if (typeof rawTabId !== "string" || typeof rawData !== "string") return;
+		if (remoteTerminalManager?.has(rawTabId)) {
 			// Budget the remote transport only; native paste behavior remains unchanged.
-			if (data.length > 16 * 1024) throw new Error("INVALID_TERMINAL_INPUT");
-			return remoteTerminalManager.input(remoteSender(event.sender), id, data);
+			if (rawData.length > 16 * 1024) throw new Error("INVALID_TERMINAL_INPUT");
+			return remoteTerminalManager.input(remoteSender(event.sender), rawTabId, rawData);
 		}
-		terminalManager.input(id, data);
+		terminalManager.input(rawTabId, rawData);
 	});
 	ipcMain.handle(ipcChannels.terminalResize, (event, rawTabId: unknown, rawCols: unknown, rawRows: unknown) => {
-		const id = parseTerminalTabId(rawTabId),
-			cols = parseTerminalDimension(rawCols),
-			rows = parseTerminalDimension(rawRows);
-		if (remoteTerminalManager?.has(id)) return remoteTerminalManager.resize(remoteSender(event.sender), id, cols, rows);
-		terminalManager.resize(id, cols, rows);
+		// cols/rows 直达原生 pty.resize：非有限数字（NaN/Infinity/字符串）会以 NaN 落到 ConPTY，
+		// 行为未定义；下限钳制在 manager 侧已有（Math.max(2/1)），这里只挡类型（dev 语义：静默忽略）。
+		if (typeof rawTabId !== "string" || typeof rawCols !== "number" || !Number.isFinite(rawCols) || typeof rawRows !== "number" || !Number.isFinite(rawRows)) return;
+		if (remoteTerminalManager?.has(rawTabId)) return remoteTerminalManager.resize(remoteSender(event.sender), rawTabId, rawCols, rawRows);
+		terminalManager.resize(rawTabId, rawCols, rawRows);
 	});
 	ipcMain.handle(ipcChannels.terminalAcknowledge, (event, rawTabId: unknown, sequence: unknown) => {
 		const id = parseTerminalTabId(rawTabId);
@@ -163,11 +155,15 @@ export function registerTerminalIpc({ appLogger, projectStore, sessionRuntimeCoo
 		if (remoteTerminalManager?.has(id)) remoteTerminalManager.ack(remoteSender(event.sender), id, sequence);
 	});
 	ipcMain.handle(ipcChannels.terminalClose, (event, rawTabId: unknown) => {
-		const tabId = parseTerminalTabId(rawTabId);
-		if (remoteTerminalManager?.has(tabId)) remoteTerminalManager.close(remoteSender(event.sender), tabId);
-		else terminalManager.close(tabId);
-		void appLogger.info("terminal", "Terminal closed", { tabId });
+		// 非字符串 tabId 静默忽略（dev 语义）且不写关闭日志：无效载荷不是一次真实的关闭。
+		if (typeof rawTabId !== "string") return;
+		if (remoteTerminalManager?.has(rawTabId)) remoteTerminalManager.close(remoteSender(event.sender), rawTabId);
+		else terminalManager.close(rawTabId);
+		void appLogger.info("terminal", "Terminal closed", { tabId: rawTabId });
 	});
 	// shell 候选列表（供「选择 Shell」下拉）：只读平台探测结果，无入参可校验
 	ipcMain.handle(ipcChannels.terminalShells, () => terminalManager.listShells());
+	// 系统字体族列表（供终端设置页的字体下拉）：只读枚举 + 进程内缓存，无入参可校验。
+	// 枚举失败返回空数组，下拉退化为「跟随代码字体」一项，不阻断设置页。
+	ipcMain.handle(ipcChannels.terminalFonts, () => listSystemFontFamilies());
 }

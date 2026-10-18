@@ -21,6 +21,7 @@ import {
 import type { UpdateSourceId } from "../../shared/types/settings";
 import { isDshRunnerNodeCompatible, parseNodeVersion } from "./dshRunnerNode";
 import { dshRunnerNodeUserDataSidecar } from "./dshRunnerNodeSidecar";
+import { getAppLogger } from "../logging/sharedLogger";
 
 const execFileAsync = promisify(execFile);
 
@@ -150,10 +151,13 @@ export async function installDshRunnerNodeSidecar(input: InstallDshRunnerNodeInp
 	const sha256OfFile = input.sha256OfFile ?? defaultSha256;
 
 	mkdirSync(destDir, { recursive: true });
+	// 下载外部 Node 二进制并替换已安装文件，属供应链相关落盘动作，来源必须可审计
+	getAppLogger()?.info("dsh-runner", "Node 24 runner download started", { url, version, arch, destExe });
 	try {
 		await download(url, zipPath, input.onProgress, input.signal);
 		const actual = await sha256OfFile(zipPath);
 		if (actual.toLowerCase() !== release.sha256.toLowerCase()) {
+			getAppLogger()?.error("dsh-runner", "Node 24 package checksum mismatch", { url, expected: release.sha256, actual });
 			return { ok: false, error: "Node 24 压缩包校验失败（sha256 不匹配）" };
 		}
 		const extracted = await extract(zipPath, destDir, innerRel);
@@ -167,8 +171,10 @@ export async function installDshRunnerNodeSidecar(input: InstallDshRunnerNodeInp
 		if (!isDshRunnerNodeCompatible(installed)) {
 			return { ok: false, error: `下载到的 Node 版本不兼容：${installed || "未知"}` };
 		}
+		getAppLogger()?.info("dsh-runner", "Node 24 runner installed", { path: destExe, version: installed });
 		return { ok: true, path: destExe, version: installed };
 	} catch (error) {
+		getAppLogger()?.warn("dsh-runner", "Node 24 runner install failed", { url, error: error instanceof Error ? error.message : String(error) });
 		return { ok: false, error: error instanceof Error ? error.message : String(error) };
 	} finally {
 		await rm(zipPath, { force: true });

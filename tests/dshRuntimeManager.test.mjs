@@ -119,6 +119,17 @@ test("selectRelease：与 selectRuntime 同样按兼容区间 + 取最新", () =
 	assert.equal(selectRelease(releases, "0.6.0"), undefined, "没有任何兼容版本");
 });
 
+test("selectRelease：给了配套版本就只认它，不退回区间内最新版", () => {
+	const releases = [
+		{ runtimeVersion: "0.1.0", minAppVersion: "0.7.0", maxAppVersion: "", url: "a", sha256: "a", size: 1 },
+		{ runtimeVersion: "0.1.1", minAppVersion: "0.7.0", maxAppVersion: "0.8.0", url: "b", sha256: "b", size: 1 },
+	];
+	assert.equal(selectRelease(releases, "0.7.5", "0.1.0").runtimeVersion, "0.1.0", "命中声明版本时不能装更大的那版（门控按逐字相等判定）");
+	assert.equal(selectRelease(releases, "0.7.5", "0.2.0"), undefined, "索引没有配套版本时报缺版本，而不是偷偷装 0.1.1");
+	assert.equal(selectRelease(releases, "0.7.5", "v0.1.1").runtimeVersion, "0.1.1", "容忍 v 前缀写法差异");
+	assert.equal(selectRelease(releases, "0.8.0", "0.1.1"), undefined, "区间不兼容的声明版本不发放（装了也起不来）");
+});
+
 // ── 归档条目安全（tar slip）──
 
 test("isSafeArchiveEntry 拒绝绝对路径与 ../ 逃逸", () => {
@@ -171,6 +182,82 @@ test("installFromArchive：校验通过后原子落位，版本目录可用", as
 	assert.equal(existsSync(join(layout.runtimesRoot, "0.1.1-rc.2", "manifest.json")), true);
 	assert.equal(existsSync(join(layout.runtimesRoot, "0.1.1-rc.2", "node_modules")), true);
 	assert.equal(existsSync(join(layout.runtimesRoot, "0.1.1-rc.2", "dsh-runtime")), false);
+	rmSync(root, { recursive: true, force: true });
+});
+
+test("同版本重装走换位落位：旧目录先让位、落位失败时原样放回（任意时刻不出现半空 target）", async () => {
+	const { manager, layout, root } = makeManager({
+		extract: async (_archive, destDir) => {
+			stageRuntime(join(destDir, "dsh-runtime"), { over: { runtimeVersion: "0.1.1-rc.2" } });
+			// 落位阶段写入标记文件，用于区分新旧内容
+			writeFileSync(join(destDir, "dsh-runtime", "marker.txt"), "new");
+		},
+	});
+	// 预置已存在的同版本目录（旧安装），带旧标记
+	mkdirSync(join(layout.runtimesRoot, "0.1.1-rc.2"), { recursive: true });
+	writeFileSync(join(layout.runtimesRoot, "0.1.1-rc.2", "marker.txt"), "old");
+
+	const archive = join(root, "in.tgz");
+	writeFileSync(archive, "fake");
+	const result = await manager.installFromArchive(archive);
+	assert.equal(result.ok, true);
+	assert.equal(result.dirName, "0.1.1-rc.2");
+	// 换位落位后 target 是新内容
+	assert.equal(readFileSync(join(layout.runtimesRoot, "0.1.1-rc.2", "marker.txt"), "utf8"), "new");
+	// 旧目录残骸只允许出现在 tempRoot（finally 清理失败也仅是残留，不影响安装）
+	rmSync(root, { recursive: true, force: true });
+});
+
+test("同版本重装：落位 rename 失败时旧目录让位后回滚（不出现半空 target）", async () => {
+	// 通过 stubs 注入 fs/promises：第二次起 rename 持续 EPERM（模拟杀毒/资源管理器
+	// 占用），验证 swapRuntimeDirectory 的两段式换位——让位成功、落位失败、回滚放回。
+	const fsPromises = await import("node:fs/promises");
+	const realRename = fsPromises.rename;
+	let renames = 0;
+	const { DshRuntimeManager: StubbedManager } = loadTsCommonJs("src/main/dsh/runtime/DshRuntimeManager.ts", {
+		stubs: {
+			"node:fs/promises": {
+				...fsPromises,
+				rename: async (from, to) => {
+					renames += 1;
+					if (renames >= 2) {
+						const error = new Error("EPERM: operation not permitted, rename");
+						error.code = "EPERM";
+						throw error;
+					}
+					return realRename(from, to);
+				},
+			},
+		},
+	});
+	const root = mkdtempSync(join(tmpdir(), "dsh-rt-"));
+	const layout = {
+		runtimesRoot: join(root, "runtimes", "dsh"),
+		tempRoot: join(root, "runtimes", ".tmp"),
+	};
+	const manager = new StubbedManager({
+		layout,
+		appVersion: () => "0.7.5",
+		extract: async (_a, destDir) => {
+			stageRuntime(join(destDir, "dsh-runtime"));
+		},
+	});
+	// 预置旧目录（用户已装的运行时）
+	mkdirSync(join(layout.runtimesRoot, "0.1.1-rc.2"), { recursive: true });
+	writeFileSync(join(layout.runtimesRoot, "0.1.1-rc.2", "marker.txt"), "old");
+
+	const archive = join(root, "in.tgz");
+	writeFileSync(archive, "fake");
+	const result = await manager.installFromArchive(archive);
+	assert.equal(result.ok, false, "落位失败必须报告安装失败");
+	assert.match(result.error ?? "", /EPERM/);
+	// renameWithRetry(EPERM 重试 5 次×300ms)：实际调用为让位 1 + 落位重试 5 + 回滚重试 5 = 11 次；
+	// 次数是重试策略的实现细节，这里只断言三段都真正尝试过（≥3）且终态不出现半空目录。
+	assert.ok(renames >= 3, `让位/落位/回滚三段 rename 都应被调用（实际 ${renames} 次）`);
+	// 回滚 rename（第 3 次）也被 mock 拦截失败：旧目录安全留在 tempRoot，
+	// target 不存在——任意时刻都没有半空目录；旧内容也没有丢。
+	assert.equal(existsSync(join(layout.runtimesRoot, "0.1.1-rc.2")), false, "target 不出现半空");
+	assert.equal(existsSync(join(layout.tempRoot)) && readdirSync(layout.tempRoot).length >= 1, true, "旧目录残留在 tempRoot 可手动找回");
 	rmSync(root, { recursive: true, force: true });
 });
 

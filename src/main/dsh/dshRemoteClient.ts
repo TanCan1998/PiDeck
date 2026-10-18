@@ -1,5 +1,8 @@
 import { randomUUID } from "node:crypto";
+import type { ModelCatalog } from "@deepseek-ai/dsh-api-session-controller/types";
+import { parseDshModelCatalog } from "./dshModels";
 import { DshApiClient, type DshRpcResult } from "./DshApiClient";
+import { projectSubagentCatalog, readSubagentCatalog, type DshSubagentView } from "./dshSubagentCatalog";
 
 /** 旧 AbstractApiClient 的返回信封（调用方沿用的解包形状 x.result.ok / x.result.value）。
  *  泛型默认 any：0.1.5 的生成 wire 类型随 dsh-host-apiproxy 一起消失，宿主侧
@@ -8,13 +11,38 @@ export type DshEnvelope<T = any> = {
 	result: { ok: true; value: T } | { ok: false; error: { code: string; message: string; details: object } };
 };
 
+/** session/list · session/search 返回条目的最小结构（仅声明消费点字段，逐步收窄信封默认 any）。 */
+export type DshSessionListItem = { sessionId?: string | number; snippet?: string; agentPreset?: string; projections?: unknown };
+
+/** settings/describe 返回值（DshHost 设置域消费；字段按消费方快照类型声明，宿主侧 zod 负责运行时校验）。 */
+export type DshSettingsDescribeValue = {
+	writable: boolean;
+	hasDocument: boolean;
+	namespaces?: Array<{
+		ns: string;
+		applies: string;
+		revision: number;
+		value: unknown;
+		base?: unknown;
+		user?: unknown;
+		secrets?: Array<{ path: string[]; set: boolean }>;
+		schema?: unknown;
+	}>;
+};
+
+/** llm/providers 返回条目的最小结构。 */
+export type DshLlmProviderEntry = { provider: string; displayName: string; active: boolean; declared?: boolean };
+
+/** skills/list 返回条目的最小结构。 */
+export type DshSkillEntry = { name?: string; description?: string; whenToUse?: string; modelInvocable?: boolean };
+
 /** 把新 DshRpcResult 包成旧信封（保留语义，调用点零改动）。 */
 function envelope<T>(promise: Promise<DshRpcResult<T>>): Promise<DshEnvelope<T>> {
 	return promise.then((result) => ({ result }));
 }
 
 /**
- * DSH 0.1.5 Typert Remote 适配层（docs/dsh-0.1.5-typert-migration.md §4）。
+ * DSH Typert Remote 适配层（docs/dsh-remote-contract.md 的「PiDeck 传输设计」）。
  *
  * 目标：把 PiDeck 既有调用面（旧 AbstractApiClient 的领域方法签名与
  * `{result:{ok,value|error}}` 信封）映射到 0.1.5 的 Connection RPC 端点，
@@ -94,9 +122,9 @@ export class DshRemoteClient {
 
 	// ── 会话域 ────────────────────────────────────────────────────────────────
 
-	async sessionsList(): Promise<DshEnvelope> {
+	async sessionsList(): Promise<DshEnvelope<{ items?: DshSessionListItem[] }>> {
 		// 描述符要求 _request 键（wire 名，非可选）：空对象表示不带游标。
-		return envelope(this.rpc.call("session/list", { _request: {} }));
+		return envelope<{ items?: DshSessionListItem[] }>(this.rpc.call("session/list", { _request: {} }) as Promise<DshRpcResult<{ items?: DshSessionListItem[] }>>);
 	}
 
 	/**
@@ -157,6 +185,17 @@ export class DshRemoteClient {
 		return envelope(this.rpc.call("session/cancel", { request: { sessionId: input.sessionId } }));
 	}
 
+	/**
+	 * 变更一条排队中的消息（`session/updateQueue`）：remove 撤回排队项、
+	 * edit 仅接受 text 块重写内容、steer 仅对运行中会话的 next-turn 项合法
+	 * （把排队项转为立即插入当前回合的转向指令）。PiDeck 目前只用 remove
+	 * （取消排队）；edit/steer 的 UI 语义未定，不透出到渲染层。
+	 */
+	sessionUpdateQueue(input: { sessionId: string; itemId: string; action: { kind: "remove" } | { kind: "edit"; content: Array<{ type: "text"; text: string }> } | { kind: "steer" } }): Promise<DshEnvelope> {
+		const { sessionId, itemId, action } = input;
+		return envelope(this.rpc.call("session/updateQueue", { request: { sessionId, itemId, action } }));
+	}
+
 	async sessionsRename(input: { sessionId: string; title: string }): Promise<DshEnvelope> {
 		return envelope(this.rpc.call("session/rename", { request: { sessionId: input.sessionId, title: input.title } }));
 	}
@@ -193,13 +232,20 @@ export class DshRemoteClient {
 		);
 	}
 
-	async sessionsSearch(input: { query: string }, signal?: AbortSignal): Promise<DshEnvelope> {
-		return envelope(this.rpc.call("session/search", { request: { query: input.query } }, signal));
+	async sessionsSearch(input: { query: string }, signal?: AbortSignal): Promise<DshEnvelope<{ items?: DshSessionListItem[] }>> {
+		return envelope<{ items?: DshSessionListItem[] }>(this.rpc.call("session/search", { request: { query: input.query } }, signal) as Promise<DshRpcResult<{ items?: DshSessionListItem[] }>>);
 	}
 
-	/** 旧 client.sessions.models / client.llm.models 的 0.1.5 宿主：session/modelCatalog。 */
-	async sessionsModelCatalog(): Promise<DshEnvelope> {
-		return envelope(this.rpc.call("session/modelCatalog", {}));
+	/** 模型目录是 host 默认值与可路由供应商，不包含会话当前选择。 */
+	async sessionsModelCatalog(): Promise<DshEnvelope<ModelCatalog>> {
+		const result = await this.rpc.call("session/modelCatalog", {});
+		if (!result.ok) return { result };
+		return { result: { ok: true, value: parseDshModelCatalog(result.value) } };
+	}
+
+	/** 会话级投影冷读；不激活 Agent，不获取写租约。 */
+	async sessionsProjections(input: { sessionId: string }): Promise<DshEnvelope<unknown>> {
+		return envelope(this.rpc.call("session/projections", { request: { sessionId: input.sessionId } }));
 	}
 
 	async sessionsSelectModel(input: { sessionId: string; provider: string; model: string; reasoningEffort?: string }): Promise<DshEnvelope> {
@@ -438,8 +484,19 @@ export class DshRemoteClient {
 
 	// ── 子代理 / 技能 ─────────────────────────────────────────────────────────
 
-	async subagentsList(input: { parentSessionId: string }): Promise<DshEnvelope> {
-		return envelope(this.rpc.call("subagents/list", { parentSessionId: input.parentSessionId }));
+	/** 0.2 删除 subagents/list；目录与运行状态都走官方冷读端点，不激活 Agent。 */
+	async subagentsList(input: { parentSessionId: string }): Promise<DshEnvelope<{ entries: DshSubagentView[] }>> {
+		const result = await this.rpc.call("session/projections", { request: { sessionId: input.parentSessionId } });
+		if (!result.ok) return { result };
+		try {
+			const catalog = readSubagentCatalog(result.value);
+			if (!catalog.length) return { result: { ok: true, value: { entries: [] } } };
+			const sessions = await this.rpc.call("session/list", { _request: {} });
+			if (!sessions.ok) return { result: sessions };
+			return { result: { ok: true, value: { entries: projectSubagentCatalog(catalog, sessions.value) } } };
+		} catch (error) {
+			return { result: { ok: false, error: { code: "subagent/catalog-unavailable", message: error instanceof Error ? error.message : String(error), details: {} } } };
+		}
 	}
 
 	/**
@@ -480,14 +537,14 @@ export class DshRemoteClient {
 		return { result: { ok: true, value: { events, hasMore: value.hasMore } } };
 	}
 
-	async skillsList(input: { sessionId: string }): Promise<DshEnvelope> {
-		return envelope(this.rpc.call("skills/list", { request: { sessionId: input.sessionId } }));
+	async skillsList(input: { sessionId: string }): Promise<DshEnvelope<{ skills?: DshSkillEntry[] }>> {
+		return envelope<{ skills?: DshSkillEntry[] }>(this.rpc.call("skills/list", { request: { sessionId: input.sessionId } }) as Promise<DshRpcResult<{ skills?: DshSkillEntry[] }>>);
 	}
 
 	// ── 设置 / 凭证 / LLM / 预设 / 工作区 ─────────────────────────────────────
 
-	async settingsDescribe(): Promise<DshEnvelope> {
-		return envelope(this.rpc.call("settings/describe", {}));
+	async settingsDescribe(): Promise<DshEnvelope<DshSettingsDescribeValue>> {
+		return envelope<DshSettingsDescribeValue>(this.rpc.call("settings/describe", {}) as Promise<DshRpcResult<DshSettingsDescribeValue>>);
 	}
 
 	async settingsUpdate(input: { ns: string; patch: unknown; expectedRevision?: number }): Promise<DshEnvelope> {
@@ -526,8 +583,8 @@ export class DshRemoteClient {
 		return envelope(this.rpc.call("credentials/unset", { ref: input.ref }));
 	}
 
-	async llmProviders(): Promise<DshEnvelope> {
-		return envelope(this.rpc.call("llm/listProviders", {}));
+	async llmProviders(): Promise<DshEnvelope<{ providers?: DshLlmProviderEntry[] }>> {
+		return envelope<{ providers?: DshLlmProviderEntry[] }>(this.rpc.call("llm/listProviders", {}) as Promise<DshRpcResult<{ providers?: DshLlmProviderEntry[] }>>);
 	}
 
 	async llmDiscoverModels(input: { settingsNs: string; provider?: string; baseURL?: string; api?: string; apiKey?: string }): Promise<DshEnvelope> {
@@ -546,10 +603,6 @@ export class DshRemoteClient {
 
 	async agentPresetsList(): Promise<DshEnvelope> {
 		return envelope(this.rpc.call("agentPresets/list", {}));
-	}
-
-	async agentPresetsRemove(input: { agentPreset: string }): Promise<DshEnvelope> {
-		return envelope(this.rpc.call("agentPresets/deletePreset", { id: input.agentPreset }));
 	}
 
 	async workspaceCreate(input: { path: string }): Promise<DshEnvelope> {

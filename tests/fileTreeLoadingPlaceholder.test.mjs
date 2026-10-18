@@ -65,7 +65,8 @@ test("打标后重新 merge 成功结果可恢复（重试入口语义）", () =
 });
 
 test("接线：toggleDirectory / drillCompactChain 失败路径调用 markFileTreeLoadFailed", () => {
-	const app = readFileSync("src/renderer/src/App.tsx", "utf8");
+	// 文件树域已迁入 useProjectFileTreeController（App 只接线）
+	const app = readFileSync("src/renderer/src/hooks/files/useProjectFileTreeController.ts", "utf8");
 	// toggleDirectory 的 catch：打标 + 保留代次校验（切项目后不得写入）。
 	const toggleCatch = app.match(/\.catch\(\(error\) => \{[\s\S]{0,400}?markFileTreeLoadFailed\(tree, path\)[\s\S]{0,200}?\}\);/);
 	assert.ok(toggleCatch, "toggleDirectory expand failure should mark the directory");
@@ -76,10 +77,11 @@ test("接线：toggleDirectory / drillCompactChain 失败路径调用 markFileTr
 });
 
 test("接线：restoreExpandedDirs 只补拉「已展开 + 无 children + 未标失败」目录", () => {
-	const app = readFileSync("src/renderer/src/App.tsx", "utf8");
+	const app = readFileSync("src/renderer/src/hooks/files/useProjectFileTreeController.ts", "utf8");
 	// 注意：biome 格式基线（tabs + 折行）会把签名与依赖数组拆行，正则必须容忍空白/换行，
 	// 不能写死「两空格缩进 + 单行签名」，否则格式化一动测试就假失败。
-	const fn = app.match(/const restoreExpandedDirs = useCallback\(\s*async \(projectId: string\): Promise<boolean> => \{[\s\S]*?\},\s*\[beginFileTreeRequest, isFileTreeRequestCurrent\],?\s*\);/);
+	// 依赖数组允许追加（如本机项目判定），但两个代次守卫必须在。
+	const fn = app.match(/const restoreExpandedDirs = useCallback\(\s*async \(projectId: string\): Promise<boolean> => \{[\s\S]*?\},\s*\[beginFileTreeRequest, isFileTreeRequestCurrent[^\]]*\],?\s*\);/);
 	assert.ok(fn, "restoreExpandedDirs should exist with generation guards");
 	const body = fn[0];
 	// 判定条件与 FileNode 占位分支同构：expanded && !children && hasChildren !== false。
@@ -87,8 +89,8 @@ test("接线：restoreExpandedDirs 只补拉「已展开 + 无 children + 未标
 	assert.match(body, /expandedDirsRef\.current\.has\(nodeKey\)/);
 	assert.match(body, /!Array\.isArray\(node\.children\)/);
 	assert.match(body, /node\.hasChildren !== false/);
-	// 父目录先补（merge 依赖父层节点先存在）。
-	assert.match(body, /sort\(\(left, right\) => left\.path\.length - right\.path\.length\)/);
+	// 父目录先补（merge 依赖父层节点先存在）。合并后展开键统一走 fileTreeNodeKey，元素是字符串。
+	assert.match(body, /sort\(\(left, right\) => left\.length - right\.length\)/);
 	// 补拉过程带代次校验，切项目后不得写入。
 	assert.match(body, /isFileTreeRequestCurrent\(generation, projectId\)/);
 	// 失败打标：补拉本身失败也不能留下永久占位。
@@ -96,7 +98,8 @@ test("接线：restoreExpandedDirs 只补拉「已展开 + 无 children + 未标
 });
 
 test("接线：打开文件抽屉先自愈，无待修复目录才静默 refreshFiles", () => {
-	const app = readFileSync("src/renderer/src/App.tsx", "utf8");
+	// 抽屉切换语义已迁入 useSessionFileLinks（App 只接线）
+	const app = readFileSync("src/renderer/src/hooks/workspace/useSessionFileLinks.ts", "utf8");
 	const block = app.match(/void restoreExpandedDirs\(activeProjectId\)\.then\(\(repaired\) => \{[\s\S]{0,200}?\}\);/);
 	assert.ok(block, "drawer-open path should run restoreExpandedDirs");
 	assert.match(block[0], /if \(!repaired\) void refreshVisibleFiles\(activeProjectId, true\)/);

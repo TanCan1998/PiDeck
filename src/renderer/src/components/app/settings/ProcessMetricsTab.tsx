@@ -1,4 +1,4 @@
-import { Activity, CircleStop, Info, RefreshCw } from "lucide-react";
+import { Loader2, Activity, CircleStop, Info, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type { AgentProcessMetric, ProcessMetricsSnapshot } from "../../../../../shared/types";
 import { DSH_HOST_MONITOR_ID } from "../../../../../shared/types/processMetrics";
@@ -156,7 +156,10 @@ export function ProcessMetricsTab() {
 					</div>
 				</>
 			) : (
-				<div className="py-12 text-center text-control text-text-tertiary">{t("common.loading")}</div>
+				<div className="flex items-center justify-center gap-2 py-12 text-control text-text-tertiary">
+					<Loader2 size={14} className="animate-pideck-spin" aria-hidden="true" />
+					{t("common.loading")}
+				</div>
 			)}
 
 			{/* 停止确认：shadcn AlertDialog（ConfirmDialog 统一封装），danger 红底按钮。

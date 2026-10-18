@@ -33,7 +33,10 @@ export type CompactNoticeKind =
 	/** 用户按了停止（或压缩窗口内的回合中断）：压缩是被自己打断的。 */
 	| "interrupted"
 	/** 接管者有自己的压缩入口，请求已改写成它的扩展命令（如 Magic Context 的 /ctx-wrapup）。 */
-	| "routedToOwner";
+	| "routedToOwner"
+	/** 等待 RPC 响应超时：pi 进程仍活着、压缩大概率还在后台进行，最终结果以
+	 * compaction_end 事件为准，不能当成「压缩失败」提示（#303）。 */
+	| "timeout";
 
 /**
  * 取消来源的稳定标记：主进程按证据判定后抛这两条之一，classifyCompactError 只认标记。
@@ -50,6 +53,14 @@ export const COMPACT_CANCELLED_BY_USER_ABORT = "Compaction cancelled by user abo
  * 标记后跟命令名（如 `/ctx-wrapup`），渲染层据此给出「已改用 X」的提示。
  */
 export const COMPACT_ROUTED_TO_OWNER = "Compaction routed to extension command";
+
+/**
+ * 手动压缩等待超时的稳定标记：PiDeck 的 RPC 等待已到时，但 pi 进程仍活着、
+ * 压缩大概率仍在后台进行（真实案例：120s 超时报「压缩失败」，149.4s 后台实际
+ * 压缩成功并写入会话文件，#303）。主进程识别超时错误后抛这条标记，渲染层
+ * 映射为「仍在后台进行」而非「失败」；最终结果由 compaction_end 事件反馈。
+ */
+export const COMPACT_WAIT_TIMEOUT = "Compact wait timed out; still running in background";
 
 /** 从 `Compaction routed to extension command: /ctx-wrapup` 取出命令名。 */
 export function compactRoutedCommand(raw: string): string | null {
@@ -144,6 +155,9 @@ export function classifyCompactError(raw: string): CompactNoticeKind {
 	// 改写（路由到接管者命令）必须排在取消之前：改写的文案里带 "cancelled" 之外的
 	// `Compaction routed ...`，但先判它可避免将来文案交叉时归错类。
 	if (/compaction routed to extension/.test(lower)) return "routedToOwner";
+	// 等待超时必须排在 cancelled/failed 之前：超时只说明「没等到响应」，pi 进程
+	// 仍活着时压缩大概率还在后台跑，归成 failed 会让用户误以为已确认失败（#303）。
+	if (/compact wait timed out/.test(lower)) return "timeout";
 	// 取消必须在 inProgress 之后：后者含 compacting，前者含 compaction cancelled。
 	// 来源标记（主进程抛出的稳定文案）优先于 pi 原始文本。
 	if (/session_before_compact|cancelled by owner|cancelled by extension/.test(lower)) {

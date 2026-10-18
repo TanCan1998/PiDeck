@@ -27,7 +27,9 @@ function fakeExecFile(command, args, _options, callback) {
 const gitExecutable = loadTsCommonJs("src/main/git/gitExecutable.ts");
 const { GitService } = loadTsCommonJs("src/main/git/GitService.ts", {
 	stubs: {
-		"./gitExecutable": gitExecutable, // 同一份模块状态：setConfiguredGitPath 对 GitService 生效
+		// 同一份模块状态：setConfiguredGitPath 对执行层生效。Key 必须与 gitRun.ts 的
+		// 源级 specifier 一致（带 .ts 扩展名，与 Node type stripping 直跑测试的约定配套）。
+		"./gitExecutable.ts": gitExecutable,
 		electron: { shell: { trashItem: async () => {} } }, // ../fs/trash 懒加载 electron.shell
 		"node:child_process": { execFile: fakeExecFile },
 	},

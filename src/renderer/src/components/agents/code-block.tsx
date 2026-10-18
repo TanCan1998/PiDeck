@@ -79,7 +79,7 @@ export function CodeBlock({ code, language = "typescript", filename, status = "c
 				<FileCode2 aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground/70" />
 				{filename ? <span className="min-w-0 truncate font-mono text-xs text-foreground/80">{filename}</span> : null}
 				<span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground/55">{language}</span>
-				<span className={cn("ml-auto inline-flex shrink-0 items-center gap-1 text-[10px] font-medium", streaming ? "text-blue-600 dark:text-blue-400" : "text-emerald-600 dark:text-emerald-400")}>
+				<span className={cn("ml-auto inline-flex shrink-0 items-center gap-1 text-[10px] font-medium", streaming ? "text-info" : "text-success")}>
 					{streaming ? <LoaderCircle className={cn("size-3", !reduce && "animate-pideck-spin")} /> : <Check className="size-3" />}
 					{streaming ? "Writing" : "Ready"}
 				</span>

@@ -1,4 +1,6 @@
 import { open } from "node:fs/promises";
+import { estimateTokensFromJsonValue, estimateTokensFromText } from "../tokenEstimate";
+import { applyPromptMessage, createPromptLoadout, estimatePromptLoadoutTokens, hasMeasuredPromptLoadout, type PromptLoadout, resetPromptLoadoutFromSnapshot } from "./promptLoadout";
 
 /**
  * 会话缓存命中率统计：
@@ -24,7 +26,11 @@ import { open } from "node:fs/promises";
  * 另外注意 latest 的语义：原来是「逆序遍历取首个命中」，流式只能顺序读，
  * 这里改为「顺序取最后一次命中」，结果等价且不必反向读整个文件。
  *
- * usage 的逐行解析抽取为纯函数，供流式与内存两条路径共用（口径必须完全一致）。
+ * 每次扫描同时维护两样派生数据（口径与命中率无关，但同一次扫描里顺手算出，
+ * 避免为圆环面板另扫一遍文件）：
+ *  - `conversationTokens`：当前上下文纪元内对话消息的 token 估算（压缩行重置）；
+ *  - `systemTokens` / `toolsTokens`：从系统消息条目重放出的提示词装载两段
+ *    （见 promptLoadout.ts，压缩快照重置）。
  */
 
 export type CacheHitStats = {
@@ -34,8 +40,14 @@ export type CacheHitStats = {
 	average: number | undefined;
 	/** 参与统计的 assistant 消息条数 */
 	sampleCount: number;
-	/** 全部消息文本累计字符数（含 user/assistant 的 text），
-	 *  渲染层据此估算「对话占上下文比例」（见 SessionContextMeter）。 */
+	/** 当前上下文纪元内对话消息的 token 估算（CJK 加权，含工具调用/结果文本，压缩后重置），
+	 *  渲染层据此展示「对话占上下文比例」（见 SessionContextMeter）。 */
+	conversationTokens?: number;
+	/** 系统提示词 token 估算（会话文件里重放出的 sections；没有提示词装载时为 undefined）。 */
+	systemTokens?: number;
+	/** 工具声明 token 估算（会话文件里重放出的工具定义；没有提示词装载时为 undefined）。 */
+	toolsTokens?: number;
+	/** @deprecated 已由 conversationTokens 取代；保留字段仅为旧快照反序列化兼容，不再写入。 */
 	messageChars?: number;
 };
 
@@ -56,19 +68,33 @@ export function hitRateFromUsage(usage: UsageLike | undefined): number | undefin
 	return (cacheRead / promptTokens) * 100;
 }
 
-/** 从消息对象提取文本字符数：兼容 content 数组（[{type:"text",text}]）与裸 text 字段。
- *  估算用途，无需精确 token 级解析。 */
-function messageTextChars(message: { role?: unknown; usage?: unknown; text?: unknown; content?: unknown }): number {
-	let chars = 0;
-	if (typeof message.text === "string") chars += message.text.length;
-	if (Array.isArray(message.content)) {
+/** 从消息对象估算 token：兼容 content 数组（text / toolCall 参数）与裸 text 字段。
+ *  工具调用参数与工具结果也占上下文，漏计会把「系统+工具」段反向高估。 */
+function messageConversationTokens(message: { role?: unknown; usage?: unknown; text?: unknown; content?: unknown; details?: unknown }): number {
+	let tokens = 0;
+	if (typeof message.text === "string") tokens += estimateTokensFromText(message.text);
+	if (typeof message.content === "string") {
+		tokens += estimateTokensFromText(message.content);
+	} else if (Array.isArray(message.content)) {
 		for (const part of message.content) {
-			if (part && typeof part === "object" && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string") {
-				chars += (part as { text: string }).text.length;
+			if (!part || typeof part !== "object") continue;
+			const block = part as { type?: unknown; text?: unknown; arguments?: unknown };
+			if (block.type === "text" && typeof block.text === "string") {
+				tokens += estimateTokensFromText(block.text);
+			} else if (block.type === "toolCall") {
+				// pi 的历史把工具参数存在 assistant.content 的 toolCall 块里
+				tokens += estimateTokensFromJsonValue(block.arguments);
+			} else if ((block.type === "toolResult" || block.type === "resource") && block.arguments != null) {
+				// 防御：非 pi 标准块形状也尽量计入，未知形状不丢估
+				tokens += estimateTokensFromJsonValue(block.arguments);
 			}
 		}
 	}
-	return chars;
+	// toolResult 角色消息：结果正文在 content（上面已计），details 里可能是结构化补充
+	if (message.role === "toolResult" && message.details != null) {
+		tokens += estimateTokensFromJsonValue(message.details);
+	}
+	return tokens;
 }
 
 /** 流式统计的累加器：顺序扫描时不断累积，最后交给 finishCacheHitStats 收敛。 */
@@ -79,12 +105,14 @@ export type CacheHitAccumulator = {
 	rateCount: number;
 	/** 顺序扫描中最后一次命中的命中率 */
 	latest: number | undefined;
-	/** 全部消息文本累计字符数 */
-	messageChars: number;
+	/** 当前上下文纪元的对话 token 估算（遇 compaction 行重置） */
+	conversationTokens: number;
+	/** 当前提示词装载（sections + 工具声明）：系统消息按文件顺序重放，压缩快照重置 */
+	loadout: PromptLoadout;
 };
 
 export function createCacheHitAccumulator(): CacheHitAccumulator {
-	return { rateSum: 0, rateCount: 0, latest: undefined, messageChars: 0 };
+	return { rateSum: 0, rateCount: 0, latest: undefined, conversationTokens: 0, loadout: createPromptLoadout() };
 }
 
 /**
@@ -96,9 +124,25 @@ export function consumeCacheHitLine(state: CacheHitAccumulator, line: string): v
 	if (!trimmed) return;
 	try {
 		const entry = JSON.parse(trimmed) as Record<string, unknown>;
-		const message = entry?.message as { role?: unknown; usage?: unknown; text?: unknown; content?: unknown } | undefined;
+		// compaction 行：压缩后旧消息归档、不再计入上下文，统计整体重置到「压缩摘要」纪元；
+		// 提示词装载重置到压缩快照（pi 在压缩边界写完整 sections + 工具声明）。
+		if (entry?.type === "compaction") {
+			const summary = typeof entry.summary === "string" ? entry.summary : "";
+			state.rateSum = 0;
+			state.rateCount = 0;
+			state.latest = undefined;
+			state.conversationTokens = estimateTokensFromText(summary);
+			resetPromptLoadoutFromSnapshot(state.loadout, entry.systemMessage);
+			return;
+		}
+		const message = entry?.message as { role?: unknown; usage?: unknown; text?: unknown; content?: unknown; details?: unknown } | undefined;
 		if (!message) return;
-		state.messageChars += messageTextChars(message);
+		// 系统消息属于「系统」段（内容在 sections 里），不再计入对话估算，否则三段重复计量。
+		if (message.role === "system") {
+			applyPromptMessage(state.loadout, message);
+			return;
+		}
+		state.conversationTokens += messageConversationTokens(message);
 		if (message.role !== "assistant" || !message.usage) return;
 		const rate = hitRateFromUsage(message.usage as UsageLike);
 		if (rate === undefined) return;
@@ -113,12 +157,16 @@ export function consumeCacheHitLine(state: CacheHitAccumulator, line: string): v
 
 /** 累加器 → 对外统计结果。 */
 export function finishCacheHitStats(state: CacheHitAccumulator): CacheHitStats {
+	// 提示词装载只在重放出内容时才有测量值：没有系统消息的老会话（或只剩删除补丁的空装载）
+	// 保持两段都是 undefined，调用方据此退回旧口径，而不是当成「系统为 0」。
+	const loadoutTokens = hasMeasuredPromptLoadout(state.loadout) ? estimatePromptLoadoutTokens(state.loadout) : undefined;
 	const base: CacheHitStats = {
 		latest: state.latest,
 		average: undefined,
 		sampleCount: 0,
-		/** 全部消息文本字符数：始终返回（可能为 0），渲染层据此估算对话占比 */
-		messageChars: state.messageChars,
+		/** 当前纪元对话 token 估算：始终返回（可能为 0），渲染层据此估算对话占比 */
+		conversationTokens: state.conversationTokens,
+		...(loadoutTokens ? { systemTokens: loadoutTokens.systemTokens, toolsTokens: loadoutTokens.toolsTokens } : {}),
 	};
 	if (state.rateCount === 0) return base;
 	return {

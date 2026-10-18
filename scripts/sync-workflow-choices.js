@@ -53,10 +53,14 @@ function parseVersions(changelogText) {
 	for (const line of changelogText.split(/\r?\n/)) {
 		// 保留 v 前缀：workflow 里填的必须是真实 tag 名（git tag 是 vX.Y.Z），
 		// 只认 vX.Y.Z 与 X.Y.Z 两种写法，统一归一成带 v 的形式。
-		const m = line.match(/^##\s+(v?)(\d+\.\d+\.\d+)(?:-([0-9A-Za-z.-]+))?/);
+		const m = line.match(/^##\s+(v?)(\d+\.\d+\.\d+)(?:-([0-9A-Za-z.-]+))?(.*)$/);
 		if (!m) continue;
 		// 只收正式版：beta/pre-release 不作为下拉的常规选项（要同步它们用 tag_custom）
 		if (m[3]) continue;
+		// 行尾只允许发布日期（`- 2026-09-26` 与 `(2026-09-17)` 两种历史写法）；
+		// `## vX.Y.Z (Unreleased)` 还没发布，同样不能进下拉（发版后才补日期）。
+		const tail = m[4].trim();
+		if (tail && !/^(?:-\s*\d{4}-\d{2}-\d{2}|\(\s*\d{4}-\d{2}-\d{2}\s*\))$/.test(tail)) continue;
 		const version = `v${m[2]}`;
 		if (!versions.includes(version)) versions.push(version);
 	}

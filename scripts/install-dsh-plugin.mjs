@@ -196,7 +196,13 @@ console.log(`      entry: ${entry}`);
 if (register) {
 	// 自动登记：追加到用户补丁层（先备份；已存在同 id 行则跳过，幂等）
 	if (existsSync(patchPath)) {
-		const current = readFileSync(patchPath, "utf8");
+		// 顶层 `[]` 占位（补丁层只剩注释时由 PiDeck 补进来，保证 host 能启动）与
+		// `- insert:` 块式序列不能并存，直接追加会让 YAML 解析失败 → 先摘掉占位。
+		const raw = readFileSync(patchPath, "utf8");
+		const current = raw
+			.split("\n")
+			.filter((line) => !/^\s*\[\s*\]\s*$/.test(line))
+			.join("\n");
 		if (current.includes(`id: ${rowId}`)) {
 			console.log(`      补丁层已有 ${rowId} 行，跳过登记`);
 		} else {

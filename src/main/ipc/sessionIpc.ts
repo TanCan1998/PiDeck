@@ -12,7 +12,10 @@ import { isDshPermissionPreset } from "../../shared/types/agent";
 import { isRewindRestoreScope } from "../../shared/types/rewind";
 import { canonicalizeSessionPath } from "../../shared/sessionIdentity";
 import { createSessionModelPreference } from "../../shared/modelDisplayName";
+import { modelThinkingLevelOf } from "../../shared/modelThinkingLevels";
+import { collectLatestTurnFileChanges } from "../../shared/fileChanges";
 import type {
+	AvailableModel,
 	CreateSessionDraftInput,
 	CreateAnonymousSessionInput,
 	CreateAnonymousSessionResult,
@@ -31,6 +34,7 @@ import type {
 	SessionProcessEvent,
 	DshModelDiscoveryInput,
 	FetchedModel,
+	SessionBranchTree,
 	SessionMessagePage,
 	SessionModelPreference,
 	RewindCheckpointPageParams,
@@ -38,10 +42,18 @@ import type {
 	ResolvedLaunchDefaults,
 	ArchivedDshSession,
 	ArchivedPiSession,
+	SessionSearchResult,
 } from "../../shared/types";
+import type { BridgeEventInput, BridgeResyncInput } from "../../shared/types/bridge";
 import { parseSessionProcessEventsFromFile } from "../sessions/sessionProcessEventsFile";
+import type { SessionForkCommands } from "../sessions/sessionForkCommands";
 import { dshUnavailablePageFor } from "../dsh/dshManualStop";
+import { missingSessionFilePage } from "../sessions/sessionFileMissingPage";
+import { isSessionSearchFilePath } from "../sessions/sessionSearchPath";
+import { validateNpmSpec } from "../dsh/dshPluginNpmRunner";
+import { validateSearchKeyword } from "../dsh/dshPluginMarket";
 import { downgradeRunningStartedBefore, downgradeStaleRunning } from "../pi/derivedSubagents";
+import { getCachedModelList } from "../pi/modelListCache";
 import { resolveLaunchDefaultOptions, isModelInModelsConfig } from "../sessions/launchDefaults";
 import { BackgroundScanCoordinator } from "../sessions/BackgroundScanCoordinator";
 import { DIRECTORY_IMPORT_MAX_SUMMARIES } from "../sessions/directorySessionImport";
@@ -51,6 +63,8 @@ import type { SshSessionLocator } from "../../shared/projectLocation";
 import { REMOTE_SESSION_DELETE_CODES } from "../../shared/sessionDeleteCodes";
 import type { RemoteArchivedSessionDeleteAnswerResult, RemoteArchivedSessionDeleteRequestResult } from "../../shared/types";
 import { createRemoteArchivedSessionDelete } from "../sessions/RemoteArchivedSessionDelete";
+import { registerSessionImageMutationIpc } from "./sessionImageMutationIpc";
+import { acpMessagePage } from "../acp/acpMessagePage";
 
 function isDshModelDiscoveryInput(input: unknown): input is DshModelDiscoveryInput {
 	if (!isRecord(input) || typeof input.settingsNs !== "string" || !input.settingsNs.trim()) return false;
@@ -148,10 +162,14 @@ import type { ConfigManager } from "../config/ConfigManager";
 import type { TerminalSessionManager } from "../terminal/TerminalSessionManager";
 import type { CodexSessionImporter } from "../sessions/CodexSessionImporter";
 import type { ClaudeSessionImporter } from "../sessions/ClaudeSessionImporter";
+import type { QoderSessionImporter } from "../sessions/QoderSessionImporter";
 import type { OpenCodeSessionImporter } from "../sessions/OpenCodeSessionImporter";
 import type { ZCodeSessionImporter } from "../sessions/ZCodeSessionImporter";
 import type { WorkBuddySessionImporter } from "../sessions/WorkBuddySessionImporter";
 import type { CursorSessionImporter } from "../sessions/CursorSessionImporter";
+import type { KimiSessionImporter } from "../sessions/KimiSessionImporter";
+import type { KimiWorkSessionImporter } from "../sessions/KimiWorkSessionImporter";
+import type { MinimaxSessionImporter } from "../sessions/MinimaxSessionImporter";
 import type { AppLogger } from "../logging/AppLogger";
 import { REMOTE_SESSION_EXPORT_CODES } from "../remote/RemoteSessionHtmlExport";
 
@@ -179,15 +197,12 @@ export type DshBackendIpcDeps = {
 	listDshAgentPresets?: () => Promise<
 		Array<{
 			id: string;
-			trust: "system" | "user";
 			isDefault: boolean;
 			name?: string;
 			description?: string;
 			broken?: string;
 		}>
 	>;
-	/** DSH 删除本地（user）预设（agentPreset.remove）；system 预设由 host 拒绝。 */
-	removeDshAgentPreset?: (id: string) => Promise<void>;
 	/** DSH 部署默认模型选择（settings.yaml agent-default-model）；未装配/不可读时 undefined。 */
 	getDshDefaultModel?: () => Promise<
 		| {
@@ -272,6 +287,8 @@ export type DshBackendIpcDeps = {
 	 * 按 24 条/轮换算成 host 的消息预算）；`maxMessages` = 显式消息窗口（Web/工具结果回读）。
 	 */
 	readDshHistoryPage?: (dshSessionId: string, beforeSeq: number | undefined, options: { turnCount?: number; maxMessages?: number }) => Promise<{ messages: import("../../shared/types").ChatMessage[]; total: number; nextBefore: number | null }>;
+	/** ACP 会话消息回读（运行时内存投影；未激活返回空数组）；未装配时返回空数组。 */
+	readAcpMessages?: (acpSessionId: string) => import("../../shared/types").ChatMessage[];
 	/** DSH 轨迹过程事件（运行时会话按 mux/重放收集；历史会话从 host history 推导；未装配时返回空数组）。 */
 	readDshProcessEvents?: (agentId: string | undefined, dshSessionId: string | undefined) => Promise<import("../../shared/types/trajectory").SessionProcessEvent[]>;
 	/** DSH 轨迹系统提示（运行时会话读投影缓存；历史会话从 host history 折叠 request/header；未装配返回 undefined）。 */
@@ -286,6 +303,8 @@ export type DshBackendIpcDeps = {
 	createDshGoal?: (agentId: string, objective: string, maxGoalRounds?: number) => Promise<void>;
 	/** DSH 目标操作（G5：pause/resume/complete/clear）；未装配时抛错。 */
 	runDshGoalAction?: (agentId: string, action: "pause" | "resume" | "complete" | "clear") => Promise<void>;
+	/** DSH 取消 host 侧排队消息（session/updateQueue remove）；未装配时抛错。 */
+	cancelDshQueuedMessage?: (agentId: string, itemId: string) => Promise<void>;
 	/** DSH 子代理列表（G6）；未装配时返回空列表。 */
 	listDshSubagents?: (agentId: string) => Promise<
 		Array<{
@@ -330,6 +349,12 @@ export type DshBackendIpcDeps = {
 	listDshStaticPlugins?: () => Promise<import("../../shared/types").DshStaticPluginView[]>;
 	/** DSH 用户自装静态插件卸载（移除用户补丁层行 + 可选回收插件目录）；未装配时抛错。 */
 	uninstallDshUserPlugin?: (input: import("../../shared/types").DshUserPluginUninstallInput) => Promise<import("../../shared/types").DshUserPluginUninstallResult>;
+	/** DSH 插件市场搜索（官方目录 + npm 双源）；未装配时抛错。 */
+	searchDshPluginMarket?: (keyword: string) => Promise<import("../../shared/types").DshPluginMarketSearchResult>;
+	/** DSH 用户自装静态插件安装（npm pack → 受管目录 → 用户补丁层行；幂等）；未装配时抛错。 */
+	installDshUserPlugin?: (spec: string) => Promise<import("../../shared/types").DshUserPluginInstallResult>;
+	/** DSH 用户补丁层清单（安装服务视角）；未装配时返回空列表。 */
+	listDshUserPlugins?: () => Promise<import("../../shared/types").DshUserPluginListEntry[]>;
 	/** DSH 动态插件安装（define）；未装配时抛错。 */
 	installDshPlugin?: (input: import("../../shared/types").DshPluginInstallInput) => Promise<unknown>;
 	/** DSH 动态插件运行（面板手势）；未装配时抛错。 */
@@ -340,10 +365,6 @@ export type DshBackendIpcDeps = {
 	uninstallDshPlugin?: (input: import("../../shared/types").DshPluginLifecycleInput) => Promise<unknown>;
 	/** 判断 agentId 是否属于 DSH 后端（fork 等 pi 专属命令按 backend 分流）。 */
 	isDshAgent: (agentId: string) => boolean;
-	/** DSH fork：session.fork 裁剪 + runtime 换绑 + catalog dshSessionId 回写。 */
-	forkDshAgentSession?: (target: SessionRuntimeTarget, entryId: string) => Promise<Record<string, unknown> & { targetSessionId?: string }>;
-	/** DSH clone：fork 无锚点（完整副本）+ runtime 换绑 + catalog dshSessionId 回写。 */
-	cloneDshAgentSession?: (target: SessionRuntimeTarget) => Promise<Record<string, unknown> & { targetSessionId?: string }>;
 };
 
 export type SessionIpcDeps = {
@@ -356,10 +377,16 @@ export type SessionIpcDeps = {
 	configManager: ConfigManager;
 	codexSessionImporter: CodexSessionImporter;
 	claudeSessionImporter: ClaudeSessionImporter;
+	qoderSessionImporter: QoderSessionImporter;
 	openCodeSessionImporter: OpenCodeSessionImporter;
 	zcodeSessionImporter: ZCodeSessionImporter;
 	workbuddySessionImporter: WorkBuddySessionImporter;
 	cursorSessionImporter: CursorSessionImporter;
+	kimiSessionImporter: KimiSessionImporter;
+	/** Kimi Work（桌面版）会话导入：daimon-share 位置可被用户自定义，scan/import 内部走探测链。 */
+	kimiWorkSessionImporter: KimiWorkSessionImporter;
+	/** MinimaxCode（CLI）会话导入：数据目录固定 ~/.minimax/v2/sessions，无探测链。 */
+	minimaxSessionImporter: MinimaxSessionImporter;
 	/** 外置目录会话导入（项目目录移动/改名后找回历史；只建 catalog 引用，不复制原文件）。 */
 	directorySessionImporter: DirectorySessionImporter;
 	appLogger: AppLogger;
@@ -368,6 +395,10 @@ export type SessionIpcDeps = {
 	getMainWindow: () => BrowserWindow | null;
 	emitSessionRuntimeEvent: (agentId: string, channel: string, payload: unknown) => boolean;
 	emitSessionRuntimeDetach: (target: SessionRuntimeTarget) => void;
+	/** 激活窗口的 session 级合成 starting 事件（bind 前 emitSessionRuntimeEvent 会丢弃一切状态，见 index.ts 实现注释）。 */
+	emitSessionActivating?: (sessionId: string) => void;
+	/** 激活失败的 session 级合成 error 事件：无绑定时失败终态同样被丢弃，不补发则加载态永挂。 */
+	emitSessionActivationFailed?: (sessionId: string) => void;
 	createAnonymousSession: (input: CreateAnonymousSessionInput) => Promise<CreateAnonymousSessionResult>;
 	stopSessionRuntime: (target: SessionRuntimeTarget) => void;
 	emitReplacementState: (runtime: SessionRuntimeInfo, includeMessages: boolean) => void;
@@ -408,7 +439,30 @@ export type SessionIpcDeps = {
 	 * REMOTE_SESSION_DELETE_UNAVAILABLE，绝不落回本机路径分支。
 	 */
 	deleteArchivedRemoteSession?: (input: { hostId: string; archivedPath: string }) => Promise<void>;
-	replaceAgentSession: (agentId: string, fn: () => Promise<any>, options?: { markForked?: boolean }) => Promise<any>;
+	replaceAgentSession: (agentId: string, fn: () => Promise<unknown>, options?: { markForked?: boolean; markSuperseded?: boolean }) => Promise<unknown>;
+	/** fork/clone 统一命令层（与 Web HTTP 共用）：重发/编辑 fork 化语义只在这一处维护。 */
+	sessionForkCommands: SessionForkCommands;
+	/**
+	 * 模型存在性校验用的 pi 目录模型：必须与模型选择器同源（capability 快照 ∪ CLI 缓存）。
+	 * 未装配（单测/无 pi 运行时的宿主）时退回仅 CLI 缓存（models.json）的旧行为。
+	 */
+	validationCatalogModels?: () => AvailableModel[] | null | undefined;
+	/**
+	 * 跨会话正文搜索（Go session-index sidecar 的适配闭包；装配层封装 roots
+	 * 解析与降级）。未装配（单测）或返回 null（sidecar 缺失/boot 中/失败）时
+	 * 渲染层回退现有标题过滤，搜索入口永远不报错。
+	 */
+	sessionContentSearch?: (query: string) => Promise<SessionSearchResult | null>;
+	/**
+	 * 会话内查找（同一 sidecar 的单文件检索）。入参是会话文件路径（= SessionRecord.id）。
+	 * 返回 null 表示「索引未就绪/不可用」——渲染层据此提示而不是显示「无匹配」。
+	 */
+	sessionMessageSearch?: (sessionPath: string, query: string) => Promise<SessionSearchResult | null>;
+	/**
+	 * 无 pi 会话文件的会话（生视频后端）历史读取：回退 VideoSession 独立存储。
+	 * 未装配（单测/无生视频域）时 undefined；调用处 `?? []` 兜底空页。
+	 */
+	readVideoSessionMessages?: (sessionId: string) => Promise<import("../../shared/types").ChatMessage[]>;
 	/** DSH 后端专用 IPC 依赖（C1 分组；未装配 = 无 DSH 后端）。 */
 	dshBackend?: DshBackendIpcDeps;
 };
@@ -421,10 +475,11 @@ function sessionCommandIpcError(error: SessionCommandError, appLogger: Pick<AppL
 /**
  * 会话命令失败日志：edit/delete/resend 等 IPC 直接返回 SessionCommandResult，
  * 不走 sessionCommandIpcError 抛错，漏打这条就会出现「toast 失败、主进程无日志」。
+ * 标题带上错误码：按 code/关键词（如 edit、BUSY）就能在日志里搜到对应失败，
+ * 不依赖结构化字段（2026-10 教训：按「编辑」搜正文一无所获）。
  */
 function logSessionCommandFailure(appLogger: Pick<AppLogger, "warn">, error: SessionCommandError, extra?: Record<string, unknown>): void {
-	if (!error.debugDetails && extra === undefined) return;
-	void appLogger.warn("session-command", "Session command failed", {
+	void appLogger.warn("session-command", `Session command failed (${error.code})`, {
 		code: error.code,
 		...(error.debugDetails ? { debugDetails: error.debugDetails } : {}),
 		...extra,
@@ -456,10 +511,14 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		configManager,
 		codexSessionImporter,
 		claudeSessionImporter,
+		qoderSessionImporter,
 		openCodeSessionImporter,
 		zcodeSessionImporter,
 		workbuddySessionImporter,
 		cursorSessionImporter,
+		kimiSessionImporter,
+		kimiWorkSessionImporter,
+		minimaxSessionImporter,
 		directorySessionImporter,
 		appLogger,
 		terminalManager,
@@ -469,10 +528,14 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		emitSessionRuntimeDetach,
 		createAnonymousSession,
 		stopSessionRuntime,
+		emitSessionActivating,
+		emitSessionActivationFailed,
 		emitReplacementState,
 		readCatalogSessionReferenceMessages,
 		// 无 pi 会话文件（纯生图草稿）历史读取回退：ImageSession 独立存储
 		readImageSessionMessages,
+		// 生视频后端会话历史读取回退：VideoSession 独立存储
+		readVideoSessionMessages,
 		copyCatalogSession,
 		exportCatalogSessionHtml,
 		exportRemoteCatalogSessionHtml,
@@ -482,6 +545,7 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		archiveRemoteSession,
 		unarchiveRemoteSession,
 		deleteArchivedRemoteSession,
+		validationCatalogModels,
 	} = deps;
 	/**
 	 * 远端归档会话永久删除（Phase 5）：main 持有一步式确认状态（sender 绑定/60s/一次性），
@@ -506,13 +570,19 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		return senderId;
 	}
 	const localSessionFilePath = (sessionId: string) => sessionCatalog.getLocalFilePath(sessionId);
+
+	/**
+	 * 创建草稿 / 匿名会话 / 引导页默认解析共用的模型存在性校验数据源。
+	 * 必须与模型选择器同源：选择器展示的是 capability 快照，只用 CLI 缓存会把
+	 * auth 渠道模型判为不存在，首发的点选被静默换成配置默认模型（issue #340）。
+	 */
+	const selectableModels = validationCatalogModels ?? getCachedModelList;
 	// C1：DSH 后端依赖从 dshBackend 分组解构（未装配 = 空对象，相关通道降级）。
 	const {
 		listDshModels,
 		discoverDshModels,
 		listDshProviders,
 		listDshAgentPresets,
-		removeDshAgentPreset,
 		getDshDefaultModel,
 		getDshStatus,
 		getDshRuntimeStatus,
@@ -532,6 +602,7 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		stopDshHost,
 		startDshHost,
 		readDshHistoryPage,
+		readAcpMessages,
 		readDshProcessEvents,
 		readDshSystemPrompt,
 		readDshMessageFullText,
@@ -539,6 +610,7 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		searchDshSessions,
 		createDshGoal,
 		runDshGoalAction,
+		cancelDshQueuedMessage,
 		listDshSubagents,
 		readDshSubagentHistory,
 		listDshSkills,
@@ -553,13 +625,14 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		listDshDynamicPlugins,
 		listDshStaticPlugins,
 		uninstallDshUserPlugin,
+		searchDshPluginMarket,
+		installDshUserPlugin,
+		listDshUserPlugins,
 		installDshPlugin,
 		runDshPlugin,
 		stopDshPlugin,
 		uninstallDshPlugin,
 		isDshAgent = () => false,
-		forkDshAgentSession,
-		cloneDshAgentSession,
 	} = dshBackend ?? {};
 
 	/**
@@ -611,18 +684,55 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		}
 		return sessionScanner.list(projectPath);
 	});
+	// 跨会话正文搜索：sidecar 不可用/boot 中/失败一律返回 null，渲染层回退标题过滤
+	ipcMain.handle(ipcChannels.sessionsSearchContent, async (_event, query: unknown) => {
+		const searcher = deps.sessionContentSearch;
+		if (!searcher) return null;
+		if (typeof query !== "string") return null;
+		const trimmed = query.trim();
+		if (!trimmed || trimmed.length > 256) return null;
+		try {
+			return await searcher(trimmed);
+		} catch (error) {
+			void appLogger.warn("session", "Content search failed", { error: error instanceof Error ? error.message : String(error) });
+			return null;
+		}
+	});
+
+	// 会话内查找：只搜当前会话单个文件，命中按时间线顺序（上一条/下一条导航）。
+	ipcMain.handle(ipcChannels.sessionsSearchInSession, async (_event, sessionPath: unknown, query: unknown) => {
+		const searcher = deps.sessionMessageSearch;
+		if (!searcher) return null;
+		if (typeof sessionPath !== "string" || typeof query !== "string") return null;
+		const trimmedPath = sessionPath.trim();
+		const trimmed = query.trim();
+		// 路径必须像会话文件（无歧义绝对路径 + .jsonl）：sidecar 只索引真实会话文件，
+		// 这里再兜一道，避免把任意路径透传给子进程。判定收口在 sessionSearchPath，
+		// Windows 反斜杠路径与 POSIX 正斜杠路径都放行（旧实现只认 `/`，Windows 全被拒）。
+		if (!isSessionSearchFilePath(trimmedPath)) return null;
+		if (!trimmed || trimmed.length > 256) return null;
+		try {
+			return await searcher(trimmedPath, trimmed);
+		} catch (error) {
+			void appLogger.warn("session", "In-session search failed", { error: error instanceof Error ? error.message : String(error) });
+			return null;
+		}
+	});
+
 	ipcMain.handle(ipcChannels.sessionsCatalogList, async (_event, projectId: string, options?: { scan?: boolean }) => {
 		const project = projectStore.get(projectId);
 		if (!project) throw new Error(mainCopy("project.notFound"));
 		// 已登记的目录元数据是本机 catalog，远端项目也必须能读取：导入后刷新依赖这条通道。
 		// 读取这些记录不等于扫描远端文件；远端分支必须在本地 scanner / WSL 转换前返回。
-		// 目录缓存中的现有记录（上次扫描/运行时创建的合并结果，启动时从磁盘加载）
-		const cachedRecords = sessionCatalog
-			.listEntries()
-			.filter((entry) => entry.projectId === projectId)
-			.map((entry) => sessionCatalog.getRecord(entry.id))
-			.filter((record): record is SessionRecord => Boolean(record));
 		if (!isLocalProject(project)) {
+			// 目录缓存中的现有记录（上次扫描/运行时创建的合并结果，启动时从磁盘加载）。
+			// 这里刻意不用下方本地路径的死链过滤与排序：远端会话的 filePath 是远端绝对路径
+			// （如 /home/u/.pi/...），宿主 existsSync 恒 false，套用本地过滤会把整组远端会话滤空。
+			const remoteCachedRecords = sessionCatalog
+				.listEntries()
+				.filter((entry) => entry.projectId === projectId)
+				.map((entry) => sessionCatalog.getRecord(entry.id))
+				.filter((record): record is SessionRecord => Boolean(record));
 			// 远端项目只有目录缓存可读，没有本机扫描可调度。渲染层靠「catalog 已刷新」推送揭开 loading，
 			// 所以这里必须主动补一次推送，否则空缓存的远端项目会一直停在「正在加载历史会话…」直到看门狗兜底。
 			// scan:false 是渲染层收到推送后的静默回拉（见 useProjectSync 的 onCatalogRefreshed），
@@ -635,7 +745,7 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 					});
 				}
 			}
-			return cachedRecords;
+			return remoteCachedRecords;
 		}
 		let projectPath = project.path;
 		const settings = settingsStore.get();
@@ -648,13 +758,47 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		const runScanAndMerge = async (): Promise<SessionRecord[]> => {
 			const summaries = await sessionScanner.list(projectPath);
 			const records = await sessionCatalog.mergeScanned(projectId, summaries, wslEnabled ? { wslDistro, wslUser } : {});
-			const bindings = sessionRuntimeCoordinator.attachCatalogRuntimes(records);
+			// 重发/编辑 fork 化替换：被子会话接替的旧记录不出现在列表（文件保留可恢复，
+			// 用户要求 fork 后历史会话不重复）
+			const visibleRecords = records.filter((record) => !record.supersededBy);
+			const bindings = sessionRuntimeCoordinator.attachCatalogRuntimes(visibleRecords);
 			for (const binding of bindings) {
 				const tab = agentManager.list().find((candidate) => candidate.id === binding.agentId);
 				if (tab) emitSessionRuntimeEvent(tab.id, ipcChannels.agentsState, tab);
 			}
-			return records;
+			return visibleRecords;
 		};
+
+		// 目录缓存中的现有记录（上次扫描/运行时创建的合并结果，启动时从磁盘加载）
+		const cachedRecords = sessionCatalog
+			.listEntries()
+			// 与扫描路径同口径：替换标记记录直接跳过（都不必走 getRecord）
+			.filter((entry) => entry.projectId === projectId && !entry.supersededBy)
+			.map((entry) => sessionCatalog.getRecord(entry.id))
+			.filter((record): record is SessionRecord => Boolean(record))
+			// 与 mergeScanned 同口径排序：小窗项目选择器直接取 sessions[0]，
+			// 乱序会把陈旧记录顶到最前（陈旧子代理记录曾因此在小窗报 ENOENT）。
+			.sort((left, right) => right.updatedAt - left.updatedAt)
+			// 死链过滤：文件已删但清理闸还没跑到（mergeScanned 在后台异步调度）时，
+			// 别让「最近会话」落到一个必然 ENOENT 的记录上。
+			// 豁免：无文件记录（imagegen/草稿）、dsh（filePath 由 host 侧解析，
+			// 本地路径可能不存在）、UNC/WSL 路径（发行版停机时 existsSync
+			// 恒 false，不能误藏整组会话）、活绑定运行时（standby 预分配的
+			// sessionPath 在 pi 首条消息前不落盘，existsSync 恒 false；若按死链
+			// 隐藏，catalog 刷新会把当前选中的草稿剔出列表 → 渲染层
+			// replaceProjectSessionsAtom 清空焦点 → 闪回引导页、输入丢失、
+			// 引导页重发另建会话留下孤儿空闲 Agent——2026-10-06 事故，与
+			// mergeScanned 的 liveness 豁免同口径）。
+			.filter((record) => {
+				if (!record.filePath || record.backend === "dsh" || record.backend === "acp" || record.filePath.startsWith("\\\\")) return true;
+				// WSL 条目豁免：catalog 存的是 Linux 侧路径（/home/...），宿主 existsSync 恒
+				// false，按死链滤掉会把 WSL 用户的全部会话从列表里抹掉（2026-10-07 升级
+				// 0.7.9 反馈：58 条会话一条不少躺在 catalog，列表却全空）。
+				// 与 mergeScanned 清理闸（environment=wsl 跳过）同口径。
+				if (record.environment === "wsl") return true;
+				if (sessionRuntimeCoordinator.hasLiveRuntime(record.id)) return true;
+				return existsSync(record.filePath);
+			});
 
 		// 纯读路径：事件回调/订阅刷新专用，不再触发扫描（防止推送-拉取循环触发）
 		if (options?.scan === false) return cachedRecords;
@@ -710,20 +854,26 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		// 新会话的思考按钮只显示「思考」而非实际默认档位。
 		let model = normalizeSessionModelPreference(input.model);
 		let thinkingLevel = input.thinkingLevel;
-		if ((input.backend !== "dsh" && !model) || !thinkingLevel) {
+		const nonPiBackend = input.backend === "dsh" || input.backend === "acp";
+		if ((!nonPiBackend && !model) || !thinkingLevel) {
 			try {
 				const [settingsResult, modelsResult] = await Promise.all([configManager.getSettingsConfig(), configManager.getModelsConfig()]);
 				// 引导页/渲染层显式传入的模型（如欢迎页偏好）也可能指向已删除的供应商/模型：
-				// 校验其仍存在于 models.json，不存在则交给解析器按欢迎页点选 → 配置默认 →
-				// enabledModels → lastUsed 的顺序兜底，避免新会话带着幽灵模型启动。
-				if (input.backend !== "dsh" && model) {
+				// 校验其仍存在（models.json ∪ pi 目录，与选择器可选范围一致），不存在则交给
+				// 解析器按欢迎页点选 → 配置默认 → enabledModels → lastUsed 的顺序兜底，
+				// 避免新会话带着幽灵模型启动。
+				if (!nonPiBackend && model) {
 					if (
 						typeof model.provider !== "string" ||
 						typeof model.modelId !== "string" ||
-						!isModelInModelsConfig(modelsResult.parsed, {
-							provider: model.provider,
-							modelId: model.modelId,
-						})
+						!isModelInModelsConfig(
+							modelsResult.parsed,
+							{
+								provider: model.provider,
+								modelId: model.modelId,
+							},
+							selectableModels(),
+						)
 					) {
 						model = undefined;
 					}
@@ -737,15 +887,23 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 					backend: input.backend,
 					settings: settingsResult.parsed,
 					models: modelsResult.parsed,
+					// pi 目录（同步读）：lastUsed/welcomeModel 的存在性校验按
+					// models.json ∪ capability 快照判定，与选择器可选范围一致。
+					catalogModels: selectableModels(),
 					// lastUsed 语义：用户最近一次实际发送所用模型；仅无显式默认与偏好时参与。
 					lastUsedModel: settingsStore.get().lastUsedModel,
 					welcomeModel: input.welcomeModel && typeof input.welcomeModel.provider === "string" && typeof input.welcomeModel.modelId === "string" ? input.welcomeModel : undefined,
 				});
-				if (input.backend !== "dsh" && !model) {
+				if (!nonPiBackend && !model) {
 					model = defaults.model;
 				}
 				if (!thinkingLevel) {
-					thinkingLevel = defaults.thinkingLevel;
+					// 每模型默认档位优先于全局默认，且必须按**最终生效的模型**查（显式传入的
+					// model / welcomeModel 可能不是解析器选出的默认模型）：pi 在新建与切换模型时
+					// 都按「显式选择 > 每模型默认 > 全局默认」解析再 clamp，这里同序才能保证
+					// 首轮请求用的档位与引导页底栏展示的一致。DSH 无 pi 模型身份，跳过。
+					const perModelThinkingLevel = !nonPiBackend && model && typeof model.provider === "string" && typeof model.modelId === "string" ? modelThinkingLevelOf(settingsResult.parsed, model.provider, model.modelId) : undefined;
+					thinkingLevel = perModelThinkingLevel ?? defaults.thinkingLevel;
 				}
 			} catch {
 				// Config read is best-effort; draft creation must never block.
@@ -756,9 +914,13 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			title: input.title?.trim() || mainCopy("session.newTitle"),
 			environment: settingsStore.get().wslEnabled ? "wsl" : "native",
 			// 后端透传：仅接受白名单枚举，其余视为 pi（渲染层不可信输入校验在边界）。
-			backend: input.backend === "dsh" ? "dsh" : undefined,
+			backend: input.backend === "dsh" ? "dsh" : input.backend === "acp" ? "acp" : undefined,
+			// ACP 工具预选（AcpToolConfig.id）：backend=acp 草稿期选哪个 CLI。
+			acpToolId: input.backend === "acp" && typeof input.acpToolId === "string" ? input.acpToolId : undefined,
 			model,
 			thinkingLevel,
+			// 渲染层输入不可信：侧边任务只认显式 true，其余（含任意真值）按普通会话建。
+			sideTask: input.sideTask === true,
 		});
 		void appLogger.info("session", "Session draft created", {
 			sessionId: draft.id,
@@ -766,17 +928,23 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			title: draft.title,
 			model: draft.model,
 		});
+		// standby 补热：草稿创建是「用户马上要开聊」的最强信号，趁用户阅读/输入的空窗
+		// 后台预热一个 pi 进程待命（fire-and-forget；ensure 幂等且受 standbyRuntimeEnabled 闸）。
+		if (!nonPiBackend) agentManager.ensureStandbyAgent(input.projectId);
 		return draft;
 	});
 	ipcMain.handle(ipcChannels.sessionsResolveLaunchDefaults, async (_event, input?: ResolveLaunchDefaultsInput): Promise<ResolvedLaunchDefaults> => {
 		// 渲染层输入不可信：backend 只认白名单枚举，其余按非 DSH（pi）解析。
-		const backend = input?.backend === "dsh" ? "dsh" : undefined;
+		const backend = input?.backend === "dsh" ? "dsh" : input?.backend === "acp" ? "acp" : undefined;
 		try {
 			const [settingsResult, modelsResult] = await Promise.all([configManager.getSettingsConfig(), configManager.getModelsConfig()]);
 			return resolveLaunchDefaultOptions({
 				backend,
 				settings: settingsResult.parsed,
 				models: modelsResult.parsed,
+				// 与 createDraft 同源：存在性校验含 capability 快照（auth 渠道模型也在内），
+				// 否则引导页预选与创建再次分叉。
+				catalogModels: selectableModels(),
 				// lastUsed 语义：引导页预选默认 = 用户最后一次实际使用的模型。
 				lastUsedModel: settingsStore.get().lastUsedModel,
 			});
@@ -802,6 +970,10 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		return result;
 	});
 	ipcMain.handle(ipcChannels.sessionsCatalogUpdate, async (_event, sessionId: string, patch: UpdateSessionRecordInput) => {
+		// 渲染层输入不可信：侧边任务标记只认真值 true 与 null（清除），其余按「本次不改」处理。
+		if (patch.sideTask !== undefined && patch.sideTask !== true && patch.sideTask !== null) {
+			patch = { ...patch, sideTask: undefined };
+		}
 		const normalizedModel = patch.model === undefined ? undefined : patch.model === null ? null : normalizeSessionModelPreference(patch.model);
 		if (patch.model !== undefined && patch.model !== null && !normalizedModel) {
 			throw new Error(mainCopy("session.invalidModel"));
@@ -816,6 +988,12 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		// 已 active 或已有 runtime 的会话拒绝 backend 变更（渲染层已隐藏入口，这里是边界防御）。
 		if (patch.backend !== undefined && patch.backend !== entry.backend && (entry.status === "active" || sessionRuntimeCoordinator.getTarget(sessionId))) {
 			throw new Error(mainCopy("session.backendLocked"));
+		}
+		// 草稿会话切到非 pi 后端时回收本项目的 standby 预热进程：它服务不了这个会话，
+		// 不主动丢就只能等 10min TTL 自然到期（用户反馈的「没用到还占着内存」）。
+		// 放在锁定判定之后：已锁定的会话会先报错，不改状态也不回收进程。
+		if (patch.backend !== undefined && patch.backend !== entry.backend && patch.backend !== "pi") {
+			agentManager.releaseStandbyAgent(entry.projectId);
 		}
 		// DSH agent 预设同样创建即固定：激活会话的 preset 由 host 会话 header 权威持有，
 		// 渲染层只读展示，拒绝任何运行时改写（草稿期预选不受限）。
@@ -857,9 +1035,10 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		return sessionCatalog.update(sessionId, {
 			...patch,
 			title: title || undefined,
-			// 切到生图后端时甩开 pi 会话文件引用：生图历史独立存 ImageSessionStore，
-			// 残留 filePath 会让生图/重发/历史加载误落到不存在的 pi 文件（ENOENT 根因）。
-			...(patch.backend === "imagegen" ? { filePath: null, piSessionId: null } : {}),
+			// 切到生图/生视频/ACP 后端时甩开 pi 会话文件引用：生图历史独立存 ImageSessionStore，
+			// 生视频独立存 VideoSessionStore，ACP 会话由 agent CLI 自持（session/new 在远端）；
+			// 残留 filePath 会让历史加载误落到不存在的 pi 文件（ENOENT 根因，imagegen 同款）。
+			...(patch.backend === "imagegen" || patch.backend === "videogen" || patch.backend === "acp" ? { filePath: null, piSessionId: null } : {}),
 		});
 	});
 	ipcMain.handle(ipcChannels.sessionsCatalogDelete, async (_event, rawSessionId: unknown) => {
@@ -1111,31 +1290,51 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			const page = await readDshHistoryPage(entry.dshSessionId, undefined, { maxMessages: 1000 });
 			return page.messages;
 		}
+		// ACP 会话历史只活在 agent 侧 + 运行时内存投影(load 重放):无 runtime
+		// (未激活/已停止)时返回空数组,渲染层显示起始页;激活后 load 重放补全。
+		if (entry?.backend === "acp") {
+			return readAcpMessages ? readAcpMessages(entry.acpSessionId ?? "") : [];
+		}
 		if (entry?.backend === "imagegen") {
 			// imagegen 后端会话：历史独立存 ImageSessionStore，不走 pi 文件
 			return (await readImageSessionMessages?.(sessionId)) ?? [];
 		}
+		if (entry?.backend === "videogen") {
+			// videogen 后端会话：历史独立存 VideoSessionStore（任务占位/终态按消息 id 折叠）
+			return (await readVideoSessionMessages?.(sessionId)) ?? [];
+		}
 		if (!sessionFilePath) return [];
 		// 有界「加载窗口」（9 轮 + 条目预算），不是全量历史：整量读出在大会话上
 		// 会同时顶爆主进程与渲染层（#213）；需要更早历史走 readRecordMessagePage。
-		const window = await agentManager.readSessionLoadWindow(sessionFilePath, sessionId);
+		const window = await agentManager.readSessionLoadWindow(sessionFilePath, sessionId, entry ? { projectId: entry.projectId } : undefined);
 		const messages = window.messages;
 		const metadata = await agentManager.readSessionDisplayMetadata(sessionFilePath);
 		await backfillHistoricalSessionMetadata(sessionId, metadata);
 		return messages;
 	});
+	/** 会话分支树（右侧抽屉「分支」面板）：只读文件索引，无需活 runtime；DSH/imagegen 无 pi 文件返回 null。 */
+	ipcMain.handle(ipcChannels.sessionsGetBranchTree, async (_event, sessionId: unknown): Promise<SessionBranchTree | null> => {
+		if (typeof sessionId !== "string" || !sessionId.trim()) throw new Error("Invalid branch-tree request");
+		const entry = sessionCatalog.get(sessionId);
+		// DSH / imagegen / videogen 会话没有 pi JSONL：面板按空态处理，不报错。
+		if (!entry?.filePath || entry.backend === "dsh" || entry.backend === "imagegen" || entry.backend === "videogen" || entry.backend === "acp") return null;
+		return agentManager.readSessionBranchTree(entry.filePath);
+	});
 	/** 子代理列表：从会话文件 subagents:record + catalog 子会话回填合成。 */
 	ipcMain.handle(ipcChannels.sessionsListSubagents, async (_event, rawSessionId: unknown) => {
 		const sessionId = parseSessionId(rawSessionId);
 		const entry = sessionCatalog.get(sessionId);
-		const sessionFilePath = localSessionFilePath(sessionId);
-		if (!entry || !sessionFilePath) return [];
-		let records = await agentManager.readSessionSubagentRecords(sessionFilePath);
+		if (!entry?.filePath) return [];
+		// 锚点对账要在读取侧做（liveRuntimeStartedAt）：record 完成时才写，运行中
+		// 子代理只剩 start 锚点，不传对账时间会一律合成 stopped，面板在子代理
+		// 实际运行期间误显「已停止」（issue #300）。本代派发的锚点 → running。
+		const liveTarget = sessionRuntimeCoordinator.getTarget(sessionId);
+		const liveTab = liveTarget ? agentManager.list().find((t) => t.id === liveTarget.agentId) : undefined;
+		let records = await agentManager.readSessionSubagentRecords(entry.filePath, { liveRuntimeStartedAt: liveTab?.createdAt });
 		// acp_delegate 推导条目在会话无活 runtime 时残留的 running 视为已终止：
 		// 终态通知没写进文件（进程被杀/崩溃）的委托在历史会话里永远是 running，
 		// 会误导为仍在运行；活会话保持 running，由后续通知/桥接覆盖。
 		// 与 start 锚点残留合成 stopped 同一语义（见 downgradeStaleRunning）。
-		const liveTarget = sessionRuntimeCoordinator.getTarget(sessionId);
 		if (!liveTarget) {
 			if (!sessionRuntimeCoordinator.isActivating(sessionId)) {
 				records = downgradeStaleRunning(records);
@@ -1146,7 +1345,6 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			// hook 在绑定出现时会重新拉取本列表，激活完成后即看到降级结果
 			//（2026-09-14 用户环境实测：真实活动子代理 0，历史投影仍显示 33 个
 			// running；启动之后派发的异步运行不受影响，保持 running）。
-			const liveTab = agentManager.list().find((t) => t.id === liveTarget.agentId);
 			if (liveTab?.createdAt) {
 				records = downgradeRunningStartedBefore(records, liveTab.createdAt);
 			}
@@ -1155,7 +1353,7 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		// 再按子会话名 `${type}#${id前8位}` 精确匹配。
 		const children = sessionCatalog
 			.listEntries()
-			.filter((e) => e.parentSessionPath === sessionFilePath)
+			.filter((e) => e.parentSessionPath === entry.filePath)
 			.map((e) => sessionCatalog.getRecord(e.id))
 			.filter((r): r is NonNullable<typeof r> => r != null);
 		for (const record of records) {
@@ -1164,6 +1362,11 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			const childSessionPath = child?.locator?.kind === "local" ? child.locator.filePath : undefined;
 			if (childSessionPath) record.childSessionPath = childSessionPath;
 			if (child) record.childSessionId = child.id;
+		}
+		// 列举子代理时顺带刷新会话级性能区间（按 id 幂等覆盖，重复列举不会膨胀）；
+		// 读接口不推状态事件，避免把「看子代理列表」变成高频 runtime 推送。
+		if (liveTarget?.agentId) {
+			agentManager.syncSubagentPerfSpans(liveTarget.agentId, records, { emit: false });
 		}
 		return records;
 	});
@@ -1174,19 +1377,21 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 	ipcMain.handle(ipcChannels.sessionsListFileChanges, async (_event, rawSessionId: unknown) => {
 		const sessionId = parseSessionId(rawSessionId);
 		const entry = sessionCatalog.get(sessionId);
-		const sessionFilePath = localSessionFilePath(sessionId);
-		// DSH/生图会话无 pi 会话文件，文件汇总无意义
-		if (!entry || !sessionFilePath || entry.backend === "dsh" || entry.backend === "imagegen") return [];
-		return agentManager.readSessionFileChanges(sessionFilePath);
+		// ACP 会话无 pi 会话文件，但 tool_call 原始参数里带 filePath/edit 内容：
+		// 从运行时消息投影按「最新一轮」口径聚合（与 pi 的 readFileChangeMessages
+		// 同语义；消息列表有界且在内存，无读盘风险）。2027-03 审计发现 I。
+		if (entry?.backend === "acp") return collectLatestTurnFileChanges(readAcpMessages?.(entry.acpSessionId ?? "") ?? []);
+		// DSH/生图/生视频会话无 pi 会话文件，文件汇总无意义
+		if (!entry?.filePath || entry.backend === "dsh" || entry.backend === "imagegen" || entry.backend === "videogen") return [];
+		return agentManager.readSessionFileChanges(entry.filePath);
 	});
 	/** 会话级 todo 快照：从会话文件 pi-deck-todo custom 条目重建最新计划（历史会话任务 tab）。 */
 	ipcMain.handle(ipcChannels.sessionsListSessionTodo, async (_event, rawSessionId: unknown) => {
 		const sessionId = parseSessionId(rawSessionId);
 		const entry = sessionCatalog.get(sessionId);
-		const sessionFilePath = localSessionFilePath(sessionId);
-		// DSH/生图会话无 pi 会话文件，无 todo 快照
-		if (!entry || !sessionFilePath || entry.backend === "dsh" || entry.backend === "imagegen") return undefined;
-		return agentManager.readSessionTodo(sessionFilePath);
+		// DSH/生图/生视频会话无 pi 会话文件，无 todo 快照
+		if (!entry?.filePath || entry.backend === "dsh" || entry.backend === "imagegen" || entry.backend === "videogen") return undefined;
+		return agentManager.readSessionTodo(entry.filePath);
 	});
 
 	ipcMain.handle(ipcChannels.sessionsCatalogReadMessagePage, async (_event, rawSessionId: unknown, rawBefore?: unknown, rawPageSize?: unknown, rawOptions?: unknown) => {
@@ -1219,7 +1424,10 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 				throw error;
 			}
 		}
-		const sessionFilePath = localSessionFilePath(sessionId);
+		if (entry?.backend === "acp") return acpMessagePage(readAcpMessages?.(entry.acpSessionId ?? "") ?? [], before, pageSize);
+		// 顺序要求（2026-10 修复）：本机路径解析必须在远端分流之后 —— ssh 条目的 filePath 在规范化时
+		// 已被清空，一旦远端分支被挪到它后面就会变成不可达的死代码。合并后本机路径就是 dev 的
+		// `entry.filePath`（不再额外调 localSessionFilePath：它对 ssh 抛稳定码，且夹具无需提供该端口）。
 		// DSH 会话没有 pi 会话文件：历史浏览走 host 的 session.history 事件流翻页
 		// （游标 = 事件 seq），与 pi 的磁盘分页同形状（messages/total/nextBefore）；
 		// 第三条参数在 pi 路径是「轮数」，所以 DSH 这里按 turnCount 传（main 侧换算消息预算）。
@@ -1236,14 +1444,14 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 				throw error;
 			}
 		}
-		if (entry?.backend === "imagegen" || !sessionFilePath) {
-			// imagegen 后端会话（可能残留无意义 pi filePath）或纯生图草稿：
-			// 走 ImageSession 独立存储恢复生图历史，避免落到不存在的 pi 文件
-			const imageSessionMessages = (await readImageSessionMessages?.(sessionId)) ?? [];
-			if (imageSessionMessages.length > 0) {
+		if (entry?.backend === "imagegen" || entry?.backend === "videogen" || !entry?.filePath) {
+			// imagegen/videogen 后端会话（可能残留无意义 pi filePath）或纯生图草稿：
+			// 走独立存储恢复历史（生图 ImageSession / 生视频 VideoSession），避免落到不存在的 pi 文件
+			const independentMessages = entry?.backend === "videogen" ? ((await readVideoSessionMessages?.(sessionId)) ?? []) : ((await readImageSessionMessages?.(sessionId)) ?? []);
+			if (independentMessages.length > 0) {
 				return {
-					messages: imageSessionMessages,
-					total: imageSessionMessages.length,
+					messages: independentMessages,
+					total: independentMessages.length,
 					nextBefore: null,
 				};
 			}
@@ -1263,7 +1471,7 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 				const target = sessionRuntimeCoordinator.getTarget(sessionId);
 				if (target) {
 					const cached = await agentManager
-						.tryReadRuntimeTurnPage(sessionFilePath, target.agentId, {
+						.tryReadRuntimeTurnPage(entry.filePath, target.agentId, {
 							beforeEntryId: options?.beforeEntryId,
 							before,
 							turnCount: pageSize,
@@ -1272,10 +1480,18 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 					if (cached) return cached;
 				}
 			}
-			page = await agentManager.readSessionDisplayTurnPage(sessionFilePath, sessionId, before, pageSize, options?.beforeEntryId);
+			page = await agentManager.readSessionDisplayTurnPage(entry.filePath, sessionId, before, pageSize, options?.beforeEntryId, { projectId: entry.projectId });
 			await backfillHistoricalSessionMetadata(sessionId, page);
 			return page;
 		} catch (error) {
+			// 文件还不存在（新建会话在发出第一条消息前不落盘，微信/飞书桥建的会话尤其常见）：
+			// 这是「还没有内容」而不是读取故障，返回带原因的友好空页，
+			// 避免把 ENOENT 报成「会话历史加载失败/文件已删除」（2026-10 微信 /new 反馈）。
+			const missingFile = missingSessionFilePage(error);
+			if (missingFile) {
+				appLogger.info("session", "Read message page: session file not written yet", { sessionId, filePath: entry.filePath });
+				return missingFile;
+			}
 			// 文件读取失败（被删/路径失效）先查 ImageSession 兜底，命中则直接恢复历史；
 			// 都无记录才按失败处理（渲染层显示明确错误态 + 日志）。
 			const imageSessionMessages = (await readImageSessionMessages?.(sessionId)) ?? [];
@@ -1288,7 +1504,7 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			}
 			appLogger.warn("session", "Read message page failed", {
 				sessionId,
-				filePath: sessionFilePath,
+				filePath: entry.filePath,
 				error: error instanceof Error ? error.message : String(error),
 			});
 			throw error;
@@ -1391,6 +1607,14 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		if (typeof agentId !== "string") return [];
 		if (!listDshSubagents) return [];
 		return listDshSubagents(agentId);
+	});
+	// DSH 取消 host 侧排队消息（inbox 投影项的撤回）
+	ipcMain.handle(ipcChannels.dshCancelQueuedMessage, async (_event, agentId: unknown, itemId: unknown) => {
+		if (typeof agentId !== "string" || typeof itemId !== "string" || itemId === "") {
+			throw new Error("Invalid agentId or queue item id");
+		}
+		if (!cancelDshQueuedMessage) throw new Error("dsh queue is not available");
+		await cancelDshQueuedMessage(agentId, itemId);
 	});
 	// DSH 子代理历史（G6）
 	ipcMain.handle(ipcChannels.dshSubagentHistory, async (_event, agentId: unknown, childSessionId: unknown, beforeSeq?: unknown, maxMessages?: unknown) => {
@@ -1528,6 +1752,29 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			deleteFiles: record.deleteFiles === true,
 		});
 	});
+	// DSH 插件市场搜索：关键词 1-80 字符、无控制字符（渲染层输入不可信）。
+	ipcMain.handle(ipcChannels.dshPluginMarketSearch, async (_event, keyword: unknown): Promise<import("../../shared/types").DshPluginMarketSearchResult> => {
+		if (typeof keyword !== "string") throw new Error("invalid plugin market search payload");
+		const validated = validateSearchKeyword(keyword);
+		if (!validated.ok) throw new Error(validated.reason);
+		if (!searchDshPluginMarket) throw new Error("DSH plugin market search is not available");
+		return searchDshPluginMarket(validated.value);
+	});
+	// DSH 用户插件安装：spec 只接受 npm 包名或 name@精确版本（路径/range/tag 全拒）。
+	ipcMain.handle(ipcChannels.dshPluginUserInstall, async (_event, input: unknown): Promise<import("../../shared/types").DshUserPluginInstallResult> => {
+		if (typeof input !== "object" || input === null) throw new Error("invalid user plugin install payload");
+		const record = input as Record<string, unknown>;
+		if (typeof record.spec !== "string" || !record.spec.trim()) throw new Error("invalid user plugin install payload");
+		const spec = validateNpmSpec(record.spec);
+		if (!spec.ok) throw new Error(spec.reason);
+		if (!installDshUserPlugin) throw new Error("DSH user plugin install is not available");
+		return installDshUserPlugin(record.spec.trim());
+	});
+	// DSH 用户补丁层清单（安装服务视角；未装配返回空列表与既有 list 通道语义一致）。
+	ipcMain.handle(ipcChannels.dshPluginUserList, async (): Promise<import("../../shared/types").DshUserPluginListEntry[]> => {
+		if (!listDshUserPlugins) return [];
+		return listDshUserPlugins();
+	});
 	ipcMain.handle(ipcChannels.dshPluginInstall, async (_event, input: unknown): Promise<unknown> => {
 		if (typeof input !== "object" || input === null) {
 			throw new Error("invalid plugin install payload");
@@ -1605,6 +1852,9 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			path: result.path,
 		});
 		return result;
+	});
+	registerSessionImageMutationIpc(ipcMain, sessionRuntimeCoordinator, (error, context) => {
+		logSessionCommandFailure(appLogger, error, { operation: "removeCatalogMessageImage", ...context });
 	});
 	// catalog 级消息改写：按 sessionId 操作 JSONL，不要求 live runtime。
 	// 运行中必须先停（coordinator 拒绝 SESSION_RUNTIME_BUSY）；入参在边界校验。
@@ -1691,7 +1941,7 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			// 同时维护 recentProviders（最新在前，去重截断 8）：模型选择器按此优先排列供应商分组。
 			if (result.accepted) {
 				const record = sessionCatalog.get(input.sessionId);
-				if (record?.backend !== "dsh" && record?.model?.provider && record?.model?.modelId) {
+				if (record?.backend !== "dsh" && record?.backend !== "acp" && record?.model?.provider && record?.model?.modelId) {
 					const provider = record.model.provider;
 					const current = settingsStore.get().recentProviders ?? [];
 					// 当前供应商提到首位，其余保持原有相对顺序；SettingsStore 会做去重/截断/无变化早退。
@@ -1730,11 +1980,66 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		}
 	});
 	ipcMain.handle(ipcChannels.sessionsUiResponse, (_event, input: SessionUiResponseInput) => sessionRuntimeCoordinator.respondToUi(input));
+	/**
+	 * GUI 扩展桥：渲染进程回灌交互事件 → 排入该 agent 的桥队列。
+	 *
+	 * 边界校验（AGENTS.md「输入校验在边界」）：
+	 * - 三个身份字段必填（sessionId / agentId / runtimeGeneration）
+	 * - runtimeGeneration 必须与该会话当前 runtime 一致，拒绝旧 runtime 的迟到事件
+	 * 失败一律返回 false（渲染层据此静默丢弃），**不抛错跨 IPC**。
+	 */
+	ipcMain.handle(ipcChannels.sessionsBridgeEvent, (_event, input: BridgeEventInput) => {
+		if (!input || typeof input !== "object") return false;
+		const { sessionId, agentId, runtimeGeneration, event } = input;
+		if (typeof sessionId !== "string" || !sessionId) return false;
+		if (typeof agentId !== "string" || !agentId) return false;
+		if (typeof runtimeGeneration !== "number" || !Number.isFinite(runtimeGeneration)) return false;
+		if (!event || typeof event !== "object" || typeof event.type !== "string") return false;
+		const current = sessionRuntimeCoordinator.getTarget(sessionId);
+		if (!current || current.agentId !== agentId || current.runtimeGeneration !== runtimeGeneration) {
+			// 旧 runtime 的迟到事件：丢弃，不报错
+			return false;
+		}
+		return sessionRuntimeCoordinator.pushBridgeEvent(agentId, event);
+	});
+	/**
+	 * GUI 扩展桥：渲染进程要求桥**全量重推一次**（§9.4）。
+	 *
+	 * 边界校验与 `sessionsBridgeEvent` 完全一致（三个身份字段 + runtime 一致性）——
+	 * 不新写一套规则，避免两处漂移。失败一律返回 false，**不抛错跨 IPC**。
+	 */
+	ipcMain.handle(ipcChannels.sessionsBridgeResync, (_event, input: BridgeResyncInput) => {
+		if (!input || typeof input !== "object") return false;
+		const { sessionId, agentId, runtimeGeneration } = input;
+		if (typeof sessionId !== "string" || !sessionId) return false;
+		if (typeof agentId !== "string" || !agentId) return false;
+		if (typeof runtimeGeneration !== "number" || !Number.isFinite(runtimeGeneration)) return false;
+		const current = sessionRuntimeCoordinator.getTarget(sessionId);
+		if (!current || current.agentId !== agentId || current.runtimeGeneration !== runtimeGeneration) {
+			// 旧 runtime 的迟到请求：忽略，不报错
+			return false;
+		}
+		return sessionRuntimeCoordinator.requestBridgeResync(agentId);
+	});
 	ipcMain.handle(ipcChannels.sessionsRuntimeList, () => sessionRuntimeCoordinator.listRuntimes());
 	ipcMain.handle(ipcChannels.sessionsRuntimeActivate, async (_event, sessionId: string) => {
 		const startedAt = Date.now();
 		void appLogger.info("session-perf", "Runtime activation IPC started", { sessionId });
+		// 审计发现 A：coordinator.activate 在 bind() 之前不转发任何状态事件（ACP 握手
+		// 可达 ~8.5s）。激活前先发 session 级合成 starting，渲染层立即进入加载动画，
+		// 不再静默空窗；已有活 runtime 时（预热复用/快速路径）不发，避免闪状态。
+		if (!sessionRuntimeCoordinator.hasLiveRuntime(sessionId)) emitSessionActivating?.(sessionId);
 		const result = await sessionRuntimeCoordinator.activateRuntime(sessionId);
+		if (result.ok) {
+			// 激活完成后立即补发完整 tab 状态 + 消息窗口：deckSessionId/backend 让侧栏
+			// ACP 配对即时生效（否则要等首个 agents:state 事件，期间 agent 行与 catalog
+			// 行双行并存）；播种快照历史直接进时间线，不等首个回合。
+			emitReplacementState(result.value, true);
+		} else if (!sessionRuntimeCoordinator.hasLiveRuntime(sessionId)) {
+			// 失败且无活 runtime（spawn 失败/握手超时，binding 从未建立）：合成 error
+			// 抵消上面的合成 starting，加载态收敛为可重试的静态引导。
+			emitSessionActivationFailed?.(sessionId);
+		}
 		void appLogger.info("session-perf", "Runtime activation IPC completed", {
 			sessionId,
 			ok: result.ok,
@@ -1762,13 +2067,6 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 	});
 	ipcMain.handle(ipcChannels.dshListProviders, async () => (listDshProviders ? listDshProviders() : []));
 	ipcMain.handle(ipcChannels.dshAgentPresets, async () => (listDshAgentPresets ? listDshAgentPresets() : []));
-	// 预设删除：边界校验 id（非空字符串、去首尾空白）；system 预设由 host 侧拒绝并回传结构化错误。
-	ipcMain.handle(ipcChannels.dshAgentPresetRemove, async (_event, id: string) => {
-		const presetId = typeof id === "string" ? id.trim() : "";
-		if (!presetId) throw new Error("Invalid DSH agent preset id");
-		if (!removeDshAgentPreset) throw new Error("DSH agent presets are not available");
-		await removeDshAgentPreset(presetId);
-	});
 	ipcMain.handle(ipcChannels.dshDefaultModel, async () => (getDshDefaultModel ? getDshDefaultModel() : undefined));
 	ipcMain.handle(ipcChannels.dshGetStatus, async () => (getDshStatus ? getDshStatus() : { started: false, homeDir: "", bootError: null }));
 	// DSH runtime 安装态查询：未装配 dshBackend = 无 DSH 后端，按 notInstalled 返回
@@ -1785,9 +2083,10 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		// 对话框在主进程弹：渲染层不参与路径选择，也就没有「传任意路径读文件」的入口。
 		const picked = await dialog.showOpenDialog({
 			title: mainCopy("dsh.runtime.pickArchiveTitle"),
-			// 过滤器只影响文件选择；openDirectory 让已解压目录也能被选中。
-			filters: [{ name: "DSH runtime", extensions: ["tgz", "tar.gz"] }],
-			properties: ["openFile", "openDirectory"],
+			// 只收归档：与目录入口分开弹。Windows 上 openFile + openDirectory 同时给会
+			// 退化成只能选目录，.tgz 选不到（见 shared/ipc.ts 的 dshRuntimeInstallLocalDir）。
+			filters: [{ name: "DSH runtime", extensions: ["tgz", "gz"] }],
+			properties: ["openFile"],
 		});
 		if (picked.canceled || picked.filePaths.length === 0) return { ok: false, error: "cancelled" };
 		const filePath = picked.filePaths[0];
@@ -1796,6 +2095,19 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			throw new Error(mainCopy("dsh.runtime.invalidArchivePath"));
 		}
 		return importDshRuntime(filePath);
+	});
+	ipcMain.handle(ipcChannels.dshRuntimeInstallLocalDir, async () => {
+		if (!importDshRuntime) throw new Error("DSH runtime installation is not available");
+		const picked = await dialog.showOpenDialog({
+			title: mainCopy("dsh.runtime.pickDirectoryTitle"),
+			properties: ["openDirectory"],
+		});
+		if (picked.canceled || picked.filePaths.length === 0) return { ok: false, error: "cancelled" };
+		const dirPath = picked.filePaths[0];
+		if (!dirPath || !existsSync(dirPath)) {
+			throw new Error(mainCopy("dsh.runtime.invalidArchivePath"));
+		}
+		return importDshRuntime(dirPath);
 	});
 	ipcMain.handle(ipcChannels.dshRuntimeUninstall, async () => {
 		if (!uninstallDshRuntime) throw new Error("DSH runtime installation is not available");
@@ -1867,6 +2179,11 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 	ipcMain.handle(ipcChannels.sessionsRuntimeCompact, (_event, target: SessionRuntimeTarget, prompt?: string) => sessionRuntimeCoordinator.compactRuntime(target, prompt));
 	ipcMain.handle(ipcChannels.sessionsRuntimeState, (_event, target: SessionRuntimeTarget) => sessionRuntimeCoordinator.getRuntimeState(target));
 	ipcMain.handle(ipcChannels.sessionsRuntimeCommands, (_event, target: SessionRuntimeTarget) => sessionRuntimeCoordinator.listRuntimeCommands(target));
+	// 草稿命令预览是只读提示增强：入参只有 projectId，非法值在 coordinator 层自然返回 null。
+	ipcMain.handle(ipcChannels.sessionsDraftCommands, (_event, projectId: string) => {
+		if (typeof projectId !== "string" || !projectId.trim()) return null;
+		return sessionRuntimeCoordinator.draftCommands(projectId);
+	});
 	ipcMain.handle(ipcChannels.sessionsRuntimeListModels, (_event, target: SessionRuntimeTarget) => sessionRuntimeCoordinator.listRuntimeModels(target));
 	ipcMain.handle(ipcChannels.sessionsRuntimeThinkingLevels, (_event, target: SessionRuntimeTarget) => sessionRuntimeCoordinator.listRuntimeThinkingLevels(target));
 	ipcMain.handle(ipcChannels.sessionsRuntimeExportHtml, async (_event, target: SessionRuntimeTarget) => {
@@ -1966,77 +2283,12 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		}
 		return sessionRuntimeCoordinator.setRuntimePermission(target, preset);
 	});
-	ipcMain.handle(ipcChannels.sessionsRuntimeClone, async (_event, target: SessionRuntimeTarget) => {
-		const validated = sessionRuntimeCoordinator.validateTarget(target);
-		if (!validated.ok) return validated;
-		try {
-			// DSH 后端：clone = fork 无锚点（完整副本）+ runtime 换绑新会话
-			// （catalog 的 dshSessionId 同步更新，重启后 attach 到 clone 结果）。
-			// D3/C10：与 fork 同约束——withRuntimeReservation（lease 检查 + replacement 预留）。
-			if (isDshAgent(target.agentId)) {
-				if (!cloneDshAgentSession) {
-					throw new Error("dsh clone is not available");
-				}
-				const value = await sessionRuntimeCoordinator.withRuntimeReservation(target.sessionId, target.agentId, () => cloneDshAgentSession(target));
-				void appLogger.info("session", "Session cloned (dsh)", {
-					sessionId: target.sessionId,
-				});
-				return { ok: true as const, value };
-			}
-			const value = await replaceAgentSession(target.agentId, () => agentManager.cloneSession(target.agentId), { markForked: true });
-			void appLogger.info("session", "Session cloned", { sessionId: target.sessionId });
-			return {
-				ok: true as const,
-				value,
-			};
-		} catch (error) {
-			return {
-				ok: false as const,
-				error: {
-					code: "SESSION_COMMAND_FAILED" as const,
-					debugDetails: error instanceof Error ? error.message : String(error),
-				},
-			};
-		}
-	});
-	// fork 与 clone 共用 replaceAgentSession：RPC 成功后刷新 sessionPath / 消息投影
+	// fork/clone 命令链已收口到 sessionForkCommands（与 Web HTTP 同源）：重发/编辑
+	// fork 化（mutationFork/branchMode）、supersededBy 隐藏、DSH 分流、catalog 刷新广播
+	// 都在那一层维护，两端行为必须一致（Web 重发后出现两个重复会话的教训）。
+	ipcMain.handle(ipcChannels.sessionsRuntimeClone, (_event, target: SessionRuntimeTarget) => deps.sessionForkCommands.cloneRuntimeSession(target));
 	ipcMain.handle(ipcChannels.sessionsRuntimeGetForkMessages, (_event, target: SessionRuntimeTarget) => sessionRuntimeCoordinator.getRuntimeForkMessages(target));
-	ipcMain.handle(ipcChannels.sessionsRuntimeFork, async (_event, target: SessionRuntimeTarget, entryId: string) => {
-		const validated = sessionRuntimeCoordinator.validateTarget(target);
-		if (!validated.ok) return validated;
-		try {
-			// DSH 后端：fork = session.fork 裁剪 + runtime 换绑新会话（catalog 的
-			// dshSessionId 同步更新，重启后 attach 到 fork 结果）。
-			// D3/C10：withRuntimeReservation 提供完整保护——dispatch lease 检查
-			// （在途发送拒绝，防 RPC 响应落到已废弃 mux）+ replacement 预留
-			// （fork 期间阻止并发 restart 等命令交错）。
-			if (isDshAgent(target.agentId)) {
-				if (!forkDshAgentSession) {
-					throw new Error("dsh fork is not available");
-				}
-				const value = await sessionRuntimeCoordinator.withRuntimeReservation(target.sessionId, target.agentId, () => forkDshAgentSession(target, entryId));
-				void appLogger.info("session", "Session forked (dsh)", {
-					sessionId: target.sessionId,
-					entryId,
-				});
-				return { ok: true as const, value };
-			}
-			const value = await replaceAgentSession(target.agentId, () => agentManager.forkSession(target.agentId, entryId), { markForked: true });
-			void appLogger.info("session", "Session forked", { sessionId: target.sessionId, entryId });
-			return {
-				ok: true as const,
-				value,
-			};
-		} catch (error) {
-			return {
-				ok: false as const,
-				error: {
-					code: "SESSION_COMMAND_FAILED" as const,
-					debugDetails: error instanceof Error ? error.message : String(error),
-				},
-			};
-		}
-	});
+	ipcMain.handle(ipcChannels.sessionsRuntimeFork, (_event, target: SessionRuntimeTarget, entryId: string, options?: { mutationFork?: boolean; branchMode?: boolean }) => deps.sessionForkCommands.forkRuntimeSession(target, entryId, options));
 	ipcMain.handle(ipcChannels.codexSessionsScan, async (_event, projectId: string) => {
 		const project = projectStore.get(projectId);
 		if (!project) throw new Error(`Project not found: ${projectId}`);
@@ -2070,6 +2322,26 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		if (!isLocalProject(project)) throw new Error("UNSUPPORTED_PROJECT_LOCATION");
 		const result = await claudeSessionImporter.import(project.path, sourcePaths);
 		void appLogger.info("session", "Claude sessions imported", {
+			projectId,
+			sourceCount: sourcePaths.length,
+		});
+		return result;
+	});
+	ipcMain.handle(ipcChannels.qoderSessionsScan, async (_event, projectId: string) => {
+		const project = projectStore.get(projectId);
+		if (!project) throw new Error(`Project not found: ${projectId}`);
+		// Qoder 导入只对本地目录成立：远端项目没有本机 path（与上面 Claude/OpenCode 同口径）。
+		if (!isLocalProject(project)) throw new Error("UNSUPPORTED_PROJECT_LOCATION");
+		const result = await qoderSessionImporter.scan(project.path);
+		void appLogger.debug("session", "Qoder sessions scanned", { projectId });
+		return result;
+	});
+	ipcMain.handle(ipcChannels.qoderSessionsImport, async (_event, projectId: string, sourcePaths: string[]) => {
+		const project = projectStore.get(projectId);
+		if (!project) throw new Error(`Project not found: ${projectId}`);
+		if (!isLocalProject(project)) throw new Error("UNSUPPORTED_PROJECT_LOCATION");
+		const result = await qoderSessionImporter.import(project.path, sourcePaths);
+		void appLogger.info("session", "Qoder sessions imported", {
 			projectId,
 			sourceCount: sourcePaths.length,
 		});
@@ -2148,6 +2420,80 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		void appLogger.info("session", "Cursor sessions imported", {
 			projectId,
 			sourceCount: sourcePaths.length,
+		});
+		return result;
+	});
+	ipcMain.handle(ipcChannels.kimiSessionsScan, async (_event, projectId: string) => {
+		const project = projectStore.get(projectId);
+		if (!project) throw new Error(`Project not found: ${projectId}`);
+		if (!isLocalProject(project)) throw new Error("UNSUPPORTED_PROJECT_LOCATION");
+		const result = await kimiSessionImporter.scan(project.path);
+		void appLogger.debug("session", "Kimi sessions scanned", { projectId });
+		return result;
+	});
+	ipcMain.handle(ipcChannels.kimiSessionsImport, async (_event, projectId: string, sourcePaths: string[]) => {
+		const project = projectStore.get(projectId);
+		if (!project) throw new Error(`Project not found: ${projectId}`);
+		if (!isLocalProject(project)) throw new Error("UNSUPPORTED_PROJECT_LOCATION");
+		const result = await kimiSessionImporter.import(project.path, sourcePaths);
+		void appLogger.info("session", "Kimi sessions imported", {
+			projectId,
+			sourceCount: sourcePaths.length,
+		});
+		return result;
+	});
+	// ── Kimi Work（kimi-desktop 桌面版）会话导入 ─────────────────────────────
+	// 与 CLI 版（上方）的差异：数据目录不固定——先 describe 探测（settings 手动指定 >
+	// daimon-storage.json 记录的自定义位置 > 默认安装位置），弹窗把探测结果展示给用户。
+	// scan/import 全部走探测链，用户改 Kimi Work 数据位置后 PiDeck 无需改设置。
+	ipcMain.handle(ipcChannels.kimiWorkSessionsDescribe, async () => {
+		const customRoot = settingsStore.get().kimiWorkShareRoot;
+		const result = await kimiWorkSessionImporter.describeShareRoot(customRoot);
+		void appLogger.debug("session", "Kimi Work share root described", { origin: result.origin });
+		return result;
+	});
+	ipcMain.handle(ipcChannels.kimiWorkSessionsScan, async (_event, projectId: string) => {
+		const project = projectStore.get(projectId);
+		if (!project) throw new Error(`Project not found: ${projectId}`);
+		if (!isLocalProject(project)) throw new Error("UNSUPPORTED_PROJECT_LOCATION");
+		const customRoot = settingsStore.get().kimiWorkShareRoot;
+		const result = await kimiWorkSessionImporter.scan(project.path, customRoot);
+		void appLogger.debug("session", "Kimi Work sessions scanned", { projectId, count: result.length });
+		return result;
+	});
+	ipcMain.handle(ipcChannels.kimiWorkSessionsImport, async (_event, projectId: string, sourcePaths: string[]) => {
+		const project = projectStore.get(projectId);
+		if (!project) throw new Error(`Project not found: ${projectId}`);
+		if (!isLocalProject(project)) throw new Error("UNSUPPORTED_PROJECT_LOCATION");
+		const customRoot = settingsStore.get().kimiWorkShareRoot;
+		const result = await kimiWorkSessionImporter.import(project.path, sourcePaths, customRoot);
+		void appLogger.info("session", "Kimi Work sessions imported", {
+			projectId,
+			sourceCount: sourcePaths.length,
+			imported: result.imported,
+		});
+		return result;
+	});
+	// ── MinimaxCode（CLI）会话导入 ─────────────────────────────────────
+	// 数据目录固定 ~/.minimax/v2/sessions（无 describe/探测链）；cwd 取自每个会话
+	// 目录 llm-call.json 的 systemPrompt（working directory 行），与项目路径匹配才列出。
+	ipcMain.handle(ipcChannels.minimaxSessionsScan, async (_event, projectId: string) => {
+		const project = projectStore.get(projectId);
+		if (!project) throw new Error(`Project not found: ${projectId}`);
+		if (!isLocalProject(project)) throw new Error("UNSUPPORTED_PROJECT_LOCATION");
+		const result = await minimaxSessionImporter.scan(project.path);
+		void appLogger.debug("session", "MinimaxCode sessions scanned", { projectId, count: result.length });
+		return result;
+	});
+	ipcMain.handle(ipcChannels.minimaxSessionsImport, async (_event, projectId: string, sourcePaths: string[]) => {
+		const project = projectStore.get(projectId);
+		if (!project) throw new Error(`Project not found: ${projectId}`);
+		if (!isLocalProject(project)) throw new Error("UNSUPPORTED_PROJECT_LOCATION");
+		const result = await minimaxSessionImporter.import(project.path, sourcePaths);
+		void appLogger.info("session", "MinimaxCode sessions imported", {
+			projectId,
+			sourceCount: sourcePaths.length,
+			imported: result.imported,
 		});
 		return result;
 	});

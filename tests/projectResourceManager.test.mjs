@@ -508,3 +508,32 @@ test("项目级 markdown 技能无 name 时回退为文件名且重命名时自�
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("项目 MCP 保存支持 expectedRevision 乐观锁：外部改过则拒绝覆盖", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pideck-prm-mcp-rev-"));
+	try {
+		mkdirSync(join(root, ".pi"), { recursive: true });
+		const mcpJson = join(root, ".pi", "mcp.json");
+		writeFileSync(mcpJson, JSON.stringify({ mcpServers: { keep: { command: "keep" } } }), "utf8");
+		const manager = managerFor({ id: "p1", name: "P1", path: root, lastOpenedAt: 1 });
+		const { revisionOf } = loadTsCommonJs("src/main/config/piConfigFileStore.ts");
+		const currentRevision = revisionOf(readFileSync(mcpJson, "utf8"), true);
+
+		// 过期 revision：拒绝覆盖，磁盘内容保持原样
+		const stale = await manager.saveProjectMcpConfig("p1", { mcpServers: { evil: { command: "evil" } } }, { expectedRevision: `${currentRevision}-stale` });
+		assert.equal(stale.ok, false);
+		assert.equal(stale.conflict, true);
+		assert.ok(readFileSync(mcpJson, "utf8").includes("keep"));
+
+		// 匹配 revision：写入成功
+		const saved = await manager.saveProjectMcpConfig("p1", { mcpServers: { next: { command: "next" } } }, { expectedRevision: currentRevision });
+		assert.equal(saved.ok, true);
+		assert.ok(readFileSync(mcpJson, "utf8").includes("next"));
+
+		// 不带 expectedRevision = 不校验（兼容旧调用方）
+		const unguarded = await manager.saveProjectMcpConfig("p1", { mcpServers: {} });
+		assert.equal(unguarded.ok, true);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});

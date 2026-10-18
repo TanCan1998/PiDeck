@@ -17,7 +17,7 @@
  */
 
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState } from "react";
-import { Trash2 } from "lucide-react";
+import { Loader2, Trash2 } from "lucide-react";
 import { createDefaultSecurityConfig, type SecurityAction, type SecurityConfig, type SecurityLevelConfig, type SecurityPathPolicy, type SecurityToolName } from "../../../../shared/types";
 import { Button } from "../ui-shadcn/button";
 import { Input } from "../ui-shadcn/input";
@@ -176,7 +176,12 @@ export const SecuritySection = forwardRef<SecuritySectionHandle, SecuritySection
 	const builtinCount = useMemo(() => config.levels.filter((level) => level.builtin).length, [config.levels]);
 
 	if (loading) {
-		return <div className="py-12 text-center text-control text-muted-foreground">{t("common.loading")}</div>;
+		return (
+			<div className="flex items-center justify-center gap-2 py-12 text-control text-muted-foreground">
+				<Loader2 size={14} className="animate-pideck-spin" aria-hidden="true" />
+				{t("common.loading")}
+			</div>
+		);
 	}
 
 	return (
@@ -285,7 +290,7 @@ function SecurityLevelCard(props: {
 			</div>
 
 			{expanded && (
-				<div className="flex flex-col gap-3 border-t border-border/40 px-3 py-3">
+				<div className="flex flex-col gap-3 border-t border-border/40 px-3 py-3 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-fast">
 					<div className="grid grid-cols-2 gap-3">
 						<div className="flex flex-col gap-1">
 							<label className="text-micro text-muted-foreground">{t("security.levelName")}</label>
@@ -305,7 +310,7 @@ function SecurityLevelCard(props: {
 								<div key={tool} className="flex items-center justify-between gap-2">
 									<span className="text-control text-muted-foreground">{t(`security.tool.${tool}`)}</span>
 									<Select value={level.toolActions[tool] ?? level.defaultAction} onValueChange={(value) => onChange({ toolActions: { ...level.toolActions, [tool]: value as SecurityAction } })}>
-										<SelectTrigger className="h-7 w-24">
+										<SelectTrigger size="sm" className="w-24">
 											<SelectValue />
 										</SelectTrigger>
 										<SelectContent>
@@ -350,7 +355,7 @@ function SecurityLevelCard(props: {
 						<div className="flex flex-col gap-1">
 							<label className="text-micro text-muted-foreground">{t("security.pathPolicyTitle")}</label>
 							<Select value={level.pathPolicy} onValueChange={(value) => onChange({ pathPolicy: value as SecurityPathPolicy })}>
-								<SelectTrigger className="h-8">
+								<SelectTrigger size="sm">
 									<SelectValue />
 								</SelectTrigger>
 								<SelectContent>
@@ -363,7 +368,7 @@ function SecurityLevelCard(props: {
 						<div className="flex flex-col gap-1">
 							<label className="text-micro text-muted-foreground">{t("security.defaultActionTitle")}</label>
 							<Select value={level.defaultAction} onValueChange={(value) => onChange({ defaultAction: value as SecurityAction })}>
-								<SelectTrigger className="h-8">
+								<SelectTrigger size="sm">
 									<SelectValue />
 								</SelectTrigger>
 								<SelectContent>

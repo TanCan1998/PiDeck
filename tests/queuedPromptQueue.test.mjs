@@ -21,6 +21,7 @@ const queueStateSource = readFileSync("src/renderer/src/utils/queuedPromptQueue.
 const toolRuntimeStateSource = readFileSync("src/shared/toolRuntimeState.ts", "utf8");
 const agentManagerSource = readFileSync("src/main/pi/AgentManager.ts", "utf8");
 const webServiceSource = readFileSync("src/main/web/WebServiceManager.ts", "utf8");
+const webApiRoutesSource = readFileSync("src/main/web/WebApiRoutes.ts", "utf8");
 const sharedTypesSource = [readFileSync("src/shared/types.ts", "utf8"), readFileSync("src/shared/types/session.ts", "utf8")].join("\n");
 // Queue ownership now lives in useQueuedPrompt.
 const queuedPromptHookSource = readFileSync("src/renderer/src/hooks/useQueuedPrompt.ts", "utf8");
@@ -53,7 +54,7 @@ test("pending prompts share the native content width constraint without hiding c
 	assert.doesNotMatch(composerPanelsSource, /justify-end/);
 	assert.doesNotMatch(composerPanelsSource, /w-\[clamp\(13\.5rem,36%,22\.5rem\)\]/);
 	assert.match(composerPanelsSource, /queued-row flex h-9 min-h-9 shrink-0/);
-	assert.match(composerPanelsSource, /truncate text-\[13px\] leading-5/);
+	assert.match(composerPanelsSource, /truncate text-control leading-5/);
 	assert.doesNotMatch(stylesSource, /\.queued-card \{/);
 });
 
@@ -95,9 +96,13 @@ test("busy composer keeps send circle; stop only when input is empty", () => {
 	assert.match(sendControls, /onStop=\{composer\.delivery\.abort\}/);
 	// 忙碌时有无内容决定停止/发送：hasContent 由控制器传入，不再只看 isAgentBusy
 	assert.match(sendControls, /hasContent=\{composer\.hasContent\}/);
-	assert.doesNotMatch(sendControls, /onSendSteer/);
-	assert.doesNotMatch(sendControls, /onSendFollowUp/);
-	assert.doesNotMatch(sendControls, /onSendAsk/);
+	// 发送钮拆分为「主按钮 + caret 下拉」：主按钮仍是 发送/停止（onSend/onStop）；
+	// 并行发送（sendParallel）、插队（sendSteer）、排队（sendFollowUp）前置到 caret 菜单，
+	// 让用户发送前就能发现投递方式（此前只能发出后在队列行切换，感知差）。
+	assert.match(sendControls, /onSendSteer=\{composer\.delivery\.sendSteer\}/);
+	assert.match(sendControls, /onSendFollowUp=\{composer\.delivery\.sendFollowUp\}/);
+	assert.match(sendControls, /onSendParallel=\{composer\.delivery\.sendParallel\}/);
+	assert.match(sendControls, /canSendParallel=\{composer\.delivery\.canSendParallel\}/);
 	assert.match(composerPanelsSource, /composer-send-primary/);
 	assert.match(composerPanelsSource, /primaryStops \? t\("app\.stop"\) : t\("app\.send"\)/);
 	assert.match(composerPanelsSource, /onClick=\{primaryStops \? props\.onStop : props\.onSend\}/);
@@ -105,8 +110,33 @@ test("busy composer keeps send circle; stop only when input is empty", () => {
 	assert.match(composerPanelsSource, /hasContent: props\.hasContent/);
 	assert.doesNotMatch(composerPanelsSource, /send-behavior-toggle/);
 	assert.doesNotMatch(composerPanelsSource, /send-behavior-chevron/);
-	assert.doesNotMatch(composerPanelsSource, /<DropdownMenu>/);
+	// caret 下拉菜单（Radix DropdownMenu）：承载 steer/followUp/parallel 三个投递动作
+	assert.match(composerPanelsSource, /<DropdownMenu>/);
+	assert.match(composerPanelsSource, /app\.sendBehaviorTitle/);
 	assert.doesNotMatch(composerPanelsSource, /composer-bar-btn stop/);
+	assert.match(composerPanelsSource, /composer-send-primary size-7 rounded-l-md/);
+	// 主钮与 caret 用 shadcn ButtonGroup 官方 split-button 形态拼成一颗圆角矩形：
+	// DropdownMenu 直接作为组内子项（不加 ButtonGroupSeparator / fragment），相邻内侧角由组收平；
+	// 不再允许回到「大黑圆 + 小灰圆」两颗 rounded-full 的割裂形态。
+	assert.match(composerPanelsSource, /<ButtonGroup className="composer-send-controls">/);
+	assert.doesNotMatch(composerPanelsSource, /ButtonGroupSeparator/);
+	assert.doesNotMatch(composerPanelsSource, /rounded-full bg-\[var\(--color-accent\)\]/);
+});
+
+test("composer send split menu exposes steer/followUp/parallel items", () => {
+	// caret 菜单三项：插队（steer，仅忙碌时可用）、排队（followUp）、并行（sendParallel）。
+	// 图标/键名与队列行一致，保持用户认知一致。
+	assert.match(composerPanelsSource, /onSendSteer\?\./);
+	assert.match(composerPanelsSource, /onSendFollowUp\?\./);
+	assert.match(composerPanelsSource, /onSendParallel\?\./);
+	assert.match(composerPanelsSource, /app\.sendSteerTitle/);
+	assert.match(composerPanelsSource, /app\.sendFollowUpTitle/);
+	assert.match(composerPanelsSource, /app\.sendAskTitle/);
+	assert.match(composerPanelsSource, /<ChevronDown/);
+	// 并行发送不支持图片附件：控制器按 canSendParallel=false 置灰
+	assert.match(composerPanelsSource, /disabled=\{props\.canSendParallel === false\}/);
+	assert.match(composerControllerSource, /sendToAsk\(effectiveProjectId, text/);
+	assert.match(composerControllerSource, /originSessionId: sessionId/);
 });
 
 test("composer keeps native typing inside the Session feature root", () => {
@@ -121,7 +151,8 @@ test("composer keeps native typing inside the Session feature root", () => {
 	assert.doesNotMatch(queuedPromptHookSource, /promptByAgent/);
 	assert.match(appSource, /livePromptByAgentRef\.current = migrateAgentRecord/);
 	assert.doesNotMatch(composerControllerSource, /sendBehaviorMenuOpen/);
-	assert.doesNotMatch(composerPanelsSource, /<DropdownMenuItem/);
+	// caret 拆分菜单已常驻发送钮（见上 test），这里只确认队列行仍保留原生行为切换，不与发送菜单重复
+	assert.match(composerPanelsSource, /<DropdownMenuItem/);
 });
 
 test("queue drain is serialized and waits for an ordered canonical Session capability event", () => {
@@ -131,7 +162,8 @@ test("queue drain is serialized and waits for an ordered canonical Session capab
 	//（见 tests/sessionRunControl.test.mjs 的能力矩阵断言）。
 	assert.match(sessionRuntimeControllerSource, /hasInFlightQueuedPrompt: activeQueuedPrompts\.some\(/);
 	assert.match(sessionRuntimeControllerSource, /sessionRunCapabilities\(\{/);
-	assert.match(appSource, /queueFlushBySessionRef\.current\.has\(sessionId\)/);
+	// flush 串行化闸门随队列逻辑迁入 useQueuedPrompt；App 只保留 ref 定义并注入。
+	assert.match(queuedPromptHookSource, /queueFlushBySessionRef\.current\.has\(sessionId\)/);
 	assert.doesNotMatch(sessionRuntimeControllerSource, /queuedPrompts\[activeAgentId\]/);
 	assert.doesNotMatch(globalListenersSource, /sessions\.onRuntimeEvent\(/);
 	assert.match(sessionRuntimeBridgeSource, /sessions\.onRuntimeEvent\(/);
@@ -139,7 +171,12 @@ test("queue drain is serialized and waits for an ordered canonical Session capab
 	assert.match(appSource, /previous\?\.isExecutingTool\s*&&\s*!current\.isExecutingTool[\s\S]*?queue\.flushQueuedSteerPrompts\(sessionId\)/);
 	assert.match(runtimeStateSource, /incoming\.toolStateSequence < current\.toolStateSequence/);
 	assert.match(agentManagerSource, /updateActiveToolCalls/);
-	assert.match(toolRuntimeStateSource, /calls\.delete\(event\.toolCallId\)/);
+	// end 的 key 必须经 resolveEndToolCallKey 解析（缺 toolCallId 时按 toolName / 唯一项回退），
+	// 不能直接按原始 id 删除：start 缺 id 时用的是 `${toolName}-${timestamp}` 兜底 key，
+	// 直接删会让工具永久「执行中」，这个 true→false 边沿就永远不出现，
+	// 排队的 steer 提示词会一直卡在队列里（行为细节见 tests/toolRuntimeState.test.mjs）。
+	assert.match(toolRuntimeStateSource, /const key = resolveEndToolCallKey\(calls, event\.toolCallId, event\.toolName\)/);
+	assert.match(toolRuntimeStateSource, /if \(key !== undefined\) calls\.delete\(key\)/);
 	assert.match(toolRuntimeStateSource, /completedBatch: event\.type === "end" && current\.size > 0 && calls\.size === 0/);
 	assert.match(queuedPromptHookSource, /claimIdleHead\(queuedPromptsRef\.current, sessionId\)/);
 	assert.match(queuedPromptHookSource, /claimNextSteerPrompt\(queuedPromptsRef\.current, sessionId\)/);
@@ -208,8 +245,11 @@ test("indeterminate prompt timeout never becomes a retryable rejection", () => {
 test("prompt acceptance is explicit across the main and renderer boundary", () => {
 	assert.match(agentManagerSource, /Promise<SendPromptResult>/);
 	assert.match(agentManagerSource, /accepted: false,[\s\S]{0,160}?error: errorMessage,[\s\S]{0,160}?i18nKey: "diagnostic\./);
-	assert.match(webServiceSource, /this\.sendJson\(response, \{ result \}\)/);
-	assert.doesNotMatch(webServiceSource, /sendError\(response, 409, result\.error\)/);
+	// 提示词接受语义在路由表（Wave 5 从 manager 迁到 WebApiRoutes）。
+	assert.match(webApiRoutesSource, /this\.sendJson\(response, \{ result \}\)/);
+	assert.doesNotMatch(webApiRoutesSource, /sendError\(response, 409, result\.error\)/);
 	assert.match(agentManagerSource, /if \(cancelled\)[\s\S]*?命令已取消[\s\S]*?return \{ accepted: true \}/);
-	assert.match(appSource, /if \(!result\.accepted\)[\s\S]*?translateI18nDescriptor\(result, result\.error\)[\s\S]*?PromptDeliveryUnknownError\(localizedError\)[\s\S]*?throw new Error\(localizedError\)/);
+	// sendPrompt 的显式接受/失败判定随 dispatchPromptSnapshot 迁入 useSessionPromptDispatch。
+	const promptDispatchSource = readFileSync("src/renderer/src/hooks/session/useSessionPromptDispatch.ts", "utf8");
+	assert.match(promptDispatchSource, /if \(!result\.accepted\)[\s\S]*?translateI18nDescriptor\(result, result\.error\)[\s\S]*?PromptDeliveryUnknownError\(localizedError\)[\s\S]*?throw new Error\(localizedError\)/);
 });

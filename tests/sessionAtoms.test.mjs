@@ -42,17 +42,30 @@ function loadAtoms() {
 	const liveTextHandoff = compileModule("src/renderer/src/utils/liveTextHandoff.ts");
 	const outlineRevision = compileModule("src/renderer/src/atoms/outlineRevision.ts");
 	const outlineProjectionCache = compileModule("src/renderer/src/atoms/outlineProjectionCache.ts");
+	// 侧栏计时点：session-atoms 在回合边界推进它（见 utils/sessionActivityClock.ts）。
+	const sessionActivityClock = compileModule("src/renderer/src/utils/sessionActivityClock.ts");
+	const sessionActivityAtoms = compileModule("src/renderer/src/atoms/sessionActivityAtoms.ts", {
+		"../utils/sessionActivityClock": sessionActivityClock,
+	});
+	// session-atoms ⇄ composer-atoms 是模块级循环：双方都只在惰性 action 体内用对方导出。
+	// 先给 session-atoms 一个可后填的桥对象，两模块都编译完后再回填真实导出。
+	const composerExports = {};
 	const sessions = compileModule("src/renderer/src/atoms/session-atoms.ts", {
+		"./recent-session-atoms": compileModule("src/renderer/src/atoms/recent-session-atoms.ts"),
+		"./composer-atoms": composerExports,
 		"../utils/agentRuntimeState": runtimeState,
 		"../utils/sessionRecordIdentity": sessionRecordIdentity,
 		"../utils/liveTextHandoff": liveTextHandoff,
 		"./outlineRevision": outlineRevision,
 		"./outlineProjectionCache": outlineProjectionCache,
+		"./sessionActivityAtoms": sessionActivityAtoms,
+		"../utils/sessionActivityClock": sessionActivityClock,
 	});
 	const composer = compileModule("src/renderer/src/atoms/composer-atoms.ts", {
 		"./session-atoms": sessions,
 	});
-	return { ...sessions, ...composer, outlineProjectionCache };
+	Object.assign(composerExports, composer);
+	return { ...sessions, ...composer, outlineProjectionCache, ...sessionActivityAtoms };
 }
 
 function session(id, projectId = "project-1", overrides = {}) {
@@ -340,6 +353,48 @@ test("anonymous session switch-back does not wipe runtime messages via empty dis
 	assert.deepEqual(store.get(atoms.sessionMessagesCacheAtom)["anon-42"].messages, [{ id: "m1", role: "user", text: "hi" }]);
 });
 
+test("runtime binding event advances an activating send state to sending (ACP first-turn fix)", () => {
+	const atoms = loadAtoms();
+	const store = createStore();
+	// 首条消息发送：sendState 先置 activating（此时 runtime 尚未绑定）。
+	store.set(atoms.sessionSendStateByIdAtom, { "session-a": { status: "activating", requestId: "req-1" } });
+	// ACP 首回合：激活完成时先推 idle（绑定事件），回合派发后推 running。
+	store.set(atoms.applySessionRuntimeEventAtom, {
+		sessionId: "session-a",
+		agentId: "agent-a",
+		runtimeGeneration: 1,
+		sourceChannel: "agents:state",
+		payload: { id: "agent-a", status: "idle" },
+	});
+	let sendState = store.get(atoms.sessionSendStateBySessionIdAtomFamily("session-a"));
+	assert.equal(sendState.status, "sending");
+	// requestId 必须保留：结算路径 isCurrentRequest() 靠它识别本次发送。
+	assert.equal(sendState.requestId, "req-1");
+	// running 事件不再重复改写（已不是 activating）。
+	store.set(atoms.applySessionRuntimeEventAtom, {
+		sessionId: "session-a",
+		agentId: "agent-a",
+		runtimeGeneration: 1,
+		sourceChannel: "agents:state",
+		payload: { id: "agent-a", status: "running" },
+	});
+	sendState = store.get(atoms.sessionSendStateBySessionIdAtomFamily("session-a"));
+	assert.equal(sendState.status, "sending");
+	assert.equal(sendState.requestId, "req-1");
+	// 终态事件（closed）不推进 activating（激活失败由 IPC 拒绝结果结算为 error）。
+	store.set(atoms.sessionSendStateByIdAtom, { "session-b": { status: "activating", requestId: "req-2" } });
+	store.set(atoms.applySessionRuntimeEventAtom, {
+		sessionId: "session-b",
+		agentId: "agent-b",
+		runtimeGeneration: 1,
+		sourceChannel: "agents:state",
+		payload: { id: "agent-b", status: "closed" },
+	});
+	assert.equal(store.get(atoms.sessionSendStateBySessionIdAtomFamily("session-b")).status, "activating");
+	// 无发送中的会话不受影响。
+	assert.equal(store.get(atoms.sessionSendStateBySessionIdAtomFamily("session-c")).status, "idle");
+});
+
 test("routes runtime payloads into session-keyed messages and state", () => {
 	const atoms = loadAtoms();
 	const store = createStore();
@@ -361,6 +416,53 @@ test("routes runtime payloads into session-keyed messages and state", () => {
 	assert.equal(runtime.agentId, "agent-a");
 	assert.equal(runtime.status, "running");
 	assert.equal(store.get(atoms.sessionMessagesCacheAtom)["session-a"].messages[0].text, "hello");
+});
+
+/** 等一个毫秒边界：计时点用 Date.now()，相邻断言隔开才能看出「有没有被推进」。 */
+function tick(ms = 5) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+test("sidebar timing point advances only on turn start and turn end", async () => {
+	const atoms = loadAtoms();
+	const store = createStore();
+	const send = (sourceChannel, payload) =>
+		store.set(atoms.applySessionRuntimeEventAtom, {
+			sessionId: "session-a",
+			agentId: "agent-a",
+			runtimeGeneration: 1,
+			sourceChannel,
+			payload,
+		});
+	const anchor = () => store.get(atoms.sessionActivityAnchorByIdAtom)["session-a"];
+
+	// 首次观测到空闲：没有边界发生，不得写计时点（否则历史行全变成「刚刚」）。
+	send("agents:state", { id: "agent-a", status: "idle" });
+	assert.equal(anchor(), undefined);
+
+	// 用户发消息 → 本轮开始：计时点推进到现在。
+	await tick();
+	send("agents:state", { id: "agent-a", status: "running" });
+	const turnStart = anchor();
+	assert.equal(typeof turnStart, "number");
+
+	// 流式/工具调用等中间态不推进计时点（否则读不出「这轮跑了多久」）。
+	await tick();
+	send("agents:runtime-state", { agentId: "agent-a", state: { isStreaming: true, isExecutingTool: true, executingToolName: "bash" } });
+	assert.equal(anchor(), turnStart);
+
+	// turn 结束（agent_end 边沿）：新计时点。
+	await tick();
+	send("agents:runtime-state", { agentId: "agent-a", state: { isTurnActive: true } });
+	send("agents:runtime-state", { agentId: "agent-a", state: { isStreaming: false, isExecutingTool: false } });
+	assert.equal(anchor(), turnStart);
+	await tick();
+	send("agents:runtime-state", { agentId: "agent-a", state: { isTurnActive: false } });
+	assert.ok(anchor() > turnStart);
+
+	// 会话删除：计时点与其它 per-session 状态一起清掉。
+	store.set(atoms.removeSessionStateAtom, "session-a");
+	assert.equal(anchor(), undefined);
 });
 
 test("ignores late events from an older runtime generation", () => {

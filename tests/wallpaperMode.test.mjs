@@ -4,10 +4,13 @@ import test from "node:test";
 import { readRendererStyles } from "./helpers/rendererStyles.mjs";
 
 const css = readRendererStyles();
+const shell = readFileSync("src/renderer/src/components/app/AppShell.tsx", "utf8");
 
 test("wallpaper mode: background image reveals through translucent panels", () => {
-	// 启用背景图时主容器透明（修复前 .wechat-shell 不透明背景盖住 body 背景图）
-	assert.match(css, /:root\[data-bg-image="on"\] \.wechat-shell\s*\{\s*background:\s*transparent;/);
+	// 启用背景图时主容器透明（修复前 .wechat-shell 不透明背景盖住 body 背景图）。
+	// 现由 shell 上的 Tailwind `[[data-bg-image=on]_&]:bg-transparent` 承担，
+	// 覆盖主工作台与 compact 小任务两套 shell，不再写死根选择器。
+	assert.match(shell, /wechat-shell[\s\S]*?\[\[data-bg-image=on\]_&\]:bg-transparent/);
 	// 弹窗使用独立中高不透明度，并在弹窗内局部覆盖 bg 变量（变量继承），
 	// 让 header/body 统一跟随壁纸设置，同时保留足够可读性。
 	assert.match(css, /:root\[data-bg-image="on"\] \[data-slot="dialog-content"\][\s\S]*?--wallpaper-dialog-alpha: max\(90%, calc\(var\(--wallpaper-panel-alpha, 30%\) \+ 35%\)\);/);
@@ -73,17 +76,18 @@ test("Pi management and feedback dialogs inherit page wallpaper transparency", (
 });
 
 test("all wallpaper dialogs share one readable baseline (no panel-alpha downgrade)", () => {
-	// 回归守卫：弹窗透明度只保留「弹窗基线」一档。若有人再把某个弹窗（或草稿本）
-	// 按面板档降档，背景图模式下该弹窗立刻发虚——这里逐条锁住。
+	// 回归守卫：弹窗透明度只保留「弹窗基线」一档。
+	// 按面板档降档会让背景图模式下的弹窗发虚；草稿本已复用普通抽屉底色。
 	assert.doesNotMatch(css, /--wallpaper-dialog-alpha:\s*var\(--wallpaper-panel-alpha,\s*30%\)/, "no surface may downgrade dialogs to panel alpha");
-	// 草稿本与 shadcn DialogContent 共用同一条基线规则（同一份 bg token 注入）。
-	assert.match(css, /:root\[data-bg-image="on"\] \[data-slot="dialog-content"\],[\s\S]{0,240}?:root\[data-bg-image="on"\] \.scratch-pad-panel \{[\s\S]{0,240}?--wallpaper-dialog-alpha: max\(90%, calc\(var\(--wallpaper-panel-alpha, 30%\) \+ 35%\)\);/);
+	assert.match(css, /:root\[data-bg-image="on"\]\s+\[data-slot="dialog-content"\]\s*\{[\s\S]{0,240}?--wallpaper-dialog-alpha:\s*max\(90%,\s*calc\(var\(--wallpaper-panel-alpha,\s*30%\)\s*\+\s*35%\)\);/);
+	assert.doesNotMatch(css, /\.scratch-pad-panel\s*\{/);
 	// 工作台弹框仍要扁平化内部卡片底色，避免双层半透明（≈51%）白形成磨砂补丁。
 	assert.match(css, /\[data-slot="dialog-content"\]\.environment-dialog \{[\s\S]{0,700}?--color-bg-panel: transparent;[\s\S]{0,200}?--color-card: transparent;[\s\S]{0,200}?--color-bg-muted: transparent;/);
 });
 
-test("App.tsx toggles wallpaper mode marker with background image setting", () => {
-	const appSource = readFileSync("src/renderer/src/App.tsx", "utf8");
+test("useAppAppearance toggles wallpaper mode marker with background image setting", () => {
+	// 壁纸/皮肤注入已从 App.tsx 迁至 hooks/appearance/useAppAppearance.ts（域 owner）
+	const appSource = readFileSync("src/renderer/src/hooks/appearance/useAppAppearance.ts", "utf8");
 	assert.match(appSource, /root\.dataset\.bgImage = settings\.backgroundImage \? "on" : "off"/);
 	// 皮肤 + 背景图合并为单一 effect（修复互相清除：皮肤 effect 清 token 误清壁纸注入、
 	// 背景 else 分支误清皮肤 bg 键）

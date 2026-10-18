@@ -10,16 +10,52 @@
 
 import { createElement } from "react";
 import { toast } from "sonner";
+import { DEFAULT_TOAST_DURATION_MS, TOAST_DURATION_STICKY_MS } from "../../../shared/types";
+import type { NoticeHistoryKind as SharedNoticeHistoryKind } from "../../../shared/types/noticeHistory";
 import { NoticeToastCard } from "../components/ui-shadcn/notice-toast";
 import { writeClipboard } from "./clipboard";
+import { addActiveNotice, removeActiveNotice } from "./noticeCountStore";
+import { recordNoticeHistory } from "./noticeHistory";
+import type { NoticeHistoryEntry } from "./noticeHistory";
 import { t } from "../i18n";
 
 /**
- * 通知语义档位。
+ * 通知语义档位：从共享通知历史档位派生（neutral 是无 kind 调用的展示档，不属于语义档）。
  * `question` 专供 Ask 等待回答：「需要你操作」而非「出错」，不用 warning 黄三角
  * 以免被误读成失败。
  */
-export type NoticeKind = "info" | "error" | "warning" | "question";
+export type NoticeKind = Exclude<SharedNoticeHistoryKind, "neutral">;
+
+/**
+ * 全局 toast 展示时长（ms），Number.POSITIVE_INFINITY = 常驻。
+ * 由设置项 `toastDurationMs` 经 configureNoticeDefaults 同步（App 装配层 effect），
+ * 出厂值取 shared 的 DEFAULT_TOAST_DURATION_MS，与主进程 defaultSettings 同源。
+ * 口径是「全局统一」：调用方显式传入的时长不再被尊重，只有常驻（Infinity）保留——
+ * 扩展 ctx.ui.notify 等提示过去硬编码 1500ms，用户普遍反馈「烧一下就没了」。
+ */
+let noticeDefaultDurationMs: number = DEFAULT_TOAST_DURATION_MS;
+
+/**
+ * 同步 toast 展示时长（来自设置项 toastDurationMs）。
+ * 设置层用有限哨兵 TOAST_DURATION_STICKY_MS(-1) 表示常驻——settings.json 存不了
+ * Infinity（JSON 序列化成 null）——这里映射回 sonner 需要的 Number.POSITIVE_INFINITY。
+ * 其余非法值（NaN/负数/0）忽略。
+ */
+export function configureNoticeDefaults(input: { toastDurationMs?: number }): void {
+	const value = input.toastDurationMs;
+	if (typeof value !== "number") return;
+	if (value === TOAST_DURATION_STICKY_MS) {
+		noticeDefaultDurationMs = Number.POSITIVE_INFINITY;
+		return;
+	}
+	if (!Number.isFinite(value) || value <= 0) return;
+	noticeDefaultDurationMs = value;
+}
+
+/** 当前生效的全局展示时长（测试与调试用）。 */
+export function getNoticeDefaultDurationMs(): number {
+	return noticeDefaultDurationMs;
+}
 
 type NoticeData = {
 	message: string;
@@ -110,8 +146,9 @@ function ensureFallbackHost() {
 	const host = document.createElement("div");
 	host.id = "app-notice-fallback-host";
 	host.setAttribute("aria-live", "polite");
-	// 与 sonner 的 top-right 位置保持一致，并让开标题栏拖拽区，避免兑底与正式 toast 位置跳动
-	host.style.cssText = ["position:fixed", "top:calc(var(--window-drag-height, 0px) + 12px)", "right:16px", "z-index:2147483000", "display:flex", "flex-direction:column", "align-items:flex-end", "gap:8px", "pointer-events:none", "max-width:min(520px, calc(100vw - 32px))", "-webkit-app-region:no-drag"].join(";");
+	// 与 sonner 的 top-right 位置和宽度保持一致；兜底只在 Toaster 尚未挂载时短暂使用，
+	// 也必须限制超长标题，否则首屏异常提示会再次撑成横条。
+	host.style.cssText = ["position:fixed", "top:calc(var(--window-drag-height, 0px) + 12px)", "right:16px", "z-index:2147483000", "display:flex", "flex-direction:column", "align-items:flex-end", "gap:8px", "pointer-events:none", "width:min(420px, calc(100vw - 32px))", "-webkit-app-region:no-drag"].join(";");
 	document.body.appendChild(host);
 	fallbackHost = host;
 	return host;
@@ -119,6 +156,8 @@ function ensureFallbackHost() {
 
 /** 关闭兜底通知并回收宿主节点；持久 Ask 通知只能通过这个按钮结束。 */
 function dismissFallbackNotice(item: HTMLDivElement, host: HTMLDivElement) {
+	// noticeId 已 String 化（showFallbackNotice），Set 按 id 幂等，重复关闭不减穿
+	if (item.dataset.noticeId) removeActiveNotice(item.dataset.noticeId);
 	item.remove();
 	if (host.childElementCount === 0) {
 		host.remove();
@@ -151,7 +190,8 @@ function showFallbackNotice(message: string, duration: number, kind: NoticeKind 
 		"box-shadow:var(--shadow-popover, 0 4px 12px rgba(0,0,0,0.12))",
 		"font:500 13px/1.5 var(--font-family-base, system-ui,-apple-system,Segoe UI,sans-serif)",
 		"word-break:break-word",
-		"width:min(360px, calc(100vw - 32px))",
+		// 兜底宿主已经限定最大宽度，子项填满宿主即可与 sonner 卡片同宽并正常换行。
+		"width:100%",
 	].join(";");
 	item.setAttribute("role", kind === "error" ? "alert" : "status");
 	item.dataset.noticeId = noticeId;
@@ -237,6 +277,8 @@ function showFallbackNotice(message: string, duration: number, kind: NoticeKind 
 	item.appendChild(actionGroup);
 
 	host.appendChild(item);
+	// 计入活跃 toast 集合（收纳条数据源），关闭经 dismissFallbackNotice 按 id 移除
+	addActiveNotice(noticeId);
 	if (Number.isFinite(duration)) {
 		window.setTimeout(() => dismissFallbackNotice(item, host), Math.max(1200, duration));
 	}
@@ -247,9 +289,12 @@ function showFallbackNotice(message: string, duration: number, kind: NoticeKind 
 const iconButtonCss = ["display:inline-flex", "align-items:center", "justify-content:center", "width:24px", "height:24px", "flex:none", "border:0", "border-radius:var(--radius-md, 6px)", "background:transparent", "color:var(--color-text-tertiary, #8b8f94)", "cursor:pointer"].join(";");
 
 /**
- * 弹出全局 toast。duration 省略时 info=1500ms、需要用户留意/处理的 error/warning/question=3000ms。
+ * 弹出全局 toast。展示时长由设置项 toastDurationMs 统一决定（全局口径）：
+ * 除调用方显式传 Number.POSITIVE_INFINITY（常驻，需手动关闭）外，
+ * 传入的 duration 与 error/warning/question 的内部默认档都被配置档覆盖。
  * 粘性提示必须传 Number.POSITIVE_INFINITY：sonner 把 duration: 0 当成立刻关闭，
  * 看起来就像“闪一下就没了”。空 message 会直接丢弃，调用方需保证有正文。
+ * 每次弹出都会记进 noticeHistory 环形缓冲（历史面板回看/复制/重放的唯一数据源）。
  */
 export function showNotice(
 	message: string,
@@ -260,10 +305,21 @@ export function showNotice(
 	/** 稳定 id：同 id 再次弹出时顶掉上一条，避免自动重试等连发场景堆一排 toast。 */
 	id?: NoticeId,
 ): NoticeId | undefined {
-	// question 需要用户点开会话去回答，比纯提示停留更久（Ask 场景通常自带 Infinity 保持粘性）。
-	const resolvedDuration = duration ?? (kind === "error" || kind === "warning" || kind === "question" ? 3000 : 1500);
+	// 常驻是唯一例外：只有调用方明确要求「手动关闭」时才跳过配置档。
+	const resolvedDuration = duration === Number.POSITIVE_INFINITY ? Number.POSITIVE_INFINITY : noticeDefaultDurationMs;
 	const text = String(message ?? "").trim();
 	if (!text) return;
+	// 单点记录历史：卡片主文案=标题（无标题时整段正文），描述只在有标题时存在。
+	// 兜底分支同样经过这里，保证 Toaster 未挂载期间的 toast 也留痕。
+	// 同一份数据推送主进程落盘（fire-and-forget，失败静默——历史永不阻断/打断 toast）。
+	const historyInput = {
+		title: title ? title : text,
+		description: title ? text : undefined,
+		kind: kind ?? "neutral",
+		duration: resolvedDuration,
+	} as const;
+	recordNoticeHistory(historyInput);
+	void window?.piDesktop?.noticeHistory?.record(historyInput)?.catch(() => undefined);
 	if (!toasterMounted()) {
 		return showFallbackNotice(text, resolvedDuration, kind, title, actions, id);
 	}
@@ -274,6 +330,7 @@ export function showNotice(
 	const noticeId = id !== undefined ? id : `notice-${++nextSonnerNoticeId}`;
 	const cardTitle = title ? title : text;
 	const cardDescription = title ? text : undefined;
+	addActiveNotice(noticeId);
 	toast.custom(
 		(toastId) =>
 			createElement(NoticeToastCard, {
@@ -283,7 +340,14 @@ export function showNotice(
 				description: cardDescription,
 				actions,
 			}),
-		{ id: noticeId, duration: resolvedDuration },
+		{
+			id: noticeId,
+			duration: resolvedDuration,
+			// sonner 的超时/手动/外部 dismiss 最终都走 delete → onDismiss（见其源码
+			// toast.delete 分支），是唯一可靠的「消失」信号。同 id 顶掉时 sonner 合并选项、
+			// 生效的仍是首弹闭包，但 remove 按 id 幂等，先后触发也只减一次。
+			onDismiss: () => removeActiveNotice(noticeId),
+		},
 	);
 	return noticeId;
 }
@@ -297,4 +361,15 @@ export function dismissNotice(id: NoticeId | undefined) {
 	}
 	const item = fallbackHost?.querySelector<HTMLDivElement>(`[data-notice-id="${CSS.escape(String(id))}"]`);
 	if (item && fallbackHost) dismissFallbackNotice(item, fallbackHost);
+}
+
+/**
+ * 把一条历史记录重新弹成 toast（通知历史面板的「重放」）。
+ * 刻意不还原 action 按钮：回调不在历史里持久化，重放只用于「再看一眼内容」，
+ * 若原提示带操作，用户可循原路径（设置/会话）再触发。时长沿用记录时的生效值。
+ */
+export function replayNoticeEntry(entry: NoticeHistoryEntry): NoticeId | undefined {
+	const kind: NoticeKind | undefined = entry.kind === "neutral" ? undefined : entry.kind;
+	if (entry.description) return showNotice(entry.description, entry.duration, kind, entry.title);
+	return showNotice(entry.title, entry.duration, kind);
 }

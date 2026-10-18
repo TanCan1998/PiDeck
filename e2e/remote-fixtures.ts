@@ -1,6 +1,6 @@
-import { _electron as electron, expect, test as base, type ElectronApplication, type Page, type TestInfo } from "@playwright/test";
+import { _electron as electron, expect, test as base, type ElectronApplication, type Locator, type Page, type TestInfo } from "@playwright/test";
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -129,18 +129,26 @@ export const test = base.extend<RemoteAppFixture & { remoteCredentials: RemoteAc
 		await use(credentials);
 	},
 	remoteUserDataRoot: async ({}, use) => {
-		const dir = mkdtempSync(join(tmpdir(), "pideck-e2e-remote-"));
+		// Windows 上 %TEMP% 常是 8.3 短名（C:\Users\ADMINI~1\...），而 Electron 主进程的 realpath 会把它展开成长名，
+		// dev 的项目文件读取边界用「canonical 目标 vs 词法根」比较，短名根会被误判为越界并在启动时打一条
+		// files:list 失败（产品缺陷，已在验收报告单独记录，不在 e2e 里修）。这不是本测试要验的行为：把隔离根
+		// 归一成长名一次，夹具里的项目路径就只有一种形态（系统目录选择器给的也通常是长名）。仅统一路径形态，
+		// 不改变隔离范围，也不影响任何断言。
+		const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "pideck-e2e-remote-")));
 		await use(dir);
 		await rm(dir, { recursive: true, force: true, maxRetries: 12, retryDelay: 250 });
 	},
-	remoteApp: async ({ remoteUserDataRoot }, use) => {
+	remoteApp: async ({ remoteUserDataRoot }, use, testInfo) => {
 		// 依赖 remoteCredentials：无凭据时该 fixture 已被 skip，这里根本不会执行（也就不会启动 Electron）。
 		const entry = join(repoRoot, "out", "main", "index.js");
 		if (!existsSync(entry)) throw new Error("out/main/index.js 不存在：先跑 npm run build:fast（e2e 不负责构建）");
 		const profileDir = join(remoteUserDataRoot, "profile");
 		mkdirSync(profileDir, { recursive: true });
 		// 语言固定 zh-CN，e2e 的按钮/标签选择器才与字典一致（不受宿主机系统语言影响）。
-		writeFileSync(join(profileDir, "settings.json"), JSON.stringify({ language: "zh-CN" }));
+		// piEnvironmentChecked 预置 true：开发机普遍有多份 pi 安装，全新 profile 首启会弹出「Pi 环境检测」模态，
+		// Radix 会把主界面 aria-hidden → 侧栏设置入口等 getByRole 集体失效（伪装成点击超时）。dev 的 e2e/fixtures.ts
+		// 用同一手法规避；此处与它对齐，真实主机验收不应先被人机环境检查弹窗挡住。
+		writeFileSync(join(profileDir, "settings.json"), JSON.stringify({ language: "zh-CN", piEnvironmentChecked: true }));
 		const env: NodeJS.ProcessEnv = {
 			...process.env,
 			PIDECK_E2E_USER_DATA_DIR: profileDir,
@@ -152,7 +160,14 @@ export const test = base.extend<RemoteAppFixture & { remoteCredentials: RemoteAc
 			CI: "1",
 		};
 		delete env.ELECTRON_RENDERER_URL;
-		const app = await electron.launch({ args: [entry, "--user-data-dir=" + profileDir], env });
+		// xterm 6 默认装 WebGL 渲染器：终端正文只画在 canvas 上，DOM 里没有 .xterm-rows。
+		// 只有「远端终端」验收要读「用户实际看到的终端文本」，因此仅这一条用例关掉 GPU/软件光栅化，
+		// 让 WebGL 不可用、走产品自己 try/catch 的 DOM 渲染器回退（TerminalDock 的官方兜底路径）；
+		// 断言仍读真实渲染结果，不改从 PTY 旁路取数。其余用例保持默认 WebGL 渲染（真实用户路径），
+		// 避免为读文本全局改变渲染后端。
+		const domTerminalRenderer = testInfo.title.includes("远端终端");
+		const rendererArgs = domTerminalRenderer ? ["--disable-gpu", "--disable-software-rasterizer"] : [];
+		const app = await electron.launch({ args: [entry, "--user-data-dir=" + profileDir, ...rendererArgs], env });
 		await use(app);
 		await app.close();
 	},
@@ -321,6 +336,19 @@ export function remoteProjectRow(window: Page, projectName: string) {
 }
 
 /**
+ * 项目标题行里「项目名按钮」的可点/可右键区域。
+ *
+ * dev 的 ProjectTree 重设计删掉了旧的 .project-draggable：项目名现在是一个
+ * button.cursor-grab（点击同时切项目与折叠），里面才是 .conversation-title。
+ * 会话行同样用 .conversation-title，但项目标题行在 DOM 顺序上永远排在它展开的会话之前，
+ * 所以 first() 就是标题本身，而不是某条会话（不用 nth，也不依赖按钮里没有稳定 role/aria-label 的现状）。
+ * 点击/右键都落在标题按钮上：右键事件冒泡到标题行的 onContextMenu，与旧行为一致。
+ */
+export function remoteProjectTitle(window: Page, projectName: string): Locator {
+	return remoteProjectRow(window, projectName).locator(".conversation-title").first();
+}
+
+/**
  * 在指定项目里新建会话（Phase 4 P4.2 真机 UI 验收的**新点**：远端项目的会话创建入口）。
  *
  * 为什么必须单独有它：既有夹具只覆盖到「登记远端项目」，而远端项目的中间空态是**只读**面板
@@ -340,7 +368,7 @@ export async function createRemoteSessionInProject(window: Page, projectName: st
 	await expect(row).toBeVisible();
 	await row.hover();
 	// 展开的项目组中心落在会话列表上，hover浮层所属的标题行才能真的解除命中屏蔽。
-	await row.locator(".project-draggable").hover();
+	await remoteProjectTitle(window, projectName).hover();
 	// aria-label 来自 i18n `app.newNormalSession`（项目行「+」与 Chat 标题栏「+」共用同一文案），
 	// 所以必须限定在项目行内取，避免命中 Chat 区那个同名按钮。
 	const newSession = row.getByRole("button", { name: "普通会话", exact: true });

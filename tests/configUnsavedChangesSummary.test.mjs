@@ -56,7 +56,10 @@ test("装配契约：关闭确认用点名列表，DSH 导航与顶层分页有�
 
 test("装配契约：保存并关闭汇总全部脏来源（不再只存当前 tab）", () => {
 	assert.match(configModal, /roots\.add\(key\.startsWith\("dsh:"\) \? "dsh" : key\)/);
-	assert.match(configModal, /for \(const key of roots\)/);
+	// 保存顺序必须经 orderDirtyKeysForSave：settings 最后保存，否则它的 force 重载
+	// 会连带把 models/auth/raw 的未保存草稿冲成磁盘内容（保存并关闭路径同样适用）。
+	assert.match(configModal, /for \(const key of orderDirtyKeysForSave\(roots\)\)/);
+	assert.doesNotMatch(configModal, /for \(const key of roots\)/);
 	assert.match(configModal, /saveByKey\(key\)/);
 });
 

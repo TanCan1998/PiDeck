@@ -1,4 +1,4 @@
-import type { ChatMessage, ImageContent, TodoItem } from "../../shared/types";
+import type { ChatMessage, DshQueuedMessage, ImageContent, TodoItem } from "../../shared/types";
 import { defaultToolDetailTranslate, formatToolDetail, truncateDetailWithMeta, type ToolDetailTranslate } from "../../shared/formatToolDetail";
 
 /**
@@ -37,9 +37,8 @@ export type DshProjection = {
 	/** 最近一次 assistant 回合的 token 用量（G16：assistant/message 携带 adapter 报告
 	 *  的 usage 时更新，latest wins；缺失 = 适配器未报告）。 */
 	usage?: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number };
-	/** DSH 当轮真实系统提示（request/header 事件的 EpochHeader.system；last wins；
-	 *  缺失 = 会话尚未发过请求头）。dsh-web 轨迹同源——DSH 的系统提示由 harness 按
-	 *  persona + sections 在请求时组装，PiDeck 只能从请求头拿到文本。 */
+	/** DSH 当轮真实系统提示（V4 system/message；旧版 request/header 兼容）。
+	 * 空串表示上游显式清空，undefined 表示尚未读到系统提示。 */
 	systemPrompt?: string;
 	/** 路由上下文容量（request/context 事件携带的 contextWindow，adapter 上报时才有）：
 	 *  上下文圆环的窗口数据源（dsh-web ContextMeter 同源；与 token-meter 的
@@ -115,6 +114,48 @@ export function parseDshTodoList(value: unknown): TodoItem[] | null | undefined 
 	return items;
 }
 
+/**
+ * DSH `inbox` projection 解析：`{ "next-turn": [...], "next-step": [...] }` 整值替换。
+ * 两个数组是必填键（官方投影 init 即写入空数组）；缺任一键视为脏帧返回 undefined
+ * （保持原值，不得把已有排队误清空）。单项非法只跳过该项（排队项之间的独立性好于
+ * todos 的整表约束：一条脏项不应掩盖其余可操作项），但 id 非字符串的项无法操作，
+ * 跳过即丢展示。空数组是合法值（排队被消费/清空）。
+ */
+export function parseDshInboxProjection(value: unknown): DshQueuedMessage[] | undefined {
+	if (value === null || typeof value !== "object") return undefined;
+	const record = value as Record<string, unknown>;
+	const nextTurn = record["next-turn"];
+	const nextStep = record["next-step"];
+	if (!Array.isArray(nextTurn) || !Array.isArray(nextStep)) return undefined;
+	const items: DshQueuedMessage[] = [];
+	for (const target of ["next-turn", "next-step"] as const) {
+		for (const raw of target === "next-turn" ? nextTurn : nextStep) {
+			if (!isRecord(raw)) continue;
+			const id = raw.id;
+			if (typeof id !== "string" || id === "") continue;
+			items.push({ id, target, text: inboxMessageText(raw.content) });
+		}
+	}
+	return items;
+}
+
+/** inbox 项展示文本：text 块拼接，非文本块（图片等）计为 [附件] 后缀。 */
+function inboxMessageText(content: unknown): string {
+	if (!Array.isArray(content)) return "";
+	const parts: string[] = [];
+	let attachments = 0;
+	for (const block of content) {
+		if (!isRecord(block)) continue;
+		if (block.type === "text" && typeof block.text === "string") {
+			parts.push(block.text);
+		} else {
+			attachments += 1;
+		}
+	}
+	const text = parts.join(" ").trim();
+	return attachments > 0 ? (text ? `${text} [+${attachments}]` : ` [+${attachments}]`.trim()) : text;
+}
+
 /** 按类型拆分内容块：text 与 reasoning 分开提取（两者不能混在同一条正文里）。 */
 function splitBlocks(blocks: unknown): { text: string; reasoning: string } {
 	if (!Array.isArray(blocks)) return { text: "", reasoning: "" };
@@ -124,7 +165,10 @@ function splitBlocks(blocks: unknown): { text: string; reasoning: string } {
 		if (!block || typeof block !== "object") continue;
 		const value = block as { type?: unknown; text?: unknown; reasoning?: unknown };
 		if (value.type === "text" && typeof value.text === "string") text += value.text;
-		if (value.type === "reasoning" && typeof value.reasoning === "string") reasoning += value.reasoning;
+		if (value.type === "reasoning") {
+			// V4 与 text 块共用 text 字段；保留旧历史的 reasoning 字段读取。
+			reasoning += typeof value.text === "string" ? value.text : typeof value.reasoning === "string" ? value.reasoning : "";
+		}
 	}
 	return { text, reasoning };
 }
@@ -358,8 +402,8 @@ export function projectDshEvent(
 			// 投影进 projection（渲染层 runtime state 的 token/缓存指标），并写入本条
 			// assistant 消息的 meta.usage（轨迹账本按消息展示 token 用量，dsh-web 同源）。
 			const usageForMessage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number } | undefined = (() => {
-				if (!isRecord(data.message)) return undefined;
-				const usage = (data.message as { usage?: unknown }).usage;
+				// V4 用量属于事件而非 message；旧版内层字段仅在顶层缺失时兜底。
+				const usage = data.usage ?? (isRecord(data.message) ? data.message.usage : undefined);
 				if (!isRecord(usage)) return undefined;
 				const u = usage as Record<string, unknown>;
 				const inputTokens = typeof u.inputTokens === "number" ? u.inputTokens : 0;
@@ -395,6 +439,9 @@ export function projectDshEvent(
 			// 回复都会被拆成独立 agent-run（每个头像时间戳+独立「执行过程」chip）。
 			// 语义：带 tool-call = 中间回复（toolUse）；无 tool-call 的终态 = 最终回复（stop）。
 			const assistantStopReason = hasToolCalls ? "toolUse" : "stop";
+			// 本条 assistant 消息用的模型：DSH 由 request/context 上报路由模型（state.model，
+			// last-wins）；未上报时留空，渲染层不显示。
+			const assistantModel = base.model ? { provider: base.model.provider, modelId: base.model.model } : undefined;
 			if (hasToolCalls && !finalText.trim() && !finalThinking.trim() && !assistantImagesPresent && !base.pendingAssistantId) {
 				next.pendingAssistantId = undefined;
 				next.pendingAssistantText = "";
@@ -419,6 +466,7 @@ export function projectDshEvent(
 						timestamp: eventTime(event.time),
 						stopReason: assistantStopReason,
 						...(assistantImages.length > 0 ? { images: assistantImages } : previous.images ? { images: previous.images } : {}),
+						...(assistantModel ? { model: assistantModel } : previous.model ? { model: previous.model } : {}),
 						// 思考耗时：终态时间作为结束点（startedAt 已在骨架创建时记录）
 						...(finalThinking.trim() || previous.thinkingStartedAt !== undefined ? { thinkingEndedAt: eventTime(event.time) } : {}),
 						...(previous.thinkingStartedAt !== undefined ? { thinkingStartedAt: previous.thinkingStartedAt } : {}),
@@ -441,6 +489,7 @@ export function projectDshEvent(
 						timestamp: eventTime(event.time),
 						stopReason: assistantStopReason,
 						...(assistantImages.length > 0 ? { images: assistantImages } : {}),
+						...(assistantModel ? { model: assistantModel } : {}),
 						...(assistantImageMeta || usageForMessage ? { meta: { ...(assistantImageMeta ?? {}), ...(usageForMessage ? { usage: usageForMessage } : {}) } } : {}),
 					});
 				}
@@ -455,6 +504,7 @@ export function projectDshEvent(
 					timestamp: eventTime(event.time),
 					stopReason: assistantStopReason,
 					...(assistantImages.length > 0 ? { images: assistantImages } : {}),
+					...(assistantModel ? { model: assistantModel } : {}),
 					...(assistantImageMeta || usageForMessage ? { meta: { ...(assistantImageMeta ?? {}), ...(usageForMessage ? { usage: usageForMessage } : {}) } } : {}),
 				});
 				next.messagesChanged = true;
@@ -511,8 +561,10 @@ export function projectDshEvent(
 			break;
 		}
 		case "tool/result": {
-			const message = (data.message ?? {}) as { source?: unknown; content?: unknown };
-			// 0.1.5 的结果文本嵌在 tool-result 块内（见 toolResultBlocksToText）。
+			const message = isRecord(data.message) ? data.message : {};
+			// V4 内容已扁平化，错误标记移至消息顶层；保留 V3 包装读取用于旧历史。
+			const legacyResult = Array.isArray(message.content) ? message.content.find((block: unknown) => isRecord(block) && block.type === "tool-result") : undefined;
+			const isError = message.isError === true || (isRecord(legacyResult) && legacyResult.isError === true);
 			const fullText = toolResultTextFromBlocks(message.content);
 			// 工具结果截断展示（渲染层工具卡展开区 2000 字符内），完整文本保留在
 			// meta.fullText 供「查看完整输出」按需读取（A3：DSH 会话没有 pi 会话
@@ -523,7 +575,7 @@ export function projectDshEvent(
 			// 必须按 callId 精确匹配工具卡，不能更新“最后一条 tool”——并发/乱序
 			// 结果下会把结果挂错卡，并把先到的卡永远留在 running。
 			const source = isRecord(message.source) ? message.source : undefined;
-			const resultCallId = typeof source?.callId === "string" ? source.callId : typeof data.callId === "string" ? data.callId : undefined;
+			const resultCallId = typeof message.toolCallId === "string" ? message.toolCallId : typeof source?.callId === "string" ? source.callId : typeof data.callId === "string" ? data.callId : undefined;
 			const activeToolCalls = new Map(base.activeToolCalls ?? new Map<string, string>());
 			if (resultCallId) activeToolCalls.delete(resultCallId);
 
@@ -539,7 +591,7 @@ export function projectDshEvent(
 				}
 			}
 			// 兼容无 callId 的异常/旧数据：退化为最后一条 tool，并同时从活跃集合摘除。
-			if (targetIndex === -1) {
+			if (targetIndex === -1 && !resultCallId) {
 				for (let index = messages.length - 1; index >= 0; index -= 1) {
 					if (messages[index].role === "tool") {
 						targetIndex = index;
@@ -558,7 +610,7 @@ export function projectDshEvent(
 				const toolName = typeof target.meta?.toolName === "string" ? target.meta.toolName : "tool";
 				// 与 PI 同一套 detailText（工具/状态/参数/结果）；结果正文用已截断的 text，
 				// 超长仍走 meta.fullText + truncated，展开区「查看完整输出」契约不变。
-				const detailText = formatToolDetail(toolName, target.meta?.args, text || undefined, false, translate);
+				const detailText = formatToolDetail(toolName, target.meta?.args, text || undefined, isError ? "error" : "done", translate);
 				const detailDelivery = truncateDetailWithMeta(detailText, translate);
 				const keepFullText = truncated || detailDelivery.truncated;
 				messages[targetIndex] = {
@@ -567,7 +619,7 @@ export function projectDshEvent(
 					meta: target.meta
 						? {
 								...target.meta,
-								status: "done",
+								status: isError ? "error" : "done",
 								durationMs: Math.max(0, resultTime - callTime),
 								detailText: detailDelivery.text,
 								// host 为结果事件计算的下发 view（dsh-web 历史页同数据）：
@@ -700,8 +752,18 @@ export function projectDshEvent(
 			next.stateChanged = true;
 			break;
 		}
+		case "system/message": {
+			// V4 系统提示成为独立消息。空 content 是明确清空，不能用 truthy 判断。
+			if (!isRecord(data.message) || !Array.isArray(data.message.content)) break;
+			const system = textFromBlocks(data.message.content);
+			if (system !== base.systemPrompt) {
+				next.systemPrompt = system;
+				next.stateChanged = true;
+			}
+			break;
+		}
 		case "request/header": {
-			// 当轮请求头（EpochHeader）：system 是 harness 组装的真实系统提示（persona +
+			// 兼容旧版请求头：system 是 harness 组装的真实系统提示（persona +
 			// sections 展开后的完整文本，dsh-web 轨迹展示同源）。同一会话可能因模型切换/
 			// 权限变化多次发请求头，last wins；无 system 字段（低版本 host）不覆盖已有值。
 			const header = isRecord(data.header) ? data.header : undefined;

@@ -46,7 +46,7 @@ test("every plain-text surface folds self-contained reference blocks", () => {
 		"子代理转录（DSH）": "src/renderer/src/components/session/DshAgentToolsPanel.tsx",
 		会话定位轴标题: "src/renderer/src/components/app/AppUtils.ts",
 		"侧栏会话 preview（主进程）": "src/main/sessions/SessionScanner.ts",
-		"Web 端消息渲染（主进程）": "src/main/web/WebServiceManager.ts",
+		"Web 端消息渲染（主进程）": "src/main/web/WebHttpResponders.ts",
 	};
 	for (const [label, file] of Object.entries(surfaces)) {
 		const source = readFileSync(file, "utf8");
@@ -109,4 +109,18 @@ test("session title surfaces strip reference block bodies", () => {
 		const source = readFileSync(file, "utf8");
 		assert.match(source, pattern, `${label} must strip expanded reference blocks before deriving a title (${file})`);
 	}
+});
+
+test("textForSessionTitle strips vision bridge blocks (marker + description are not user words)", () => {
+	// 2026-10 现场：只发图不写字的消息，正文整段是「[图片 #1（视觉桥已查看…）]＋视觉模型描述」，
+	// 旧实现把首行占位标记写成了会话标题。图+文消息里描述同样不能进标题。
+	// 组成顺序与真实链路一致：input 钩子总是「用户正文在前、描述追加在后」。
+	const success = "[图片 #1（视觉桥已查看，以下为图片实际内容）]\n这是一张截图，展示供应商列表管理界面。";
+	assert.equal(textForSessionTitle(`帮我看下这个界面\n\n${success}`), "帮我看下这个界面");
+	// 只发图：剥完为空，调用方回退到 assistant 首条文本（agentUtils/SessionScanner 的既有语义）。
+	assert.equal(textForSessionTitle(success), "");
+	assert.equal(textForSessionTitle("[图片 #1 未发送给模型：视觉桥未配置]"), "");
+	assert.equal(textForSessionTitle("[图片 #1 视觉桥转换失败：接口超时。请检查视觉桥设置（模型/接口地址/API Key）后重试，此图片内容不可见]"), "");
+	// 引用块在前、视觉桥块在尾的混排：两者都剥，只留用户手写正文。
+	assert.equal(textForSessionTitle(`<quoted_context label="引用A" message_id="m1">\nA 全文\n</quoted_context>\n照着改\n\n${success}`), "照着改");
 });

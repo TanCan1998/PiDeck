@@ -9,7 +9,12 @@
  *
  * 协议参考：https://ai-sdk.dev/docs/ai-sdk-ui/stream-protocol
  * 需要设置响应头 x-vercel-ai-ui-message-stream: v1 才能被 useChat 识别。
+ *
+ * DSH 后端没有 pi 的 RPC 事件（agent_start/message_update/agent_settled），它的流式
+ * 数据走自己的 IPC 通道，由 DshChannelToPiEvents 先翻译成同形状的 pi 事件再进同一套
+ * 适配器（见 bindChannelSource），因此 Web 线协议与前端零分支。
  */
+import { DshChannelToPiEvents } from "./DshChannelToPiEvents";
 
 /** AI SDK UIMessageStream 单个 SSE 帧（data: 后的 JSON 对象）。 */
 export type UiMessageStreamFrame = Record<string, unknown>;
@@ -17,8 +22,14 @@ export type UiMessageStreamFrame = Record<string, unknown>;
 /** 事件来源 agentId → 目标 sessionId 的路由函数，由装配方注入。 */
 export type AgentToSessionRouter = (agentId: string) => string | undefined;
 
+/** 非 pi 后端（DSH）的 agent 通道事件源：由装配方提供订阅句柄。 */
+export type AgentChannelEventSource = (handler: (agentId: string, channel: string, payload: unknown) => void) => () => void;
+
 /** SSE 帧写出函数；返回 false 表示连接已失效（对方已断开）。 */
 export type SseWriter = (frame: UiMessageStreamFrame) => boolean;
+
+/** 会话级收口基准的保留条数上限（只服务重连窗口，不需要长期记忆）。 */
+const CLOSED_RUN_SESSIONS_MAX = 64;
 
 /** 单个 pi 事件（与 AgentManager.handlePiEvent 收到的结构一致）。 */
 export type PiEvent = {
@@ -26,10 +37,12 @@ export type PiEvent = {
 	// message_start / message_end / message_update 顶层字段
 	message?: Record<string, unknown>;
 	assistantMessageEvent?: Record<string, unknown>;
-	// tool_execution_*
+	// tool_execution_*（result/partialResult：工具执行结果，供 Web 端展开详情）
 	toolName?: string;
 	toolCallId?: string;
 	args?: unknown;
+	result?: unknown;
+	partialResult?: unknown;
 	isError?: boolean;
 	// agent_end
 	stopReason?: string;
@@ -42,8 +55,10 @@ export class PiEventToUiMessageStream {
 	private reasoningBlockId: string | null = null;
 	private currentMessageId: string | null = null;
 	private finished = false;
-	/** 记录当前流已经发送过 tool-input 的 toolCallId，防止遗漏 start 导致 AI SDK 抛错 */
-	private startedToolCallIds = new Set<string>();
+	/** 已发送过 tool-input 帧的 toolCallId（防重发：message 层 toolcall_start 与顶层 tool_execution_start 双路径去重） */
+	private inputSentToolCallIds = new Set<string>();
+	/** 已发送过 tool-output 帧的 toolCallId（防重复 settle；settle 后即生命周期完结） */
+	private settledToolCallIds = new Set<string>();
 
 	/**
 	 * 翻译单个 pi 事件为 0..n 个 UIMessageStream 帧。
@@ -83,9 +98,10 @@ export class PiEventToUiMessageStream {
 
 		// agent_end 只是本轮 LLM 步结束：后面常接 tool_execution / 下一轮 message_start。
 		// 这里关流会让手机端工具卡在 input-available，useChat 标成失败且后续正文丢失。
-		// 真失败才收尾；正常结束等 agent_settled。
+		// 真失败才收尾；正常结束等 agent_settled。pi 部分路径会带 error: null（无错的
+		// 显式空值），与 undefined 同样视为无错，否则整轮工具循环会在第一步就断流。
 		if (type === "agent_end") {
-			if (event.error !== undefined) return this.finishMessage(event);
+			if (event.error !== undefined && event.error !== null) return this.finishMessage(event);
 			return frames;
 		}
 
@@ -155,7 +171,9 @@ export class PiEventToUiMessageStream {
 		if (eventType === "toolcall_start") {
 			const toolCall = ev.toolCall as Record<string, unknown> | undefined;
 			if (toolCall && typeof toolCall.id === "string" && typeof toolCall.name === "string") {
-				this.startedToolCallIds.add(toolCall.id);
+				// 双路径去重：顶层 tool_execution_start 先到时不重发 input 帧（重发会把 AI SDK 端已 settle 的 part 拍回 running）。
+				if (this.inputSentToolCallIds.has(toolCall.id) || this.settledToolCallIds.has(toolCall.id)) return frames;
+				this.inputSentToolCallIds.add(toolCall.id);
 				frames.push({
 					type: "tool-input-start",
 					toolCallId: toolCall.id,
@@ -175,14 +193,21 @@ export class PiEventToUiMessageStream {
 			if (toolCall && typeof toolCall.id === "string") {
 				// 容错：若当前流中途建立或跨端并发输入，未见证过 toolcall_start，
 				// 过滤孤儿 toolcall_end，防止 AI SDK 抛出 "No tool invocation found for tool call ID" 导致告警红条。
-				if (!this.startedToolCallIds.has(toolCall.id)) {
+				if (!this.inputSentToolCallIds.has(toolCall.id)) {
 					return [];
 				}
-				this.startedToolCallIds.delete(toolCall.id);
+				// toolcall_end 只是 LLM 层把调用参数发完，执行尚未开始/结束：
+				// 不带 output 时不 settle（保持 running，等顶层 tool_execution_end 带真实结果）；
+				// 带 output（pi replay 最终消息）才提前结算，且要防重复。
+				const output = toolCall.output;
+				if (output === null || output === undefined) return frames;
+				if (this.settledToolCallIds.has(toolCall.id)) return frames;
+				this.settledToolCallIds.add(toolCall.id);
+				this.inputSentToolCallIds.delete(toolCall.id);
 				frames.push({
 					type: "tool-output-available",
 					toolCallId: toolCall.id,
-					output: toolCall.output ?? {},
+					output,
 				});
 			}
 			return frames;
@@ -200,7 +225,9 @@ export class PiEventToUiMessageStream {
 	private startTool(event: PiEvent): UiMessageStreamFrame[] {
 		const toolName = typeof event.toolName === "string" ? event.toolName : "tool";
 		const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId : `tool_${toolName}_${Date.now()}`;
-		this.startedToolCallIds.add(toolCallId);
+		// 双路径去重：message 层 toolcall_start 已发过 input 时不再重发，避免 state 回退成 running。
+		if (this.inputSentToolCallIds.has(toolCallId) || this.settledToolCallIds.has(toolCallId)) return [];
+		this.inputSentToolCallIds.add(toolCallId);
 		return [
 			{ type: "tool-input-start", toolCallId, toolName },
 			{ type: "tool-input-available", toolCallId, toolName, input: event.args ?? {} },
@@ -212,20 +239,32 @@ export class PiEventToUiMessageStream {
 		if (!toolCallId) return [];
 		// 容错：若当前流中途建立或跨端并发输入，未见证过 tool_execution_start，
 		// 过滤孤儿 tool_execution_end，防止 AI SDK 抛出 "No tool invocation found for tool call ID" 导致告警红条。
-		if (!this.startedToolCallIds.has(toolCallId)) {
+		// 已结算（message 层 toolcall_end 带 output 先到过）不重复发；从未见过 start 的孤儿同样滤掉。
+		if (this.settledToolCallIds.has(toolCallId) || !this.inputSentToolCallIds.has(toolCallId)) {
 			return [];
 		}
-		this.startedToolCallIds.delete(toolCallId);
+		this.settledToolCallIds.add(toolCallId);
+		this.inputSentToolCallIds.delete(toolCallId);
 		if (event.isError) {
 			return [
 				{
 					type: "tool-output-error",
 					toolCallId,
-					errorText: "Tool failed",
+					errorText: typeof event.error === "string" ? event.error : "Tool failed",
 				},
 			];
 		}
-		return [{ type: "tool-output-available", toolCallId, output: {} }];
+		// 工具真实结果（P2 工具卡展开）：优先 result，退 partialResult，都没有时空对象。
+		// 超大输出截断到 64KB 预览（SSE 帧必须有界，与桌面 timeline 截断同源考量）。
+		const rawOutput = event.result ?? event.partialResult ?? {};
+		let output: unknown = {};
+		try {
+			const serialized = JSON.stringify(rawOutput) ?? "{}";
+			output = serialized.length > 64 * 1024 ? { truncated: true, preview: `${serialized.slice(0, 32 * 1024)}…` } : rawOutput;
+		} catch {
+			output = {};
+		}
+		return [{ type: "tool-output-available", toolCallId, output }];
 	}
 
 	/** 只关当前 text/reasoning 块，不结束整条 SSE。 */
@@ -269,13 +308,21 @@ export const SSE_DONE = "data: [DONE]\n\n";
 /**
  * 每个 session 一条活跃流的连接状态。
  * 持有翻译器 + 写出函数，连接关闭后标记 dead 并停止写出。
+ * keepAlive：外部流（GET /stream，EventSource 常驻订阅）在一轮 finish+[DONE] 后
+ * 不关连接，而是换一个全新翻译器等待下一轮——消除轮与轮之间的重连空窗
+ * （Ask 续答/桌面发起的下一轮若落在重连窗口内，事件金部落盒、前端只能等磁盘追赶）。
+ * /api/chat（useChat 一次性 fetch）不用 keepAlive：AI SDK 语义要求流随 [DONE] 结束。
  */
 export type SessionStreamEntry = {
 	sessionId: string;
 	adapter: PiEventToUiMessageStream;
+	/** 非 pi 后端（DSH）通道载荷 → pi 事件 的翻译器；连接建立时创建，随连接销毁。 */
+	channels: DshChannelToPiEvents;
 	/** 写出原始 wire 文本（含 data: 前缀）；返回是否成功。 */
 	writeRaw: (wire: string) => boolean;
 	closed: boolean;
+	/** 一轮结束后保活重置（外部流），不结束响应。 */
+	keepAlive?: boolean;
 	onFinish?: () => void;
 };
 
@@ -289,16 +336,26 @@ export type SessionStreamEntry = {
 export class WebEventStreamRouter {
 	private readonly sessionStreams = new Map<string, Set<SessionStreamEntry>>();
 	private unsubscribePi: (() => void) | null = null;
+	private unsubscribeChannels: (() => void) | null = null;
+	/**
+	 * 会话级「已收口正文」基准：每条连接一份翻译器，连接重建时基准必须延续——
+	 * 停止的握手是「abort 先收口，host 迟到的 turn/end 再带同一份全文收一次」，
+	 * 中间断开重连（Web 端 stop 后外部流重建）会让新翻译器把重复收口当成新一轮上屏。
+	 * key 按会话保留，值在下一轮 turn/start（reset）时被翻译器清空。
+	 */
+	private readonly closedRunTextBySession = new Map<string, string>();
 
 	constructor(private readonly resolveSession: AgentToSessionRouter) {}
 
 	/** 注册一个 session 的 SSE 连接。返回关闭函数。 */
-	add(sessionId: string, writeRaw: (wire: string) => boolean, onClose: () => void, onFinish?: () => void): () => void {
+	add(sessionId: string, writeRaw: (wire: string) => boolean, onClose: () => void, onFinish?: () => void, options?: { keepAlive?: boolean }): () => void {
 		const entry: SessionStreamEntry = {
 			sessionId,
 			adapter: new PiEventToUiMessageStream(),
+			channels: new DshChannelToPiEvents(this.closedRunTextBySession.get(sessionId) ?? null),
 			writeRaw,
 			closed: false,
+			keepAlive: options?.keepAlive === true,
 			onFinish,
 		};
 		let set = this.sessionStreams.get(sessionId);
@@ -335,6 +392,26 @@ export class WebEventStreamRouter {
 		this.unsubscribePi = null;
 	}
 
+	/**
+	 * 供后端绑定：订阅非 pi 后端（DSH）的 agent 通道事件。
+	 * 没有这一层时 DSH 会话在 Web 端只能靠状态轮询 + 磁盘重拉追赶（输出很慢），
+	 * 且整轮没有 finish 帧（察觉不到结束/停止）。
+	 */
+	bindChannelSource(subscribe: AgentChannelEventSource | undefined): void {
+		this.unsubscribeChannels?.();
+		if (!subscribe) {
+			this.unsubscribeChannels = null;
+			return;
+		}
+		this.unsubscribeChannels = subscribe((agentId, channel, payload) => this.onChannelEvent(agentId, channel, payload));
+	}
+
+	/** 解绑通道事件源（服务停止时调用）。 */
+	unbindChannelSource(): void {
+		this.unsubscribeChannels?.();
+		this.unsubscribeChannels = null;
+	}
+
 	private onPiEvent(agentId: string, event: PiEvent): void {
 		const sessionId = this.resolveSession(agentId);
 		if (!sessionId) return;
@@ -343,31 +420,78 @@ export class WebEventStreamRouter {
 
 		for (const entry of set) {
 			if (entry.closed) continue;
-			const frames = entry.adapter.push(event);
-			for (const frame of frames) {
-				if (!entry.writeRaw(serializeSseFrame(frame))) {
-					// 写出失败（对方断开）：立即标记关闭，避免持续写已失效的 socket。
-					entry.closed = true;
-					set.delete(entry);
-					break;
-				}
-				// AI SDK 协议：finish 帧后必须跟 [DONE] 终止标记，前端据此关闭连接。
-				if (frame.type === "finish") {
-					if (!entry.writeRaw(SSE_DONE)) {
-						entry.closed = true;
-						set.delete(entry);
-						break;
-					}
-					// [DONE] 是协议终止标记，但 Node response 仍需显式 end，
-					// 否则 useChat 可能继续等待 HTTP body 关闭，界面会一直显示运行中。
-					entry.closed = true;
-					set.delete(entry);
-					entry.onFinish?.();
-					break;
-				}
-			}
+			this.emitFrames(entry, set, entry.adapter.push(event));
 		}
 		if (set.size === 0) this.sessionStreams.delete(sessionId);
+	}
+
+	/**
+	 * 非 pi 后端的通道事件：先翻译成 pi 事件形状，再走同一个适配器产出 UI 帧。
+	 * 没有订阅者时直接返回（不翻译 = 零开销，事件风暴期不给主进程添负担）。
+	 */
+	private onChannelEvent(agentId: string, channel: string, payload: unknown): void {
+		if (this.sessionStreams.size === 0) return;
+		const sessionId = this.resolveSession(agentId);
+		if (!sessionId) return;
+		const set = this.sessionStreams.get(sessionId);
+		if (!set || set.size === 0) return;
+
+		let baseline: string | null = null;
+		let connected = false;
+		for (const entry of set) {
+			if (entry.closed) continue;
+			connected = true;
+			for (const event of entry.channels.push(channel, payload)) {
+				if (entry.closed) break;
+				this.emitFrames(entry, set, entry.adapter.push(event));
+			}
+			baseline = entry.channels.baseline();
+		}
+		// 会话级记住收口基准，供重连后的新翻译器 seed（见字段注释）。
+		if (connected) {
+			if (baseline === null) this.closedRunTextBySession.delete(sessionId);
+			else this.rememberClosedRun(sessionId, baseline);
+		}
+		if (set.size === 0) this.sessionStreams.delete(sessionId);
+	}
+
+	/** 记录会话的收口基准；上限只兜底（真实场景是少量活跃会话）。 */
+	private rememberClosedRun(sessionId: string, text: string): void {
+		if (!this.closedRunTextBySession.has(sessionId) && this.closedRunTextBySession.size >= CLOSED_RUN_SESSIONS_MAX) {
+			const oldest = this.closedRunTextBySession.keys().next().value;
+			if (oldest !== undefined) this.closedRunTextBySession.delete(oldest);
+		}
+		this.closedRunTextBySession.set(sessionId, text);
+	}
+
+	/** 把一批 UI 帧写到连接上；finish 帧按 keepAlive 语义收尾或保活。 */
+	private emitFrames(entry: SessionStreamEntry, set: Set<SessionStreamEntry>, frames: UiMessageStreamFrame[]): void {
+		for (const frame of frames) {
+			if (!entry.writeRaw(serializeSseFrame(frame))) {
+				// 写出失败（对方断开）：立即标记关闭，避免持续写已失效的 socket。
+				entry.closed = true;
+				set.delete(entry);
+				return;
+			}
+			// AI SDK 协议：finish 帧后必须跟 [DONE] 终止标记，前端据此关闭连接。
+			if (frame.type !== "finish") continue;
+			if (!entry.writeRaw(SSE_DONE)) {
+				entry.closed = true;
+				set.delete(entry);
+				return;
+			}
+			// keepAlive（外部流）：连接保留，换新翻译器等下一轮；客户端在下一轮的
+			// start 帧上自行重置合并器。非 keepAlive（/api/chat）：[DONE] 后显式 end，
+			// 否则 useChat 可能继续等待 HTTP body 关闭，界面会一直显示运行中。
+			if (entry.keepAlive) {
+				entry.adapter = new PiEventToUiMessageStream();
+				return;
+			}
+			entry.closed = true;
+			set.delete(entry);
+			entry.onFinish?.();
+			return;
+		}
 	}
 }
 

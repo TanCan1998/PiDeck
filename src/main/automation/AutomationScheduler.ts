@@ -2,6 +2,7 @@ import type { AutomationTask } from "../../shared/types";
 import { missedAutomationCronOccurrences, nextAutomationCronOccurrence } from "./automationCron";
 import { hasActiveAutomationRun } from "./automationPolicy";
 import type { AutomationStore } from "./AutomationStore";
+import { getAppLogger } from "../logging/sharedLogger";
 
 const TICK_INTERVAL_MS = 1_000;
 // Catch-up window: check missed runs if PiDeck was offline for at most 7 days.
@@ -54,6 +55,14 @@ export class AutomationScheduler {
 				if (!task.enabled || task.schedule.type !== "cron") continue;
 				await this.evaluateTask(task, runs, now);
 			}
+		} catch (error) {
+			// 单个任务求值失败（如 cron 表达式损坏）不得炸掉调度器：记日志后等下个 tick 重试，
+			// 否则 void tick() 会变成每分钟一次的 unhandledRejection 噪音。
+			const logger = getAppLogger();
+			void logger?.error("automation", "Scheduler tick failed", {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
 		} finally {
 			this.ticking = false;
 		}
@@ -90,6 +99,7 @@ export class AutomationScheduler {
 
 		// Single-flight check: if an active run already exists for this task, skip this occurrence
 		if (hasActiveAutomationRun(runs, task.id)) {
+			getAppLogger()?.info("automation", "Scheduled run skipped (previous run still active)", { taskId: task.id, triggerType, scheduledTime });
 			await this.store.createRun(
 				{
 					task,
@@ -105,9 +115,12 @@ export class AutomationScheduler {
 		}
 
 		if (this.onTrigger) {
+			// 无人值守自动触发会自起 agent 会话，必须留痕（手动触发已由 automationIpc 记录）
+			getAppLogger()?.info("automation", "Scheduled run triggered", { taskId: task.id, triggerType, scheduledTime });
 			try {
 				await this.onTrigger(task, scheduledTime, triggerType);
 			} catch (err) {
+				getAppLogger()?.error("automation", "Scheduled run trigger failed", { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
 				// Failed to enqueue or start
 				await this.store.createRun(
 					{

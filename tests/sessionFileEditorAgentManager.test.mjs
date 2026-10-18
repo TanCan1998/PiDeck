@@ -596,6 +596,24 @@ test("identity cache merges repeated captures for the same session and stays bou
 	assert.equal(cache.get(session, "m-0"), undefined, "超出上限的旧身份应被淘汰");
 });
 
+test("persisted image removal routes through the stopped file editor and never falls back to resend", async () => {
+	const received = [];
+	const { manager } = createHarness({
+		removeImage: async (input) => received.push(input),
+		truncateForResend: async () => assert.fail("image removal must not truncate"),
+	});
+	const imageTarget = { index: 0, expectedImageCount: 1, expectedHash: "a".repeat(64) };
+	await assert.rejects(manager.mutatePersistedSessionMessage("C:/sessions/session.jsonl", "message-1", "remove-image", { imageTarget }), /BUSY_GENERIC/);
+	assert.equal(received.length, 0);
+	manager.agents.clear();
+	await manager.mutatePersistedSessionMessage("C:/sessions/session.jsonl", "message-1", "remove-image", { imageTarget });
+	assert.equal(received.length, 1);
+	assert.equal(received[0].target.entryId, "a1");
+	assert.deepEqual(received[0].imageTarget, imageTarget);
+	manager.sessionHistoryReader.readMessageByMessageId = async () => undefined;
+	await assert.rejects(manager.mutatePersistedSessionMessage("C:/sessions/session.jsonl", "missing", "remove-image", { imageTarget }), /Message not found/);
+});
+
 test("mutatePersistedSessionMessage refuses a live runtime", async () => {
 	let called = false;
 	const editor = {
@@ -627,4 +645,17 @@ test("mutatePersistedSessionMessage delete accepts a message absent from the fil
 	// edit/resend 依赖文件正文，对象缺失必须保留报错（错误映射层会提示 MESSAGE_NOT_FOUND）
 	await assert.rejects(manager.mutatePersistedSessionMessage("C:/sessions/session.jsonl", "agent-1-history-missing", "edit", { newText: "changed" }), /Message not found/);
 	await assert.rejects(manager.mutatePersistedSessionMessage("C:/sessions/session.jsonl", "agent-1-history-missing", "resend"), /Message not found/);
+});
+
+test("restoreCheckpoint refuses conversation scope when no fork anchor exists (no silent fake success)", async () => {
+	// 2026-10 假成功事故：scope=conversation/all 且检查点早于任何已落盘消息时
+	// resolveForkEntryBeforeCheckpoint 返回 undefined，旧实现静默跳过 fork，
+	// UI 报「回退成功」但什么都没发生。行为级验证需要完整 runtime fixture
+	//（fork RPC/ref 解析），这里用源码断言钉住「无锚点必须拒绝」分支（空白容忍）。
+	const source = readFileSync("src/main/pi/AgentManager.ts", "utf8");
+	assert.match(source, /if \(wantConversation && !forkEntryId\) \{\s*throw new Error\("Cannot locate a conversation anchor before this checkpoint/);
+	// 拒绝必须发生在 applyCheckpointRestore 之前（否则文件已回退却报错，半成功态）
+	const throwPos = source.indexOf("Cannot locate a conversation anchor");
+	const restorePos = source.indexOf("await applyCheckpointRestore(root, cp);");
+	assert.ok(throwPos > 0 && restorePos > throwPos, "锚点拒绝必须先于文件回退执行");
 });

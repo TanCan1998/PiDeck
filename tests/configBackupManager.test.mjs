@@ -5,30 +5,16 @@
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import ts from "typescript";
-import vm from "node:vm";
+import { createTsSandbox } from "./helpers/createTsSandbox.mjs";
 
-const require = createRequire(import.meta.url);
-
-function transpile(filePath) {
-	return ts.transpileModule(readFileSync(filePath, "utf8"), {
-		compilerOptions: {
-			module: ts.ModuleKind.CommonJS,
-			target: ts.ScriptTarget.ES2022,
-		},
-	}).outputText;
-}
+// 用统一 TS 沙箱加载：相对 import 按源文件目录解析（生产模块新增本地依赖不再炸沙箱）
+const load = createTsSandbox();
 
 function loadModule() {
-	const sandbox = { exports: {}, require, setTimeout, clearTimeout };
-	vm.runInNewContext(transpile("src/main/config/ConfigBackupManager.ts"), sandbox, {
-		filename: "ConfigBackupManager.ts",
-	});
-	return sandbox.exports;
+	return load("src/main/config/ConfigBackupManager.ts");
 }
 
 const mod = loadModule();

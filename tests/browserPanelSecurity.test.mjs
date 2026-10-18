@@ -36,6 +36,13 @@ test("BrowserPanel uses a fixed persistent partition without popup or file acces
 	assert.doesNotMatch(rendererTypes, /allowpopups/i);
 });
 
+test("BrowserPanel starts on a blank page and Home returns to blank", () => {
+	assert.match(browserPanel, /const DEFAULT_HOME = "about:blank"/);
+	assert.match(browserPanel, /src=\{initialTab\.url\}/);
+	assert.match(browserPanel, /onClick=\{\(\) => loadUrl\(DEFAULT_HOME\)\}/);
+	assert.doesNotMatch(browserPanel, /const DEFAULT_HOME = "https:\/\/pideck\.caoayu\.top\//);
+});
+
 test("BrowserPanel navigation goes through the module-state pending-URL poll loop", () => {
 	assert.match(browserPanel, /export function navigateTo\(url: string\)/);
 	assert.match(browserPanel, /pendingNavigateUrl = url/);
@@ -92,4 +99,16 @@ test("external browser IPC shares the HTTP(S) protocol gate and Chromium sandbox
 	// 但只能在用户未显式开启 electronChromiumSandbox 时才附带 no-sandbox；
 	// 用户开启沙箱后必须保持 Chromium 默认沙箱，不能无条件追加 no-sandbox。
 	assert.match(main, /if \(!electronChromiumSandboxEnabled\) \{\s*\/\/[^\n]*\n\s*app\.commandLine\.appendSwitch\("no-sandbox"\);/);
+});
+
+test("pending external navigation consumes via listener, not idle 50ms polling", () => {
+	// 回归（2026-10 流畅度审计）：旧实现 50ms setInterval 常驻空转检测 module 变量；
+	// 现在 navigateTo 直接触发监听器（未挂载面板时 URL 留存、挂载后补消费），
+	// webview 未就绪/加载中由消费函数自重试兑底，空转时钟归零。
+	assert.match(browserPanel, /pendingNavigateListener\?\.\(\);/, "navigateTo 应直接触发监听器");
+	const effect = browserPanel.match(/useEffect\(\(\) => \{\s*let alive = true;[\s\S]*?\}, \[applyDeviceUserAgent\]\);/);
+	assert.ok(effect, "事件驱动的消费 effect 应可被发现");
+	assert.doesNotMatch(effect[0], /setInterval/, "消费路径不得再依赖常驻轮询");
+	assert.match(effect[0], /pendingNavigateListener = consumePendingNavigate;/);
+	assert.match(effect[0], /consumePendingNavigate\(\);/, "挂载时应补消费一次留存的 URL");
 });

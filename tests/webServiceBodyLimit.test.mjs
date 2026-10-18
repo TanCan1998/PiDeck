@@ -14,7 +14,7 @@ async function withServer(run) {
 			return { id: "project-2", name: "New Project", path, lastOpenedAt: 2 };
 		},
 	});
-	await manager.start("127.0.0.1", 0);
+	await manager.start("127.0.0.1", 0, false);
 	const baseUrl = `http://127.0.0.1:${manager.current.port}`;
 	try {
 		await run({ baseUrl, calls });

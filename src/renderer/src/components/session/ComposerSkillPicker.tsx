@@ -226,7 +226,7 @@ export function ComposerSkillPicker(props: {
 						<div className="flex flex-col items-center gap-1.5 px-4 py-6 text-caption">
 							<span className="font-medium text-foreground">{t("app.skillContentLoadFailed")}</span>
 							<span className="text-muted-foreground">{t("app.skillPickerLoadFailedNote")}</span>
-							<pre className="max-h-28 w-full overflow-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-muted/40 p-2.5 font-mono text-[11px] leading-relaxed text-muted-foreground">{detail.error}</pre>
+							<pre className="max-h-28 w-full overflow-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-muted/40 p-2.5 font-mono text-micro leading-relaxed text-muted-foreground">{detail.error}</pre>
 						</div>
 					) : (
 						<pre className="picker-preview-content">{detail.content}</pre>
@@ -261,7 +261,7 @@ export function ComposerSkillPicker(props: {
 						<div className="flex flex-col items-center gap-1.5 px-4 py-6 text-caption">
 							<span className="font-medium text-foreground">{t("app.skillPickerLoadFailed")}</span>
 							<span className="text-muted-foreground">{t("app.skillPickerLoadFailedNote")}</span>
-							{error && <pre className="max-h-28 w-full overflow-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-muted/40 p-2.5 font-mono text-[11px] leading-relaxed text-muted-foreground">{error}</pre>}
+							{error && <pre className="max-h-28 w-full overflow-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-muted/40 p-2.5 font-mono text-micro leading-relaxed text-muted-foreground">{error}</pre>}
 						</div>
 					) : blockedByAgent ? (
 						<div className="px-6 py-10 text-center text-caption text-muted-foreground">{t("app.skillPickerNoAgent")}</div>

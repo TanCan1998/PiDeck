@@ -253,6 +253,49 @@ test("SessionHistoryReader incremental index picks up appended JSONL rows withou
 	}
 });
 
+test("SessionHistoryReader resend snapshot preserves flat and nested images in message order", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pideck-history-resend-images-"));
+	const sessionPath = join(directory, "session.jsonl");
+	try {
+		await writeFile(
+			sessionPath,
+			[
+				JSON.stringify({ id: "session", type: "session" }),
+				JSON.stringify({
+					id: "entry-images",
+					parentId: "session",
+					type: "message",
+					message: {
+						id: "message-images",
+						role: "user",
+						content: [
+							{ type: "text", text: "keep text" },
+							{ type: "image", data: "FLAT", mimeType: "image/jpeg" },
+							{ type: "image", data: "LEGACY", mime_type: "image/webp" },
+							{ type: "image", source: { type: "base64", media_type: "image/gif", data: "NESTED" } },
+							{ type: "image", data: "DEFAULT" },
+							{ type: "image", data: "" },
+							{ type: "image", data: 42 },
+							null,
+						],
+					},
+				}),
+			].join("\n"),
+			"utf8",
+		);
+		const snapshot = await createReader((path) => path).readMessageByMessageId(sessionPath, "message-images");
+		assert.equal(snapshot.text, "keep text");
+		assert.deepEqual(JSON.parse(JSON.stringify(snapshot.images)), [
+			{ type: "image", data: "FLAT", mimeType: "image/jpeg" },
+			{ type: "image", data: "LEGACY", mimeType: "image/webp" },
+			{ type: "image", data: "NESTED", mimeType: "image/gif" },
+			{ type: "image", data: "DEFAULT", mimeType: "image/png" },
+		]);
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+});
+
 test("SessionHistoryReader locates message by messageId and reads its content for resend", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pideck-history-locate-"));
 	const sessionPath = join(directory, "session.jsonl");
@@ -950,6 +993,41 @@ test("custom_message card lands at the message index even when system entries pr
 	}
 });
 
+test("custom 条目投影按 pi 口径：注册 renderer 的显示，未注册与内部前缀隐藏", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pideck-history-codemode-store-"));
+	const sessionPath = join(directory, "session.jsonl");
+	try {
+		await writeLines(sessionPath, [
+			JSON.stringify({ id: "session", type: "session" }),
+			roleEntry("u1", "session", "user", "q1"),
+			roleEntry("a1", "u1", "assistant", "a1"),
+			// codemode store() 的 KV 持久化（内部记账）：即使被误扫进注册集合也不投影
+			JSON.stringify({ id: "cs1", parentId: "a1", type: "custom", customType: "codemode-store", data: { set: { key: { status: "fulfilled", value: "**Fetched:** https://example.com" } } }, timestamp: "2026-01-01T00:00:02.000Z" }),
+			// 第三方扩展未注册 renderer 的内部 appendEntry：pi TUI 不显示，PiDeck 也不显示
+			JSON.stringify({ id: "ce0", parentId: "a1", type: "custom", customType: "some-ext-internal", data: { hidden: true }, timestamp: "2026-01-01T00:00:02.500Z" }),
+			// 注册了 entry renderer 的扩展输出：显示（issue #285 的可见性补齐）
+			JSON.stringify({ id: "ce1", parentId: "ce0", type: "custom", customType: "pi-plan-btw", data: { query: "看下进度" }, timestamp: "2026-01-01T00:00:03.000Z" }),
+			roleEntry("u2", "ce1", "user", "q2"),
+			roleEntry("a2", "u2", "assistant", "a2"),
+		]);
+		const reader = createRoleAwareReader((path) => path);
+
+		// 未传注册集合：全部 custom 条目默认隐藏（与 pi「只有注册 renderer 的条目才算 transcript」一致）
+		const hidden = await reader.readSessionDisplayTurnPage(sessionPath, "viewer", undefined, 100);
+		assert.equal(JSON.stringify(hidden.messages.map((message) => `${message.meta?.type ?? "message"}:${message.text}`)), JSON.stringify(["message:q1", "message:a1", "message:q2", "message:a2"]));
+
+		// 传入注册集合：注册的类型投影成卡，内部前缀与未注册类型仍隐藏
+		const shown = await reader.readSessionDisplayTurnPage(sessionPath, "viewer", undefined, 100, undefined, { entryRendererTypes: ["pi-plan-btw", "codemode-store"] });
+		assert.equal(JSON.stringify(shown.messages.map((message) => `${message.meta?.type ?? "message"}:${message.text}`)), JSON.stringify(["message:q1", "message:a1", "customEntry:看下进度", "message:q2", "message:a2"]));
+		assert.equal(
+			shown.messages.some((message) => String(message.meta?.customType ?? "").startsWith("codemode-")),
+			false,
+		);
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+});
+
 test("readLoadWindow maps the compaction insert point into the window", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pideck-history-load-window-compaction-"));
 	const sessionPath = join(directory, "session.jsonl");
@@ -976,6 +1054,106 @@ test("readLoadWindow maps the compaction insert point into the window", async ()
 		assert.equal(compactionIndex, 2);
 		assert.equal(JSON.stringify(Array.from(window.messages, (message) => message.text)), JSON.stringify(["q2", "a2", "compacted", "q3", "a3", "q4", "a4"]));
 		assert.equal(JSON.stringify(joined(window.messages.filter((message) => message.role !== "system"))), JSON.stringify(["q2:u2", "a2:a2", "q3:u3", "a3:a3", "q4:u4", "a4:a4"]));
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+});
+
+/**
+ * pi 原生 context_edit 在时间线上的呈现规则（2026-10 产品决定）：
+ *   - 被移出上下文的消息**直接不显示**（用户按下删除就应当看不到它，无徐章、不折叠）；
+ *   - 被改写内容的显示**改写后的正文**（否则刚做完的编辑看起来没生效），也不带标记。
+ * 文件里两者原文都保留（pi 的 append-only 语义），只是不再参与展示。
+ */
+test("context_edit：被移出的消息不出现，被改写的显示新正文", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pideck-history-context-edits-"));
+	const sessionPath = join(directory, "session.jsonl");
+	try {
+		await writeLines(sessionPath, [
+			JSON.stringify({ id: "session", type: "session" }),
+			roleEntry("u1", "session", "user", "q1"),
+			roleEntry("a1", "u1", "assistant", "a1"),
+			roleEntry("u2", "a1", "user", "q2"),
+			roleEntry("a2", "u2", "assistant", "a2"),
+			JSON.stringify({ id: "e1", parentId: "a2", type: "context_edit", targetId: "a1", replacement: null, timestamp: "2026-01-01T00:00:04.000Z" }),
+			JSON.stringify({ id: "e2", parentId: "e1", type: "context_edit", targetId: "u2", replacement: { content: "rewritten q2" }, timestamp: "2026-01-01T00:00:05.000Z" }),
+		]);
+		const reader = createRoleAwareReader((path) => path);
+
+		const page = await reader.readSessionDisplayTurnPage(sessionPath, "viewer", undefined, 100);
+		// a1 被移出 → 不出现；u2 被改写 → 显示改写后的正文
+		assert.equal(JSON.stringify(joined(page.messages)), JSON.stringify(["q1:u1", "rewritten q2:u2", "a2:a2"]));
+		const replacedMessage = page.messages.find((message) => message.meta?.entryId === "u2");
+		assert.equal(replacedMessage.meta?.contextEdit, undefined, "编辑后不再带任何标记");
+		assert.equal(replacedMessage.meta?.contextEditOriginalText, undefined, "元数据随标记一并下线（原文在文件里，不在载荷里再存一份）");
+		assert.equal(
+			page.messages.some((message) => message.meta?.entryId === "a1"),
+			false,
+			"被移出的消息必须从时间线上消失",
+		);
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+});
+
+/** 同一目标多次编辑：后者覆盖前者（先改写再删除 → 最终就该消失）。 */
+test("context_edit：同一目标多次编辑只保留最后一次的状态", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pideck-history-context-edits-last-"));
+	const sessionPath = join(directory, "session.jsonl");
+	try {
+		await writeLines(sessionPath, [
+			JSON.stringify({ id: "session", type: "session" }),
+			roleEntry("u1", "session", "user", "q1"),
+			roleEntry("a1", "u1", "assistant", "a1"),
+			JSON.stringify({ id: "e1", parentId: "a1", type: "context_edit", targetId: "u1", replacement: { content: "first" }, timestamp: "2026-01-01T00:00:01.000Z" }),
+			JSON.stringify({ id: "e2", parentId: "e1", type: "context_edit", targetId: "u1", replacement: null, timestamp: "2026-01-01T00:00:02.000Z" }),
+		]);
+		const reader = createRoleAwareReader((path) => path);
+
+		const page = await reader.readSessionDisplayTurnPage(sessionPath, "viewer", undefined, 100);
+		assert.equal(JSON.stringify(joined(page.messages)), JSON.stringify(["a1:a1"]), "先改写再删除 → u1 最终不显示");
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+});
+
+/**
+ * 分支隔离：另一分支上的编辑不得影响当前分支的展示。
+ * 文件顺序决定 leaf（最后一条带 id 的条目），所以主分支叶子写最后。
+ */
+test("context_edit：另一分支的编辑不影响当前分支展示", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pideck-history-context-edits-branch-"));
+	const sessionPath = join(directory, "session.jsonl");
+	try {
+		await writeLines(sessionPath, [
+			JSON.stringify({ id: "session", type: "session" }),
+			roleEntry("u1", "session", "user", "q1"),
+			roleEntry("a1", "u1", "assistant", "main"),
+			// 另一分支：b1 + 其上针对 a1 的编辑（不在 leaf=a2 的父链上）
+			roleEntry("b1", "u1", "assistant", "side"),
+			JSON.stringify({ id: "e-side", parentId: "b1", type: "context_edit", targetId: "a1", replacement: null, timestamp: "2026-01-01T00:00:01.000Z" }),
+			roleEntry("a2", "a1", "assistant", "main leaf"),
+		]);
+		const reader = createRoleAwareReader((path) => path);
+
+		const page = await reader.readSessionDisplayTurnPage(sessionPath, "viewer", undefined, 100);
+		// 另一分支的删除不得把本分支的 a1 也从界面上抹掉
+		assert.equal(JSON.stringify(joined(page.messages)), JSON.stringify(["q1:u1", "main:a1", "main leaf:a2"]));
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+});
+
+/** 无编辑时行为不变（旧会话不引入回归噪声）。 */
+test("无 context_edit 时消息原样展示", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pideck-history-context-edits-none-"));
+	const sessionPath = join(directory, "session.jsonl");
+	try {
+		await writeLines(sessionPath, [JSON.stringify({ id: "session", type: "session" }), roleEntry("u1", "session", "user", "q1"), roleEntry("a1", "u1", "assistant", "a1")]);
+		const reader = createRoleAwareReader((path) => path);
+
+		const page = await reader.readSessionDisplayTurnPage(sessionPath, "viewer", undefined, 100);
+		assert.equal(JSON.stringify(joined(page.messages)), JSON.stringify(["q1:u1", "a1:a1"]));
 	} finally {
 		await rm(directory, { recursive: true, force: true });
 	}

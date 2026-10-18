@@ -3,9 +3,10 @@ import { getDefaultStore, useAtom, useAtomValue } from "jotai";
 import { settingsFocusAtom, type SettingsPaneId, type SettingsTabId } from "../../atoms";
 import { hasPendingUpdateAtom } from "../../atoms/update-atoms";
 import { useSettingsFocus } from "./settings/useSettingsFocus.ts";
-import { Settings2, Network, Plug, Wrench, PawPrint, Bell, Trash2, Brush, Eye, ChartColumnBig, Activity, MessageSquare, ImageIcon, DatabaseBackup, Globe, FileCode2, GitBranch, SlidersHorizontal, MonitorCog, Keyboard, X } from "lucide-react";
+import { Settings2, Network, Plug, Wrench, PawPrint, Bell, Trash2, Brush, Eye, ChartColumnBig, Activity, MessageSquare, ImageIcon, DatabaseBackup, Globe, FileCode2, GitBranch, Loader2, SlidersHorizontal, MonitorCog, Keyboard, TerminalSquare, X, Bot, Puzzle, Clapperboard } from "lucide-react";
 import { t, type TranslationKey } from "../../i18n";
 import { applyAppearanceAttributes, type AppearanceSettings } from "../../themeAppearance";
+import { applyCustomThemeTokens, applyFontSizeAttributes } from "../../hooks/appearance/useAppAppearance";
 import { Button } from "../ui-shadcn/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui-shadcn/tabs";
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from "../ui-shadcn/dialog";
@@ -18,11 +19,12 @@ import { dirtySettingsTabIds, type SettingsUnsavedTabId } from "./settings/unsav
 import { computeDirtyFields } from "./settings/settingsDirtyFields.ts";
 import { SETTINGS_TAB_IDS, SETTINGS_TAB_LABEL_KEYS } from "./settings/settingsTabLayout";
 import { isSettingsTabHidden, resolveInitialSettingsTab, resolveVisibleSettingsTabs } from "./settings/settingsTabVisibility";
+import { BridgeGuiSlot, useBridgeSessionId } from "../bridge/BridgeSlot";
 import { showNotice } from "../../utils/notice";
 import { useGitModels } from "./settings/gitModels.ts";
 import { formatSettingsUnsavedMessage, summarizeSettingsUnsavedChanges } from "./settings/unsavedChangesSummary.ts";
 import { UpdateInstallUnsavedDialog } from "./settings/UpdateInstallUnsavedDialog.tsx";
-import type { AppSettings, AppInfo, AvailableModel, PiInstallStatus, PiUpdateCheckResult, PiCliUpdateResult, Project } from "../../../../shared/types";
+import type { AppSettings, AppInfo, AvailableModel, PiInstallation, PiInstallStatus, PiUpdateCheckResult, PiCliUpdateResult, Project } from "../../../../shared/types";
 
 // ── 各 tab 内容 lazy 加载：首开只下载壳 + 当前 tab 的 chunk（qrcode/表格/日志查看器等
 //    重依赖随各自 tab 拆包），切换到某 tab 时才加载其 chunk（本地文件，秒级以内）。──
@@ -44,6 +46,10 @@ const ProcessMetricsTab = lazy(() => import("./settings/ProcessMetricsTab").then
 const UsageStatsTab = lazy(() => import("./settings/UsageStatsTab").then((m) => ({ default: m.UsageStatsTab })));
 const VisionBridgeSettingsTab = lazy(() => import("./settings/VisionBridgeSettingsTab").then((m) => ({ default: m.VisionBridgeSettingsTab })));
 const ImageGenSettingsTab = lazy(() => import("./settings/ImageGenSettingsTab").then((m) => ({ default: m.ImageGenSettingsTab })));
+const VideoGenSettingsTab = lazy(() => import("./settings/VideoGenSettingsTab").then((m) => ({ default: m.VideoGenSettingsTab })));
+const AcpToolsTab = lazy(() => import("./settings/AcpToolsTab").then((m) => ({ default: m.AcpToolsTab })));
+const HostPluginsTab = lazy(() => import("../../config/HostPluginsTab").then((m) => ({ default: m.HostPluginsTab })));
+const TerminalTab = lazy(() => import("./settings/TerminalTab").then((m) => ({ default: m.TerminalTab })));
 
 // 配置管理分区（pi 配置文件管理）作为独立 chunk 懒加载：首开设置窗口不加载 ConfigModal 数组。
 const ConfigPane = lazy(() => import("../../ConfigModal").then((m) => ({ default: m.ConfigPane })));
@@ -91,23 +97,32 @@ type SettingsModalProps = {
 	settings: AppSettings;
 	piStatus: PiInstallStatus | null;
 	piChecking: boolean;
+	piInstallations: PiInstallation[];
+	onChoosePiInstallation: (path: string) => void;
+	onShellProbePiInstallations: () => void;
+	shellProbingPiInstallations: boolean;
+	/** 正在校验的安装路径（列表行内 loading）；由 hook 自持，不用 customPiPath 反推 */
+	applyingPiInstallationPath: string | null;
+	/** 进入 dev tab 时拉一次安装列表 */
+	onRequestPiInstallations: () => void;
+	/** 系统文件选择器挑 pi 可执行文件（稀有/自定义安装） */
+	onBrowsePiPath: () => void;
+	browsingPiPath: boolean;
 	piProxyChecking: boolean;
 	piProxyNotice: string;
 	piProxyNoticeTone: "info" | "success" | "error";
 	webServiceChanging: boolean;
 	onRestartWebService: () => void;
 	appInfo: AppInfo;
-	customPiPath: string;
-	customPathValidating: boolean;
-	customPathResult: PiInstallStatus | null;
+	/** 添加/编辑/移除用户自加的候选路径（列表内联表单驱动） */
+	onAddPiCustomPath: (path: string) => Promise<void> | void;
+	onUpdatePiCustomPath: (previousPath: string, nextPath: string) => Promise<void> | void;
+	onRemovePiCustomPath: (path: string) => Promise<void> | void;
 	updateChecking: boolean;
 	piUpdating: boolean;
 	piUpdateChecking: boolean;
 	piUpdateCheck: PiUpdateCheckResult | null;
 	piUpdateResult: PiCliUpdateResult | null;
-	onCustomPathChange: (path: string) => void;
-	onValidateCustomPath: () => void;
-	onClearCustomPath: () => void;
 	onCheckPi: () => void;
 	onTestPiProxy: () => void;
 	onCheckUpdate: () => void;
@@ -120,7 +135,7 @@ type SettingsModalProps = {
 	onToggleDevTools: () => void;
 	onRestartApp: () => void;
 	onClearCheckFlag?: () => void;
-	onOpenWebService: (port: string) => void;
+	onOpenWebService: (url: string) => void;
 	onClose: () => void;
 	onChange: (patch: Partial<AppSettings>) => Promise<boolean>;
 	/** 当前项目身份：项目资源操作只使用主进程登记的 id。 */
@@ -147,8 +162,20 @@ class SettingsModalErrorBoundary extends Component<{ onClose: () => void; childr
 		return { error };
 	}
 
+	/** 重试：清掉错误重新渲染子树。懒加载 chunk 的失败结果被 React 缓存在模块级，重试无效时需走「刷新应用」。 */
+	private readonly handleRetry = () => {
+		this.setState({ error: null });
+	};
+
+	/** 刷新应用：懒加载 chunk 拉取失败只有整页刷新能可靠恢复（更新后旧 chunk 已被替换）。 */
+	private readonly handleReload = () => {
+		window.location.reload();
+	};
+
 	override render() {
 		if (!this.state.error) return this.props.children;
+		// 三大浏览器懒加载 chunk 拉取失败的报错文案（常见于应用更新 / dev 热更新后），给出针对性提示。
+		const isChunkLoadError = /failed to fetch dynamically imported module|error loading dynamically imported module|importing a module script failed/i.test(this.state.error.message);
 		// #115：错误兜底直接走 shadcn Dialog 外壳
 		return (
 			<Dialog open onOpenChange={(next) => !next && this.props.onClose()}>
@@ -161,16 +188,23 @@ class SettingsModalErrorBoundary extends Component<{ onClose: () => void; childr
 							</Button>
 						</DialogClose>
 					</DialogHeader>
-					<div className="settings-layout">
-						<div className="settings-content" style={{ padding: "var(--space-5)" }}>
-							<div className="config-diagnostic-card">
-								<div>
-									<strong>{t("settings.renderCrashed")}</strong>
-									<span>{this.state.error.message}</span>
-									<small>{t("settings.renderCrashedHelp")}</small>
-								</div>
-								<pre>{this.state.error.stack ?? this.state.error.message}</pre>
+					{/* 不能套 .settings-layout：那是 196px 侧栏 + 内容的双列栅格，唯一子项会被挤进侧栏列（布局错位的根因） */}
+					<div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-5" role="alert">
+						<div className="config-diagnostic-card">
+							<div>
+								<strong>{t("settings.renderCrashed")}</strong>
+								<span>{this.state.error.message}</span>
+								<small>{isChunkLoadError ? t("settings.renderCrashedChunkHint") : t("settings.renderCrashedHelp")}</small>
 							</div>
+							<pre>{this.state.error.stack ?? this.state.error.message}</pre>
+						</div>
+						<div className="flex items-center justify-end gap-2">
+							<Button type="button" variant="outline" onClick={this.handleRetry}>
+								{t("app.renderErrorRetry")}
+							</Button>
+							<Button type="button" variant="default" onClick={this.handleReload}>
+								{t("app.renderErrorReload")}
+							</Button>
 						</div>
 					</div>
 				</DialogContent>
@@ -181,7 +215,14 @@ class SettingsModalErrorBoundary extends Component<{ onClose: () => void; childr
 
 /** tab chunk 加载占位：轻量居中提示，避免首次切到某 tab 时空白闪烁 */
 function SettingsTabLoading() {
-	return <div className="settings-panel grid min-w-0 min-h-40 place-items-center text-caption text-text-tertiary">{t("common.loading")}</div>;
+	return (
+		<div className="settings-panel grid min-w-0 min-h-40 place-items-center text-caption text-text-tertiary">
+			<span className="flex items-center gap-2">
+				<Loader2 size={14} className="animate-pideck-spin" aria-hidden="true" />
+				{t("common.loading")}
+			</span>
+		</div>
+	);
 }
 
 /**
@@ -206,6 +247,7 @@ const TAB_META: Record<SettingsTabId, { labelKey: TranslationKey; icon: ReactNod
 	common: { labelKey: SETTINGS_TAB_LABEL_KEYS.common, icon: <Settings2 size={16} /> },
 	shortcuts: { labelKey: SETTINGS_TAB_LABEL_KEYS.shortcuts, icon: <Keyboard size={16} /> },
 	appearance: { labelKey: SETTINGS_TAB_LABEL_KEYS.appearance, icon: <Brush size={16} /> },
+	terminal: { labelKey: SETTINGS_TAB_LABEL_KEYS.terminal, icon: <TerminalSquare size={16} /> },
 	proxy: { labelKey: SETTINGS_TAB_LABEL_KEYS.proxy, icon: <Network size={16} /> },
 	connections: { labelKey: SETTINGS_TAB_LABEL_KEYS.connections, icon: <Plug size={16} /> },
 	web: { labelKey: SETTINGS_TAB_LABEL_KEYS.web, icon: <Globe size={16} /> },
@@ -221,6 +263,9 @@ const TAB_META: Record<SettingsTabId, { labelKey: TranslationKey; icon: ReactNod
 	process: { labelKey: SETTINGS_TAB_LABEL_KEYS.process, icon: <Activity size={16} /> },
 	vision: { labelKey: SETTINGS_TAB_LABEL_KEYS.vision, icon: <Eye size={16} /> },
 	imagegen: { labelKey: SETTINGS_TAB_LABEL_KEYS.imagegen, icon: <ImageIcon size={16} /> },
+	videogen: { labelKey: SETTINGS_TAB_LABEL_KEYS.videogen, icon: <Clapperboard size={16} /> },
+	acp: { labelKey: SETTINGS_TAB_LABEL_KEYS.acp, icon: <Bot size={16} /> },
+	hostplugins: { labelKey: SETTINGS_TAB_LABEL_KEYS.hostplugins, icon: <Puzzle size={16} /> },
 };
 
 /**
@@ -231,6 +276,8 @@ function SettingsModalContent(props: SettingsModalProps) {
 	// 弹窗每次打开都会重新挂载（Radix Dialog 关闭即卸载内容）。
 	// 深链（如 Git「去设置」）优先于上次记住的 tab，否则会停在外观/开发等其它页。
 	const hasPendingUpdate = useAtomValue(hasPendingUpdateAtom);
+	// GUI 扩展桥：设置弹窗是应用级单实例 chrome，由当前聚焦会话的 pi 进程供给内容（不做回落）。
+	const bridgeSessionId = useBridgeSessionId();
 	// 开弹窗时的隐藏模块快照只用于算初始 tab；侧栏过滤读草稿（下方 draftSettings.hiddenModules），开关一切即预览。
 	const [activeTab, setActiveTab] = useState<SettingsTabId>(() => resolveInitialSettingsTab(getDefaultStore().get(settingsFocusAtom)?.tab, loadLastSettingsTab(), props.settings.hiddenModules ?? NO_HIDDEN_MODULES));
 	/**
@@ -293,11 +340,19 @@ function SettingsModalContent(props: SettingsModalProps) {
 	const imageGenRef = useRef<{ save: () => Promise<boolean> } | null>(null);
 	const [imageGenDirty, setImageGenDirty] = useState(false);
 	const handleImageGenDirtyChange = useCallback((dirty: boolean) => setImageGenDirty(dirty), []);
+	// ── 生视频草稿：独立文件 userData/videogen.json，保存链与生图一致（ref.save + 脏标记） ──
+	const videoGenRef = useRef<{ save: () => Promise<boolean> } | null>(null);
+	const [videoGenDirty, setVideoGenDirty] = useState(false);
+	const handleVideoGenDirtyChange = useCallback((dirty: boolean) => setVideoGenDirty(dirty), []);
+	// ── ACP 工具表：独立 settings.acpTools 字段，保存链与生图一致（ref.save + 脏标记） ──
+	const acpToolsRef = useRef<{ save: () => Promise<boolean> } | null>(null);
+	const [acpDirty, setAcpDirty] = useState(false);
+	const handleAcpDirtyChange = useCallback((dirty: boolean) => setAcpDirty(dirty), []);
 	// 快捷键存在冲突等非法状态时禁用保存（ShortcutsTab 上报，见 saveAll 按钮）
 	const [shortcutsInvalid, setShortcutsInvalid] = useState(false);
 	const handleShortcutsInvalidChange = useCallback((invalid: boolean) => setShortcutsInvalid(invalid), []);
 	// 左侧导航黄点来源：与关闭确认同一套字段目录，避免两处口径不一致
-	const dirtyTabIds = useMemo(() => dirtySettingsTabIds({ dirtyFields, visionDirty: visionDraft.dirty, imageGenDirty }), [dirtyFields, visionDraft.dirty, imageGenDirty]);
+	const dirtyTabIds = useMemo(() => dirtySettingsTabIds({ dirtyFields, visionDirty: visionDraft.dirty, imageGenDirty, acpDirty }), [dirtyFields, visionDraft.dirty, imageGenDirty, acpDirty]);
 	/** 各 tab 的局部编辑态（WSL 输入/Web 端口/宠物预览模式）在取消时通过递增信号重置 */
 	const [devTabResetKey, setDevTabResetKey] = useState(0);
 	const [webTabResetKey, setWebTabResetKey] = useState(0);
@@ -338,8 +393,20 @@ function SettingsModalContent(props: SettingsModalProps) {
 	// 保存后由 App 的 settings effect 接管；取消时在 cancelAll 里回滚回 baseSnapshot。
 	useEffect(() => {
 		const media = window.matchMedia?.("(prefers-color-scheme: dark)");
-		applyAppearanceAttributes(document.documentElement, draftSettings as AppearanceSettings, Boolean(media?.matches));
-	}, [draftSettings.theme, draftSettings.themeScheduleLightStart, draftSettings.themeScheduleDarkStart, draftSettings.themeSkin, draftSettings.accent]);
+		const root = document.documentElement;
+		applyAppearanceAttributes(root, draftSettings as AppearanceSettings, Boolean(media?.matches));
+		// 自定义主题包快照同样实时预览：与 App 的 useAppAppearance 共用注入实现
+		// （data-theme 先由 applyAppearanceAttributes 写好，再按当前亮暗选档注入）。
+		applyCustomThemeTokens(root, draftSettings, root.dataset.theme === "dark");
+	}, [draftSettings.theme, draftSettings.themeScheduleLightStart, draftSettings.themeScheduleDarkStart, draftSettings.themeSkin, draftSettings.accent, draftSettings.customTheme, draftSettings.customThemeOverrides]);
+
+	// 字号档位实时预览：与上方主题色预览同理，草稿变化立即写入 <html> dataset（含 Tab 栏字号）。
+	// 此前字号不预览，弹窗内选档位界面毫无反应，用户以为设置无效（v0.7.8 发布前用户反馈）；
+	// 保存后由 App 的 useAppAppearance 接管（两处共用 applyFontSizeAttributes，回落链一致）；
+	// 取消/放弃时在 restoreAppearanceFromSnapshot 里回滚回快照。
+	useEffect(() => {
+		applyFontSizeAttributes(document.documentElement, draftSettings);
+	}, [draftSettings.fontSize, draftSettings.uiFontSize, draftSettings.tabBarFontSize, draftSettings.chatFontSize, draftSettings.inputFontSize]);
 
 	/** 检查指定字段在草稿中是否已被修改（与基准快照真实差异比较）。 */
 	const isDirty = useCallback(
@@ -353,7 +420,12 @@ function SettingsModalContent(props: SettingsModalProps) {
 	 *  只在 settings 实际变化时重跑，取消/放弃不触发，必须在这里显式恢复预览）。 */
 	const restoreAppearanceFromSnapshot = useCallback(() => {
 		const media = window.matchMedia?.("(prefers-color-scheme: dark)");
-		applyAppearanceAttributes(document.documentElement, baseSnapshotRef.current as AppearanceSettings, Boolean(media?.matches));
+		const root = document.documentElement;
+		applyAppearanceAttributes(root, baseSnapshotRef.current as AppearanceSettings, Boolean(media?.matches));
+		// 字号档位同样回滚：字号预览直接写 dataset，不恢复会残留草稿档位
+		applyFontSizeAttributes(root, baseSnapshotRef.current);
+		// 自定义主题 token 同步回滚到快照（否则草稿预览的 inline 变量残留）
+		applyCustomThemeTokens(root, baseSnapshotRef.current, root.dataset.theme === "dark");
 	}, []);
 
 	/** 保存全部内容：全局设置差异提交（无差异也提交空 patch，触发「已保存」反馈）+ 视觉桥/生图草稿（若有改动）；返回是否全部成功 */
@@ -384,6 +456,16 @@ function SettingsModalContent(props: SettingsModalProps) {
 			ok = ok && imageGenOk;
 			// 保存成功后脏标记由子组件通过 onDirtyChange 自动清掉
 		}
+		if (videoGenDirty) {
+			// 校验失败（必填缺失）时子组件返回 false，保留脏标记供用户修正后重试
+			const videoGenOk = (await videoGenRef.current?.save()) ?? false;
+			ok = ok && videoGenOk;
+		}
+		if (acpDirty) {
+			// 校验失败（必填/重名）时子组件返回 false，保留脏标记供用户修正后重试
+			const acpOk = (await acpToolsRef.current?.save()) ?? false;
+			ok = ok && acpOk;
+		}
 		return ok;
 	};
 
@@ -392,7 +474,7 @@ function SettingsModalContent(props: SettingsModalProps) {
 		setDraftSettings(deepClone(baseSnapshotRef.current));
 		restoreAppearanceFromSnapshot();
 		visionDraft.reset();
-		setPerAreaFontSize(baseSnapshotRef.current.uiFontSize !== null || baseSnapshotRef.current.chatFontSize !== null || baseSnapshotRef.current.inputFontSize !== null);
+		setPerAreaFontSize(baseSnapshotRef.current.uiFontSize !== null || baseSnapshotRef.current.tabBarFontSize !== null || baseSnapshotRef.current.chatFontSize !== null || baseSnapshotRef.current.inputFontSize !== null);
 		// tab 局部编辑态（WSL 输入、Web 端口、宠物预览）由各自 tab 监听信号重置
 		setDevTabResetKey((k) => k + 1);
 		setWebTabResetKey((k) => k + 1);
@@ -477,7 +559,7 @@ function SettingsModalContent(props: SettingsModalProps) {
 		props.onInstallUpdate();
 	};
 
-	const [perAreaFontSize, setPerAreaFontSize] = useState(draftSettings.uiFontSize !== null || draftSettings.chatFontSize !== null || draftSettings.inputFontSize !== null);
+	const [perAreaFontSize, setPerAreaFontSize] = useState(draftSettings.uiFontSize !== null || draftSettings.tabBarFontSize !== null || draftSettings.chatFontSize !== null || draftSettings.inputFontSize !== null);
 
 	// Git 摘要模型列表与会话 Command 选择器共用 pi --list-models 数据源。
 	const { gitModels, report: gitModelsReport, refreshing: gitModelsRefreshing, reload: reloadGitModels, gitModelPickerOpen, openPicker: openGitModelPicker, closePicker: closeGitModelPicker } = useGitModels();
@@ -523,7 +605,7 @@ function SettingsModalContent(props: SettingsModalProps) {
 
 	const hasDirtyChanges = dirtyFields.size > 0;
 	// 视觉桥/生图草稿有未保存改动时，头部保存/取消按钮同样点亮（与全局设置脏标记合并判定）
-	const hasAnyDirtyChanges = hasDirtyChanges || visionDraft.dirty || imageGenDirty;
+	const hasAnyDirtyChanges = hasDirtyChanges || visionDraft.dirty || imageGenDirty || videoGenDirty || acpDirty;
 	// 关闭确认：列出全部变更项（不再只点第一条），多项按设置页 tab/字段顺序逐条展示。
 	const unsavedSummary = useMemo(
 		() =>
@@ -531,8 +613,9 @@ function SettingsModalContent(props: SettingsModalProps) {
 				dirtyFields,
 				visionDirty: visionDraft.dirty,
 				imageGenDirty,
+				acpDirty,
 			}),
-		[dirtyFields, visionDraft.dirty, imageGenDirty],
+		[dirtyFields, visionDraft.dirty, imageGenDirty, acpDirty],
 	);
 	const unsavedCloseMessage = useMemo(() => formatSettingsUnsavedMessage(unsavedSummary, t), [unsavedSummary]);
 	// 关闭确认清单 = 系统设置 + 配置管理两区未保存项合并（配置项由 ConfigPane 上报）
@@ -550,7 +633,7 @@ function SettingsModalContent(props: SettingsModalProps) {
 							   黄点/禁用态由配置页内部脏集合与保存状态上报 */
 							<>
 								<Button variant="default" size="sm" onClick={() => void configPaneRef.current?.saveCurrent()} disabled={configPaneState.saving} title={configPaneState.hasDirty ? t("config.dirtyTooltip") : undefined}>
-									{configPaneState.hasDirty && <span className="size-2 rounded-full bg-amber-400" aria-hidden="true" />}
+									{configPaneState.hasDirty && <span className="size-1.5 rounded-full bg-warning" aria-hidden="true" />}
 									{configPaneState.saving ? t("common.saving") : t("common.save")}
 								</Button>
 								<Button variant="outline" size="sm" onClick={() => configPaneRef.current?.exportConfig()}>
@@ -606,17 +689,17 @@ function SettingsModalContent(props: SettingsModalProps) {
 					{/* 顶层分区 tab：直接用 shadcn Tabs 默认观感（bg-muted p-1 圆角条），与全局组件统一；
 				    不再套自定义 tab 条样式，只做外边距/自定宽定位。 */}
 					<TabsList className="mx-3 mt-2.5 w-auto justify-start gap-0.5 self-start" aria-label={t("settings.title")}>
-						<TabsTrigger value="settings" className="h-8 gap-1.5 px-3 text-[13px]">
+						<TabsTrigger value="settings" className="h-8 gap-1.5 px-3 text-control">
 							<MonitorCog className="size-4" aria-hidden="true" />
 							{t("settings.panes.system")}
 							{/* 系统设置分区黄点：全局设置/视觉桥/生图草稿任一有未保存 */}
-							{hasAnyDirtyChanges ? <span className="size-1.5 rounded-full bg-amber-500" aria-hidden="true" /> : null}
+							{hasAnyDirtyChanges ? <span className="size-1.5 rounded-full bg-warning" aria-hidden="true" /> : null}
 						</TabsTrigger>
-						<TabsTrigger value="config" className="h-8 gap-1.5 px-3 text-[13px]">
+						<TabsTrigger value="config" className="h-8 gap-1.5 px-3 text-control">
 							<SlidersHorizontal className="size-4" aria-hidden="true" />
 							{t("settings.panes.config")}
 							{/* 配置管理分区黄点：由 ConfigPane 内部脏集合上报 */}
-							{configPaneState.hasDirty ? <span className="size-1.5 rounded-full bg-amber-500" aria-hidden="true" /> : null}
+							{configPaneState.hasDirty ? <span className="size-1.5 rounded-full bg-warning" aria-hidden="true" /> : null}
 						</TabsTrigger>
 					</TabsList>
 					<TabsContent value="config" forceMount hidden={pane !== "config"} className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -663,7 +746,7 @@ function SettingsModalContent(props: SettingsModalProps) {
 										两者可并存；均为装饰（aria-hidden），语义由 tab 内卡片文案承担。 */}
 											<div className="ml-auto flex items-center gap-1">
 												{tab.id === "dev" && hasPendingUpdate ? <span className="size-1.5 rounded-full bg-[var(--color-accent)]" aria-hidden="true" /> : null}
-												{dirtyTabIds.has(tab.id as SettingsUnsavedTabId) ? <span className="size-1.5 rounded-full bg-amber-500" aria-hidden="true" /> : null}
+												{dirtyTabIds.has(tab.id as SettingsUnsavedTabId) ? <span className="size-1.5 rounded-full bg-warning" aria-hidden="true" /> : null}
 											</div>
 										</TabsTrigger>
 									</Fragment>
@@ -692,6 +775,15 @@ function SettingsModalContent(props: SettingsModalProps) {
 								<TabsContent value="appearance" className="settings-panel min-w-0">
 									<Suspense fallback={<SettingsTabLoading />}>
 										<AppearanceTab draft={draftSettings} updateDraft={updateDraft} isDirty={isDirty} perAreaFontSize={perAreaFontSize} setPerAreaFontSize={setPerAreaFontSize} visionEnabled={visionDraft.draft?.enabled} />
+									</Suspense>
+								</TabsContent>
+							)}
+
+							{/* ── 终端设置 tab ── */}
+							{activeTab === "terminal" && (
+								<TabsContent value="terminal" className="settings-panel min-w-0">
+									<Suspense fallback={<SettingsTabLoading />}>
+										<TerminalTab draft={draftSettings} updateDraft={updateDraft} isDirty={isDirty} />
 									</Suspense>
 								</TabsContent>
 							)}
@@ -766,13 +858,18 @@ function SettingsModalContent(props: SettingsModalProps) {
 											appInfo={props.appInfo}
 											piStatus={props.piStatus}
 											piChecking={props.piChecking}
-											customPiPath={props.customPiPath}
-											customPathValidating={props.customPathValidating}
-											customPathResult={props.customPathResult}
-											onCustomPathChange={props.onCustomPathChange}
-											onValidateCustomPath={props.onValidateCustomPath}
-											onClearCustomPath={props.onClearCustomPath}
+											piInstallations={props.piInstallations}
+											onChoosePiInstallation={props.onChoosePiInstallation}
+											onShellProbePiInstallations={props.onShellProbePiInstallations}
+											shellProbingPiInstallations={props.shellProbingPiInstallations}
+											applyingPiInstallationPath={props.applyingPiInstallationPath}
+											onRequestPiInstallations={props.onRequestPiInstallations}
+											onBrowsePiPath={props.onBrowsePiPath}
+											browsingPiPath={props.browsingPiPath}
 											onCheckPi={props.onCheckPi}
+											onAddPiCustomPath={props.onAddPiCustomPath}
+											onUpdatePiCustomPath={props.onUpdatePiCustomPath}
+											onRemovePiCustomPath={props.onRemovePiCustomPath}
 											onClearCheckFlag={props.onClearCheckFlag}
 											piUpdateChecking={props.piUpdateChecking}
 											onCheckPiUpdate={props.onCheckPiUpdate}
@@ -792,7 +889,7 @@ function SettingsModalContent(props: SettingsModalProps) {
 								</TabsContent>
 							)}
 
-							{/* ── 外部连接 tab（飞书机器人，由 Pi 管理界面迁入） ── */}
+							{/* ── 外部连接 tab（飞书 / 微信，由 Pi 管理界面迁入） ── */}
 							{activeTab === "im" && (
 								<TabsContent value="im" className="settings-panel min-w-0">
 									<Suspense fallback={<SettingsTabLoading />}>
@@ -866,7 +963,37 @@ function SettingsModalContent(props: SettingsModalProps) {
 									<ImageGenSettingsTab ref={imageGenRef} onDirtyChange={handleImageGenDirtyChange} />
 								</Suspense>
 							</TabsContent>
+							{/* ── 生视频 tab：独立 videogen.json，草稿/脏标记/保存链与生图同构（hidden 保挂载）。 ── */}
+							<TabsContent value="videogen" className="settings-panel min-w-0" hidden={activeTab !== "videogen"}>
+								<Suspense fallback={<SettingsTabLoading />}>
+									<VideoGenSettingsTab ref={videoGenRef} onDirtyChange={handleVideoGenDirtyChange} />
+								</Suspense>
+							</TabsContent>
+							{/* ── ACP 工具 tab：独立 settings.acpTools 字段；草稿自持，切换 tab 保持挂载（hidden）以免丢失未保存行 ── */}
+							<TabsContent value="acp" className="settings-panel min-w-0" hidden={activeTab !== "acp"}>
+								<Suspense fallback={<SettingsTabLoading />}>
+									<AcpToolsTab ref={acpToolsRef} onDirtyChange={handleAcpDirtyChange} />
+								</Suspense>
+							</TabsContent>
+							{/* ── PiDeck 插件 tab：宿主插件管理（安装/授权/启停）。独立于 pi 配置弹窗，
+							    归属应用设置；无草稿语义，切 tab 即卸载（动作型 IPC 即时生效）。 ── */}
+							<TabsContent value="hostplugins" className="settings-panel min-w-0" hidden={activeTab !== "hostplugins"}>
+								<Suspense fallback={<SettingsTabLoading />}>
+									<HostPluginsTab />
+								</Suspense>
+							</TabsContent>
 						</Tabs>
+						{/* GUI 扩展桥：设置弹窗内的扩展区块（ctx.gui.setSettingsSection）。
+						    **追加**在全部设置 tab 之下 —— 不改 SETTINGS_TAB_LAYOUT / TAB_META /
+						    i18n 标签这套 tab 注册表（它有独立的契约测试），也不新增 TabsContent。
+						    无贡献时返回 null，不占位。
+
+						    封高 + 自滚（重要）：本槽位在 `flex flex-col` 里，上方 `<Tabs>` 是 `flex-1`。
+						    若槽位不限高（原先只有 shrink-0），贡献一多就会把设置区挤成 0 高、
+						    自己撑出弹窗被 overflow-hidden 裁掉 —— 表现为「扩展把设置页全挡住了、还不能滑」。
+						    40vh 是保守值：足够看一个分组，又永远留得住设置区。
+						    sessionId 取聚焦会话（应用级落点由它供给，不做回落）。 */}
+						<BridgeGuiSlot sessionId={bridgeSessionId} slot="settings.section" className="mx-3 mb-3 flex max-h-[40vh] min-h-0 shrink-0 flex-col gap-2 overflow-y-auto" />
 					</TabsContent>
 				</Tabs>
 				{/* 未保存变更确认对话框 */}

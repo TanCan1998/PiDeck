@@ -32,9 +32,11 @@ for (const channel of ["sessionsCatalogReadMessagePage", "sessionsCatalogExportH
 		const code = codeOnly(handlerBody(channel));
 		// 远端分流按 ssh locator 判定（各 handler 写法略有差异，认特征片段而不是完整表达式）。
 		const remoteAt = code.search(/kind === "ssh"/);
-		const localAt = code.search(/localSessionFilePath\s*\(\s*sessionId\s*\)/);
+		// 本机路径解析：导出链路走 localSessionFilePath()，读页链路在合并后直接用 dev 的
+		// `entry.filePath`（ssh 条目已在上方 return；乱序会让本机链路先看到被清空的路径）。
+		const localAt = Math.min(...[code.search(/localSessionFilePath\s*\(\s*sessionId\s*\)/), code.search(/entry\??\.filePath/)].filter((index) => index >= 0));
 		assert.ok(remoteAt >= 0, "handler 里必须存在远端分流（按 ssh locator 判定）");
-		assert.ok(localAt >= 0, "handler 里必须存在本机路径解析");
+		assert.ok(Number.isFinite(localAt), "handler 里必须存在本机路径解析");
 		assert.ok(remoteAt < localAt, "远端分流必须排在本机路径解析之前，否则远端分支不可达（见本文件头注释）");
 	});
 }

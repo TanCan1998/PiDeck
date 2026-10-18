@@ -134,16 +134,22 @@ export function AutomationHistoryList({ projectId, onViewSession }: AutomationHi
 		});
 	};
 
+	// 状态一律用 badge 的语义档（info/success/danger/warning/neutral），色值走 foundation
+	// 的 --color-* token，暗色与皮肤自动翻转；不再逐处重写 h-5 px-1.5 text-micro。
 	const renderStatusBadge = (status: AutomationRun["status"]) => {
 		switch (status) {
 			case "queued":
 			case "starting":
 			case "running":
-				return <Badge className="h-5 animate-pulse border-sky-500/30 bg-sky-500/15 px-1.5 text-[11px] font-normal text-sky-500">{status === "queued" ? t("automation.status.queued") : status === "starting" ? t("automation.status.starting") : t("automation.status.running")}</Badge>;
+				return (
+					<Badge variant="info" size="sm" className="animate-pulse">
+						{status === "queued" ? t("automation.status.queued") : status === "starting" ? t("automation.status.starting") : t("automation.status.running")}
+					</Badge>
+				);
 			case "succeeded":
 				return (
-					<Badge className="h-5 border-emerald-500/30 bg-emerald-500/15 px-1.5 text-[11px] font-normal text-emerald-500">
-						<CheckCircle2 className="mr-1 size-3" />
+					<Badge variant="success" size="sm">
+						<CheckCircle2 className="size-3" />
 						{t("automation.status.succeeded")}
 					</Badge>
 				);
@@ -152,21 +158,21 @@ export function AutomationHistoryList({ projectId, onViewSession }: AutomationHi
 			case "budget-exhausted":
 			case "interrupted":
 				return (
-					<Badge className="h-5 border-destructive/30 bg-destructive/15 px-1.5 text-[11px] font-normal text-destructive">
-						<XCircle className="mr-1 size-3" />
+					<Badge variant="danger" size="sm">
+						<XCircle className="size-3" />
 						{status === "timed-out" ? t("automation.status.timedOut") : status === "interrupted" ? t("automation.status.interrupted") : t("automation.status.failed")}
 					</Badge>
 				);
 			case "aborted":
 				return (
-					<Badge className="h-5 border-amber-500/30 bg-amber-500/15 px-1.5 text-[11px] font-normal text-amber-500">
-						<AlertCircle className="mr-1 size-3" />
+					<Badge variant="warning" size="sm">
+						<AlertCircle className="size-3" />
 						{t("automation.status.aborted")}
 					</Badge>
 				);
 			case "skipped":
 				return (
-					<Badge variant="outline" className="h-5 px-1.5 text-[11px] font-normal text-muted-foreground">
+					<Badge variant="neutral" size="sm">
 						{t("automation.status.skipped")}
 					</Badge>
 				);
@@ -194,13 +200,13 @@ export function AutomationHistoryList({ projectId, onViewSession }: AutomationHi
 					</span>
 				</div>
 				<div className="flex items-center gap-1.5">
-					<Button variant="outline" size="sm" className="h-6 px-2 text-[11px]" disabled={selectedIds.size === 0 || busy} onClick={() => setConfirm("delete")}>
+					<Button variant="outline" size="sm" className="h-6 px-2 text-micro" disabled={selectedIds.size === 0 || busy} onClick={() => setConfirm("delete")}>
 						<Trash2 className="mr-1 size-3" />
 						{t("common.deleteSelected")}
 						{selectedIds.size > 0 ? ` (${selectedIds.size})` : ""}
 					</Button>
 					{!projectId && (
-						<Button variant="ghost" size="sm" className="h-6 px-2 text-[11px]" disabled={terminalRuns.length === 0 || busy} onClick={() => setConfirm("clear")}>
+						<Button variant="ghost" size="sm" className="h-6 px-2 text-micro" disabled={terminalRuns.length === 0 || busy} onClick={() => setConfirm("clear")}>
 							{t("automation.clearHistory")}
 						</Button>
 					)}
@@ -226,18 +232,18 @@ export function AutomationHistoryList({ projectId, onViewSession }: AutomationHi
 										</Badge>
 									)}
 									{renderStatusBadge(run.status)}
-									<span className="font-mono text-[11px] text-muted-foreground">{run.trigger}</span>
+									<span className="font-mono text-micro text-muted-foreground">{run.trigger}</span>
 								</div>
 
 								<div className="flex shrink-0 items-center gap-1.5">
 									{isRunning && (
-										<Button variant="destructive" size="sm" className="h-6 gap-1 px-2 text-[11px]" disabled={isAborting} onClick={() => handleAbort(run)}>
+										<Button variant="destructive" size="sm" className="h-6 gap-1 px-2 text-micro" disabled={isAborting} onClick={() => handleAbort(run)}>
 											<StopCircle className="size-3" />
 											{t("automation.abortRun")}
 										</Button>
 									)}
 									{run.sessionId && onViewSession && (
-										<Button variant="outline" size="sm" className="h-6 gap-1 px-2 text-[11px]" onClick={() => onViewSession(run.projectId, run.sessionId!)}>
+										<Button variant="outline" size="sm" className="h-6 gap-1 px-2 text-micro" onClick={() => onViewSession(run.projectId, run.sessionId!)}>
 											<ExternalLink className="size-3" />
 											{t("automation.viewSession")}
 										</Button>
@@ -245,9 +251,9 @@ export function AutomationHistoryList({ projectId, onViewSession }: AutomationHi
 								</div>
 							</div>
 
-							{run.error && <div className="break-all rounded bg-destructive/10 px-2 py-1 font-mono text-[11px] text-destructive">{run.error}</div>}
+							{run.error && <div className="break-all rounded bg-destructive/10 px-2 py-1 font-mono text-micro text-destructive">{run.error}</div>}
 
-							<div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border/20 pt-1.5 text-[11px] text-muted-foreground">
+							<div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border/20 pt-1.5 text-micro text-muted-foreground">
 								<span className="flex items-center gap-1">
 									<Clock className="size-3 opacity-70" />
 									{formatTime(run.startedAt ?? run.queuedAt)}

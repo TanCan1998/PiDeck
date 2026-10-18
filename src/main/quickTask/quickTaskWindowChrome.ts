@@ -13,13 +13,14 @@ import { app, screen, type BrowserWindow } from "electron";
 import { ipcChannels } from "../../shared/ipc";
 import type { QuickTaskState } from "../../shared/types/quickTask";
 import type { FocusTarget } from "../utils/focusTarget";
+import type { LastWindowBounds } from "../windowState";
 import { QuickTaskController } from "./QuickTaskController";
 
 export type QuickTaskWindowChromeDeps = {
 	/** 主窗口读取器：mainWindow 是模块级可空变量，必须每次现取而不是捕获快照。 */
 	getWindow: () => BrowserWindow | null;
 	/** 持久化工作台几何（由 index.ts 装配为 saveLastWindowBounds(userData, …)）。 */
-	saveWorkbenchBounds: (bounds: { x: number; y: number; width: number; height: number; maximized: boolean }) => void;
+	saveWorkbenchBounds: (bounds: LastWindowBounds & { x: number; y: number; maximized: boolean }) => void;
 };
 
 export class QuickTaskWindowChrome {
@@ -36,7 +37,7 @@ export class QuickTaskWindowChrome {
 	}
 
 	/**
-	 * 关窗时保存工作台几何（位置 + 尺寸 + 是否最大化）。
+	 * 关窗时保存工作台几何及目标工作区，供启动时区分原生贴边外框与显示器变化后的离屏。
 	 * 紧凑模式激活期间窗口是 720×760，此时必须存控制器捕获的 saved bounds，
 	 * 否则会把小窗口尺寸写进 lastWindowBounds（下次启动直接变窄）。
 	 * 最大化/全屏时存 normal bounds（还原后的几何），maximized 标记让下次启动先按 normal
@@ -47,8 +48,10 @@ export class QuickTaskWindowChrome {
 		if (window.isDestroyed()) return;
 		const workbench = this.controller.getWorkbenchBounds();
 		const maximized = workbench ? this.controller.wasWorkbenchMaximized() : window.isMaximized() || window.isFullScreen();
-		const normal = workbench ?? (maximized ? window.getNormalBounds() : window.getBounds());
-		this.deps.saveWorkbenchBounds({ x: normal.x, y: normal.y, width: normal.width, height: normal.height, maximized });
+		// 最小化时 getBounds 可能是系统的离屏占位坐标，不能作为上次工作台位置。
+		const normal = workbench ?? (maximized || window.isMinimized() ? window.getNormalBounds() : window.getBounds());
+		const workArea = screen.getDisplayMatching(normal).workArea;
+		this.deps.saveWorkbenchBounds({ x: normal.x, y: normal.y, width: normal.width, height: normal.height, maximized, workArea });
 	}
 
 	/**

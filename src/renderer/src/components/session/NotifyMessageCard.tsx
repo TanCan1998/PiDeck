@@ -44,7 +44,7 @@ export const NotifyMessageCard = memo(function NotifyMessageCard(props: { messag
 				{/* 整行可点：图标 + 标题 + 子代理名 + 折叠预览 + 时间 + chevron */}
 				<button
 					type="button"
-					className="flex min-h-7 w-full min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-caption transition-colors duration-150 hover:bg-[color:color-mix(in_srgb,var(--color-bg-hover)_50%,transparent)] focus-visible:-outline-offset-2 focus-visible:outline-2 focus-visible:outline-[var(--focus-ring)]"
+					className="flex min-h-7 w-full min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-caption transition-colors duration-fast hover:bg-[color:color-mix(in_srgb,var(--color-bg-hover)_50%,transparent)] focus-visible:-outline-offset-2 focus-visible:outline-2 focus-visible:outline-[var(--focus-ring)]"
 					onClick={() => setExpanded((value) => !value)}
 					aria-expanded={expanded}
 					title={expanded ? t("notify.collapse") : t("notify.expand")}

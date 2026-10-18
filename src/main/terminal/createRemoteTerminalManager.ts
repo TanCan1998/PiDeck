@@ -1,4 +1,4 @@
-import * as pty from "node-pty";
+import { loadNodePty } from "./nodePtyRuntime";
 import type { Project } from "../../shared/types";
 import { isRemoteProject } from "../../shared/projectLocation";
 import type { RemoteHostConnectionService } from "../remote/RemoteHostConnectionService";
@@ -12,7 +12,7 @@ import { SshTerminalSessionLauncher } from "./SshTerminalSessionLauncher";
  * project id, canonical root): nothing here accepts renderer-supplied authority.
  */
 export function createRemoteTerminalManager(options: { project(id: string): Project | undefined; service(): Promise<RemoteHostConnectionService> | undefined; emit(senderId: number, channel: string, payload: unknown): void }): RemoteTerminalSessionManager {
-	const launcher = new SshTerminalSessionLauncher({ spawn: (file, args, spawnOptions) => pty.spawn(file, args, spawnOptions) });
+	const launcher = new SshTerminalSessionLauncher({ spawn: (file, args, spawnOptions) => loadNodePty().spawn(file, args, spawnOptions) });
 	return new RemoteTerminalSessionManager({
 		locator: (id) => {
 			const project = options.project(id);

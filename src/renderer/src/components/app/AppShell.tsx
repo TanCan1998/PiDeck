@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode, type CSSProperties } from 
 import { type Layout, type LayoutChangedMeta, type PanelImperativeHandle } from "react-resizable-panels";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "../ui-shadcn/resizable";
 import { AppHeader } from "../AppHeader";
+import { RightSidebarStack } from "../workspace/RightSidebarStack";
 import { WorkspaceDrawerHost } from "../workspace/WorkspaceDrawerHost";
 import { useNotifyLayoutResized } from "../../hooks/useNotifyLayoutResized";
 import { LIST_WIDTH_MIN, LIST_WIDTH_MAX } from "../../hooks/useResize";
@@ -37,6 +38,7 @@ import { shouldCommitPanelPixels } from "../../lib/shellPanelLayout";
  */
 
 export interface AppShellProps {
+	navigationChrome?: ReactNode;
 	/** Compact mode reuses this window's session store and preserves workbench layout preferences. */
 	compactContent?: ReactNode;
 	listCollapsed: boolean;
@@ -61,6 +63,8 @@ export interface AppShellProps {
 	drawerContent: (panel: WorkspaceDrawerPanel) => ReactNode;
 	/** 抽屉活动栏（files/git/browser 切换），由 App 注入；抽屉打开时常驻。 */
 	drawerRail?: ReactNode;
+	/** 右侧边栏下半区（常驻会话状态面板），由 App 注入；不传则抽屉列保持单区结构。 */
+	drawerFooter?: ReactNode;
 	outlineContent?: ReactNode;
 
 	setListCollapsed: (v: boolean) => void;
@@ -132,6 +136,7 @@ export function AppShell(props: AppShellProps) {
 		chatPaneContent,
 		drawerContent,
 		drawerRail,
+		drawerFooter,
 		outlineContent,
 		setListCollapsed,
 		setListWidth,
@@ -291,7 +296,19 @@ export function AppShell(props: AppShellProps) {
 	function handleLayoutChanged(_layout: Layout, meta: LayoutChangedMeta) {
 		// 无论交互还是程序化变更，布局落定后都通知悬浮层重算一次。
 		notifyLayoutResized();
-		if (!meta.isUserInteraction) return;
+
+		// 自愈：boot 恢复钉住抽屉时，drawer 面板约束从「可折叠 minSize=240」变为
+		//「不可折叠 minSize=260」，库会重解布局把抽屉从 0 撑到 260，供体优先选
+		// 唯一可折叠的 list 面板 → 侧栏被挤到 0。listWidth/listCollapsed 均未变化，
+		// 既有 heal effect 不会重跑；非交互布局落定后若 list 实宽归零而状态未折叠，
+		// 立即恢复保存宽度（resize 走 list|chat 枢轴，从 chat 拿空间，不影响抽屉）。
+		if (!meta.isUserInteraction) {
+			const listPanel = listPanelRef.current;
+			if (listPanel && !listCollapsed && listPanel.isCollapsed()) {
+				listPanel.resize(listWidthRef.current);
+			}
+			return;
+		}
 
 		const drawerPanel = drawerPanelRef.current;
 		if (drawerPanel && drawer && !drawerCollapsed) {
@@ -337,31 +354,41 @@ export function AppShell(props: AppShellProps) {
 		}
 	}
 
-	if (props.compactContent)
+	if (props.compactContent) {
+		// 小窗的标题栏/导航归 MiniOverlaySurface；任务模式继续复用工作台窗口控制。
+		// 边界感不在这里画：透明窗口里的自绘描边/投影被窗口矩形裁掉且颜色过淡，
+		// 改由系统接管（DWM 投影 + Win11 圆角），与任务模式同款观感。
+		const isMiniOverlayMode = new URLSearchParams(window.location.search).get("mini-overlay") === "1";
 		return (
-			<div className={["wechat-shell quick-task-shell", useNativeTitleBar ? "" : "custom-titlebar-enabled", !useNativeTitleBar && platform === "darwin" ? "mac-custom-titlebar" : ""].filter(Boolean).join(" ")}>
-				<AppHeader
-					useNativeTitleBar={useNativeTitleBar}
-					platform={platform}
-					toggleAlwaysOnTop={toggleAlwaysOnTop}
-					isWindowAlwaysOnTop={isWindowAlwaysOnTop}
-					minimizeWindow={minimizeWindow}
-					toggleMaximizeWindow={toggleMaximizeWindow}
-					isWindowMaximized={isWindowMaximized}
-					onWindowMaximizedChange={onWindowMaximizedChange}
-					closeWindow={closeWindow}
-				/>
+			<div className={["wechat-shell quick-task-shell bg-bg-app [[data-bg-image=on]_&]:bg-transparent", isMiniOverlayMode ? "mini-overlay-shell overflow-hidden" : "", useNativeTitleBar ? "" : "custom-titlebar-enabled", !useNativeTitleBar && platform === "darwin" ? "mac-custom-titlebar" : ""].filter(Boolean).join(" ")}>
+				{!isMiniOverlayMode ? (
+					<AppHeader
+						useNativeTitleBar={useNativeTitleBar}
+						platform={platform}
+						toggleAlwaysOnTop={toggleAlwaysOnTop}
+						isWindowAlwaysOnTop={isWindowAlwaysOnTop}
+						minimizeWindow={minimizeWindow}
+						toggleMaximizeWindow={toggleMaximizeWindow}
+						isWindowMaximized={isWindowMaximized}
+						onWindowMaximizedChange={onWindowMaximizedChange}
+						closeWindow={closeWindow}
+					/>
+				) : null}
 				<main ref={chatPaneRef} className="flex min-h-0 flex-1 flex-col">
 					{props.compactContent}
 				</main>
 				{children}
 			</div>
 		);
+	}
 	return (
 		<div
 			ref={shellRef}
 			className={[
 				"wechat-shell",
+				props.navigationChrome
+					? "simple-shell bg-(--simple-shell-surface) [--simple-shell-surface:color-mix(in_srgb,var(--color-bg-sidebar)_25%,var(--color-bg-muted))] dark:[--simple-shell-surface:var(--color-bg-app)] [[data-bg-image=on]_&]:bg-transparent [[data-bg-image=on]_&]:[--simple-shell-surface:var(--color-bg-sidebar)] [&_.window-controls]:h-8 [&_.window-drag-layer]:h-8 [&_.window-drag-layer]:pointer-events-none [&_.session-tabs-bar]:mr-0 [&_.session-tabs-bar]:[-webkit-app-region:no-drag] [&.custom-titlebar-enabled_.simple-navigation-bar]:[-webkit-app-region:drag] [&.custom-titlebar-enabled_.simple-navigation-bar]:mr-[var(--window-controls-width)] [&.mac-custom-titlebar_.simple-navigation-bar]:pl-[calc(var(--traffic-lights-width)+8px)]"
+					: "bg-bg-app [[data-bg-image=on]_&]:bg-transparent",
 				drawer && !drawerCollapsed ? "drawer-open" : "",
 				listCollapsed ? "list-collapsed" : "",
 				drawerCollapsed ? "drawer-collapsed" : "",
@@ -389,6 +416,7 @@ export function AppShell(props: AppShellProps) {
 			}
 		>
 			<AppHeader
+				simple={Boolean(props.navigationChrome)}
 				useNativeTitleBar={useNativeTitleBar}
 				platform={platform}
 				toggleAlwaysOnTop={toggleAlwaysOnTop}
@@ -399,6 +427,7 @@ export function AppShell(props: AppShellProps) {
 				onWindowMaximizedChange={onWindowMaximizedChange}
 				closeWindow={closeWindow}
 			/>
+			{props.navigationChrome}
 			<ResizablePanelGroup orientation="horizontal" className="shell-panel-group" onLayoutChanged={handleLayoutChanged}>
 				<ResizablePanel id="list" panelRef={listPanelRef} collapsible collapsedSize={LIST_COLLAPSED_SIZE} minSize={LIST_WIDTH_MIN} maxSize={LIST_WIDTH_MAX} groupResizeBehavior="preserve-pixel-size" defaultSize={listCollapsed ? LIST_COLLAPSED_SIZE : listWidth} className="shell-panel-list">
 					<div
@@ -416,12 +445,13 @@ export function AppShell(props: AppShellProps) {
             splitter-right 会把抽屉缩到 0 且再次双击仍回 0——「缩没了无法复原，只能
             重启」（2026-08 用户反馈）。左右分隔条统一 disableDoubleClick：桌面工作台
             里双击折叠不是预期手势，折叠/展开走侧栏与抽屉的专属按钮。 */}
-				<ResizableHandle className="splitter splitter-left" disableDoubleClick />
+				{/* 简洁面板通过底色差形成边界，Separator 只保留拖拽命中。 */}
+				<ResizableHandle className={cn("splitter splitter-left", props.navigationChrome && "before:hidden")} disableDoubleClick />
 
 				<ResizablePanel id="chat" minSize={360} className="shell-panel-chat">
 					<main
 						ref={chatPaneRef}
-						className="chat-pane"
+						className={cn("chat-pane bg-bg-panel", props.navigationChrome && "rounded-tl-[18px]")}
 						style={
 							{
 								"--terminal-row-h": `${terminalRowHeight}px`,
@@ -448,7 +478,13 @@ export function AppShell(props: AppShellProps) {
 							if (event.target === event.currentTarget) setDrawerEntering(false);
 						}}
 					>
-						<WorkspaceDrawerHost panel={drawer} collapsed={drawerCollapsed} pinned={drawerPinned} onCollapse={onDrawerCollapse} onClose={onDrawerClose} onRestore={onDrawerRestore} onTogglePin={onToggleDrawerPin} rail={drawerRail} renderPanel={(panel) => drawerContent(panel)} />
+						{/* 右侧边栏：上半区为原抽屉宿主（props 不变），下半区为 App 注入的常驻面板。
+						    纵向分组嵌在 drawer Panel 内部，不进入水平 Group 的直系子节点。 */}
+						<RightSidebarStack
+							open={Boolean(drawer) && !drawerCollapsed}
+							bottom={drawerFooter}
+							top={<WorkspaceDrawerHost panel={drawer} collapsed={drawerCollapsed} pinned={drawerPinned} onCollapse={onDrawerCollapse} onClose={onDrawerClose} onRestore={onDrawerRestore} onTogglePin={onToggleDrawerPin} rail={drawerRail} renderPanel={(panel) => drawerContent(panel)} />}
+						/>
 					</div>
 				</ResizablePanel>
 			</ResizablePanelGroup>

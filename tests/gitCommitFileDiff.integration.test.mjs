@@ -26,7 +26,12 @@ function write(relativePath, content) {
 before(() => {
 	// Compile only the service and its shared types so the integration test exercises
 	// the real implementation without requiring a complete Electron build first.
-	execFileSync(process.execPath, [resolve("node_modules/typescript/bin/tsc"), "src/main/git/GitService.ts", "src/shared/types.ts", "--module", "commonjs", "--target", "es2022", "--moduleResolution", "node", "--esModuleInterop", "--skipLibCheck", "--outDir", buildDir], { cwd: resolve("."), stdio: "pipe" });
+	// --rewriteRelativeImportExtensions：GitService 的依赖链（gitRun/gitWsl）本地 import
+	// 带 .ts 扩展名（Node type stripping 直跑测试的约定），CLI tsc 需在 emit 时重写为 .js。
+	execFileSync(process.execPath, [resolve("node_modules/typescript/bin/tsc"), "src/main/git/GitService.ts", "src/shared/types.ts", "--module", "commonjs", "--target", "es2022", "--moduleResolution", "node", "--esModuleInterop", "--skipLibCheck", "--rewriteRelativeImportExtensions", "--outDir", buildDir], {
+		cwd: resolve("."),
+		stdio: "pipe",
+	});
 	// GitService 依赖 ../fs/trash（懒加载 electron.shell.trashItem）。
 	// 纯 Node 集成测试环境没有 electron，注入 stub：模拟回收站 = 删除源文件，
 	// 使 discard untracked 的真实删除语义在测试中成立。
@@ -474,6 +479,11 @@ describe("GitService committed-file diff integration", () => {
 		const plainDir = mkdtempSync(join(tmpdir(), "pideck-not-git-"));
 		try {
 			await assert.doesNotReject(() => service.fetch(plainDir));
+		} catch (err) {
+			// fetch 只对「非 git 仓库」静默放行：报错文案来自 git 本地化输出，
+			// 英文环境是 "not a git repository"，中文环境是 "不是 git 仓库"（见下）。
+			assert.match(String(err), /not a git repository|不是 git 仓库/, `非 git 目录不应把 fetch 失败抛出，但错误应与「非仓库」无关：${String(err)}`);
+			throw err;
 		} finally {
 			rmSync(plainDir, { recursive: true, force: true });
 		}
@@ -514,5 +524,26 @@ describe("GitService committed-file diff integration", () => {
 		} finally {
 			rmSync(plainDir, { recursive: true, force: true });
 		}
+	});
+
+	test("getStagedDiff：空暂存区返回空串，git 失败必须抛出而不是被吞成空串（issue #338）", async () => {
+		const service = new GitService();
+		git("reset", "--quiet");
+		assert.equal(await service.getStagedDiff(repositoryDir), "");
+
+		// 非仓库目录：execGit 以非 0 退出 reject（"Command failed: ... fatal: not a git repository"）。
+		// 旧实现 `catch { return "" }` 把它和「空暂存区」混成同一信号，前端只能提示「模型没有
+		// 返回提交摘要」，把用户引去查模型配置。
+		const plainDir = mkdtempSync(join(tmpdir(), "pideck-not-git-staged-"));
+		try {
+			await assert.rejects(() => service.getStagedDiff(plainDir), /Command failed|not a git repository/i);
+		} finally {
+			rmSync(plainDir, { recursive: true, force: true });
+		}
+
+		// 暂存后必须真拿到内容：否则上面的空串断言可能只是「永远返回空」的假绿
+		write("staged-later.ts", "export const staged = 1;\n");
+		git("add", "--", "staged-later.ts");
+		assert.match(await service.getStagedDiff(repositoryDir), /\+\+\+ b\/staged-later\.ts/);
 	});
 });

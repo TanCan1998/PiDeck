@@ -35,6 +35,20 @@ function extractFunctionToEnd(source, name) {
 const sessionTabBody = extractFunction(tabsBar, "SessionTab", "NewSessionMenu");
 const editorTabBody = extractFunction(tabsBar, "EditorWorkbenchTab", "GroupCapsuleButton");
 
+test("Tab 右键菜单携带与 ⋯ 菜单同源的会话操作组", () => {
+	// 2026-10-02 需求：右键菜单与右上角 ⋯ 更多菜单结合。装配层用同一工厂
+	// （contextSessionActions(sessionId)）喂两处，闸门（草稿/DSH/无文件路径）一致。
+	assert.match(tabsBar, /contextSessionActions\?: \(sessionId: string\) => SessionTabActions \| undefined;/);
+	// Tab 级菜单渲染工厂结果（后台 Tab 同样可操作；renderTab 在 SessionTabsBar 函数体内）。
+	assert.match(tabsBar, /sessionActions=\{props\.contextSessionActions\?\.\(sessionId\)\}/);
+	// 右键菜单项与 ⋯ 菜单同源文案：重命名/复制会话/导出 HTML/复制路径/打开文件。
+	assert.match(sessionTabBody, /\{t\("common\.rename"\)\}/);
+	assert.match(sessionTabBody, /\{t\("menu\.copySession"\)\}/);
+	assert.match(sessionTabBody, /\{t\("menu\.exportHtml"\)\}/);
+	assert.match(sessionTabBody, /\{t\("menu\.copySessionFilePath"\)\}/);
+	assert.match(sessionTabBody, /\{t\("menu\.openSessionFile"\)\}/);
+});
+
 function test_sessionTab() {}
 
 test("SessionTab 用富 Tooltip 替代原生 title，第二行显示工作区", () => {
@@ -47,6 +61,9 @@ test("SessionTab 用富 Tooltip 替代原生 title，第二行显示工作区", 
 	// Tooltip 两行结构：标题行 + 工作区行（含完整路径兜底）。
 	assert.match(body, /<Tooltip delayDuration=\{500\}>/);
 	assert.match(body, /<TooltipContent side="bottom" align="start"/);
+	// 2026-10-02 回归：重排右键菜单嵌套时误删 TooltipTrigger → Tooltip.Root 失去
+	// trigger，hover 富提示整体失效（用户报「移入的效果没了」）。Trigger 必须在链上。
+	assert.match(body, /<TooltipTrigger asChild>/);
 	assert.match(body, /\{workspaceName \? \(/);
 	assert.match(body, /tabProject\?\.path/);
 	// 读屏契约：aria-label 保留 标题 — 工作区。
@@ -58,7 +75,7 @@ test("EditorWorkbenchTab 用富 Tooltip 显示 标题 + 完整路径", () => {
 	assert.doesNotMatch(body, /\btitle=\{tab\.title \?\? tab\.label\}/);
 	assert.match(body, /<Tooltip delayDuration=\{500\}>/);
 	// 第二行是文件完整路径（tab.title 由装配层传 filePath），mono 字体区分路径与标题。
-	assert.match(body, /font-mono text-\[11px\][^"]*"\>\{tab\.title\}/);
+	assert.match(body, /font-mono text-micro[^"]*"\>\{tab\.title\}/);
 	// title 缺省时不渲染 TooltipContent（退化为无提示，与旧行为一致）。
 	assert.match(body, /\{tab\.title \? \(/);
 });

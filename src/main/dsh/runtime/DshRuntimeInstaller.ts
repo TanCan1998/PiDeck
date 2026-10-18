@@ -8,11 +8,23 @@
  * 进度只有一个出口（onProgress），由 main/index.ts 决定怎么广播给渲染层——
  * 编排层不认识 BrowserWindow。
  */
-import { resolveDshRuntimeReleaseUrl, selectRelease, type DshRuntimeReleaseIndex } from "../../../shared/types/dshRuntimeManifest";
+import { compareSemver, resolveDshRuntimeReleaseUrl, selectRelease, type DshRuntimeReleaseIndex } from "../../../shared/types/dshRuntimeManifest";
 import type { DshRuntimeInstallProgress } from "../../../shared/types/dshRuntime";
 import type { UpdateSourceId } from "../../../shared/types/settings";
 import { existsSync, statSync } from "node:fs";
 import type { BundledDshRuntime, DshRuntimeManager } from "./DshRuntimeManager";
+
+/**
+ * 「拿不到配套版本」的错误码前缀（后接 `required=<声明版本> available=<索引里的版本列表>`）。
+ * 装配层按此前缀翻译成用户可读文案（main/index.ts 的 dshRuntimeErrorCopy），
+ * 因此格式是契约：改动要同步 tests/dshRuntimeInstaller.test.mjs。
+ */
+export const DSH_RUNTIME_VERSION_UNAVAILABLE_PREFIX = "runtime version unavailable: ";
+
+/** 拼配套版本缺失的错误码；available 是发布源/随包资源里实际存在的版本（逗号分隔）。 */
+function versionUnavailableError(required: string, available: readonly string[]): string {
+	return `${DSH_RUNTIME_VERSION_UNAVAILABLE_PREFIX}required=${required} available=${available.join(",")}`;
+}
 
 /** 拉取下载源索引（返回 null 表示拉不到/解析不了）。 */
 export type DshRuntimeIndexFetcher = (url: string) => Promise<DshRuntimeReleaseIndex | null>;
@@ -26,6 +38,13 @@ export type DshRuntimeInstallerDeps = {
 	/** runtime 索引对应的应用 Release tag；省略时使用 latest。 */
 	releaseTag?: () => string | undefined;
 	appVersion: () => string;
+	/**
+	 * 本版本 app 配套的 dsh 版本（package.json 声明）。状态服务按它做硬门控，
+	 * 所以安装必须精确命中：缺了这层比对，索引里只有旧版时 installer 会把旧版
+	 * 判成「已装、跳过下载」并返回成功，UI 于是「点安装毫无反应」（2026-10 事故）。
+	 * undefined = 调用方没给声明版本，退回旧的兼容区间择优（宁缺毋滥）。
+	 */
+	declaredVersion?: () => string | undefined;
 	fetchIndex: DshRuntimeIndexFetcher;
 	onProgress: (progress: DshRuntimeInstallProgress) => void;
 	/**
@@ -56,16 +75,24 @@ export class DshRuntimeInstaller {
 	constructor(private readonly deps: DshRuntimeInstallerDeps) {}
 
 	/**
-	 * 安装与当前 app 兼容的 runtime。
+	 * 安装与当前 app 配套的 runtime。
 	 *
 	 * 官方 dev/lite 路径不依赖 app 内部 node_modules：默认从与应用 Release 同源的索引
 	 * 下载。只有显式 full/存量包注入 bundledRuntime 时才本地解压，作为离线与旧包兼容兜底。
-	 * 索引里没有兼容版本时不下载（避免下完才发现装不上，白耗几十 MB 流量）。
+	 * 挑版本以 package.json 声明的配套版本为准（见 deps.declaredVersion），没有配套版本
+	 * 时直接失败——既不下载不相干的版本（避免下完才发现装不上，白耗几十 MB 流量），
+	 * 也不把「已装的不配套版本」当成功返回。
 	 */
 	async installFromIndex(): Promise<DshRuntimeCommandResult> {
 		const { deps } = this;
+		const declared = deps.declaredVersion?.()?.trim() || undefined;
 		const bundled = deps.bundledRuntime?.();
 		if (bundled) {
+			// 随包版本必须就是配套版本：装了不相等的版本，状态服务仍判 outdated，
+			// 用户看到「安装成功但还是一张安装引导卡」。
+			if (declared && compareSemver(bundled.manifest.runtimeVersion, declared) !== 0) {
+				return this.fail(versionUnavailableError(declared, [bundled.manifest.runtimeVersion]));
+			}
 			// 已装且校验通过的同版本重装是纯浪费（下载几十 MB + 解压数万文件约两分钟）：
 			// 直接成功返回。目录损坏/半残时 isVersionInstalled 为 false，正常走重装。
 			if (deps.manager.isVersionInstalled?.(bundled.manifest.runtimeVersion)) {
@@ -92,9 +119,21 @@ export class DshRuntimeInstaller {
 		}
 		const index = await deps.fetchIndex(indexUrl);
 		if (!index) return this.fail("runtime index unavailable");
-		const release = selectRelease(index.releases ?? [], deps.appVersion());
+		const releases = index.releases ?? [];
+		const release = selectRelease(releases, deps.appVersion(), declared);
 		if (!release) {
-			deps.log?.("dsh-runtime", "no compatible runtime release", { appVersion: deps.appVersion() });
+			deps.log?.("dsh-runtime", "no compatible runtime release", { appVersion: deps.appVersion(), declared });
+			// 区分两种「挑不到版本」：区间不兼容 vs 发布源里根本没有配套版本。
+			// 后者是发版侧问题（app 已升 dsh 声明但 runtime 资产没发），必须报出来，
+			// 不能退回「装兼容区间里的最新版」——那正是假成功的来源。
+			if (declared && selectRelease(releases, deps.appVersion())) {
+				return this.fail(
+					versionUnavailableError(
+						declared,
+						releases.map((entry) => entry.runtimeVersion),
+					),
+				);
+			}
 			// 必须推送 error：UI 在发起安装时就切到了「下载中」，没有终止事件会一直转圈。
 			return this.fail("no compatible runtime release");
 		}

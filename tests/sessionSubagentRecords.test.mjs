@@ -473,6 +473,55 @@ test("readSubagentRecords synthesizes stopped from residual start anchors and pr
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+// #300：record 由插件在完成时写，运行中的子代理只剩 start 锚点。
+// 无对账信息时锚点只能保守合成 stopped——但子代理实际运行中，面板会误显
+// 「已停止」。传入本代 runtime 启动时间后按 startedAt 对账：本代派发的锚点
+// 合成 running（与 downgradeRunningStartedBefore 同一时间阈值、同方向）。
+test("readSubagentRecords anchors spawned by the live runtime generation synthesize running (#300)", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "pid-subagent-live-"));
+	const sessionPath = join(dir, "session.jsonl");
+	try {
+		writeSession(sessionPath, startAnchorSession);
+		const reader = createReader();
+
+		// 本代 runtime 启动于锚点之前：锚点是本代派发、record 未落 → 运行中
+		const live = await reader.readSubagentRecords(sessionPath, { liveRuntimeStartedAt: 1700000250000 });
+		const running = live.find((e) => e.id === "agent-killed77");
+		assert.equal(running.status, "running");
+		assert.equal(running.completedAt, undefined);
+		// 有 record 的子代理不受对账影响：record 终态优先
+		assert.equal(live.find((e) => e.id === "agent-finished8").status, "completed");
+
+		// 本代 runtime 启动于锚点之后：锚点属上一代，随进程消亡 → stopped
+		const prevGen = await reader.readSubagentRecords(sessionPath, { liveRuntimeStartedAt: 1700000350000 });
+		assert.equal(prevGen.find((e) => e.id === "agent-killed77").status, "stopped");
+
+		// 锚点缺 startedAt 时无法对账：保守 stopped（不复活为 running）
+		const noStartSession =
+			JSON.stringify({
+				type: "session",
+				id: "ss2",
+				cwd: "/tmp",
+				timestamp: new Date().toISOString(),
+			}) +
+			"\n" +
+			JSON.stringify({
+				type: "custom",
+				customType: "pi-deck-subagent-start",
+				id: "srec-x",
+				parentId: "ss2",
+				data: { id: "agent-nostart99", type: "Explore", description: "no startedAt" },
+			}) +
+			"\n";
+		writeSession(sessionPath, noStartSession);
+		const noStart = await reader.readSubagentRecords(sessionPath, { liveRuntimeStartedAt: 1700000250000 });
+		const nostart = noStart.find((e) => e.id === "agent-nostart99");
+		assert.equal(nostart.status, "stopped");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
 /* ------------------------------------------------------------------ */
 /* readDerivedSubagentEntries：acp_delegate / subagent 工具推导          */
 /* ------------------------------------------------------------------ */
@@ -589,6 +638,111 @@ test("readDerivedSubagentEntries returns empty for session without acp activity"
 		// VM realm 数组原型不同，deepEqual 不可用
 		const entries = await reader.readDerivedSubagentEntries(sessionPath);
 		assert.equal(entries.length, 0);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+/* ------------------------------------------------------------------ */
+/* pi-subagents 异步链（nicobailon）：桥接终态 record + 推导条目合并      */
+/* ------------------------------------------------------------------ */
+
+// 用户实测场景（2026-10-11）：异步 run 完成后面板一直显示「运行中」。根因是插件只在
+// 自己的 widget 里保留终态 10s（async-job-tracker 的 completionRetentionMs），会话
+// 文件里只有派发 toolCall + 回执；widget 清空后渲染层回退到推导条目的 running。
+// 桥接扩展补落 subagents:record 之后，读取侧的合并结果必须是「终态 + 任务描述」。
+const asyncRunId = "2824f0e6-08ff-42a5-9a30-683302ba52eb";
+const asyncTask = "目标：把 4 个仍用手写 vm 沙箱的测试迁移到统一加载器";
+const asyncSubagentSession =
+	JSON.stringify({
+		type: "session",
+		id: "as1",
+		cwd: "/tmp",
+		timestamp: "2026-10-11T07:37:00.000Z",
+	}) +
+	"\n" +
+	JSON.stringify({
+		type: "message",
+		id: "au1",
+		parentId: "as1",
+		timestamp: "2026-10-11T07:37:55.963Z",
+		message: { role: "user", content: [{ type: "text", text: "派一个 worker" }] },
+	}) +
+	"\n" +
+	// 异步派发 toolCall（args.task 是任务文本的唯一来源）
+	JSON.stringify({
+		type: "message",
+		id: "am1",
+		parentId: "au1",
+		timestamp: "2026-10-11T07:37:55.963Z",
+		message: {
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: "call_async_1",
+					name: "subagent",
+					arguments: { agent: "worker", async: true, task: asyncTask },
+				},
+			],
+		},
+	}) +
+	"\n" +
+	// 异步回执：把推导条目重键为 asyncId（与桥接 record 同 id）
+	JSON.stringify({
+		type: "message",
+		id: "am2",
+		parentId: "am1",
+		timestamp: "2026-10-11T07:37:55.995Z",
+		message: {
+			role: "toolResult",
+			toolCallId: "call_async_1",
+			toolName: "subagent",
+			content: [{ type: "text", text: `Run fan-out: 1/64 used, 63 remaining\nAsync: worker [${asyncRunId}]\n\nThe async run is detached and running in the background.` }],
+		},
+	}) +
+	"\n" +
+	// 桥接扩展落盘的终态 record（事件 payload 没有 task，描述留空由读取侧回填）
+	JSON.stringify({
+		type: "custom",
+		customType: "subagents:record",
+		id: "arec-1",
+		parentId: "am2",
+		data: {
+			id: asyncRunId,
+			type: "worker",
+			description: "",
+			status: "completed",
+			startedAt: 1791704276963,
+			completedAt: 1791704545239,
+		},
+	}) +
+	"\n";
+
+test("record + 推导合并：异步 run 完成后读出 completed 且带任务描述", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "pid-async-subagent-"));
+	const sessionPath = join(dir, "session.jsonl");
+	try {
+		writeSession(sessionPath, asyncSubagentSession);
+		const reader = createReader();
+		const records = await reader.readSubagentRecords(sessionPath);
+		assert.equal(records.length, 1);
+		assert.equal(records[0].id, asyncRunId);
+		assert.equal(records[0].status, "completed");
+		assert.equal(records[0].description, "");
+
+		const derived = await reader.readDerivedSubagentEntries(sessionPath);
+		assert.equal(derived.length, 1);
+		assert.equal(derived[0].id, asyncRunId);
+		// 推导侧对异步派发只有「派发即运行中」（终态通知不带 runId，无法关联）
+		assert.equal(derived[0].status, "running");
+		assert.equal(derived[0].description, asyncTask);
+
+		const { mergeSubagentSources } = loadTsCommonJs("src/main/pi/derivedSubagents.ts");
+		const merged = mergeSubagentSources(records, derived);
+		assert.equal(merged.length, 1);
+		assert.equal(merged[0].status, "completed");
+		assert.equal(merged[0].description, asyncTask);
+		assert.equal(merged[0].completedAt, 1791704545239);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}

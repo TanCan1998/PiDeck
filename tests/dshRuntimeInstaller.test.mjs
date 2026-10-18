@@ -23,7 +23,7 @@ const release = (over = {}) => ({
 });
 
 /** 组装一个 installer，manager 用替身（不碰磁盘与网络）。 */
-function makeInstaller({ index = { schemaVersion: 1, releases: [release()] }, url = "https://idx.test/i.json", manager = {}, updateSource = "atomgit", releaseTag } = {}) {
+function makeInstaller({ index = { schemaVersion: 1, releases: [release()] }, url = "https://idx.test/i.json", manager = {}, updateSource = "atomgit", releaseTag, declared, bundled } = {}) {
 	const progress = [];
 	const calls = { installFromUrl: [], installFromArchive: [], installFromDirectory: [], uninstall: [] };
 	const fakeManager = {
@@ -56,6 +56,9 @@ function makeInstaller({ index = { schemaVersion: 1, releases: [release()] }, ur
 		updateSource: () => updateSource,
 		releaseTag: releaseTag ? () => releaseTag : undefined,
 		appVersion: () => APP_VERSION,
+		// declared === undefined → 不传该 dep，保留旧行为（按兼容区间择优）给既有断言。
+		declaredVersion: declared === undefined ? undefined : () => declared,
+		bundledRuntime: bundled ? () => bundled : undefined,
 		fetchIndex: async () => index,
 		onProgress: (p) => progress.push(p),
 	});
@@ -144,6 +147,41 @@ test("installFromIndex：isVersionInstalled 为 false（半残/损坏）时正�
 	const result = await installer.installFromIndex();
 	assert.equal(result.ok, true);
 	assert.equal(calls.installFromUrl.length, 1);
+});
+
+test("installFromIndex：声明配套版本但索引只有旧版时失败，不再假成功（2026-10「点安装没反应」回归）", async () => {
+	// 复现当时的现场：app 声明 0.2.0-rc.2，发布索引里只有 0.1.1-rc.2 且已装。
+	// 旧实现把它判成「目标版本已装 → 跳过下载 → 成功」，UI 收到 done 但门控仍是
+	// outdated，用户看到的就是点什么都没发生（日志里三条 skipping download）。
+	const { installer, calls, progress } = makeInstaller({
+		declared: "0.2.0-rc.2",
+		manager: { isVersionInstalled: () => true },
+	});
+	const result = await installer.installFromIndex();
+	assert.equal(result.ok, false);
+	assert.equal(result.error, "runtime version unavailable: required=0.2.0-rc.2 available=0.1.1-rc.2");
+	assert.equal(calls.installFromUrl.length, 0, "不相干的版本不该白下几十 MB");
+	// 失败必须收口成 error 进度，否则 UI 停在乐观的「下载中」永久转圈。
+	assert.equal(progress.at(-1).phase, "error");
+});
+
+test("installFromIndex：声明版本命中索引时照常安装（含已装短路、未装下载）", async () => {
+	const installed = makeInstaller({ declared: "0.1.1-rc.2", manager: { isVersionInstalled: () => true } });
+	assert.equal((await installed.installer.installFromIndex()).ok, true);
+	assert.equal(installed.calls.installFromUrl.length, 0, "配套版本已装才允许短路");
+
+	const fresh = makeInstaller({ declared: "0.1.1-rc.2", manager: { isVersionInstalled: () => false } });
+	assert.equal((await fresh.installer.installFromIndex()).ok, true);
+	assert.equal(fresh.calls.installFromUrl.length, 1);
+});
+
+test("installFromIndex：随包 runtime 与声明版本不一致时失败，不解压旧版", async () => {
+	const bundled = { archivePath: "C:/pkg/dsh-runtime.tgz", manifest: { runtimeVersion: "0.1.1-rc.2", archiveSha256: "aa" } };
+	const { installer, calls } = makeInstaller({ declared: "0.2.0-rc.2", bundled });
+	const result = await installer.installFromIndex();
+	assert.equal(result.ok, false);
+	assert.match(result.error, /^runtime version unavailable: required=0\.2\.0-rc\.2 available=0\.1\.1-rc\.2$/);
+	assert.equal(calls.installFromArchive.length, 0);
 });
 
 test("installFromIndex：索引里没有兼容版本时不下载，避免下完才发现装不上", async () => {

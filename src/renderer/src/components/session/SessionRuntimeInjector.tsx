@@ -3,6 +3,7 @@ import { useAtomValue, useSetAtom } from "jotai";
 import { resolvePaneTerminal, terminalOwnerKey, shouldMountPaneTerminalDock } from "../../terminalDockState";
 import { settingsOpenAtom } from "../../atoms";
 import { claimSessionRuntimeUiResponseAtom, rollbackSessionRuntimeUiResponseAtom } from "../../atoms/session-atoms";
+import { recordAskEchoAtom } from "../../atoms/ask-echo-atoms";
 import { sessionRecordByIdAtomFamily, sessionRuntimeBySessionIdAtomFamily, sessionRuntimeUiBySessionIdAtomFamily } from "../../atoms/session-selectors";
 import { projectByIdAtomFamily } from "../../atoms/project-atoms";
 import { useSessionRuntimeController } from "../../hooks/useSessionRuntimeController";
@@ -14,6 +15,7 @@ import { FileLinkBaseProvider } from "./FileLinkBase";
 import { SessionView } from "./SessionView";
 import { useSessionPaneServices } from "./SessionPaneServices";
 import { usePaneGitInfo } from "../../hooks/usePaneGitInfo";
+import { useSessionCommandNames } from "../../hooks/useSessionCommandNames";
 import { desktopApi } from "../../desktopApi";
 import { t } from "../../i18n";
 import { requireSessionCommand, sessionCommandFailureToast, toSessionRuntimeTarget } from "../../utils/sessionCommands";
@@ -52,6 +54,7 @@ export const SessionRuntimeInjector = React.memo(function SessionRuntimeInjector
 	const currentSessionRuntimeUi = useAtomValue(sessionRuntimeUiBySessionIdAtomFamily(currentSessionId));
 	const claimSessionUiResponse = useSetAtom(claimSessionRuntimeUiResponseAtom);
 	const rollbackSessionUiResponse = useSetAtom(rollbackSessionRuntimeUiResponseAtom);
+	const setRecordAskEcho = useSetAtom(recordAskEchoAtom);
 	const runtimeRef = React.useRef(currentSessionRuntime);
 	runtimeRef.current = currentSessionRuntime;
 
@@ -65,8 +68,10 @@ export const SessionRuntimeInjector = React.memo(function SessionRuntimeInjector
 			baseDir: currentSessionRuntime?.cwd ?? paneProject?.path,
 			projectId: paneProjectId || undefined,
 			projectRoot: paneProject?.path,
+			// 项目外路径的安全等级判定按本栏会话走，分屏两栏各自的安全等级互不干扰。
+			sessionId: currentSessionId,
 		}),
-		[currentSessionRuntime?.cwd, paneProject?.path, paneProjectId],
+		[currentSessionId, currentSessionRuntime?.cwd, paneProject?.path, paneProjectId],
 	);
 	const openPaneFile = React.useCallback((path: string, line?: number) => services.onOpenFile(path, line, paneFileContext), [paneFileContext, services.onOpenFile]);
 	const paneTerminal = React.useMemo(
@@ -103,6 +108,11 @@ export const SessionRuntimeInjector = React.memo(function SessionRuntimeInjector
 		},
 		[paneOwnerKey, services.setTerminalCollapsedByOwnerKey],
 	);
+
+	// 本栏命令白名单：历史消息 /命令 chip 按本会话的 runtime 命令表渲染。
+	// 历史缺陷：白名单挂在 App 全局 state（跟随聚焦会话），分屏时另一栏的命令 chip 会
+	// 拿错白名单；改为栏级 hook 后各栏独立加载自己会话的命令表。
+	const paneValidCommandNames = useSessionCommandNames(currentSessionId);
 
 	// 本栏 Git 分支状态：按本会话项目（paneProjectId，即所属 worktree）加载/轮询/切换。
 	// 历史缺陷：分屏双栏共用 App 聚焦项目的 services.gitInfo——点击任一栏，所有栏的
@@ -142,9 +152,11 @@ export const SessionRuntimeInjector = React.memo(function SessionRuntimeInjector
 			claim: claimSessionUiResponse,
 			rollback: rollbackSessionUiResponse,
 			send: services.api.sessions.sendUiResponse,
+			// 应答成功后捕获回显（recordAskEchoAtom 内部按 backend 门控：pi 的回显由 _askCard 工具卡承担）
+			onAccepted: (request, response) => setRecordAskEcho({ sessionId: currentSessionId, request, response }),
 			onError: (error) => services.showToast(error instanceof Error ? error.message : String(error), 4000),
 		});
-	}, [claimSessionUiResponse, currentSessionId, currentSessionRuntime?.agentId, currentSessionRuntime?.runtimeGeneration, rollbackSessionUiResponse, services.api.sessions.sendUiResponse, services.showToast]);
+	}, [claimSessionUiResponse, currentSessionId, currentSessionRuntime?.agentId, currentSessionRuntime?.runtimeGeneration, rollbackSessionUiResponse, setRecordAskEcho, services.api.sessions.sendUiResponse, services.showToast]);
 
 	const runtime = useSessionRuntimeController({
 		sessionId: currentSessionId,
@@ -164,13 +176,16 @@ export const SessionRuntimeInjector = React.memo(function SessionRuntimeInjector
 	const activeAgent = runtime.activeAgentId ? services.agents.find((a) => a.id === runtime.activeAgentId) : undefined;
 	const canMutateActiveMessages = runtime.canMutateActiveMessages;
 	// 未启动时 activeAgent 为空，必须看 catalog backend，不能只看 live tab。
-	// DSH 本轮不做编辑/删除/重发（无 JSONL 离线改写）；
+	// DSH 本轮不做编辑/删除/重发（无 JSONL 离线改写）；ACP 历史存 agent 侧，
+	// PiDeck 无法重写（editMessage/deleteMessage/重发/fork/rewind 主进程均抛不支持），
+	// 入口不隐藏只会变成死胡同 toast。
 	// fork 对 pi/DSH 都始终提供入口：DSH 未激活时由 forkFromUserMessage 内部
 	// 先 activateRuntime 再 fork，不再用 canMutateActiveMessages 门控——否则打开
 	// 历史 DSH 会话（runtime 懒启动）时 fork 入口时有时无。
 	const isDshBackend = sessionRecord?.backend === "dsh" || activeAgent?.backend === "dsh";
-	const canEditOrDeleteMessages = !isDshBackend;
-	const canResend = !isDshBackend;
+	const isAcpBackend = sessionRecord?.backend === "acp" || activeAgent?.backend === "acp";
+	const canEditOrDeleteMessages = !isDshBackend && !isAcpBackend;
+	const canResend = !isDshBackend && !isAcpBackend;
 
 	// ── 回退到此消息：解析最近检查点 + 确认回退（仅 pi 后端注入入口）──
 	const [rewindConfirm, setRewindConfirm] = React.useState<RewindCheckpointSummary | null>(null);
@@ -224,7 +239,7 @@ export const SessionRuntimeInjector = React.memo(function SessionRuntimeInjector
 	}, [currentSessionId, currentSessionRuntime, rewindConfirm, services]);
 
 	return (
-		<FileLinkBaseProvider baseDir={paneFileContext.baseDir} projectId={paneFileContext.projectId} projectRoot={paneFileContext.projectRoot}>
+		<FileLinkBaseProvider baseDir={paneFileContext.baseDir} projectId={paneFileContext.projectId} projectRoot={paneFileContext.projectRoot} sessionId={currentSessionId}>
 			<>
 				<SessionView
 					sessionId={currentSessionId}
@@ -245,7 +260,7 @@ export const SessionRuntimeInjector = React.memo(function SessionRuntimeInjector
 					isRestarting={runtime.isRestartingThisAgent}
 					sessionDuration={runtime.sessionDuration}
 					showThinking={services.showThinking}
-					validCommandNames={services.validCommandNames}
+					validCommandNames={paneValidCommandNames}
 					validFilePaths={services.validFilePaths}
 					onPreviewImage={services.onPreviewImage}
 					onOpenFile={openPaneFile}
@@ -253,8 +268,9 @@ export const SessionRuntimeInjector = React.memo(function SessionRuntimeInjector
 					onResendUserMessage={canResend ? services.resendUserMessage : undefined}
 					onEditMessage={canEditOrDeleteMessages ? services.editMessage : undefined}
 					onDeleteMessage={canEditOrDeleteMessages ? services.deleteMessage : undefined}
-					onForkMessage={services.forkFromUserMessage}
-					onRewindToMessage={isDshBackend ? undefined : handleRewindToMessage}
+					onRemoveMessageImage={!services.isLanWeb && (!sessionRecord?.backend || sessionRecord.backend === "pi") && sessionRecord?.filePath && services.removeMessageImage ? (message, index) => services.removeMessageImage?.(currentSessionId, message, index) : undefined}
+					onForkMessage={isAcpBackend ? undefined : services.forkFromUserMessage}
+					onRewindToMessage={isDshBackend || isAcpBackend ? undefined : handleRewindToMessage}
 					forkingMessageId={services.forkingMessageId}
 					onToast={(message: string) => services.showToast(message)}
 					onQuickPrompt={(message) => services.insertQuickPrompt(currentSessionId, message)}
@@ -283,9 +299,12 @@ export const SessionRuntimeInjector = React.memo(function SessionRuntimeInjector
 					availableTerminalHeight={services.availableTerminalHeight ?? 120}
 					terminalOwnerKey={paneOwnerKey}
 					terminalTarget={paneTerminal?.target}
+					terminalTargetProject={paneProject}
 					setTerminalOpenForOwner={setPaneTerminalOpen}
 					setTerminalCollapsedForOwner={setPaneTerminalCollapsed}
 					setTerminalHeight={services.setTerminalHeight}
+					terminalSettings={services.terminalSettings}
+					onTerminalThemeChange={services.onTerminalThemeChange}
 					settingsOpen={settingsOpen}
 					environmentDialog={services.environmentDialog}
 					runCreateSessionDraft={services.runCreateSessionDraft}

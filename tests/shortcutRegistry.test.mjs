@@ -190,6 +190,12 @@ test("resolveShortcutBindings：覆盖 ∪ 默认；非法覆盖回退默认；�
 		cycleModel: "Ctrl+M",
 		cycleThinking: "Ctrl+T",
 		openQuickMessages: "Ctrl+Shift+M",
+		toggleVoiceRecording: "F9",
+		cycleSessionTabs: "Ctrl+Tab",
+		cycleSessionTabsReverse: "Ctrl+Shift+Tab",
+		closeSessionTab: "Ctrl+W",
+		zoomIn: "Ctrl+=",
+		zoomOut: "Ctrl+-",
 		toggleDevTools: "F12", // 非法裸键回退默认
 	});
 });
@@ -227,6 +233,12 @@ test("平台默认键列表完整（覆盖表之外不丢键）", () => {
 		cycleThinking: "Ctrl+T",
 		// 快捷消息：Ctrl+M 已被模型循环占用，必须带 Shift 避让
 		openQuickMessages: "Ctrl+Shift+M",
+		toggleVoiceRecording: "F9",
+		cycleSessionTabs: "Ctrl+Tab",
+		cycleSessionTabsReverse: "Ctrl+Shift+Tab",
+		closeSessionTab: "Ctrl+W",
+		zoomIn: "Ctrl+=",
+		zoomOut: "Ctrl+-",
 		toggleDevTools: "F12",
 	});
 	const mac = loadShortcuts({ platform: "darwin" });
@@ -239,6 +251,14 @@ test("平台默认键列表完整（覆盖表之外不丢键）", () => {
 		cycleModel: "Cmd+Alt+M",
 		cycleThinking: "Cmd+Alt+T",
 		openQuickMessages: "Cmd+Shift+M",
+		toggleVoiceRecording: "F9",
+		// macOS 的 ⌘Tab 被系统应用切换器占用，跟随 Chromium 系惯例用 Control+Tab
+		cycleSessionTabs: "Ctrl+Tab",
+		cycleSessionTabsReverse: "Ctrl+Shift+Tab",
+		// 主窗口无原生菜单，⌘W 不会被 Chromium 关窗，可安全接管为关标签页
+		closeSessionTab: "Cmd+W",
+		zoomIn: "Cmd+=",
+		zoomOut: "Cmd+-",
 		toggleDevTools: "F12",
 	});
 });

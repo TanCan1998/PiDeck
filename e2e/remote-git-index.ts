@@ -37,7 +37,8 @@ export async function verifyRemoteGitIndex(input: { window: Page; credentials: R
 	};
 	const selectAndAuthorize = async (path: string) => {
 		await remoteProjectRow(window, path.split("/").pop() ?? "")
-			.locator(".project-draggable")
+			.locator(".conversation-title")
+			.first()
 			.click();
 		await window.getByRole("button", { name: "打开右侧边栏", exact: true }).click();
 		await window.getByTestId("drawer-rail-git").click();
@@ -47,7 +48,7 @@ export async function verifyRemoteGitIndex(input: { window: Page; credentials: R
 	/** Switch to a project that is already authorized: the per-project drawer may be open or closed. */
 	const switchAuthorized = async (path: string) => {
 		const project = remoteProjectRow(window, path.split("/").pop() ?? "");
-		await project.locator(".project-draggable").click();
+		await project.locator(".conversation-title").first().click();
 		const open = window.getByRole("button", { name: "打开右侧边栏", exact: true });
 		if (await open.count()) {
 			await open.click();

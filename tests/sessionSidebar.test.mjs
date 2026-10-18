@@ -44,6 +44,19 @@ function loadNavTabModule() {
 	});
 }
 
+function loadSharedSessionSortModule() {
+	return loadTsModule("src/shared/sessionSort.ts", "sessionSort.ts", (specifier) => {
+		throw new Error(`Unexpected import: ${specifier}`);
+	});
+}
+
+function loadSessionSortModesModule() {
+	return loadTsModule("src/renderer/src/sessionSortModes.ts", "sessionSortModes.ts", (specifier) => {
+		if (specifier === "../../shared/sessionSort") return loadSharedSessionSortModule();
+		throw new Error(`Unexpected import: ${specifier}`);
+	});
+}
+
 function loadControllerModule() {
 	return loadTsModule("src/renderer/src/hooks/useSidebarController.ts", "useSidebarController.ts", (specifier) => {
 		if (specifier === "react") return {};
@@ -52,6 +65,7 @@ function loadControllerModule() {
 		if (specifier === "../utils/sidebarExpandedProjects") return loadExpandedProjectsModule();
 		if (specifier === "../utils/sidebarNavTab") return loadNavTabModule();
 		if (specifier === "../sessionFilterPills") return loadPillsModule();
+		if (specifier === "../sessionSortModes") return loadSessionSortModesModule();
 		throw new Error(`Unexpected import: ${specifier}`);
 	});
 }
@@ -117,7 +131,8 @@ test("Session tree keys use catalog SessionRecord identity, including child rows
 
 test("active sidebar rows use the bound catalog title before a transient AgentTab title", () => {
 	const source = readFileSync("src/renderer/src/components/sidebar/SessionTree.tsx", "utf8");
-	assert.match(source, /const displayTitle = agentSession \? \("title" in agentSession \? agentSession\.title : agentSession\.name \|\| child\.agent\.title\) : child\.agent\.title;/);
+	// 末尾 untitled 兜底：空标题不允许渲染成看不见的空横条（ACP 空标题反馈）
+	assert.match(source, /const displayTitle = \(agentSession \? \("title" in agentSession \? agentSession\.title : agentSession\.name \|\| child\.agent\.title\) : child\.agent\.title\) \|\| t\("common\.untitled"\);/);
 	assert.match(source, /<TitleScrollText text=\{displayTitle\} className="font-medium"/);
 });
 
@@ -186,7 +201,9 @@ test("unstarted drafts have an independent delete control and context menu", () 
 test("session context menu exposes archive and restores refresh the manager project", () => {
 	const components = readFileSync("src/renderer/src/components/sidebar/SidebarComponents.tsx", "utf8");
 	const content = readFileSync("src/renderer/src/components/sidebar/SidebarContent.tsx", "utf8");
-	const app = readFileSync("src/renderer/src/App.tsx", "utf8");
+	// 归档/删除族已从 App.tsx 迁至 hooks/sidebar/useSidebarArchiveActions.ts（域 owner）；App 只保留 sidebarActions 接线
+	const app = readFileSync("src/renderer/src/hooks/sidebar/useSidebarArchiveActions.ts", "utf8");
+	const appWiring = readFileSync("src/renderer/src/App.tsx", "utf8");
 
 	assert.match(components, /onArchiveSession: \(\) => void/);
 	assert.match(components, /onSelect=\{props\.onArchiveSession\}/);
@@ -194,10 +211,12 @@ test("session context menu exposes archive and restores refresh the manager proj
 	assert.match(content, /actions\.sessions\.unarchive\(archived, managerProject\.id\)/);
 	// 恢复入口现在收**归档条目**（不是裸路径）：远端归档没有本机路径，必须由条目里的
 	// `archivedRemoteSessionId` 决定走哪条通道（`restoreArchivedPiSession` 是唯一分流点）。
-	// 这条守卫等价迁移：仍然要求"入口收条目 + 调用点传条目"，只是形状随实现演进。
-	assert.match(app, /unarchiveSidebarSession\(archived: ArchivedPiSession, projectId = activeProjectId\)/);
-	assert.match(app, /restoreArchivedPiSession\(archived, api\.sessions\)/);
-	assert.match(app, /await unarchiveSidebarSession\(archived, projectId\)/);
+	// 归档/删除族已迁至 hooks/sidebar/useSidebarArchiveActions.ts（域 owner），App 只保留 action port
+	// 接线；恢复实现可落在 hook（dev 结构）或 App 包装，但形状必须是「收条目 + 经唯一分流点」。
+	const archiveSource = `${app}\n${appWiring}`;
+	assert.match(archiveSource, /unarchiveSidebarSession\(archived: ArchivedPiSession, projectId = activeProjectId\)/);
+	assert.match(archiveSource, /restoreArchivedPiSession\(archived, api\.sessions\)/);
+	assert.match(appWiring, /await unarchiveSidebarSession\(archived, projectId\)/);
 	assert.match(app, /archivedSessionToastMessage\(session\)/);
 	assert.match(app, /ARCHIVED_SESSION_TOAST_MS/);
 });
@@ -216,6 +235,8 @@ function appFunctionBlock(source, name, nextName) {
 // 只 removeSessionState(session.id) 会在 currentSessionId 被清空后留下空态 Composer。
 test("sidebar archive and delete dismiss nested subagent chats instead of leaving a composer", () => {
 	const app = readFileSync("src/renderer/src/App.tsx", "utf8");
+	// 归档/删除族已迁至 hooks/sidebar/useSidebarArchiveActions.ts；App 只保留 chrome 接线
+	const archiveHook = readFileSync("src/renderer/src/hooks/sidebar/useSidebarArchiveActions.ts", "utf8");
 	const chrome = readFileSync("src/renderer/src/hooks/useSessionWorkspaceChrome.ts", "utf8");
 	const ipc = readFileSync("src/main/ipc/sessionIpc.ts", "utf8");
 
@@ -223,8 +244,8 @@ test("sidebar archive and delete dismiss nested subagent chats instead of leavin
 	assert.match(chrome, /closeTab = useCallback\(\s*\(sessionId: string\) => \{\s*closeTabs\(\[sessionId\]\)/);
 	assert.match(app, /closeTabs: workspaceChrome\.closeTabs/);
 
-	const remove = appFunctionBlock(app, "deleteSidebarSession", "archiveSidebarSession");
-	const archive = appFunctionBlock(app, "archiveSidebarSession", "unarchiveSidebarSession");
+	const remove = appFunctionBlock(archiveHook, "deleteSidebarSession", "archiveSidebarSession");
+	const archive = appFunctionBlock(archiveHook, "archiveSidebarSession", "unarchiveSidebarSession");
 	for (const [name, block] of [
 		["delete", remove],
 		["archive", archive],
@@ -267,7 +288,8 @@ test("Sidebar leaf remains independent from App and keeps RPC logging query loca
 	assert.doesNotMatch(content, /from "\.\.\/\.\.\/App"/);
 	assert.match(controller, /getRpcLogging/);
 	assert.match(controller, /setAgentRpcLoggingById/);
-	assert.match(content, /RpcLogViewer/);
+	// 日志面板迁到右侧抽屉：侧栏只留打开命令，不再挂查看器组件
+	assert.doesNotMatch(content, /RpcLogViewer/);
 	assert.match(content, /SessionManagerModal/);
 	assert.match(content, /WorktreeCreateDialog/);
 });
@@ -292,16 +314,18 @@ test("sidebar uses the dev-style source filter overlay and anonymous Session ent
 	const sessionTree = readFileSync("src/renderer/src/components/sidebar/SessionTree.tsx", "utf8");
 	const content = readFileSync("src/renderer/src/components/sidebar/SidebarContent.tsx", "utf8");
 	const controller = readFileSync("src/renderer/src/hooks/useSidebarController.ts", "utf8");
-	const newSessionMenu = readFileSync("src/renderer/src/components/sidebar/NewSessionMenu.tsx", "utf8");
+	// 新建菜单收敛在 SessionTabsBar 的本地 NewSessionMenu（sidebar 同名孤儿组件已删）；
+	// 匿名会话入口保留在侧栏项目右键菜单。
 	const header = readFileSync("src/renderer/src/components/session/SessionHeader.tsx", "utf8");
 	assert.doesNotMatch(projectTree, /sourceFilterOpenProjectId|session-source-filter-menu/);
 	assert.match(projectTree, /sourceFilter !== null/);
-	// 普通/匿名新建已合并到 NewSessionMenu 下拉按钮，匿名入口在其中保留
-	assert.match(newSessionMenu, /createAnonymous\(projectId\)/);
+	// 匿名会话入口：项目右键菜单（SidebarContent）保留 createAnonymous 调用
+	assert.match(content, /createAnonymous\(menuProject\.id\)/);
 	assert.match(content, /SessionSourceFilterMenu/);
 	assert.match(controller, /toggleSourceFilter/);
 	assert.match(sessionTree, /anonymous-indicator/);
-	assert.match(sessionTree, /runtimeBySessionId\[session\.id\]\?\.agentId === child\.agent\.id/);
+	// Agent 行与会话的绑定统一走 resolveBoundSession（deckSessionId 优先，判 sessionPath 真值）
+	assert.match(sessionTree, /resolveBoundSession\(child\.agent, props\.sessions, props\.controller\.catalog\.runtimeBySessionId\)/);
 	assert.match(header, /anonymous-badge/);
 });
 
@@ -367,7 +391,9 @@ test("narrow project tree keeps root names from losing avoidable width", () => {
 	// 展开后的 SessionTree 不在这里断言，避免改变会话层级的视觉语义。
 	// 赋值右侧/尾随空格可能被格式化调整：用 \s* 与容错字符类。
 	assert.match(projectTree, /treeRowClass =\s*"[^"]*items-center[^"]*px-1 /);
-	assert.match(projectTree, /className="flex min-w-0 flex-1 items-center gap-1 py-0 pr-1 text-left"/);
+	// 根节点名称行：拖拽已改为直接原生 draggable（不再长按 arming），className 回归静态串，
+	// 保留 cursor-grab 态与宽度让位类。
+	assert.match(projectTree, /className="flex min-w-0 flex-1 cursor-grab select-none items-center gap-1 py-0 pr-1 text-left/);
 	// 无标题父块：工具行保持 px-1 pb-1 布局，不把名称向右推一档
 	assert.match(projectTree, /className="flex items-center justify-between px-1 pb-1"/);
 });
@@ -521,4 +547,34 @@ test("activity page keeps failed/stopped agents visible (error/closed)", () => {
 	assert.match(activeTree, /sessionStatusDotClass\(agent\.status\)/);
 	// 右键/重启入口不区分 live：失败会话也能从活动页菜单重启。
 	assert.match(activeTree, /openMenu\(\{ kind: "agent", agentId: agent\.id/);
+});
+
+test("终态会话行的会话菜单保留「关闭 Agent」入口（不按 live 判据裁掉）", () => {
+	// 回归（2026-10）：会话行用 getBoundSidebarRuntimeAgent 选菜单类型，而该函数把
+	// error/closed 当「非 live」，报错会话因此退回会话菜单、丢掉「关闭 Agent」——
+	// 恰好是最需要它的状态。修复：会话菜单补该入口，按「有 agentId 绑定」注入。
+	const components = readFileSync("src/renderer/src/components/sidebar/SidebarComponents.tsx", "utf8");
+	const content = readFileSync("src/renderer/src/components/sidebar/SidebarContent.tsx", "utf8");
+	const sessionMenu = components.slice(components.indexOf("export function SessionContextMenu"));
+
+	assert.match(sessionMenu, /onCloseAgent\?:\s*\(\)\s*=>\s*void;/);
+	assert.match(sessionMenu, /title=\{t\("menu\.closeAgentHint"\)\}/);
+	assert.match(sessionMenu, /\{t\("menu\.closeAgent"\)\}/);
+	assert.match(sessionMenu, /onSelect=\{props\.onCloseAgent\}/);
+	// 归档入口不能被顶掉（agent 菜单没有归档，会话菜单必须保留）
+	assert.match(sessionMenu, /onSelect=\{props\.onArchiveSession\}/);
+
+	// 注入判定只看「有绑定」，不复用 RPC 日志的 live 判据
+	const boundStart = content.indexOf("const boundAgentForSession");
+	assert.ok(boundStart > 0, "SidebarContent 必须有独立的绑定判定");
+	const boundBlock = content.slice(boundStart, boundStart + 400);
+	assert.match(boundBlock, /runtimeBySessionId\[sessionId\]\?\.agentId/);
+	assert.doesNotMatch(boundBlock, /getBoundSidebarRuntimeAgent/);
+	assert.match(content, /onCloseAgent=\{\s*menuSessionBoundAgent/);
+
+	// 草稿会话行同一缺口：报错草稿也走草稿菜单，必须同样保留入口
+	const draftMenu = components.slice(components.indexOf("export function DraftSessionContextMenu"), components.indexOf("export function SessionContextMenu"));
+	assert.match(draftMenu, /onCloseAgent\?:\s*\(\)\s*=>\s*void;/);
+	assert.match(draftMenu, /onSelect=\{props\.onCloseAgent\}/);
+	assert.match(content, /onCloseAgent=\{\s*menuDraftBoundAgent/);
 });

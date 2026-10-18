@@ -21,8 +21,12 @@ function git(...args) {
 
 before(() => {
 	// 与 tests/gitCommitFileDiff.integration.test.mjs 同款编译：tsc 编译 GitService
-	// 及 shared 类型到临时目录，stub electron（../fs/trash 懒加载 electron.shell.trashItem）
-	execFileSync(process.execPath, [resolve("node_modules/typescript/bin/tsc"), "src/main/git/GitService.ts", "src/shared/types.ts", "--module", "commonjs", "--target", "es2022", "--moduleResolution", "node", "--esModuleInterop", "--skipLibCheck", "--outDir", buildDir], { cwd: resolve("."), stdio: "pipe" });
+	// 及 shared 类型到临时目录，stub electron（../fs/trash 懒加载 electron.shell.trashItem）；
+	// --rewriteRelativeImportExtensions 同因（依赖链本地 import 带 .ts 扩展名）。
+	execFileSync(process.execPath, [resolve("node_modules/typescript/bin/tsc"), "src/main/git/GitService.ts", "src/shared/types.ts", "--module", "commonjs", "--target", "es2022", "--moduleResolution", "node", "--esModuleInterop", "--skipLibCheck", "--rewriteRelativeImportExtensions", "--outDir", buildDir], {
+		cwd: resolve("."),
+		stdio: "pipe",
+	});
 	const stubElectronDir = join(buildDir, "node_modules", "electron");
 	mkdirSync(stubElectronDir, { recursive: true });
 	writeFileSync(join(stubElectronDir, "package.json"), JSON.stringify({ name: "electron", main: "index.js" }));

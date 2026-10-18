@@ -1,20 +1,29 @@
 import type { PiDesktopApi } from "../../preload";
-import { createDefaultExternalEditorSettings, createDefaultSecurityConfig, createDefaultSoundAlertSettings, DEFAULT_PET_SCALE, terminalOwnerKeyFor } from "../../shared/types";
+import { createDefaultExternalEditorSettings, createDefaultSecurityConfig, createDefaultSoundAlertSettings, DEFAULT_PET_SCALE, DEFAULT_TOAST_DURATION_MS, emptyRemoteAccessState, terminalOwnerKeyFor } from "../../shared/types";
+import { DEFAULT_VOICE_TRANSCRIPTION_CONFIG } from "../../shared/voiceTranscriptionConfig";
+import { EMPTY_VIDEO_GEN_CONFIG } from "../../shared/videoGenConfig";
 import { SESSION_TAB_MAX_WIDTH_DEFAULT } from "../../shared/sessionTabWidth";
+import { ACP_TOOL_PRESETS } from "../../shared/acpToolPresets";
 import type { AppSettings, FileTreeNode, LocalProject, Project, SessionRecord, SessionSummary, TerminalDataEvent, TerminalExitEvent, TerminalShell, TerminalTab, TerminalTarget } from "../../shared/types";
 import type { ResourceImportKind } from "../../shared/types/resourceImport";
+import type { ReplyActionRule } from "../../shared/types/replyActions";
 import { t } from "./i18n";
 
 const now = Date.now();
 
 /** 快捷消息预览夹具：预览/截图需要一个非空弹框；真实数据在 userData/quick-messages.json。 */
 const PREVIEW_QUICK_MESSAGES: readonly string[] = ["继续", "提交", "推送", "提交推送"];
+const PREVIEW_REPLY_ACTIONS: readonly ReplyActionRule[] = [
+	{ text: "继续", triggers: [{ kind: "onStop" }] },
+	{ text: "提交", triggers: [{ kind: "onStop" }] },
+	{ text: "重试", triggers: [{ kind: "onFailure" }] },
+];
 
 const projects: LocalProject[] = [
 	{
 		id: "builtin-chat",
 		name: "Chat",
-		path: "C:/Users/14012/AppData/Roaming/pi-desktop/chat-workspace",
+		path: "C:/Users/14012/AppData/Roaming/PiDeck/chat-workspace",
 		lastOpenedAt: now,
 		pinned: true,
 		sortOrder: -1,
@@ -86,6 +95,7 @@ let previewSettings: AppSettings = {
 	showNativeMenu: false,
 	sendShortcut: "enter-send",
 	defaultAgentBackend: "pi",
+	floatingBallShowRunningBadge: true,
 	theme: "system",
 	themeScheduleLightStart: "07:00",
 	themeScheduleDarkStart: "19:00",
@@ -100,13 +110,13 @@ let previewSettings: AppSettings = {
 	/** 扩展禁用白名单：与 SettingsStore 默认一致，预览壳不启用白名单 */
 	/** 扩展禁用白名单：与 SettingsStore 默认一致，预览壳不启用白名单 */
 	disabledExtensions: [],
-	disableExtensionWhitelist: false,
 	/** 技能禁用列表：与 SettingsStore 默认一致，预览壳不启用技能白名单 */
 	disabledSkills: [],
 	/** 提示词模板禁用列表：与 SettingsStore 默认一致，预览壳不启用模板白名单 */
 	disabledPrompts: [],
 	sessionTabOpenMode: "preview", // 与 SettingsStore 默认一致：忙碌时发送默认「插入当前回合」
 	busySendDelivery: "steer",
+	tpsDisplayMode: "streaming",
 	// 遗留字段：快捷消息已改存独立配置文件（预览模式没有真实文件，见下方 quickMessages 预览桩）
 	quickMessages: [],
 	enableGitManagement: true,
@@ -118,21 +128,24 @@ let previewSettings: AppSettings = {
 	closeToTray: true,
 	singleInstance: true,
 	enableNotifications: true,
-	// 与主进程 SettingsStore 默认一致：标题生成默认关闭，避免预览壳与真实设置产生分歧
-	autoSessionTitle: false,
+	// 与主进程 SettingsStore 默认一致：标题生成默认开启，预览壳与真实设置保持一致
+	autoSessionTitle: true,
 	// Ask 提问系统通知默认关闭：与主进程 SettingsStore 默认一致
 	askNotificationEnabled: false,
+	// 仅失焦提醒开关：与主进程 SettingsStore 默认一致（预览 mock 需覆盖 AppSettings 全部必填字段）
+	alertOnlyWhenUnfocused: false,
 	// 人文关怀提醒开关：与主进程 SettingsStore 默认值保持一致（预览 mock 需覆盖 AppSettings 全部必填字段）
 	agentCountReminderEnabled: true,
 	// 公告通知开关：与主进程 SettingsStore 默认一致（预览 mock 需覆盖 AppSettings 全部必填字段）
 	announcementNotificationEnabled: true,
+	// toast 展示时长：与主进程 defaultSettings 一致
+	toastDurationMs: DEFAULT_TOAST_DURATION_MS,
 	// showThinking 由 pi agent 的 hideThinkingBlock 控制，运行时从主进程加载
 	showThinking: true,
 	// 流式对话行为：与主进程 SettingsStore 默认一致（预览窗口保持相同观感）
 	expandInterimDuringStream: true,
-	// 过程组显示默认关闭：与主进程 SettingsStore 默认一致（预览窗口保持平铺观感）
-	processGroupDisplay: false,
-	collapsePrevRunsOnNewTurn: true,
+	// 过程组显示默认开启：与主进程 SettingsStore 默认一致（预览窗口按过程组渲染）
+	processGroupDisplay: true,
 	showDevTools: false,
 	developerDiagnostics: false,
 	electronChromiumSandbox: false,
@@ -145,18 +158,22 @@ let previewSettings: AppSettings = {
 	desktopProxyUrl: "http://127.0.0.1:7890",
 	desktopProxyBypass: "localhost,127.0.0.1,::1",
 	customPiPath: "",
+	piCustomPaths: [],
 	wslEnabled: false,
 	wslDistro: "Ubuntu",
 	wslUser: "root",
 	telemetryEnabled: true,
 	webServiceEnabled: false,
-	webServiceHost: "127.0.0.1",
+	webServiceHost: "0.0.0.0",
 	webServicePort: 8765,
+	webServiceRequiresAuth: true,
 	rpcTimeout: 600_000,
 	linkOpenMode: "external",
 	workspaceContentOpenMode: "split",
 	contentMaxWidth: 1800,
 	chatContentWidthPct: 80,
+	sessionStatusPlacement: "composer",
+	navigationMode: "tabs",
 	sessionTabMaxWidth: SESSION_TAB_MAX_WIDTH_DEFAULT,
 	maxEditorFileSizeMB: 5,
 	externalEditors: createDefaultExternalEditorSettings(),
@@ -168,18 +185,28 @@ let previewSettings: AppSettings = {
 	petScale: DEFAULT_PET_SCALE,
 	petPatrolEnabled: true,
 	petPatrolPauseMin: 5,
+	// 悬浮球默认关闭
+	floatingBallEnabled: false,
+	floatingBallExpandTarget: "mini",
+	floatingBallAlwaysOnTop: true,
+	floatingBallSnapToEdge: true,
 	// 闲置 agent 自动释放（预览模式不真实释放，仅保持设置项可用）
 	idleAgentAutoRelease: true,
 	idleAgentKeepCount: 5,
 	idleAgentTimeoutMin: 60,
+	// CUA 默认关闭：预览壳与主进程 SettingsStore 默认保持一致
+	cuaEnabled: false,
+	cuaAutoApprove: true,
 	favoriteModels: [],
 	// 提供商与模型显示开关：与 SettingsStore 默认一致，预览壳默认全显示
 	hiddenProviders: [],
 	hiddenModels: [],
 	hiddenModules: [],
+	hiddenComposerFeatures: [],
 
-	fontSize: "default",
+	fontSize: "medium",
 	uiFontSize: null,
+	tabBarFontSize: null,
 	chatFontSize: null,
 	inputFontSize: null,
 	zoomFactor: 1,
@@ -188,12 +215,15 @@ let previewSettings: AppSettings = {
 	fontFamilyMono: "system-mono",
 	fontFamilyMonoCustom: "",
 	removedBuiltInExtensions: [],
+	// 与主进程 defaultSettings 保持一致：默认关闭的内置扩展 opt-in 列表默认空
+	enabledBuiltInExtensions: [],
 	// 与主进程 defaultSettings 保持一致（预览壳不真实播放，仅保持设置项形状完整）
 	soundAlert: createDefaultSoundAlertSettings(),
 	imageGenSize: "unset",
 	imageGenWatermark: false,
 	imageGenOutputFormat: "png",
 	autoDownloadUpdates: true,
+	catalogAutoUpdate: true,
 	// 与主进程 defaultSettings 保持一致：更新源默认 GitHub 官方，自定义镜像前缀留空
 	updateSource: "github",
 	customUpdateSourceUrl: "",
@@ -201,10 +231,22 @@ let previewSettings: AppSettings = {
 	piRpcOffline: false,
 	piRpcNoExtensions: false,
 	piRpcNoSkills: false,
+	// 终端：与主进程 defaultSettings 保持一致（预览壳不真实枚举字体，仅保持设置项形状完整）
+	terminalTheme: "inherit",
+	terminalFontSize: null,
+	terminalFontFamily: "",
+	terminalScrollback: 5000,
+	terminalCursorStyle: "block",
+	terminalCursorBlink: true,
+	terminalCopyOnSelect: false,
+	terminalPaddingY: 8,
+	terminalConfirmClose: "running",
+	terminalStartupCommand: "",
 };
 
 export function createPreviewApi(): PiDesktopApi {
-	const noop = (() => () => undefined) as any;
+	// noop 是「订阅类槽位」的通用占位：调用它返回退订函数；never[] 入参使其可赋给任意回调签名
+	const noop = (() => () => undefined) as unknown as (...args: unknown[]) => () => void;
 	const previewImportKinds = new Map<string, ResourceImportKind>();
 	const clipboardStub: PiDesktopApi["clipboard"] = {
 		// preview 模式无真实剪贴板；浏览器下 navigator.clipboard 为异步 API，
@@ -238,9 +280,51 @@ export function createPreviewApi(): PiDesktopApi {
 		return tab;
 	};
 	return {
+		piDeckMcp: {
+			getState: async () => ({ ok: false, code: "desktop-only" }),
+			setAccess: async () => ({ ok: false, code: "desktop-only" }),
+			connection: async () => ({ ok: false, code: "desktop-only" }),
+		},
+		hostPlugins: {
+			list: async () => ({ ok: false, code: "desktop-only" }),
+			rescan: async () => ({ ok: false, code: "desktop-only" }),
+			setEnabled: async () => ({ ok: false, code: "desktop-only" }),
+			openDirectory: async () => ({ ok: false, code: "desktop-only" }),
+			install: async () => ({ ok: false, code: "desktop-only" }),
+			installDirectory: async () => ({ ok: false, code: "desktop-only" }),
+			scaffold: async () => ({ ok: false, code: "desktop-only" }),
+			mount: async () => ({ ok: false, code: "desktop-only" }),
+			update: async () => ({ ok: false, code: "desktop-only" }),
+			unmount: async () => ({ ok: false, code: "desktop-only" }),
+			remove: async () => ({ ok: false, code: "desktop-only" }),
+			onChanged: () => () => undefined,
+			onNavigate: () => () => undefined,
+			onOpenBrowser: () => () => undefined,
+		},
 		clipboard: clipboardStub,
 		// 资源管理器右键菜单预览桩：预览环境无注册表操作，一律报不支持
-		quickTask: { getState: async () => ({ active: false, requestId: 0 }), onChanged: () => () => undefined, exit: async () => undefined },
+		quickTask: { getState: async () => ({ active: false, requestId: 0 }), onChanged: () => () => undefined, exit: async () => undefined, switchToMiniOverlay: async () => undefined },
+		floatingBall: {
+			getState: async () => ({ visible: false, alwaysOnTop: true, snapToEdge: true, expandTarget: "mini" as const, showRunningBadge: true, activeCount: 0, runningCount: 0, recentTitles: [], locale: "zh-CN" as const }),
+			onStateChanged: () => () => undefined,
+			enter: async () => undefined,
+			exit: async () => undefined,
+			setEnabled: async () => undefined,
+			setExpandTarget: async () => undefined,
+			dragStart: async () => undefined,
+			dragMove: async () => undefined,
+			dragEnd: async () => undefined,
+			contextMenu: async () => undefined,
+		},
+		miniOverlay: {
+			getState: async () => null,
+			onStateChanged: () => () => undefined,
+			jumpToSession: async () => undefined,
+			quickPrompt: async () => ({ ok: false, message: "preview mode" }),
+			close: async () => undefined,
+			collapse: async () => undefined,
+			switchToQuickTask: async () => undefined,
+		},
 		// 预览模式没有真实 pi 认证宿主；提供与 preload 同形状的安全空实现，
 		// 避免新增认证能力让静态预览整站无法通过类型检查或初始化。
 		piAuth: {
@@ -250,6 +334,27 @@ export function createPreviewApi(): PiDesktopApi {
 			cancel: async () => false,
 			logout: async (providerId: string) => ({ ok: false, providerId, error: "Pi auth is unavailable in preview mode." }),
 			onFlowUpdate: () => () => undefined,
+		},
+		// 数据环境预览桩：预览模式无真实数据目录，按 stable 通道未决策返回；导入同步不可用
+		dataEnv: {
+			getInfo: async () => ({ channel: "stable" as const, decided: false, dataMode: null, activeDirectory: "shared" as const }),
+			chooseMode: async () => ({ ok: false as const, error: "invalid-mode" as const }),
+			restart: async () => undefined,
+			confirmMismatch: async () => undefined,
+			onDecisionRequired: () => () => undefined,
+			onMismatchDetected: () => () => undefined,
+			getImportPreview: async () => ({ ok: false as const, error: "unavailable" as const }),
+			importStart: async () => ({ ok: false as const, error: "unavailable" as const }),
+			importCancel: async () => undefined,
+			onImportProgress: () => () => undefined,
+		},
+		// 频道切换预览桩：预览模式不接真实更新源，查询/下载均不可用，状态恒 idle。
+		channelSwitch: {
+			query: async () => ({ ok: false as const, error: "preview-unavailable" as const }),
+			download: async () => ({ ok: false as const, error: "preview-unavailable" as const }),
+			launch: async () => ({ ok: false as const, error: "preview-unavailable" as const }),
+			getStatus: async () => ({ phase: "idle" as const }),
+			onStateChanged: () => () => undefined,
 		},
 		shellMenu: {
 			getQuickTaskState: async () => ({ supported: false, registered: false }),
@@ -265,6 +370,12 @@ export function createPreviewApi(): PiDesktopApi {
 				sampledAt: Date.now(),
 			}),
 			stopAgent: async () => undefined,
+			// 架构检测预览桩：恒报「未在转译层」，预览模式不触发换包提示
+			getArchStatus: async () => ({
+				platform: "",
+				processArch: "",
+				runningUnderArm64Translation: false,
+			}),
 			getDiagnosticsSnapshot: async () => ({
 				enabled: false,
 				sampledAt: Date.now(),
@@ -402,6 +513,7 @@ export function createPreviewApi(): PiDesktopApi {
 				projects.sort((a, b) => projectIds.indexOf(a.id) - projectIds.indexOf(b.id));
 				return projects;
 			},
+			setPinned: async () => projects,
 			rename: async () => projects,
 			onChanged: noop,
 			listRoot: async () => projects,
@@ -409,6 +521,7 @@ export function createPreviewApi(): PiDesktopApi {
 			toggleWorktreeEnabled: async () => projects[0],
 			chooseChatPath: async () => null,
 			setChatPath: async () => projects[0],
+			consumeMigrationNotice: async () => null,
 			listModels: async () => [],
 			// 预览 iframe 不需要真实模型目录：构造一个恒空报告（无失败原因），
 			// 与真实通道的 ModelListReport 形状保持一致，避免类型分叉。
@@ -497,6 +610,7 @@ export function createPreviewApi(): PiDesktopApi {
 			open: async () => undefined,
 			// 预览模式无主进程：文件搜索按空结果处理，搜索入口可用但不返回内容
 			search: async () => [],
+			searchContent: async () => null,
 			showInFolder: async () => undefined,
 			// 预览模式无主进程：不检测文件管理器（打开方式下拉不显示该入口）
 			detectFileManager: async () => null,
@@ -526,16 +640,40 @@ export function createPreviewApi(): PiDesktopApi {
 			getSize: async () => 0,
 			clearAll: async () => 0,
 		},
+		noticeHistory: {
+			// 预览/浏览器模式无主进程落盘：内存环形缓冲照常工作，只是重启不保留
+			get: async () => [],
+			record: async () => undefined,
+			clear: async () => undefined,
+			getSize: async () => 0,
+		},
 		dialog: {
 			pickFiles: async () => [],
 			pickBackgroundImage: async () => "",
 			removeBackgroundImage: async () => undefined,
 		},
+		// 自定义主题预览桩：返回空列表与拒绝保存，预览壳没有真实 userData 目录
+		customThemes: {
+			list: async () => ({ dir: "", themes: [] }),
+			read: async () => null,
+			save: async () => ({ ok: false as const, errors: ["preview"] }),
+			remove: async () => undefined,
+			writeGuide: async () => "",
+		},
+		pluginDev: {
+			// 预览模式：无扩展目录可写，状态固定“未安装”
+			status: async () => ({ userExtensionsDir: "", demoInstalled: false, guideInstalled: false }),
+			writeGuide: async () => "",
+			copyDemo: async () => ({ status: "copied" as const, path: "" }),
+		},
 		sessions: {
 			list: async () => getSessions(),
+			// 预览模式无 sidecar：null 让调用方回退标题过滤
+			searchContent: async () => null,
+			// 预览模式无 sidecar：会话内查找不可用（UI 显示不可用态而不是「无匹配」）
+			searchInSession: async () => null,
 			// 预览模式无 DSH host：空预设目录满足接口契约
 			listDshAgentPresets: async () => [],
-			removeDshAgentPreset: async () => {},
 			getDshDefaultModel: async () => undefined,
 			// 预览模式无主进程配置可解析：无启动默认（底栏不预选，不影响其它功能）
 			resolveLaunchDefaults: async () => ({}),
@@ -543,6 +681,7 @@ export function createPreviewApi(): PiDesktopApi {
 			searchDshSessions: async () => [],
 			createDshGoal: async () => undefined,
 			runDshGoalAction: async () => undefined,
+			cancelDshQueuedMessage: async () => undefined,
 			listDshSubagents: async () => [],
 			readDshSubagentHistory: async () => ({ messages: [], hasMore: false }),
 			listSessionSubagents: async () => [],
@@ -561,6 +700,12 @@ export function createPreviewApi(): PiDesktopApi {
 			listDshDynamicPlugins: async () => [],
 			listDshStaticPlugins: async () => [],
 			uninstallDshUserPlugin: async () => ({ rowRemoved: false, reason: "preview mode" }),
+			// 预览模式无主进程 npm/市场链路：搜索与安装拒绝、已装列表为空，满足接口契约
+			searchDshPluginMarket: async () => ({ entries: [], warnings: ["preview mode"] }),
+			installDshUserPlugin: async () => {
+				throw new Error("preview mode: DSH plugin install is not available");
+			},
+			listDshUserPlugins: async () => [],
 			installDshPlugin: async () => undefined,
 			runDshPlugin: async () => undefined,
 			stopDshPlugin: async () => undefined,
@@ -653,6 +798,7 @@ export function createPreviewApi(): PiDesktopApi {
 			readRecordMessages: async () => [],
 			readRecordMessagePage: async () => ({ messages: [], total: 0, nextBefore: null }),
 			editCatalogMessage: async () => ({ ok: true as const, value: undefined }),
+			removeCatalogMessageImage: async () => ({ ok: false as const, error: { code: "SESSION_COMMAND_FAILED" as const } }),
 			deleteCatalogMessage: async () => ({ ok: true as const, value: undefined }),
 			prepareCatalogResend: async () => ({ ok: true as const, value: { text: "" } }),
 			readProcessEvents: async () => [],
@@ -671,6 +817,9 @@ export function createPreviewApi(): PiDesktopApi {
 				runtimeGeneration: 1,
 			}),
 			sendUiResponse: async () => undefined,
+			// GUI 扩展桥：预览模式无桥端点，恒丢弃
+			sendBridgeEvent: async () => false,
+			requestBridgeResync: async () => false,
 			onRuntimeEvent: noop,
 			listRuntimes: async () => [],
 			activateRuntime: async () => ({
@@ -743,6 +892,7 @@ export function createPreviewApi(): PiDesktopApi {
 			onDshRuntimeStatusChanged: () => () => {},
 			installDshRuntime: async () => ({ ok: false, error: "unavailable in preview" }),
 			importDshRuntimeFile: async () => ({ ok: false, error: "unavailable in preview" }),
+			importDshRuntimeDir: async () => ({ ok: false, error: "unavailable in preview" }),
 			uninstallDshRuntime: async () => ({ ok: false, error: "unavailable in preview" }),
 			onDshRuntimeInstallProgress: () => () => {},
 			describeDshSettings: async () => ({ writable: false, hasDocument: false, namespaces: [] }),
@@ -766,6 +916,8 @@ export function createPreviewApi(): PiDesktopApi {
 				ok: true,
 				value: { target, value: [] },
 			}),
+			// 预览模式无 standby 池，草稿命令预览回退本地发现。
+			draftCommands: async () => null,
 			listRuntimeModels: async (target) => ({
 				ok: true,
 				value: { target, value: [] },
@@ -790,6 +942,8 @@ export function createPreviewApi(): PiDesktopApi {
 				ok: true,
 				value: { target, value: { items: [], hasMore: false } },
 			}),
+			// 分支树预览桩：预览环境无会话文件，空态即可。
+			getBranchTree: async () => null,
 			getRewindCheckpointDiff: async (target) => ({
 				ok: true,
 				value: { target, value: "" },
@@ -842,6 +996,10 @@ export function createPreviewApi(): PiDesktopApi {
 			scan: async () => [],
 			import: async () => ({ results: [], imported: 0, failed: 0 }),
 		},
+		qoderSessions: {
+			scan: async () => [],
+			import: async () => ({ results: [], imported: 0, failed: 0 }),
+		},
 		openCodeSessions: {
 			scan: async () => [],
 			import: async () => ({ results: [], imported: 0, failed: 0 }),
@@ -855,6 +1013,20 @@ export function createPreviewApi(): PiDesktopApi {
 			import: async () => ({ results: [], imported: 0, failed: 0 }),
 		},
 		cursorSessions: {
+			scan: async () => [],
+			import: async () => ({ results: [], imported: 0, failed: 0 }),
+		},
+		kimiSessions: {
+			scan: async () => [],
+			import: async () => ({ results: [], imported: 0, failed: 0 }),
+		},
+		kimiWorkSessions: {
+			describe: async () => ({ root: null, origin: null, sessionsFound: false }),
+			scan: async () => [],
+			import: async () => ({ results: [], imported: 0, failed: 0 }),
+		},
+		// MinimaxCode 导入预览桩：预览环境无 ~/.minimax 可扫
+		minimaxSessions: {
 			scan: async () => [],
 			import: async () => ({ results: [], imported: 0, failed: 0 }),
 		},
@@ -957,11 +1129,13 @@ export function createPreviewApi(): PiDesktopApi {
 			getSize: async () => 0,
 			get: async () => [],
 			getLive: async () => [],
+			getModelTrace: async () => null,
 			save: async () => [],
 			onLog: (_callback: unknown) => () => {},
 			clear: async () => undefined,
 			setLogging: async () => false,
 			getLogging: async () => false,
+			setWatching: async () => false,
 		},
 		pi: {
 			check: async () => ({
@@ -976,10 +1150,41 @@ export function createPreviewApi(): PiDesktopApi {
 				version: "preview",
 				searchedDirs: [],
 			}),
+			// 预览模式固定给两份安装：用来验证「多安装让用户自己选」的 UI 分支。
+			listInstallations: async () => [
+				{
+					path: "/usr/local/bin/pi",
+					realPath: "/usr/local/bin/pi",
+					version: "preview",
+					source: "package-manager" as const,
+					isActive: true,
+				},
+				{
+					path: "/home/preview/.pi/agent/bin/pi",
+					realPath: "/home/preview/.pi/agent/bin/pi",
+					version: "preview",
+					source: "managed" as const,
+					managedRoot: "/home/preview/.pi/agent/install",
+					isActive: false,
+					shellDefault: true,
+				},
+			],
+			/** 预览模式的「浏览…」：固定返回一个假路径，验证交互链路。 */
+			chooseExecutable: async () => "/home/preview/.pi/agent/bin/pi",
+			/** 预览模式：只回显，不落盘 */
+			setCustomPaths: async (paths) => ({ paths: [...paths], clearedActive: false }),
 			checkUpdate: async () => ({
 				currentVersion: "preview",
 				latestVersion: "preview",
 				hasUpdate: false,
+			}),
+			releaseNotes: async () => ({
+				markdown: "## [preview] - 2026-01-01\n\n- Preview mode: pi release notes",
+				source: "github",
+				versionCount: 1,
+				pageUrl: "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/CHANGELOG.md",
+				fetchedAt: null,
+				truncated: false,
 			}),
 			update: async () => ({
 				command: "pi update pi --no-approve",
@@ -1031,11 +1236,12 @@ export function createPreviewApi(): PiDesktopApi {
 				releasesUrl: "https://github.com/ayuayue/PiDeck/releases",
 				platform: "win32" as NodeJS.Platform,
 				homeDir: "C:/Users/preview",
-				userDataDir: "C:/Users/preview/AppData/Roaming/pi-desktop",
+				userDataDir: "C:/Users/preview/AppData/Roaming/PiDeck",
 			}),
 			preferredSystemLanguages: async () => (navigator.languages?.length ? [...navigator.languages] : [navigator.language]),
-			networkAddresses: async () => [{ address: "192.168.1.100", interfaceName: "Wi-Fi", cidr: "192.168.1.100/24", isPrivate: true }],
+			networkAddresses: async () => [{ address: "192.168.1.100", interfaceName: "Wi-Fi", cidr: "192.168.1.100/24", isPrivate: true, family: "IPv4" }],
 			checkUpdate: async () => undefined,
+			getChannel: async () => ({ channel: "stable" as const, currentVersion: "preview", devBuild: false }),
 			onUpdateStatus: () => () => undefined,
 			onOpenSettings: () => () => undefined,
 			// 预览/浏览器模式没有全局快捷键，订阅退化为空操作
@@ -1089,6 +1295,8 @@ export function createPreviewApi(): PiDesktopApi {
 			toggleMaximizeWindow: async () => false,
 			isWindowMaximized: async () => false,
 			onWindowMaximizedChange: () => () => undefined,
+			// 预览环境无主进程快捷键，返回空订阅以保持 API 形状
+			onZoomFactorChange: () => () => undefined,
 			toggleAlwaysOnTopWindow: async () => false,
 			isWindowAlwaysOnTop: async () => false,
 			closeWindow: async () => undefined,
@@ -1206,7 +1414,6 @@ export function createPreviewApi(): PiDesktopApi {
 			uninstall: async () => undefined,
 			install: async (_source: string) => "",
 			toggle: async () => undefined,
-			setWhitelistDisabled: async () => undefined,
 			removeBuiltIn: async () => undefined,
 			restoreBuiltIn: async () => undefined,
 			update: async () => ({
@@ -1384,8 +1591,10 @@ export function createPreviewApi(): PiDesktopApi {
 			}),
 		},
 		yaoPrompts: {
-			list: async () => ({ categories: [], prompts: [], repoPath: "" }),
+			list: async () => ({ categories: [], prompts: [], repoPath: "", dbState: "missing" }),
 			detail: async () => ({ title: "", description: "", promptContent: "", fullContent: "" }),
+			onDbStateChange: (_callback) => () => {},
+			retryDb: async () => ({ state: "missing" }),
 			import: async (_slug, _category) => ({
 				name: _slug,
 				path: `C:/Users/preview/.pi/agent/prompts/${_slug}.md`,
@@ -1414,6 +1623,22 @@ export function createPreviewApi(): PiDesktopApi {
 			search: async () => ({ query: "", total: 0, items: [] }),
 			detail: async () => null,
 			install: async (slug) => ({ success: true, slug, installDir: "", message: "Preview install" }),
+			// 预览模式无安装进程，但事件订阅形状必须完整（返回退订函数）
+			onInstallProgress: () => () => {},
+		},
+		acp: {
+			// 预览模式：无 ACP 工具数据，返回空表/恒过校验保持 PiDesktopApi 形状完整；
+			// 生命周期接口返回固定缺省值（无安装检测、无事件流）
+			listTools: async () => [],
+			saveTools: async () => [],
+			validateTool: async () => ({ ok: true as const }),
+			detectTool: async () => ({ presetId: ACP_TOOL_PRESETS[0]?.id ?? "gemini", state: "unknown" as const }),
+			installTool: async () => ({ ok: false, output: "preview" }),
+			uninstallTool: async () => ({ ok: false, output: "preview" }),
+			onLifecycleEvent: () => () => undefined,
+			getSessionConfig: async () => null,
+			setSessionConfig: async () => [],
+			onSessionConfigChanged: () => () => undefined,
 		},
 		settings: {
 			get: async (): Promise<AppSettings> => ({ ...previewSettings }),
@@ -1428,7 +1653,29 @@ export function createPreviewApi(): PiDesktopApi {
 				port: 0,
 				token: "",
 				requiresAuth: false,
+				tokenExpiresAt: null,
 			}),
+			rotateWebToken: async () => ({
+				running: false,
+				host: "",
+				port: 0,
+				token: "",
+				requiresAuth: false,
+				tokenExpiresAt: null,
+			}),
+			setWebToken: async () => ({
+				running: false,
+				host: "",
+				port: 0,
+				token: "",
+				requiresAuth: false,
+				tokenExpiresAt: null,
+			}),
+			webRemoteAccessState: async () => emptyRemoteAccessState(),
+			webRemoteAccessStart: async () => ({ ok: false as const, error: "preview" }),
+			webRemoteAccessStop: async () => ({ ok: false as const, error: "preview" }),
+			webRemoteAccessRefresh: async () => emptyRemoteAccessState(),
+			onWebRemoteAccessChanged: noop,
 			testPiProxy: async () => ({
 				success: true,
 				url: "https://api.openai.com/v1/models",
@@ -1469,13 +1716,25 @@ export function createPreviewApi(): PiDesktopApi {
 				writablePath: "",
 				writableFile: { mcpServers: {} },
 				writableRaw: '{\n  "mcpServers": {}\n}\n',
+				revision: "missing",
+				lowerLayerNames: [],
+				oauthCredentialNames: [],
 				layers: [],
 				servers: [],
+				invalidServers: [],
 			}),
 			saveMcp: async () => ({ valid: true }),
 			probeMcp: async () => ({ ok: true, transport: "stdio" as const, detail: "preview" }),
+			// 预览模式无 pi CLI：连接检测返回空集，登录/登出静默失败，授权 URL 无订阅源。
+			mcpListStatus: async () => ({ servers: [], errors: [] }),
+			mcpLogin: async () => ({ ok: false, output: "preview" }),
+			mcpLogout: async () => ({ ok: false, output: "preview" }),
+			onMcpLoginUrl: () => () => undefined,
 			// 预览模式无真实 pi 配置目录，返回占位（源文件页不显示路径行）。
 			getConfigDir: async () => "",
+			// 预览模式没有真实 settings.json：返回空摘要，开关操作直接失败。
+			piResourcesSummary: async () => ({ settingsPath: "", exists: false, revision: "preview", builtins: [], entries: { extensions: [], skills: [], prompts: [], themes: [] } }),
+			piResourcesSetBuiltin: async () => ({ ok: false, error: "preview" }),
 			saveModels: async () => ({ valid: true, modelLoadOk: true, modelCount: 2, modelLoadReason: null, modelLoadDetail: "" }),
 			// 预览模式无主进程验证链路：返回空订阅函数保持 API 形状一致。
 			onModelsVerifyResult: () => () => {},
@@ -1502,6 +1761,10 @@ export function createPreviewApi(): PiDesktopApi {
 			tokendanceAuthAwait: async () => ({ ok: false, error: "preview" }),
 			tokendanceAuthCancel: async () => ({ ok: true }),
 			tokendanceAuthExchange: async () => ({ ok: false, error: "preview" }),
+			// 设计预览：充值接口不触真实网络（弹窗能看到完整链路，但创建会话必然失败）
+			tokendanceTopUpCreate: async () => ({ ok: false, code: "not-configured" }),
+			tokendanceTopUpStatus: async () => ({ ok: false, code: "not-configured" }),
+			tokendanceTopUpOpenAlipay: async () => ({ ok: false, error: "preview" }),
 			installTokendance: async () => ({ ok: false, modelCount: 0, piSaved: false, dshSaved: false, error: "preview" }),
 			testProvider: async () => ({
 				success: true,
@@ -1529,6 +1792,7 @@ export function createPreviewApi(): PiDesktopApi {
 			testUsageProbe: async () => ({ success: false, error: "preview" }),
 			installUsageSkill: async () => ({ success: false, error: "preview" }),
 			installImageGenSkill: async () => ({ success: false, error: "preview" }),
+			installMcpSetupSkill: async () => ({ success: false, error: "preview" }),
 		},
 		configBackups: {
 			list: async () => ({ ok: true, backups: [] }),
@@ -1615,6 +1879,7 @@ export function createPreviewApi(): PiDesktopApi {
 				{ shell: "pwsh", label: "pwsh", available: true },
 				{ shell: "cmd", label: "cmd", available: true },
 			],
+			fonts: async () => [],
 		},
 		feishu: {
 			connect: async () => ({ success: true, message: "预览模式" }),
@@ -1642,6 +1907,23 @@ export function createPreviewApi(): PiDesktopApi {
 		browser: {
 			openExternal: async () => {},
 		},
+		wechat: {
+			snapshot: async () => ({ ok: false, message: "预览模式不支持" }),
+			setEnabled: async () => ({ ok: false, message: "预览模式不支持" }),
+			updateSettings: async () => ({ ok: false, message: "预览模式不支持" }),
+			renameAccount: async () => ({ ok: false, message: "预览模式不支持" }),
+			logout: async () => ({ ok: false, message: "预览模式不支持" }),
+			beginLogin: async () => ({ ok: false, message: "预览模式不支持" }),
+			cancelLogin: async () => ({ ok: false, message: "预览模式不支持" }),
+			submitVerifyCode: async () => ({ ok: false, message: "预览模式不支持" }),
+			getLoginState: async () => ({ phase: "idle" as const }),
+			getStatus: async () => ({ status: "disconnected" as const, account: null, activeBindings: 0 }),
+			getBindings: async () => [],
+			unbindChat: async () => ({ ok: false, message: "预览模式不支持" }),
+			onStatus: () => () => {},
+			onLoginState: () => () => {},
+			onBindingsChanged: () => () => {},
+		},
 		scratchPad: {
 			list: async () => [],
 			create: async () => ({ id: "", name: "", path: "", createdAt: 0, updatedAt: 0 }),
@@ -1658,24 +1940,60 @@ export function createPreviewApi(): PiDesktopApi {
 			saveConfig: async (config) => ({ ok: true, config }),
 			readImageBlob: async () => null,
 		},
+		// 生视频预览桩：与生图同策略（LAN web 模式继承此桩，远程暂不支持生视频任务）
+		videogen: {
+			submit: async () => ({ ok: false, error: "notConfigured" }),
+			cancel: async () => ({ ok: false }),
+			getConfig: async () => ({ ...EMPTY_VIDEO_GEN_CONFIG, providers: [] }),
+			saveConfig: async (config) => ({ ok: true, config }),
+			listJobs: async () => [],
+			onEvent: () => () => {},
+		},
+		enhance: {
+			run: async () => ({ ok: false, errorKind: "sdk-unavailable", message: "preview mode" }),
+			cancel: async () => ({ ok: true }),
+			onEvent: () => () => {},
+		},
+
 		voiceTranscription: {
-			getConfig: async () => ({
-				baseUrl: "https://api.openai.com/v1",
-				model: "whisper-1",
-				language: "",
-				hasApiKey: false,
-			}),
+			getConfig: async () => ({ ...DEFAULT_VOICE_TRANSCRIPTION_CONFIG, hasApiKey: false, hasVolcAppId: false, hasVolcAccessToken: false, apiKeyHint: null, volcAppIdHint: null, volcAccessTokenHint: null, runtimeReady: false }),
 			saveConfig: async (config) => ({
 				ok: true,
 				config: {
+					enabled: config.enabled,
+					engine: config.engine,
+					cloudProvider: config.cloudProvider,
 					baseUrl: config.baseUrl,
 					model: config.model,
 					language: config.language,
+					inputDeviceId: config.inputDeviceId,
+					localModelId: config.localModelId,
+					cliPath: config.cliPath,
+					cloudResourceId: config.cloudResourceId,
 					hasApiKey: false,
+					hasVolcAppId: false,
+					hasVolcAccessToken: false,
+					apiKeyHint: null,
+					volcAppIdHint: null,
+					volcAccessTokenHint: null,
+					runtimeReady: false,
 				},
 			}),
 			transcribe: async () => ({ ok: false, error: "notConfigured" }),
+			test: async () => ({ ok: false, error: "notConfigured" }),
+			revealSecret: async () => null,
 			cancel: async () => {},
+			// 预览环境没有 WebSocket 服务：开流直接回 notConfigured，录音链路会照直落在整段转写的桩上。
+			startStream: async () => ({ ok: false, error: "notConfigured" }),
+			sendStreamFrame: () => {},
+			finishStream: async () => ({ ok: false, error: "notConfigured" }),
+			onStreamPartial: () => () => undefined,
+			runtimeStatus: async () => ({ autoRuntimeSupported: false, cliReady: false, cliSource: "none", cliPath: null, runtimeVersion: null, models: [] }),
+			installRuntime: async () => ({ ok: false, error: "preview stub" }),
+			installModel: async () => ({ ok: false, error: "preview stub" }),
+			deleteModel: async () => ({ ok: false, error: "preview stub" }),
+			onRuntimeProgress: () => () => undefined,
+			abortInstall: async () => false,
 		},
 		// 模型目录预览桩：无内置目录可读，返回「不可用」空态，仅供预览不崩溃
 		catalog: {
@@ -1699,6 +2017,21 @@ export function createPreviewApi(): PiDesktopApi {
 			save: async (items) => ({
 				ok: true as const,
 				snapshot: { items, defaults: [...PREVIEW_QUICK_MESSAGES], filePath: "(preview)", seeded: false, defaultsAvailable: false },
+			}),
+			openFile: async () => undefined,
+		},
+		// 回复快捷操作预览桩：与快捷消息同策略，固定夹具让设置区在预览/截图里可用。
+		replyActions: {
+			get: async () => ({
+				items: PREVIEW_REPLY_ACTIONS.map((rule) => ({ ...rule, triggers: rule.triggers.map((trigger) => ({ ...trigger })) })),
+				defaults: [],
+				filePath: "(preview)",
+				seeded: false,
+				defaultsAvailable: false,
+			}),
+			save: async (items) => ({
+				ok: true as const,
+				snapshot: { items, defaults: [], filePath: "(preview)", seeded: false, defaultsAvailable: false },
 			}),
 			openFile: async () => undefined,
 		},
@@ -1766,6 +2099,12 @@ export function createPreviewApi(): PiDesktopApi {
 			}),
 			previewCron: async () => ({ valid: true, nextRuns: [] }),
 			onChanged: () => () => {},
+		},
+		cua: {
+			onApprovalRequest: () => () => {},
+			sendApprovalResponse: async () => {},
+			getState: async () => ({ enabled: false, sessionOverrides: {} }),
+			setState: async () => ({ enabled: false, sessionOverrides: {} }),
 		},
 	};
 }

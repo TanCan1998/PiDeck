@@ -184,7 +184,7 @@ export type ThinkingGroupItem = {
 export type AgentRunItem = {
 	kind: "agent-run";
 	id: string;
-	items: Array<MessageItem | ToolGroupItem | ThinkingGroupItem | RetryGroupItem | ErrorGroupItem>;
+	items: Array<MessageItem | ToolGroupItem | ThinkingGroupItem | RetryGroupItem | ErrorGroupItem | ExtensionEntryGroupItem>;
 	startedAt: number;
 	endedAt: number;
 	/** 本轮内 ask_question 的用户等待总时长（ms）：由已完成的 ask 工具消息推导，
@@ -196,7 +196,14 @@ export type AgentRunItem = {
 	askPendingAt?: number;
 };
 
-export type RenderMessage = MessageItem | ToolGroupItem | ThinkingGroupItem | RetryGroupItem | ErrorGroupItem | AgentRunItem;
+/** 扩展输出条目组：同一 run 内连续到达的 appendEntry 投影卡合为一个过程组成员（用户决策 2026-10：不单独成块，折进过程组）。 */
+export type ExtensionEntryGroupItem = {
+	kind: "extension-entries";
+	id: string;
+	messages: ChatMessage[];
+};
+
+export type RenderMessage = MessageItem | ToolGroupItem | ThinkingGroupItem | RetryGroupItem | ErrorGroupItem | ExtensionEntryGroupItem | AgentRunItem;
 
 /**
  * 生图占位消息的渲染身份：generating → error 往往只改 meta.imageGen，
@@ -238,6 +245,10 @@ export function sameChatMessageForRender(previous: ChatMessage, next: ChatMessag
 		// 空文本消息（纯工具回合骨架）的 stopReason 可能是唯一变化（pending→stop/toolUse），
 		// 漏比较会导致 reconcileRuns 复用旧引用、最终/中间分类不更新。
 		previous.stopReason !== next.stopReason ||
+		// 模型可能在同一消息上后补（思考骨架先建、message_end 才带 provider/model），
+		// 漏比较会让 reconcileRuns 复用旧引用，行头一直不显示模型。
+		previous.model?.provider !== next.model?.provider ||
+		previous.model?.modelId !== next.model?.modelId ||
 		!sameImageGenMetaForRender(previous.meta?.imageGen, next.meta?.imageGen)
 	) {
 		return false;
@@ -284,6 +295,10 @@ export function sameAgentRunForRender(previous: AgentRunItem, next: AgentRunItem
 		if (item.kind === "tool-group" && other.kind === "tool-group") {
 			return item.id === other.id && item.messages.length === other.messages.length && item.messages.every((message, messageIndex) => sameChatMessageForRender(message, other.messages[messageIndex]));
 		}
+		if (item.kind === "extension-entries" && other.kind === "extension-entries") {
+			// 扩展输出组员同样按消息本体比较（appendEntry 只会追加，但合并/降级可能改写 text/meta）。
+			return item.id === other.id && item.messages.length === other.messages.length && item.messages.every((message, messageIndex) => sameChatMessageForRender(message, other.messages[messageIndex]));
+		}
 		return false;
 	});
 }
@@ -311,7 +326,7 @@ export function groupToolMessages(messages: ChatMessage[], options: { agentBusy?
 	const result: RenderMessage[] = [];
 	let currentTools: ChatMessage[] = [];
 	let currentThinking: ChatMessage[] = [];
-	let currentRun: Array<MessageItem | ToolGroupItem | ThinkingGroupItem | RetryGroupItem | ErrorGroupItem> = [];
+	let currentRun: Array<MessageItem | ToolGroupItem | ThinkingGroupItem | RetryGroupItem | ErrorGroupItem | ExtensionEntryGroupItem> = [];
 	let runStartedAt = 0;
 	let runEndedAt = 0;
 	/** 当前回合的触发用户消息时间戳，用于替代 assistant/tool 时间戳作为回合起点 */
@@ -450,7 +465,7 @@ export function groupToolMessages(messages: ChatMessage[], options: { agentBusy?
 	// 暂存区：仅用于 ask_question 续答——system 卡片后用户回复时，把卡片前的工具/思考
 	// 暂存起来，等下一条 assistant 到来后合并为同一 agent-run。
 	// 普通「上一轮只有工具/思考、用户又发新问题」场景不得使用此暂存，否则会串轮。
-	let pendingRun: (MessageItem | ToolGroupItem | ThinkingGroupItem | RetryGroupItem | ErrorGroupItem)[] | null = null;
+	let pendingRun: (MessageItem | ToolGroupItem | ThinkingGroupItem | RetryGroupItem | ErrorGroupItem | ExtensionEntryGroupItem)[] | null = null;
 
 	for (const message of messages) {
 		if (isThinkingOnly(message)) {
@@ -496,6 +511,27 @@ export function groupToolMessages(messages: ChatMessage[], options: { agentBusy?
 				result.push({ kind: "message", message });
 			} else {
 				currentRun.push({ kind: "retry-group", id: message.id, message });
+				runEndedAt = message.timestamp;
+			}
+		} else if (message.role === "system" && message.meta?.type === "customEntry") {
+			// 扩展输出条目（appendEntry 投影卡）：与重试/错误同策略收进当前 run 的过程序列，
+			// 折进过程组（用户决策 2026-10：不单独成块）。先冲刷未成组的工具/思考保证时序；
+			// 连续到达的条目合进同一个组员（时间线里渲染为一组可展开行）。
+			// 边界：run 尚未开始（会话开头/两回合之间的条目）保持独立条目兜底，不硬造空 run。
+			flushTools();
+			if (pendingRun && currentRun.length === 0) {
+				currentRun.push(...pendingRun);
+				pendingRun = null;
+			}
+			if (currentRun.length === 0) {
+				result.push({ kind: "message", message });
+			} else {
+				const last = currentRun[currentRun.length - 1];
+				if (last.kind === "extension-entries") {
+					last.messages.push(message);
+				} else {
+					currentRun.push({ kind: "extension-entries", id: message.id, messages: [message] });
+				}
 				runEndedAt = message.timestamp;
 			}
 		} else if (message.role === "system") {
@@ -761,7 +797,14 @@ export type SuggestionItem = {
 const PINNED_COMMAND_NAMES = new Set<string>();
 // 桌面端已有独立 UI 的 pi 内置命令不进 `/` 菜单，避免点进去却落到 CLI 语义。
 // `/new` 例外：发送时由桌面拦截，走新建 Agent 会话（与侧栏 + 同源），不再藏起来。
-const HIDDEN_DESKTOP_BUILTIN_COMMAND_NAMES = new Set(["model", "resume", "fork", "name", "logout", "goal", "tree", "reload"]);
+//
+// copy/export/session/settings/clone 与 tree/reload 是两类不同原因，但都要藏：
+// pi 的 builtin 斜杠命令只在交互式 TUI 里处理（`dist/core/slash-commands.js` 只被
+// modes/interactive 引用，RPC 的 get_commands 只返回 extension/prompt/skill），发下去
+// 不会执行、只会被模型当成普通文本回答。这些命令桌面都已有等价入口（消息复制、
+// 会话菜单导出 HTML、圆环/打开会话文件、设置页、复制会话），所以直接不列；
+// `/hotkeys` 无等价按钮，靠 classifyComposerSlashCommand 接管到设置里的快捷键页。
+const HIDDEN_DESKTOP_BUILTIN_COMMAND_NAMES = new Set(["model", "resume", "fork", "name", "logout", "goal", "tree", "reload", "copy", "export", "share", "session", "settings", "clone"]);
 
 function isBuiltinDesktopCommand(command: PiCommand) {
 	return command.source == null || command.source === "builtin";
@@ -1068,16 +1111,18 @@ export function getToolEditDiff(args: Record<string, unknown>): { oldText: strin
 	return { oldText, newText };
 }
 
-export function getToolNewContent(toolName: string, args: any): string | undefined {
+export function getToolNewContent(toolName: string, args: string | Record<string, unknown>): string | undefined {
 	if (!args) return undefined;
 	if (typeof args === "string" && args.trim()) {
 		try {
-			args = JSON.parse(args);
+			// JSON.parse 返回 any；这里立刻收窄为参数对象，后续按字段 typeof 判定
+			args = JSON.parse(args) as Record<string, unknown>;
 		} catch {
 			return undefined;
 		}
 	}
 	if (!toolName) return undefined;
+	if (typeof args !== "object") return undefined;
 	if (/write|create/i.test(toolName)) {
 		const a = args as Record<string, unknown>;
 		return typeof a.content === "string" ? a.content : typeof a.text === "string" ? a.text : typeof a.data === "string" ? a.data : typeof a.body === "string" ? a.body : undefined;
@@ -1089,19 +1134,20 @@ export function getToolNewContent(toolName: string, args: any): string | undefin
 	return undefined;
 }
 
-export function getToolChangedLineCount(toolName: string, args: any): number {
+export function getToolChangedLineCount(toolName: string, args: string | Record<string, unknown>): number {
 	if (typeof args === "string" && args.trim()) {
 		try {
-			args = JSON.parse(args);
+			args = JSON.parse(args) as Record<string, unknown>;
 		} catch {
 			return 0;
 		}
 	}
 	if (!toolName) return 0;
+	if (typeof args !== "object") return 0; // 空串入参：无内容可数，与原 String(undefined ?? "") 等价
 	if (/edit|patch/i.test(toolName)) {
-		const edits = Array.isArray(args?.edits) ? args.edits : undefined;
+		const edits = Array.isArray(args?.edits) ? (args.edits as Array<Record<string, unknown>>) : undefined;
 		if (edits) {
-			return edits.reduce((total: number, edit: any) => {
+			return edits.reduce((total: number, edit) => {
 				const oldLines = countTextLines(String(edit?.oldText ?? edit?.old_text ?? ""));
 				const newLines = countTextLines(String(edit?.newText ?? edit?.new_text ?? ""));
 				return total + Math.max(oldLines, newLines);

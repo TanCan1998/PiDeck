@@ -29,13 +29,13 @@ const CHECK_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13
 
 // 块级按钮：公式容器末尾，常显半透明（仿代码块 actions 观感）；
 // 间距由 .math-display 容器 gap 提供，按钮自身不留外边距
-const BLOCK_BUTTON_CLASS = "flex h-[22px] w-[22px] shrink-0 cursor-pointer items-center justify-center rounded-[4px] border-0 bg-transparent p-0 text-text-tertiary opacity-55 transition-opacity hover:opacity-100 hover:text-[var(--color-accent)] focus-visible:outline-2 focus-visible:outline-[var(--focus-ring)]";
+const BLOCK_BUTTON_CLASS = "flex h-[22px] w-[22px] shrink-0 cursor-pointer items-center justify-center rounded-xs border-0 bg-transparent p-0 text-text-tertiary opacity-55 transition-opacity hover:opacity-100 hover:text-[var(--color-accent)] focus-visible:outline-2 focus-visible:outline-[var(--focus-ring)]";
 // 行内公式“框”样式（Tailwind utility 全部走 utilities 层，可压过 KaTeX 的
 // vendor 层样式）：细边框 + 弱底色常显，hover 边框转 accent 提示可点击。
 // 底色用 --color-bg-muted、边框用 --color-border-subtle 语义 token，暗色自动适配。
 const INLINE_BOX_BORDER_BG = ["border-[var(--color-border-subtle)]", "bg-[var(--color-bg-muted)]"];
 const INLINE_BOX_COPIED_BORDER_BG = ["border-[var(--color-success)]", "bg-[var(--color-success-soft)]"];
-const INLINE_BOX_CLASS = ["inline-block", "cursor-pointer", "rounded-[4px]", "border", "px-[5px]", "py-[1px]", "transition-colors", "hover:border-[var(--color-accent)]", ...INLINE_BOX_BORDER_BG];
+const INLINE_BOX_CLASS = ["inline-block", "cursor-pointer", "rounded-xs", "border", "px-[5px]", "py-[1px]", "transition-colors", "hover:border-[var(--color-accent)]", ...INLINE_BOX_BORDER_BG];
 
 let listenersInitialized = false;
 

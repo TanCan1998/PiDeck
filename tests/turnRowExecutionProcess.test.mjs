@@ -49,13 +49,24 @@ test("stale running tools stay stopped when a newer run starts", () => {
 	assert.doesNotMatch(turnRowSource, /stopped=\{Boolean\(props\.isLatestRun && !props\.agentRunning\)\}/);
 });
 
-test("execution summary toggle radius matches other buttons", () => {
+test("execution summary toggle uses the beUI-style activity ledger hierarchy", () => {
 	const css = readFileSync("src/renderer/src/styles/timeline.css", "utf8");
+	const summaryToggle = readFileSync("src/renderer/src/components/session/turn/ProcessSummaryToggle.tsx", "utf8");
 	const toggleRule = css.match(/\.execution-summary-toggle \{[\s\S]*?\n\}/)?.[0] ?? "";
 	assert.ok(toggleRule, ".execution-summary-toggle rule must exist");
-	// 与 shadcn rounded-md 同档（--radius-md: 8px），不再用全圆 pill
+	// 与 shadcn rounded-md 同档（--radius-md: 8px），不再用全圆 pill。
 	assert.match(toggleRule, /border-radius: var\(--radius-md\)/);
 	assert.doesNotMatch(toggleRule, /999px/);
+	// 参考 beUI AgentActivity：固定标题、统计徽章和独立展开反馈，避免长句挤成一条。
+	assert.match(summaryToggle, /execution-summary-title/);
+	assert.match(summaryToggle, /execution-summary-stats/);
+	assert.match(summaryToggle, /execution-summary-state/);
+	assert.match(toggleRule, /min-height: 32px/);
+	assert.match(css, /\.execution-summary-stat\.is-warning/);
+	assert.match(css, /\.execution-summary-stat\.is-danger/);
+	// 中间回复的统计图标＝对话气泡（语义是「回复消息」），不复用折叠头的 ListTree 树形图标
+	assert.match(summaryToggle, /interimCount[\s\S]{0,40}?icon: MessagesSquare/);
+	assert.doesNotMatch(summaryToggle, /interimCount[\s\S]{0,40}?icon: ListTree/);
 });
 
 // Chain of Thought 步骤化：执行过程折叠详情里，思考与工具同为「步骤」——

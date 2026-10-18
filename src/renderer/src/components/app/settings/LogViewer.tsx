@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { Loader2 } from "lucide-react";
 import type { AppLogEntry, AppLogLevel } from "../../../../../shared/types";
 import { t } from "../../../i18n";
 import { desktopApi } from "../../../desktopApi";
@@ -46,8 +47,11 @@ function toTimestamp(value: string): number | undefined {
  * 清除/打开文件夹由「缓存与日志」tab 的应用日志管理行承担。
  * 分页走 logs.listPage：过滤在服务端完成，任意时间范围的旧日志都能翻到
  * （旧 list 的 5000 行截断会导致选较早日期查不到）。
+ *
+ * @param props.refreshSignal 外部清空日志后递增的刷新信号：清空入口在「缓存与日志」管理行，
+ *   查看器自身无从感知（清空只落一条审计行），不重查就会停在已删除的旧行上。
  */
-export function LogViewer() {
+export function LogViewer(props: { refreshSignal?: number }) {
 	const [entries, setEntries] = useState<AppLogEntry[]>([]);
 	const [total, setTotal] = useState(0);
 	const [page, setPage] = useState(0);
@@ -94,7 +98,8 @@ export function LogViewer() {
 			void refresh();
 		}, 150);
 		return () => window.clearTimeout(timer);
-	}, [refresh]);
+		// refreshSignal 不是查询条件，而是「外部把日志清空了」的外部信号：只靠 query 变化感知不到清空
+	}, [refresh, props.refreshSignal]);
 
 	// 筛选条件变化时回到第一页（页码变化走 Pagination 回调，不在这里重置）
 	const resetPage = useCallback(() => setPage(0), []);
@@ -144,11 +149,14 @@ export function LogViewer() {
 				<Button variant="outline" size="sm" onClick={() => void refresh()} disabled={loading}>
 					{t("common.refresh")}
 				</Button>
-				{!loading && total > 0 && <span className="ml-auto text-caption text-text-tertiary tabular-nums">{t("logs.resultsCount", { count: String(total) })}</span>}
+				{!loading && total > 0 && <span className="ml-auto text-caption text-muted-foreground tabular-nums">{t("logs.resultsCount", { count: String(total) })}</span>}
 			</div>
 			{error && <div className="mb-3.5 rounded-sm border border-danger/20 bg-danger-soft px-3.5 py-2.5 text-control leading-relaxed text-danger whitespace-pre-line">{error}</div>}
 			{loading ? (
-				<div className="py-12 text-center text-control text-text-tertiary">{t("common.loading")}</div>
+				<div className="flex items-center justify-center gap-2 py-12 text-control text-text-tertiary">
+					<Loader2 size={14} className="animate-pideck-spin" aria-hidden="true" />
+					{t("common.loading")}
+				</div>
 			) : entries.length === 0 ? (
 				<div className="py-12 text-center text-control text-text-tertiary">{t("logs.empty")}</div>
 			) : (

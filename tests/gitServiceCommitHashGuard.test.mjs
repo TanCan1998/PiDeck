@@ -6,14 +6,18 @@ import { createTsSandbox } from "./helpers/createTsSandbox.mjs";
 const spawned = [];
 const load = createTsSandbox({
 	stubs: {
-		"./gitProcess": {
-			// 桩：记录参数并返回 dropCommit 需要的 stdout 形状；守卫失败时绝不会被调到
-			runGit: async (args) => {
+		// GitService 的 git 出口已收口到 gitRun（按 cwd 分派宿主/WSL 发行版内 git）。
+		// 桩：记录参数并返回 dropCommit 需要的 stdout 形状；守卫失败时绝不会被调到
+		"./gitRun": {
+			runGitCommand: async (args) => {
 				spawned.push([...args]);
 				return { stdout: "0".repeat(40) + "\n" };
 			},
+			execGit: async (args) => {
+				spawned.push([...args]);
+				return { stdout: "" };
+			},
 		},
-		"./gitExecutable": { currentGitExecutable: () => "git" },
 		"../fs/trash": { trashPath: async () => {} },
 		"../rewind/checkpointConstants": { REF_BASE: "refs/pi-checkpoints" },
 	},

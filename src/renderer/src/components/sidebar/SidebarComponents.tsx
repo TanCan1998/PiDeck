@@ -20,6 +20,7 @@ import {
 	Link2,
 	List,
 	LoaderCircle,
+	ArrowUpDown,
 	MessageCircle,
 	Pencil,
 	Pin,
@@ -27,6 +28,7 @@ import {
 	Play,
 	Plus,
 	Power,
+	PanelRight,
 	Radio,
 	RefreshCw,
 	RotateCw,
@@ -44,15 +46,17 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui-shadcn/dialog";
 import { X } from "lucide-react";
 import { cn } from "../../lib/utils";
-import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "../ui-shadcn/dropdown-menu";
+import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "../ui-shadcn/dropdown-menu";
 import { Button } from "../ui-shadcn/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui-shadcn/table";
-import type { SessionSummary, Project, AgentTab, ArchivedDshSession, ArchivedPiSession, RemoteArchivedSessionDeleteAnswerResult, RemoteArchivedSessionDeleteRequestResult } from "../../../../shared/types";
+import type { SessionSummary, Project, AgentTab, ArchivedDshSession, ArchivedPiSession, RemoteArchivedSessionDeleteAnswerResult, RemoteArchivedSessionDeleteRequestResult, SessionSortModeId } from "../../../../shared/types";
+import { SESSION_SORT_MODES, resolveSessionSortMode } from "../../sessionSortModes";
 import { worktreeSlugify } from "../../../../shared/worktreeSlug";
-import { SessionSourceBadge, SessionBackendMark, DshSourceBadge, ImageGenSourceBadge } from "../session/SessionSourceBadge";
+import { SessionSourceBadge, SessionBackendMark, SessionChannelMark, SideTaskMark, DshSourceBadge, ImageGenSourceBadge } from "../session/SessionSourceBadge";
 import { Checkbox } from "../ui-shadcn/checkbox";
 import { Input } from "../ui-shadcn/input";
 import { Label } from "../../components/ui-shadcn/label";
+import { BridgeGuiSlot, useBridgeSessionId } from "../bridge/BridgeSlot";
 import { SESSION_FILTER_PILLS, filterSessionsByPills, pillsPresentIn, type SessionFilterPill } from "../../sessionFilterPills";
 import {
 	archivedDshWorkspaceLabel,
@@ -78,7 +82,7 @@ import { useRemoteArchivedSessionDelete } from "../../hooks/useRemoteArchivedSes
  */
 function WorkspaceTag(props: { label: string }) {
 	return (
-		<span className="inline-flex shrink-0 items-center gap-0.5 rounded-[4px] border border-border-subtle bg-bg-muted px-1 py-px text-micro text-muted-foreground" title={t("sessionManager.workspaceTag", { name: props.label })}>
+		<span className="inline-flex shrink-0 items-center gap-0.5 rounded-xs border border-border-subtle bg-bg-muted px-1 py-px text-micro text-muted-foreground" title={t("sessionManager.workspaceTag", { name: props.label })}>
 			<GitBranch size={10} strokeWidth={2} aria-hidden="true" />
 			<span className="max-w-24 truncate">{props.label}</span>
 		</span>
@@ -262,7 +266,7 @@ export function SessionManagerModal(props: {
 												key={pill}
 												variant="outline"
 												size="sm"
-												className={`h-auto rounded-full border border-border-subtle bg-transparent px-3 py-1 text-caption font-medium text-text-tertiary transition-all duration-150 hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]${activePills.has(pill) ? " border-[var(--color-accent)] bg-bg-active font-semibold text-[var(--color-accent)]" : ""}`}
+												className={`h-auto rounded-full border border-border-subtle bg-transparent px-3 py-1 text-caption font-medium text-text-tertiary transition-all duration-fast hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]${activePills.has(pill) ? " border-[var(--color-accent)] bg-bg-active font-semibold text-[var(--color-accent)]" : ""}`}
 												onClick={() => togglePill(pill)}
 											>
 												{t(pill === "dsh" ? "sessionBackend.dsh" : pill === "imagegen" ? "sessionBackend.imagegen" : `sessionSource.${pill}`)}
@@ -283,7 +287,7 @@ export function SessionManagerModal(props: {
 								<Button
 									variant="outline"
 									size="sm"
-									className="h-auto gap-1 border border-border-subtle px-3 py-1 text-caption font-medium text-text-tertiary transition-all duration-150 hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+									className="h-auto gap-1 border border-border-subtle px-3 py-1 text-caption font-medium text-text-tertiary transition-all duration-fast hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
 									onClick={() => {
 										// 批量归档选中行（与删除同粒度）；运行中会话由主进程拒绝并提示
 										const toArchive = props.sessions.filter((s) => selected.has(s.id));
@@ -297,7 +301,7 @@ export function SessionManagerModal(props: {
 								<Button
 									variant="outline"
 									size="sm"
-									className="h-auto gap-1 border border-[color-mix(in_srgb,var(--color-danger)_28%,transparent)] px-3 py-1 text-caption font-medium text-[var(--color-danger)] shadow-none transition-all duration-150 hover:border-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
+									className="h-auto gap-1 border border-[color-mix(in_srgb,var(--color-danger)_28%,transparent)] px-3 py-1 text-caption font-medium text-[var(--color-danger)] shadow-none transition-all duration-fast hover:border-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
 									onClick={handleDeleteSelected}
 								>
 									{t("common.deleteSelected", { count: selected.size })}
@@ -307,7 +311,7 @@ export function SessionManagerModal(props: {
 								<Button
 									variant="outline"
 									size="sm"
-									className="h-auto gap-1 border border-[color-mix(in_srgb,var(--color-danger)_28%,transparent)] px-3 py-1 text-caption font-medium text-[var(--color-danger)] shadow-none transition-all duration-150 hover:border-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
+									className="h-auto gap-1 border border-[color-mix(in_srgb,var(--color-danger)_28%,transparent)] px-3 py-1 text-caption font-medium text-[var(--color-danger)] shadow-none transition-all duration-fast hover:border-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
 									onClick={handleDeleteArchivedSelected}
 								>
 									{t("common.deleteSelected", { count: archivedSelected.size })}
@@ -316,7 +320,7 @@ export function SessionManagerModal(props: {
 							<Button
 								variant="outline"
 								size="sm"
-								className={`h-auto gap-1 rounded-full border border-border-subtle bg-transparent px-3 py-1 text-caption font-medium transition-all duration-150 hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]${showArchived ? " border-[var(--color-accent)] bg-bg-active font-semibold text-[var(--color-accent)]" : " text-text-tertiary"}`}
+								className={`h-auto gap-1 rounded-full border border-border-subtle bg-transparent px-3 py-1 text-caption font-medium transition-all duration-fast hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]${showArchived ? " border-[var(--color-accent)] bg-bg-active font-semibold text-[var(--color-accent)]" : " text-text-tertiary"}`}
 								onClick={() => {
 									if (showArchived) {
 										setShowArchived(false);
@@ -402,7 +406,7 @@ export function SessionManagerModal(props: {
 																	variant="ghost"
 																	size="sm"
 																	disabled={remoteBusy}
-																	className="h-auto gap-[3px] rounded-[4px] px-2 text-caption text-text-tertiary transition-all duration-150 hover:bg-bg-hover hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50"
+																	className="h-auto gap-[3px] rounded-xs px-2 text-caption text-text-tertiary transition-all duration-fast hover:bg-bg-hover hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50"
 																	onClick={() => {
 																		// 恢复后重新拉取归档列表（主列表由 catalog refresh 自动更新）
 																		const restored = row.kind === "pi" ? props.onUnarchive(row.item) : props.onUnarchiveDsh(row.item.dshSessionId);
@@ -413,7 +417,7 @@ export function SessionManagerModal(props: {
 																	{t("sessionManager.restore")}
 																</Button>
 																{canDeleteManagerArchivedRow(row) && (
-																	<Button variant="ghost" size="sm" className="h-auto gap-[3px] rounded-[4px] px-2 text-caption text-text-tertiary transition-all duration-150 hover:bg-[var(--color-danger-soft)] hover:text-[var(--color-danger)]" onClick={() => setPendingDeleteArchived([row])} title={t("common.delete")}>
+																	<Button variant="ghost" size="sm" className="h-auto gap-[3px] rounded-xs px-2 text-caption text-text-tertiary transition-all duration-fast hover:bg-[var(--color-danger-soft)] hover:text-[var(--color-danger)]" onClick={() => setPendingDeleteArchived([row])} title={t("common.delete")}>
 																		<Trash2 size={12} aria-hidden="true" />
 																		{t("common.delete")}
 																	</Button>
@@ -424,7 +428,7 @@ export function SessionManagerModal(props: {
 																		size="sm"
 																		disabled={remoteArchivedDelete.state.phase !== "idle"}
 																		data-testid="remote-archived-delete"
-																		className="h-auto gap-[3px] rounded-[4px] px-2 text-caption text-text-tertiary transition-all duration-150 hover:bg-[var(--color-danger-soft)] hover:text-[var(--color-danger)]"
+																		className="h-auto gap-[3px] rounded-xs px-2 text-caption text-text-tertiary transition-all duration-fast hover:bg-[var(--color-danger-soft)] hover:text-[var(--color-danger)]"
 																		onClick={() => void remoteArchivedDelete.request(remoteSessionId)}
 																		title={t("sessionManager.remoteArchivedDelete")}
 																	>
@@ -437,10 +441,10 @@ export function SessionManagerModal(props: {
 																<div className="flex max-w-72 flex-col items-end gap-1" data-testid="remote-archived-delete-confirm">
 																	<p className="text-caption leading-snug text-[var(--color-danger)]">{t("sessionManager.remoteArchivedDeleteConfirm", { name: row.kind === "pi" ? row.item.summary.name || t("common.untitled") : "" })}</p>
 																	<div className="flex items-center gap-1">
-																		<Button variant="ghost" size="sm" data-testid="remote-archived-delete-cancel" className="h-auto rounded-[4px] px-2 text-caption" onClick={() => remoteArchivedDelete.cancel()}>
+																		<Button variant="ghost" size="sm" data-testid="remote-archived-delete-cancel" className="h-auto rounded-xs px-2 text-caption" onClick={() => remoteArchivedDelete.cancel()}>
 																			{t("common.cancel")}
 																		</Button>
-																		<Button size="sm" data-testid="remote-archived-delete-confirm-action" className="h-auto rounded-[4px] bg-[var(--color-danger)] px-2 text-caption text-white hover:bg-[var(--color-danger)]" onClick={() => void remoteArchivedDelete.confirm()}>
+																		<Button size="sm" data-testid="remote-archived-delete-confirm-action" className="h-auto rounded-xs bg-[var(--color-danger)] px-2 text-caption text-white hover:bg-[var(--color-danger)]" onClick={() => void remoteArchivedDelete.confirm()}>
 																			{t("sessionManager.remoteArchivedDeleteAction")}
 																		</Button>
 																	</div>
@@ -454,7 +458,7 @@ export function SessionManagerModal(props: {
 															{remotePhase === "unconfirmed" && (
 																<div className="flex max-w-72 flex-col items-end gap-1" data-testid="remote-archived-delete-unconfirmed">
 																	<p className="text-caption leading-snug text-[var(--color-danger)]">{t("sessionManager.remoteArchivedDeleteUnconfirmed")}</p>
-																	<Button variant="ghost" size="sm" data-testid="remote-archived-delete-dismiss" className="h-auto rounded-[4px] px-2 text-caption" onClick={() => remoteArchivedDelete.acknowledge()}>
+																	<Button variant="ghost" size="sm" data-testid="remote-archived-delete-dismiss" className="h-auto rounded-xs px-2 text-caption" onClick={() => remoteArchivedDelete.acknowledge()}>
 																		{t("sessionManager.remoteArchivedDeleteDismiss")}
 																	</Button>
 																</div>
@@ -468,7 +472,7 @@ export function SessionManagerModal(props: {
 																			return key === undefined ? t("sessionManager.remoteArchivedDeleteFailedCode", { code }) : t(key);
 																		})()}
 																	</p>
-																	<Button variant="ghost" size="sm" data-testid="remote-archived-delete-dismiss" className="h-auto rounded-[4px] px-2 text-caption" onClick={() => remoteArchivedDelete.acknowledge()}>
+																	<Button variant="ghost" size="sm" data-testid="remote-archived-delete-dismiss" className="h-auto rounded-xs px-2 text-caption" onClick={() => remoteArchivedDelete.acknowledge()}>
 																		{t("sessionManager.remoteArchivedDeleteDismiss")}
 																	</Button>
 																</div>
@@ -505,27 +509,30 @@ export function SessionManagerModal(props: {
 														<span className="truncate text-control text-text-primary">{session.name || session.preview?.slice(0, 60) || t("common.untitled")}</span>
 														{/* worktree 家族聚合：非主工作区会话打目录名标签，让用户一眼区分会话属于哪个工作区 */}
 														{sessionWorkspaceLabel(session.projectId, family) && <WorkspaceTag label={sessionWorkspaceLabel(session.projectId, family)!} />}
-														{session.backend === "dsh" || session.backend === "imagegen" ? (
+														{session.backend === "dsh" || session.backend === "imagegen" || session.backend === "acp" ? (
 															// DSH/生图会话无来源徽标（source 恒为 pi），用后端徽标区分（与侧栏树一致）
 															<SessionBackendMark backend={session.backend} />
 														) : (
 															session.source && session.source !== "pi" && <SessionSourceBadge source={session.source} />
 														)}
+														{/* 外部连接（微信/飞书）入口标志：这类会话 source 恒为 pi，用渠道徽标区分消息从哪来 */}
+														{session.channel && <SessionChannelMark channel={session.channel} />}
+														{session.sideTask && <SideTaskMark />}
 													</div>
 												</TableCell>
 												<TableCell className="w-40 text-right">
 													<div className="flex items-center justify-end gap-0.5">
-														<Button variant="ghost" size="sm" className="h-auto gap-[3px] rounded-[4px] px-2 text-caption text-text-tertiary transition-all duration-150 hover:bg-bg-hover hover:text-[var(--color-accent)]" onClick={() => props.onRename(session)} title={t("common.rename")}>
+														<Button variant="ghost" size="sm" className="h-auto gap-[3px] rounded-xs px-2 text-caption text-text-tertiary transition-all duration-fast hover:bg-bg-hover hover:text-[var(--color-accent)]" onClick={() => props.onRename(session)} title={t("common.rename")}>
 															{t("common.rename")}
 														</Button>
-														<Button variant="ghost" size="sm" className="h-auto gap-[3px] rounded-[4px] px-2 text-caption text-text-tertiary transition-all duration-150 hover:bg-bg-hover hover:text-[var(--color-accent)]" onClick={() => props.onExport(session)} title={t("menu.exportHtml")}>
+														<Button variant="ghost" size="sm" className="h-auto gap-[3px] rounded-xs px-2 text-caption text-text-tertiary transition-all duration-fast hover:bg-bg-hover hover:text-[var(--color-accent)]" onClick={() => props.onExport(session)} title={t("menu.exportHtml")}>
 															{t("menu.exportHtml")}
 														</Button>
-														<Button variant="ghost" size="sm" className="h-auto gap-[3px] rounded-[4px] px-2 text-caption text-text-tertiary transition-all duration-150 hover:bg-bg-hover hover:text-[var(--color-accent)]" onClick={() => props.onArchive([session])} title={t("sessionManager.archiveAction")}>
+														<Button variant="ghost" size="sm" className="h-auto gap-[3px] rounded-xs px-2 text-caption text-text-tertiary transition-all duration-fast hover:bg-bg-hover hover:text-[var(--color-accent)]" onClick={() => props.onArchive([session])} title={t("sessionManager.archiveAction")}>
 															<Archive size={12} aria-hidden="true" />
 															{t("sessionManager.archiveAction")}
 														</Button>
-														<Button variant="ghost" size="sm" className="h-auto gap-[3px] rounded-[4px] px-2 text-caption text-text-tertiary transition-all duration-150 hover:bg-[var(--color-danger-soft)] hover:text-[var(--color-danger)]" onClick={() => props.onDelete([session])} title={t("common.delete")}>
+														<Button variant="ghost" size="sm" className="h-auto gap-[3px] rounded-xs px-2 text-caption text-text-tertiary transition-all duration-fast hover:bg-[var(--color-danger-soft)] hover:text-[var(--color-danger)]" onClick={() => props.onDelete([session])} title={t("common.delete")}>
 															{t("common.delete")}
 														</Button>
 													</div>
@@ -591,6 +598,8 @@ export function SessionManagerModal(props: {
  * 触发器不可见但提供定位矩形（Radix dropdown-menu 无独立 Anchor 部件）。
  */
 function MenuShell(props: { x: number; y: number; onClose: () => void; className?: string; children: ReactNode }) {
+	// GUI 扩展桥：右键菜单是应用级单实例 chrome，由当前聚焦会话的 pi 进程供给内容（不做回落）。
+	const bridgeSessionId = useBridgeSessionId();
 	return (
 		<DropdownMenu
 			open
@@ -601,6 +610,12 @@ function MenuShell(props: { x: number; y: number; onClose: () => void; className
 			<DropdownMenuTrigger aria-hidden tabIndex={-1} style={{ position: "fixed", left: props.x, top: props.y, width: 0, height: 0, padding: 0, border: 0, background: "transparent", pointerEvents: "none" }} />
 			<DropdownMenuContent align="start" side="bottom" className={props.className}>
 				{props.children}
+				{/* GUI 扩展桥：右键菜单扩展项落点（ctx.gui.setContextMenuItem）。
+				    追加在菜单原有条目**之后** —— 不插进原有分组、不改原有顺序（§7.4 只追加）。
+				    计划指出仓库**无统一菜单项注册表**；这里选 MenuShell 作宿主，
+				    因为它已是侧边栏各右键菜单的共享壳（会话/项目/草稿菜单都走它）。
+				    无贡献时返回 null，不占位、不留多余分隔线。 */}
+				<BridgeGuiSlot sessionId={bridgeSessionId} slot="context.menu" className="flex flex-col" />
 			</DropdownMenuContent>
 		</DropdownMenu>
 	);
@@ -616,10 +631,14 @@ export function SessionSourceFilterMenu(props: { menu: { projectId: string; x: n
 		pi: t("sessionSource.pi"),
 		codex: t("sessionSource.codex"),
 		claude: t("sessionSource.claude"),
+		qoder: t("sessionSource.qoder"),
 		opencode: t("sessionSource.opencode"),
 		zcode: t("sessionSource.zcode"),
 		workbuddy: t("sessionSource.workbuddy"),
 		cursor: t("sessionSource.cursor"),
+		kimi: t("sessionSource.kimi"),
+		kimiwork: t("sessionSource.kimiwork"),
+		minimax: t("sessionSource.minimax"),
 		dsh: t("sessionBackend.dsh"),
 		imagegen: t("sessionBackend.imagegen"),
 	};
@@ -656,10 +675,16 @@ export function ProjectContextMenu(props: {
 	onOpenWithEditor: () => void;
 	onImportCodexSessions: () => void;
 	onImportClaudeSessions: () => void;
+	onImportQoderSessions: () => void;
 	onImportOpenCodeSessions: () => void;
 	onImportZCodeSessions: () => void;
 	onImportWorkBuddySessions: () => void;
 	onImportCursorSessions: () => void;
+	onImportKimiSessions: () => void;
+	/** 导入 Kimi Work（kimi-desktop 桌面版）会话；数据目录位置由探测链/手动指定决定。 */
+	onImportKimiWorkSessions: () => void;
+	/** 导入 MinimaxCode（CLI）会话；数据目录固定 ~/.minimax/v2/sessions。 */
+	onImportMinimaxSessions: () => void;
 	/** 导入其他目录的会话（项目目录被移动/改名后找回历史） */
 	onImportDirectorySessions: () => void;
 	onManageProjectResources: () => void;
@@ -672,6 +697,12 @@ export function ProjectContextMenu(props: {
 	onRemoveProject: () => void;
 	/** 重命名项目显示名（仅改 label，不动磁盘目录）；Chat / worktree 子项目不展示。 */
 	onRenameProject: () => void;
+	/** 置顶/取消置顶：仅普通顶级项目展示（Chat 恒置顶、worktree 子项目固定跟随父项目）。 */
+	isPinned?: boolean;
+	onTogglePin?: () => void;
+	/** 会话排序模式（全局设置，项目菜单作统一入口）；未传时隐藏子菜单。 */
+	sessionSortMode?: SessionSortModeId;
+	onSetSessionSortMode?: (mode: SessionSortModeId) => void;
 	/** worktree 子项目删除必须走 Git worktree 清理流程，不能只移除目录记录。 */
 	onRemoveWorktree?: () => void;
 	/** 聊天项目目录设置（仅内置 Chat 项目展示；调整会话存储目录，主进程校验不与已注册项目重叠）。 */
@@ -708,6 +739,13 @@ export function ProjectContextMenu(props: {
 			<DropdownMenuSeparator />
 			{/* 项目管理：会话/资源/过滤/工作区/刷新集中一组，删除式操作不混入 */}
 			<DropdownMenuLabel>{t("menu.group.manage")}</DropdownMenuLabel>
+			{/* 置顶与重命名同组：高频、非破坏性操作靠前 */}
+			{props.onTogglePin && (
+				<DropdownMenuItem onSelect={props.onTogglePin}>
+					{props.isPinned ? <PinOff className="size-3.5" aria-hidden="true" /> : <Pin className="size-3.5" aria-hidden="true" />}
+					{t(props.isPinned ? "menu.unpinProject" : "menu.pinProject")}
+				</DropdownMenuItem>
+			)}
 			{/* 重命名仅对普通顶级项目开放：聊天项目名固定、worktree 子项目 name 承载 git 分支名 */}
 			{!props.menu.project.kind && !props.menu.project.worktreeParentId && (
 				<DropdownMenuItem onSelect={props.onRenameProject}>
@@ -742,6 +780,24 @@ export function ProjectContextMenu(props: {
 				<Filter className="size-3.5" aria-hidden="true" />
 				{t("menu.filterSessions")}
 			</DropdownMenuItem>
+			{/* 会话排序（全局）：与过滤同组；选项由策略目录驱动，扩展时只改 sessionSortModes */}
+			{props.onSetSessionSortMode && (
+				<DropdownMenuSub>
+					<DropdownMenuSubTrigger>
+						<ArrowUpDown className="size-3.5" aria-hidden="true" />
+						{t("menu.sessionSortMode")}
+					</DropdownMenuSubTrigger>
+					<DropdownMenuSubContent>
+						<DropdownMenuRadioGroup value={props.sessionSortMode} onValueChange={(value) => props.onSetSessionSortMode?.(resolveSessionSortMode(value))}>
+							{SESSION_SORT_MODES.map((option) => (
+								<DropdownMenuRadioItem key={option.id} value={option.id}>
+									{t(option.labelKey)}
+								</DropdownMenuRadioItem>
+							))}
+						</DropdownMenuRadioGroup>
+					</DropdownMenuSubContent>
+				</DropdownMenuSub>
+			)}
 			<DropdownMenuItem onSelect={props.onRefreshProject}>
 				<RefreshCw className="size-3.5" aria-hidden="true" />
 				{t("app.projectRefresh")}
@@ -766,10 +822,14 @@ export function ProjectContextMenu(props: {
 						<DropdownMenuSubContent>
 							<DropdownMenuItem onSelect={props.onImportCodexSessions}>{t("menu.importCodex")}</DropdownMenuItem>
 							<DropdownMenuItem onSelect={props.onImportClaudeSessions}>{t("menu.importClaude")}</DropdownMenuItem>
+							<DropdownMenuItem onSelect={props.onImportQoderSessions}>{t("menu.importQoder")}</DropdownMenuItem>
 							<DropdownMenuItem onSelect={props.onImportOpenCodeSessions}>{t("menu.importOpenCode")}</DropdownMenuItem>
 							<DropdownMenuItem onSelect={props.onImportZCodeSessions}>{t("menu.importZCode")}</DropdownMenuItem>
 							<DropdownMenuItem onSelect={props.onImportWorkBuddySessions}>{t("menu.importWorkBuddy")}</DropdownMenuItem>
 							<DropdownMenuItem onSelect={props.onImportCursorSessions}>{t("menu.importCursor")}</DropdownMenuItem>
+							<DropdownMenuItem onSelect={props.onImportKimiSessions}>{t("menu.importKimi")}</DropdownMenuItem>
+							<DropdownMenuItem onSelect={props.onImportKimiWorkSessions}>{t("menu.importKimiWork")}</DropdownMenuItem>
+							<DropdownMenuItem onSelect={props.onImportMinimaxSessions}>{t("menu.importMinimax")}</DropdownMenuItem>
 							{/* 目录移动/改名后历史找不到时的找回入口：源目录现选，不复制文件。
 							    放在「导入会话」子菜单最后并加分隔线，与「其它工具导入」区分开。 */}
 							<DropdownMenuSeparator />
@@ -896,6 +956,8 @@ export function AgentContextMenu(props: {
 	runControl?: SidebarRunControl;
 	/** 打开当前 agent 对应会话的代理设置弹框（网络代理）；宿主在 App 层。 */
 	onOpenProxySetting?: () => void;
+	/** 在该 agent 对应会话所属项目新建一条侧边任务（右侧抽屉「侧边任务」面板承载）。 */
+	onCreateSideTask?: () => void;
 	onCloseAgent: () => void;
 	/** 运行中也可删：主进程先停后删，不必先关 Agent。 */
 	onDeleteSession?: () => void;
@@ -915,14 +977,24 @@ export function AgentContextMenu(props: {
 					{t(props.isPinned ? "menu.unpinSession" : "menu.pinSession")}
 				</DropdownMenuItem>
 			)}
+			{/* 侧边任务：与历史会话菜单同源入口，项目归属由宿主按 agent 对应会话算好。 */}
+			{props.onCreateSideTask && (
+				<DropdownMenuItem disabled={busy} onSelect={props.onCreateSideTask}>
+					<PanelRight className="size-3.5" aria-hidden="true" />
+					{t("menu.createSideTask")}
+				</DropdownMenuItem>
+			)}
 			{/* DSH 运行中会话的复制走 clone 分流（fork 无锚点完整副本），保留入口；
-			    导出 HTML 无 DSH 实现（G10 待决策），对 dsh agent 隐藏 */}
-			<DropdownMenuItem disabled={busy} onSelect={props.onCopySession}>
-				{props.actionLoading === "copy" && <span className="mini-loader animate-pideck-spin" />}
-				<Copy className="size-3.5" aria-hidden="true" />
-				{props.actionLoading === "copy" ? t("menu.copying") : t("menu.copySession")}
-			</DropdownMenuItem>
-			{props.menu.agent.backend !== "dsh" && (
+			    导出 HTML 无 DSH 实现（G10 待决策），对 dsh agent 隐藏；
+			    ACP 两者皆无实现（无 clone 协议、无宿主文件），同样隐藏（审计发现 H） */}
+			{props.menu.agent.backend !== "acp" && (
+				<DropdownMenuItem disabled={busy} onSelect={props.onCopySession}>
+					{props.actionLoading === "copy" && <span className="mini-loader animate-pideck-spin" />}
+					<Copy className="size-3.5" aria-hidden="true" />
+					{props.actionLoading === "copy" ? t("menu.copying") : t("menu.copySession")}
+				</DropdownMenuItem>
+			)}
+			{props.menu.agent.backend !== "dsh" && props.menu.agent.backend !== "acp" && (
 				<DropdownMenuItem disabled={busy} onSelect={props.onExport}>
 					{props.actionLoading === "export" && <span className="mini-loader animate-pideck-spin" />}
 					<FileDown className="size-3.5" aria-hidden="true" />
@@ -946,8 +1018,9 @@ export function AgentContextMenu(props: {
 			)}
 			{/* 会话运行控制：全状态可用（启动/停止/重载三项按策略置灰） */}
 			{props.runControl && <SidebarRunControlItems runControl={props.runControl} />}
-			{/* 会话代理：与 Session 菜单同源（同一弹框宿主），agent 入口此前缺失导致「Chat 里找不到代理」 */}
-			{props.onOpenProxySetting && (
+			{/* 会话代理：与 Session 菜单同源（同一弹框宿主），agent 入口此前缺失导致「Chat 里找不到代理」；
+			    ACP 子进程不消费会话代理（仅 pi spawn 读取），隐藏（审计发现 H） */}
+			{props.onOpenProxySetting && props.menu.agent.backend !== "acp" && (
 				<DropdownMenuItem disabled={busy} onSelect={props.onOpenProxySetting}>
 					<Settings2 className="size-3.5" aria-hidden="true" />
 					{t("menu.sessionProxy")}
@@ -989,6 +1062,8 @@ export function DraftSessionContextMenu(props: {
 	onClose: () => void;
 	/** 草稿会话也能直接启动 Agent（不必先打开会话发消息）——全状态可操作的补齐点。 */
 	runControl?: SidebarRunControl;
+	/** 关闭 Agent：草稿会话仍持有绑定（含 error/closed 终态）时由宿主注入，理由同 SessionContextMenu。 */
+	onCloseAgent?: () => void;
 	onDelete: () => void;
 }) {
 	return (
@@ -996,6 +1071,15 @@ export function DraftSessionContextMenu(props: {
 			{props.runControl && (
 				<>
 					<SidebarRunControlItems runControl={props.runControl} />
+					<DropdownMenuSeparator />
+				</>
+			)}
+			{props.onCloseAgent && (
+				<>
+					<DropdownMenuItem variant="destructive" title={t("menu.closeAgentHint")} onSelect={props.onCloseAgent}>
+						<XCircle className="size-3.5" aria-hidden="true" />
+						{t("menu.closeAgent")}
+					</DropdownMenuItem>
 					<DropdownMenuSeparator />
 				</>
 			)}
@@ -1022,6 +1106,8 @@ export function SessionContextMenu(props: {
 	runControl?: SidebarRunControl;
 	/** 打开会话代理设置弹框（菜单项「会话代理」） */
 	onOpenProxySetting?: () => void;
+	/** 在该会话所属项目新建一条侧边任务（右侧抽屉「侧边任务」面板承载）；undefined 时隐藏入口 */
+	onCreateSideTask?: () => void;
 	/** 会话是否有文件路径（DSH 会话无 pi 会话文件：隐藏「复制路径/打开文件」） */
 	hasFilePath?: boolean;
 	/** RPC 日志菜单组（与 AgentContextMenu 同语义）：仅会话有 live runtime 时显示 */
@@ -1033,6 +1119,12 @@ export function SessionContextMenu(props: {
 	/** 切换式 RPC 日志开关（SidebarContent 当前实现），与 onOpenRpcLogging 兼容共存 */
 	onToggleRpcLogging?: () => void;
 	onOpenLogs?: () => void;
+	/**
+	 * 关闭 Agent：会话行仍持有绑定（含 error/closed 终态）时由宿主注入。
+	 * 终态绑定不满足 RPC 日志的 live 判据，但报错态恰恰是最需要关闭入口的状态：
+	 * 拿 getBoundSidebarRuntimeAgent 的结果选菜单时它会退回会话菜单，入口就断了。
+	 */
+	onCloseAgent?: () => void;
 	onArchiveSession: () => void;
 	onDeleteSession: () => void;
 	/** 这条会话是**远端记录**（ssh locator）：删除只是「从列表移除」，远端文件保留（文案如实）。 */
@@ -1053,21 +1145,32 @@ export function SessionContextMenu(props: {
 					{t(props.isPinned ? "menu.unpinSession" : "menu.pinSession")}
 				</DropdownMenuItem>
 			)}
+			{/* 侧边任务：在该会话所属项目另开一条轻量会话，落在右侧抽屉「侧边任务」面板，不动主区 Tab。 */}
+			{props.onCreateSideTask && (
+				<DropdownMenuItem disabled={busy} onSelect={props.onCreateSideTask}>
+					<PanelRight className="size-3.5" aria-hidden="true" />
+					{t("menu.createSideTask")}
+				</DropdownMenuItem>
+			)}
 			{/* 运行控制：全状态可用（历史会话未启动时主控项即「启动 Agent」） */}
 			{props.runControl && <SidebarRunControlItems runControl={props.runControl} />}
-			{/* DSH 历史会话无宿主文件可复制/导出（主进程显式拒绝，A8/A9）：隐藏入口 */}
-			<DropdownMenuItem disabled={busy} onSelect={props.onOpenProxySetting}>
-				<Settings2 className="size-3.5" aria-hidden="true" />
-				{t("menu.sessionProxy")}
-			</DropdownMenuItem>
-			{props.menu.session.backend !== "dsh" && (
+			{/* DSH 历史会话无宿主文件可复制/导出（主进程显式拒绝，A8/A9）；ACP 无文件也无 clone 协议
+			    （live 走 pi clone 会报 unknown agent，审计发现 H）：同款隐藏入口 */}
+			{/* 会话代理：同 agent 菜单；ACP 子进程不消费会话代理，隐藏（审计发现 H） */}
+			{props.onOpenProxySetting && props.menu.session.backend !== "acp" && (
+				<DropdownMenuItem disabled={busy} onSelect={props.onOpenProxySetting}>
+					<Settings2 className="size-3.5" aria-hidden="true" />
+					{t("menu.sessionProxy")}
+				</DropdownMenuItem>
+			)}
+			{props.menu.session.backend !== "dsh" && props.menu.session.backend !== "acp" && (
 				<DropdownMenuItem disabled={busy} onSelect={props.onCopySession}>
 					{props.actionLoading === "copy" && <span className="mini-loader animate-pideck-spin" />}
 					<Copy className="size-3.5" aria-hidden="true" />
 					{props.actionLoading === "copy" ? t("menu.copying") : t("menu.copySession")}
 				</DropdownMenuItem>
 			)}
-			{props.menu.session.backend !== "dsh" && (
+			{props.menu.session.backend !== "dsh" && props.menu.session.backend !== "acp" && (
 				<DropdownMenuItem disabled={busy} onSelect={props.onExport}>
 					{props.actionLoading === "export" && <span className="mini-loader animate-pideck-spin" />}
 					<FileDown className="size-3.5" aria-hidden="true" />
@@ -1110,10 +1213,21 @@ export function SessionContextMenu(props: {
 				</>
 			)}
 			<DropdownMenuSeparator />
-			<DropdownMenuItem disabled={busy} onSelect={props.onArchiveSession}>
-				<Archive className="size-3.5" aria-hidden="true" />
-				{t("menu.archiveSession")}
-			</DropdownMenuItem>
+			{/* 关闭 Agent：与 AgentContextMenu 同位（底部危险组），终态会话也不会丢这个出口 */}
+			{props.onCloseAgent && (
+				<DropdownMenuItem variant="destructive" disabled={busy} title={t("menu.closeAgentHint")} onSelect={props.onCloseAgent}>
+					<XCircle className="size-3.5" aria-hidden="true" />
+					{t("menu.closeAgent")}
+				</DropdownMenuItem>
+			)}
+			{/* ACP 无宿主文件可归档（主进程直接回 false，行会被刷新带回、toast 假成功）：
+			    隐藏入口（审计发现 J）。DSH 归档走 host 目录分支，保留 */}
+			{props.menu.session.backend !== "acp" && (
+				<DropdownMenuItem disabled={busy} onSelect={props.onArchiveSession}>
+					<Archive className="size-3.5" aria-hidden="true" />
+					{t("menu.archiveSession")}
+				</DropdownMenuItem>
+			)}
 			<DropdownMenuItem variant="destructive" disabled={busy} title={props.isRemoteSession ? t("menu.removeRemoteRecordHint") : undefined} onSelect={props.onDeleteSession}>
 				<Trash2 className="size-3.5" aria-hidden="true" />
 				{t(props.isRemoteSession ? "menu.removeRemoteRecord" : "common.delete")}
@@ -1191,31 +1305,5 @@ export function WorktreeCreateDialog(props: { projectId: string; creating: boole
 				</DialogFooter>
 			</DialogContent>
 		</Dialog>
-	);
-}
-
-/**
- * RPC 日志已打开提醒弹框：开启记录后告知用户已可查看，
- * “查看日志”直接打开实时日志查看弹窗（RpcLogViewer）。
- */
-export function RpcLogOpenedDialog(props: { onView: () => void; onClose: () => void }) {
-	return (
-		<AlertDialog
-			open
-			onOpenChange={(open) => {
-				if (!open) props.onClose();
-			}}
-		>
-			<AlertDialogContent>
-				<AlertDialogHeader>
-					<AlertDialogTitle>{t("rpc.logOpenedTitle")}</AlertDialogTitle>
-					<AlertDialogDescription>{t("rpc.logOpenedDescription")}</AlertDialogDescription>
-				</AlertDialogHeader>
-				<AlertDialogFooter>
-					<AlertDialogCancel onClick={props.onClose}>{t("common.cancel")}</AlertDialogCancel>
-					<AlertDialogAction onClick={props.onView}>{t("rpc.logViewNow")}</AlertDialogAction>
-				</AlertDialogFooter>
-			</AlertDialogContent>
-		</AlertDialog>
 	);
 }

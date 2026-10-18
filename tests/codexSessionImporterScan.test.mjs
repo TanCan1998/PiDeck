@@ -282,3 +282,114 @@ test("codex import: non-standard tool lines become toolCall + paired toolResult"
 		rmSync(home, { recursive: true, force: true });
 	}
 });
+
+// 回归 2026-10：Codex 一轮并行工具调用会写成连续多条 response_item function_call，
+// 逐条转成单 call assistant 会让 pi 请求转换把除最后一个 call 外的 toolResult 判成
+// 「前面没有 tool_calls 的 tool 消息」（严格供应商 400）。连续的并行调用必须合并为
+// 一条 assistant（OpenAI 并行 tool_calls 语义），全部 toolResult 紧随其后完成配对。
+test("codex import: 连续 function_call（并行调用）合并为一条 assistant，toolResult 全部配对", async () => {
+	const home = mkdtempSync(join(tmpdir(), "codex-parallel-"));
+	try {
+		const project = join(home, "proj");
+		const sessions = join(home, ".codex", "sessions");
+		mkdirSync(sessions, { recursive: true });
+		const lines = [
+			JSON.stringify({ type: "session_meta", payload: { id: "thread-parallel", cwd: project, timestamp: "2026-08-10T10:00:00.000Z" } }),
+			JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "并行跑两条命令" }], internal_chat_message_metadata_passthrough: { content_item_kinds: ["user.text"] } } }),
+			JSON.stringify({ type: "response_item", timestamp: "2026-08-10T10:00:01.000Z", payload: { type: "function_call", call_id: "call_a", name: "shell_command", arguments: '{"command":"ls"}' } }),
+			JSON.stringify({ type: "response_item", timestamp: "2026-08-10T10:00:01.100Z", payload: { type: "function_call", call_id: "call_b", name: "shell_command", arguments: '{"command":"pwd"}' } }),
+			JSON.stringify({ type: "response_item", timestamp: "2026-08-10T10:00:02.000Z", payload: { type: "function_call_output", call_id: "call_a", output: "a.ts" } }),
+			JSON.stringify({ type: "response_item", timestamp: "2026-08-10T10:00:02.100Z", payload: { type: "function_call_output", call_id: "call_b", output: "/proj" } }),
+			JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "两条命令都完成了" }] } }),
+		];
+		writeFileSync(join(sessions, "parallel.jsonl"), `${lines.join("\n")}\n`);
+
+		const { CodexSessionImporter } = loadImporter(home);
+		const report = await new CodexSessionImporter().import(project, [join(sessions, "parallel.jsonl")]);
+		assert.equal(report.results[0].success, true);
+
+		const entries = readFileSync(report.results[0].targetPath, "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line))
+			.filter((entry) => entry.type === "message");
+
+		const merged = entries.find((entry) => entry.message?.role === "assistant" && (entry.message.content ?? []).some((block) => block.type === "toolCall"));
+		assert.ok(merged, "应有含 toolCall 的 assistant 消息");
+		const calls = merged.message.content.filter((block) => block.type === "toolCall");
+		assert.deepEqual(
+			calls.map((call) => call.id),
+			["call_a", "call_b"],
+			"两个并行调用必须合并进同一条 assistant",
+		);
+
+		const mergedIndex = entries.indexOf(merged);
+		const following = entries.slice(mergedIndex + 1, mergedIndex + 3);
+		assert.deepEqual(
+			following.map((entry) => [entry.message?.role, entry.message?.toolCallId]),
+			[
+				["toolResult", "call_a"],
+				["toolResult", "call_b"],
+			],
+			"toolResult 必须紧跟合并 assistant 且全部配对（不允许孤儿）",
+		);
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
+// 回归 2026-10（真实样本 codex_019d38d5）：Codex 会把 assistant 文本写在并行 function_call
+// 与 function_call_output 之间（call,call,text,out,out）。文本若单独成条，pi 请求转换会在
+// 新 assistant 边界重置挂起集，全部 output 变孤儿（严格供应商 400）。连续的同一轮 assistant
+// 内容必须并为一条（文本跟在 call 后面），output 紧随其后完成配对。
+test("codex import: call 与 output 之间穿插的 assistant 文本并入同一条，不产生孤儿", async () => {
+	const home = mkdtempSync(join(tmpdir(), "codex-interleave-"));
+	try {
+		const project = join(home, "proj");
+		const sessions = join(home, ".codex", "sessions");
+		mkdirSync(sessions, { recursive: true });
+		const lines = [
+			JSON.stringify({ type: "session_meta", payload: { id: "thread-interleave", cwd: project, timestamp: "2026-08-10T10:00:00.000Z" } }),
+			JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "继续" }], internal_chat_message_metadata_passthrough: { content_item_kinds: ["user.text"] } } }),
+			JSON.stringify({ type: "response_item", timestamp: "2026-08-10T10:00:01.000Z", payload: { type: "function_call", call_id: "call_x", name: "shell_command", arguments: '{"command":"ls"}' } }),
+			JSON.stringify({ type: "response_item", timestamp: "2026-08-10T10:00:01.100Z", payload: { type: "function_call", call_id: "call_y", name: "shell_command", arguments: '{"command":"pwd"}' } }),
+			// 关键：assistant 文本插在 call 与 output 之间（真实 rollout 里模型边执行边解说）
+			JSON.stringify({ type: "response_item", timestamp: "2026-08-10T10:00:01.500Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "两条命令执行中……" }] } }),
+			JSON.stringify({ type: "response_item", timestamp: "2026-08-10T10:00:02.000Z", payload: { type: "function_call_output", call_id: "call_x", output: "a.ts" } }),
+			JSON.stringify({ type: "response_item", timestamp: "2026-08-10T10:00:02.100Z", payload: { type: "function_call_output", call_id: "call_y", output: "/proj" } }),
+		];
+		writeFileSync(join(sessions, "interleave.jsonl"), `${lines.join("\n")}\n`);
+
+		const { CodexSessionImporter } = loadImporter(home);
+		const report = await new CodexSessionImporter().import(project, [join(sessions, "interleave.jsonl")]);
+		assert.equal(report.results[0].success, true);
+
+		const entries = readFileSync(report.results[0].targetPath, "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line))
+			.filter((entry) => entry.type === "message");
+
+		const merged = entries.find((entry) => entry.message?.role === "assistant" && (entry.message.content ?? []).some((block) => block.type === "toolCall"));
+		assert.ok(merged, "应有含 toolCall 的 assistant 消息");
+		const ids = merged.message.content.filter((block) => block.type === "toolCall").map((call) => call.id);
+		assert.deepEqual(ids, ["call_x", "call_y"], "两个并行调用必须在同一条 assistant 里");
+		assert.ok(
+			merged.message.content.some((block) => block.type === "text" && block.text.includes("执行中")),
+			"穿插文本必须并入同一条 assistant",
+		);
+
+		const mergedIndex = entries.indexOf(merged);
+		const following = entries.slice(mergedIndex + 1, mergedIndex + 3);
+		assert.deepEqual(
+			following.map((entry) => [entry.message?.role, entry.message?.toolCallId]),
+			[
+				["toolResult", "call_x"],
+				["toolResult", "call_y"],
+			],
+			"toolResult 必须紧跟合并 assistant 且全部配对（不允许孤儿）",
+		);
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});

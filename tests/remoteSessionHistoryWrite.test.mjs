@@ -169,8 +169,43 @@ function fakeShell(initialFiles, options = {}) {
 	};
 }
 
+/**
+ * 确定性 uuid：dev 的编辑/删除改为追加 pi 原生 `context_edit`（带新 id）。远端写面与本机
+ * `SessionFileEditor` 各跑一遍还要逐字节相等，所以两边必须注入同一条 id 序列。
+ */
+function stableUuid() {
+	let sequence = 0;
+	return () => `00000000-0000-4000-8000-${String(++sequence).padStart(12, "0")}`;
+}
+
+/**
+ * 归一化**新生成记录**的 id：`context_edit`（以及重发时被墓碑掉的它们）用的 id 在生产里是随机 UUID，
+ * 两侧独立运行不可能相同；而 id / parentId 链必须参与比对，所以按出现顺序换成稳定占位符。
+ * 判据是 UUID 形状：夹具里的原始条目 id 都是 `u1`/`a1`/`sys1` 这类短 id，不会误伤。
+ * 归一化之后仍然逐字节比对——随机 id 是唯一被放行的差异。
+ */
+function normalizeGeneratedIds(buffer) {
+	const lines = buffer
+		.toString("utf8")
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line));
+	const names = new Map();
+	const nameOf = (id) => {
+		if (!names.has(id)) names.set(id, `generated-${names.size + 1}`);
+		return names.get(id);
+	};
+	const isGenerated = (id) => typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id);
+	for (const entry of lines) {
+		if (isGenerated(entry.id)) entry.id = nameOf(entry.id);
+		if (isGenerated(entry.originalEntryId)) entry.originalEntryId = nameOf(entry.originalEntryId);
+		if (isGenerated(entry.parentId)) entry.parentId = nameOf(entry.parentId);
+	}
+	return lines.map((entry) => JSON.stringify(entry)).join("\n");
+}
+
 function createWriter(shell, options = {}) {
-	return createRemoteSessionHistoryWriter({ transport: shell.transport, resolveNodePath: async () => "/usr/bin/node", resolveSessionRoot: shell.resolveSessionRoot, now: () => FIXED_TS, ...options });
+	return createRemoteSessionHistoryWriter({ transport: shell.transport, resolveNodePath: async () => "/usr/bin/node", resolveSessionRoot: shell.resolveSessionRoot, now: () => FIXED_TS, createUuid: stableUuid(), ...options });
 }
 
 function locatorWith(remotePath) {
@@ -234,7 +269,7 @@ async function localMutation(t, document, kind, target, newText) {
 	t.after(() => rm(directory, { recursive: true, force: true }));
 	const path = join(directory, "session.jsonl");
 	await writeFile(path, document);
-	const editor = new SessionFileEditor({ now: () => FIXED_TS });
+	const editor = new SessionFileEditor({ now: () => FIXED_TS, randomUUID: stableUuid() });
 	const file = { protocolPath: path, hostPath: path, environment: "native" };
 	const reload = async () => undefined;
 	if (kind === "edit") await editor.editMessage({ file, target, newText, reload });
@@ -307,17 +342,22 @@ test("edit writes the same bytes as the local SessionFileEditor (byte-for-byte p
 		.split("\n")
 		.map((line) => JSON.parse(line));
 	assert.equal(rewritten.filter((entry) => entry.type === "session").length, 1);
-	assert.equal(rewritten.length, 8);
-	// 编辑只动目标行：其余行逐字节保留。
-	const editedLine = shell
+	// 原 8 行一条不改 + 追加一条 context_edit（dev 语义：原文不改写）。
+	assert.equal(rewritten.length, 9);
+	assert.equal(rewritten.filter((entry) => entry.type === "context_edit").length, 1);
+	// 编辑不再原地改目标行：原文仍在文件里，替换只存在于 context_edit 的 replacement。
+	const originalLine = shell
 		.text()
 		.split("\n")
 		.find((line) => line.includes('"id":"u1"'));
-	assert.match(editedLine, /"text":"edited text"/);
+	assert.match(originalLine, /"text":"hello world"/);
+	const edit = rewritten.find((entry) => entry.type === "context_edit");
+	assert.equal(edit.targetId, "u1");
+	assert.match(JSON.stringify(edit.replacement), /edited text/);
 	assert.equal(shell.text().includes("first answer"), true);
 });
 
-test("delete tombstones the answer, its process chain and reparents children (same bytes as local)", async (t) => {
+test("delete removes the answer and its process chain from context via context_edit (same bytes as local)", async (t) => {
 	const document = fixtureDocument();
 	const shell = fakeShell({ [TARGET_PATH]: document });
 
@@ -330,18 +370,22 @@ test("delete tombstones the answer, its process chain and reparents children (sa
 		.trim()
 		.split("\n")
 		.map((line) => JSON.parse(line));
-	// 过程链（thinking-only assistant + toolResult）与目标回答一起墓碑；上一段回答保留。
+	// dev 语义（2026-11）：删除 = 追加 `replacement: null` 的 pi 原生 context_edit，原文行不改写。
+	// 过程链（thinking-only assistant + toolResult）与目标回答一起移出上下文；上一段回答保留。
+	const contextEdits = entries.filter((entry) => entry.type === "context_edit");
 	assert.deepEqual(
-		entries.filter((entry) => entry.type === "deleted").map((entry) => entry.id),
-		["a2", "tr1", "a3"],
+		contextEdits.map((entry) => entry.targetId),
+		["a3", "tr1", "a2"],
 	);
-	assert.equal(entries.find((entry) => entry.id === "a2").reason, undefined);
-	// 唯一子节点重挂到被删条目的父节点（否则它会挂在墓碑上，从活动分支脱落）。
-	assert.equal(entries.find((entry) => entry.id === "u2").parentId, "a1");
+	for (const entry of contextEdits) assert.equal(entry.replacement, null);
+	assert.equal(entries.filter((entry) => entry.type === "deleted").length, 0, "delete 不再写墓碑");
+	// 目标行没被改写 ⇒ 子节点保持原父节点（重挂只属于旧墓碑语义）。
+	assert.equal(entries.find((entry) => entry.id === "u2").parentId, "a3");
 	assert.equal(entries.find((entry) => entry.id === "a1").type, "message");
+	assert.equal(entries.find((entry) => entry.id === "a2").reason, undefined);
 });
 
-test("deleting an assistant without a process chain reparents children to its parent (same bytes as local)", async (t) => {
+test("deleting an assistant without a process chain appends exactly one context_edit (same bytes as local)", async (t) => {
 	const document = fixtureDocument();
 	const shell = fakeShell({ [TARGET_PATH]: document });
 
@@ -355,10 +399,11 @@ test("deleting an assistant without a process chain reparents children to its pa
 		.split("\n")
 		.map((line) => JSON.parse(line));
 	assert.deepEqual(
-		entries.filter((entry) => entry.type === "deleted").map((entry) => entry.id),
+		entries.filter((entry) => entry.type === "context_edit").map((entry) => entry.targetId),
 		["a1"],
 	);
-	assert.equal(entries.find((entry) => entry.id === "a2").parentId, "u1");
+	// a2 是上一段回答（带文本），不是过程链：保持原父节点，不重挂。
+	assert.equal(entries.find((entry) => entry.id === "a2").parentId, "a1");
 });
 
 test("prepare-resend tombstones the message and every descendant and returns the original snapshot", async (t) => {
@@ -752,13 +797,15 @@ test("the three chains over an ssh record end to end: remote file rewritten, loc
 	await catalog.load();
 	const document = fixtureDocument();
 	const shell = fakeShell({ [TARGET_PATH]: document });
+	// 同一个写面实例（同一条 uuid 序列）：三次操作共用一份文件，重复 id 会被文档校验拒绝。
+	const writer = createWriter(shell, { createUuid: stableUuid() });
 	const coordinator = new SessionRuntimeCoordinator(
 		catalog,
 		{ backend: "pi", list: () => [] },
 		async () => ({ accepted: false, delivery: "rejected", error: "unused", sessionId: "unused", requestId: "unused" }),
 		undefined,
 		undefined,
-		() => createWriter(shell),
+		() => writer,
 	);
 	const localPathLookups = [];
 	const originalGetLocalFilePath = catalog.getLocalFilePath.bind(catalog);
@@ -786,13 +833,14 @@ test("the three chains over an ssh record end to end: remote file rewritten, loc
 	t.after(() => rm(localDirectory, { recursive: true, force: true }));
 	const localPath = join(localDirectory, "session.jsonl");
 	await writeFile(localPath, document);
-	const editor = new SessionFileEditor({ now: () => FIXED_TS });
+	const editor = new SessionFileEditor({ now: () => FIXED_TS, randomUUID: stableUuid() });
 	const file = { protocolPath: localPath, hostPath: localPath, environment: "native" };
 	const reload = async () => undefined;
 	await editor.editMessage({ file, target: USER_TARGET, newText: "edited remotely", reload });
 	await editor.deleteMessage({ file, target: ASSISTANT_TARGET, reload });
 	await editor.truncateForResend({ file, target: { entryId: "u2", role: "user", text: "again" }, reload });
-	assert.deepEqual(shell.bytes(), await readFile(localPath));
+	// 三次操作各自新增/墓碑了随机 id 的记录：先归一化这些 id，再逐字节比对（其余字节必须完全一致）。
+	assert.equal(normalizeGeneratedIds(shell.bytes()), normalizeGeneratedIds(await readFile(localPath)));
 
 	// ssh 记录全程不碰本机路径入口。
 	assert.deepEqual(localPathLookups, []);

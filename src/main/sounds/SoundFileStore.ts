@@ -11,6 +11,7 @@ import { app, dialog, type BrowserWindow } from "electron";
 import { copyFile, mkdir, readdir, stat, unlink } from "node:fs/promises";
 import { basename, extname, join, resolve, sep } from "node:path";
 import { CUSTOM_SOUND_EXTENSIONS, isAllowedCustomSoundName, MAX_CUSTOM_SOUND_BYTES, type CustomSoundInfo, type SoundImportResult } from "../../shared/types/soundAlert";
+import { getAppLogger } from "../logging/sharedLogger";
 
 /** 受管目录：userData/sounds/（与背景图/粘贴文件同一「应用数据目录」边界）。 */
 export function customSoundsDir(): string {
@@ -85,6 +86,7 @@ export async function importCustomSound(parent: BrowserWindow | null): Promise<S
 			}
 		}
 		await copyFile(source, target);
+		getAppLogger()?.info("sound", "Custom sound imported", { from: source, to: target, size });
 		return { ok: true, info: { name: basename(target), size } };
 	} catch {
 		return { ok: false, error: "readFailed" };
@@ -119,6 +121,8 @@ export async function removeCustomSound(name: string): Promise<boolean> {
 	if (!file) return false;
 	try {
 		await unlink(file);
+		// 用户音频是硬删除（不进回收站），不可逆操作留痕
+		getAppLogger()?.info("sound", "Custom sound deleted", { file });
 		return true;
 	} catch {
 		return false;

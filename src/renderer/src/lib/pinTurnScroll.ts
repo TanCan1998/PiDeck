@@ -32,6 +32,8 @@ export function pinScrollEase(progress: number): number {
 
 export type AnimateScrollTopOptions = {
 	reduceMotion?: boolean;
+	/** Re-read the target while layout grows, without restarting the easing clock. */
+	getTargetTop?: () => number;
 	isCancelled?: () => boolean;
 	onComplete?: () => void;
 };
@@ -52,6 +54,7 @@ export function animateScrollTop(element: HTMLElement, targetTop: number, option
 	}
 
 	const startTop = element.scrollTop;
+	let currentTarget = target;
 	const distance = target - startTop;
 	const duration = pinScrollDurationMs(distance);
 	const startedAt = performance.now();
@@ -69,8 +72,9 @@ export function animateScrollTop(element: HTMLElement, targetTop: number, option
 			stop();
 			return;
 		}
+		currentTarget = Math.max(0, options.getTargetTop?.() ?? currentTarget);
 		const progress = pinScrollEase((performance.now() - startedAt) / duration);
-		element.scrollTop = startTop + distance * progress;
+		element.scrollTop = startTop + (currentTarget - startTop) * progress;
 		if (progress >= 1) {
 			stop();
 			options.onComplete?.();

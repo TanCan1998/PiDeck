@@ -1,25 +1,24 @@
 import { app } from "electron";
 import { basename } from "node:path";
 import type { AppSettings } from "../../shared/types";
-import { listActiveBuiltInExtensionPaths, resolveBuiltInExtensionsOverlayDir, type BuiltInExtensionPathRoots } from "./builtInExtensions";
-import { resolveEnabledExtensionPaths } from "./enabledExtensionResolver";
+import { INTERNAL_BUILT_IN_EXTENSIONS, listActiveBuiltInExtensionPaths, resolveBuiltInExtensionsOverlayDir, type BuiltInExtensionPathRoots } from "./builtInExtensions";
 import { readProjectResourceOverrides } from "../projects/projectResourceOverrides";
 
 /**
- * 为 PiProcess 构造扩展解析器（内置扩展注入 + 白名单枚举）。
- * 返回值可直接展开为 PiProcess 第 4 参 options 的
- * resolveBuiltInExtensionPaths / resolveEnabledExtensionPaths。
+ * 为 PiProcess 构造「PiDeck 自带扩展」注入解析器。
+ *
+ * 普通扩展（用户安装的 packages / 本地文件扩展）的启停已交给 pi 原生
+ * `settings.json` 过滤规则，PiDeck 不再注入 `--no-extensions` + 全量 `-e` 白名单；
+ * 这里只负责把随包分发的 PiDeck 扩展（`pi-deck-*.ts`）以 `-e` 附加到会话上。
  *
  * 为什么共用：AgentManager（会话运行时 RPC）与 PiModelCapabilityCache（模型能力快照）
- * 必须走同一套「哪些扩展加载」的判定，否则选择器可能展示运行时实际不存在的模型
- * （例如用户已禁用的扩展贡献的模型），用户选完才在会话启动时报错。
+ * 必须走同一套「哪些自带扩展加载」的判定，否则选择器可能展示运行时实际不存在的模型。
  */
 export function createPiProcessExtensionResolvers(
 	cwd: string,
 	settings: AppSettings,
 ): {
 	resolveBuiltInExtensionPaths: (processSettings?: Partial<AppSettings>, includeProjectResources?: boolean) => string[];
-	resolveEnabledExtensionPaths: (processSettings?: Partial<AppSettings>, cwd?: string, includeProjectResources?: boolean) => string[] | null;
 } {
 	const builtInRoots: BuiltInExtensionPathRoots = {
 		appPath: app.getAppPath(),
@@ -31,15 +30,10 @@ export function createPiProcessExtensionResolvers(
 	return {
 		resolveBuiltInExtensionPaths: (processSettings, includeProjectResources = true) => {
 			const disabledForProject = new Set(includeProjectResources ? readProjectResourceOverrides(cwd).disabledGlobalExtensions : []);
-			return listActiveBuiltInExtensionPaths(builtInRoots, processSettings?.removedBuiltInExtensions ?? settings.removedBuiltInExtensions ?? []).filter((path) => !disabledForProject.has(basename(path)));
+			return listActiveBuiltInExtensionPaths(builtInRoots, processSettings?.removedBuiltInExtensions ?? settings.removedBuiltInExtensions ?? [], processSettings?.enabledBuiltInExtensions ?? settings.enabledBuiltInExtensions ?? []).filter((path) => {
+				const name = basename(path);
+				return (INTERNAL_BUILT_IN_EXTENSIONS as readonly string[]).includes(name) || !disabledForProject.has(name);
+			});
 		},
-		resolveEnabledExtensionPaths: (processSettings, _processCwd, includeProjectResources = true) =>
-			resolveEnabledExtensionPaths({
-				cwd,
-				includeProjectResources,
-				disabled: processSettings?.disabledExtensions ?? settings.disabledExtensions ?? [],
-				removedBuiltInExtensions: processSettings?.removedBuiltInExtensions ?? settings.removedBuiltInExtensions ?? [],
-				builtInRoots,
-			}),
 	};
 }

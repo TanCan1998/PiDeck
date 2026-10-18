@@ -91,8 +91,13 @@ export function openFileManagerAt(path: string): Promise<void> {
 			return;
 		}
 		if (process.platform === "darwin") {
-			spawn("open", [path], { detached: true, stdio: "ignore" }).unref();
-			resolve();
+			const macChild = spawn("open", [path], { detached: true, stdio: "ignore" });
+			// fire-and-forget 也必须有 error 兜底：未处理的 error 事件会直接炸主进程。
+			macChild.once("error", (error) => reject(error));
+			macChild.once("spawn", () => {
+				macChild.unref();
+				resolve();
+			});
 			return;
 		}
 		if (process.platform === "win32") {

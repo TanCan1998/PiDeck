@@ -36,7 +36,6 @@ test("overlay roots expose narrow contracts and never subscribe to raw UI reques
 	assert.doesNotMatch(runtime, /onUiRequest/);
 	assert.match(read("components/overlays/ImportOverlayHost.tsx"), /kind: "codex"/);
 	assert.match(read("components/overlays/EnvironmentOverlay.tsx"), /EnvironmentDialog/);
-	assert.match(read("components/overlays/ScratchPadOverlay.tsx"), /scratch-pad-overlay/);
 });
 
 // DialogClose / ESC / 遮罩关闭都依赖 onOpenChange(false) 真正调用 onClose；
@@ -65,11 +64,15 @@ test("async leaf controllers protect deferred results and update subscriptions c
 	assert.match(updateWatch, /notifiedRef/);
 });
 
-test("ScratchPad root preserves shortcut, closing, and timer cleanup", () => {
-	const scratch = read("components/overlays/ScratchPadOverlay.tsx");
+test("ScratchPad drawer keeps keyboard handling in its persistent controller", () => {
+	const scratch = read("hooks/useScratchPad.ts");
+	const drawer = read("components/scratchPad/ScratchPadDrawer.tsx");
 	assert.match(scratch, /ctrlKey.*shiftKey/);
-	assert.match(scratch, /event\.key === "Escape"/);
-	assert.match(scratch, /isClosing/);
+	assert.match(scratch, /event\.key\s*===\s*"Escape"/);
+	assert.match(scratch, /removeEventListener\("keydown",\s*handler\)/);
+	assert.match(scratch, /clearTimeout\(saveTimerRef\.current\)/);
+	assert.doesNotMatch(drawer, /addEventListener|isClosing|scratch-pad-overlay/);
+	assert.match(drawer, /<ScratchPadPanel\s/);
 });
 
 function loadResponder() {
@@ -104,6 +107,7 @@ const askUiMock = {
 	splitAskOption: (option) => ({ label: option }),
 	emptyAskBatchDraft: () => ({ answers: {}, labels: {}, customAnswerIds: [], inputValues: {}, currentTab: 0, expanded: true }),
 	emptyAskSingleDraft: () => ({ selectedOption: "", value: "", expanded: true }),
+	initialAskSingleDraft: (prefill) => ({ selectedOption: "", value: typeof prefill === "string" && prefill ? prefill : "", expanded: true }),
 	isSameAskDraftKey: (left, right) => left === right,
 	commitBatchAnswer: (draft, questionId, value, label, wasCustom) => ({
 		...draft,

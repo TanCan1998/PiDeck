@@ -464,8 +464,8 @@ test("flushMessageEmit slides the 9-turn window and carries slideOut, keeping an
 		many.push({ id: "m-u16", agentId: "agent-1", role: "user", text: "q16", timestamp: 1, meta: { entryId: "u16" } });
 		many.push({ id: "m-a16", agentId: "agent-1", role: "assistant", text: "a16", timestamp: 1, meta: { entryId: "a16" } });
 		manager.messages.set("agent-1", many);
-		// 旧窗口 = q7 起（DOM 3 / atom 9 / main 12 模型的尾部 9 轮起点）
-		manager.displayWindowStartByAgent.set("agent-1", 12);
+		// 旧窗口 = q7 起（DOM 3 / atom 9 / main 12 模型的尾部 9 轮起点）；窗口游标收口在 MessageEmitBatcher
+		manager.messageEmit.displayWindowStartByAgent.set("agent-1", 12);
 		// 匿名会话（无文件路径/无 entryId 映射）：headOffset 未知 = -1，flush 后必须保持 -1（M2）
 		manager.messageHeadOffsetByAgent.set("agent-1", -1);
 		const payloads = [];
@@ -482,7 +482,7 @@ test("flushMessageEmit slides the 9-turn window and carries slideOut, keeping an
 		);
 		assert.equal(slidePayload.windowStart, 14, "窗口右移到 q8 起（下标 14）");
 		assert.equal(slidePayload.messages[0].meta.entryId, "u8");
-		assert.equal(manager.pendingSlideOutByAgent.get("agent-1"), undefined, "flush 后待发滑出已清空");
+		assert.equal(manager.messageEmit.pendingSlideOutByAgent.get("agent-1"), undefined, "flush 后待发滑出已清空");
 		// M2：-1 保持 -1（修复前被递增成 5 的伪造游标）
 		assert.equal(manager.messageHeadOffsetByAgent.get("agent-1"), -1);
 	} finally {

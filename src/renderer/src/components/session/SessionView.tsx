@@ -1,24 +1,32 @@
-import { useAtomValue } from "jotai";
-import { useEffect, useMemo, useRef, type CSSProperties, type RefObject, type ReactNode } from "react";
+import { useAtomValue, useSetAtom } from "jotai";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject, type ReactNode } from "react";
 import { type GroupImperativeHandle, type PanelImperativeHandle } from "react-resizable-panels";
 import { ResizablePanel, ResizablePanelGroup } from "../ui-shadcn/resizable";
-import type { GitBranchInfo, ImageContent, TerminalTarget } from "../../../../shared/types";
+import type { ChatMessage, GitBranchInfo, ImageContent, Project, TerminalTarget, TerminalThemeId } from "../../../../shared/types";
 import type { SessionTimelineController } from "../../hooks/useSessionTimelineController";
 import { isLanWeb, desktopApi as api } from "../../desktopApi";
 import { SessionHeader } from "./SessionHeader";
+import { BridgeOverlayHost, BridgeGuiSlot, BridgeSlot } from "../bridge/BridgeSlot";
+import { BRIDGE_TARGET } from "../../../../shared/types/bridge";
+import { useBridgeSessionTitle } from "../../hooks/useBridgeSessionTitle";
 import { SessionBranchBar } from "./SessionBranchBar";
 import { RemoteSessionTrustNotice } from "./RemoteSessionTrustNotice";
 import { SessionFilesStrip } from "./SessionFilesStrip";
 import { SessionGoalStrip } from "./SessionGoalStrip";
 import { SessionSubagentsStrip } from "./SessionSubagentsStrip";
 import { SessionTodoStrip } from "./SessionTodoStrip";
+import { SessionTeamStrip } from "./SessionTeamStrip";
+import { SessionQueuedMessagesStrip } from "./SessionQueuedMessagesStrip";
 import { SessionSurfaceStage } from "./SessionSurfaceStage";
 import { ComposerArea } from "./ComposerArea";
+import { useReplyActions } from "../../hooks/useReplyActions";
+import { useAnimationWindow } from "../../hooks/useAnimationWindow";
 import { chatContentWidthStyle } from "./chatContentWidth";
 import { TerminalDockPanel, TERMINAL_PANEL_COLLAPSED_SIZE, TERMINAL_PANEL_MIN_SIZE } from "../terminal/TerminalDockPanel";
+import type { TerminalDockSettings } from "../terminal/TerminalDock";
 import { useSessionPaneServices } from "./SessionPaneServices";
 import { COMPOSER_MAX_HEIGHT, COMPOSER_MIN_HEIGHT, TIMELINE_MIN_HEIGHT, displayProjectDirectoryName, redistributeTerminalAgainstTimeline, shouldMountBottomComposer, sessionResizableGroupKey, sessionGroupDefaultLayout } from "../../rendererUtils";
-import { projectByIdAtomFamily, sessionRecordByIdAtomFamily } from "../../atoms";
+import { projectByIdAtomFamily, publishSessionLatestAgentRunAtom, sessionRecordByIdAtomFamily, sessionStatusInSidebarAtomFamily } from "../../atoms";
 import type { EnqueuePromptSnapshot } from "../../hooks/useSessionSend";
 import { groupToolMessages } from "../app/AppUtils";
 import type { AgentRunItem } from "./timeline/types";
@@ -63,11 +71,12 @@ export type SessionViewProps = {
 	onPreviewImage: (image: ImageContent) => void;
 	onOpenFile?: (path: string) => void;
 	onDiffFile?: (path: string) => void;
-	onResendUserMessage?: (message: any) => void;
-	onEditMessage?: (messageId: string, newText: string, entryId?: string) => void;
+	onResendUserMessage?: (message: ChatMessage) => void;
+	onEditMessage?: (message: ChatMessage, newText: string) => void;
 	onDeleteMessage?: (messageId: string, entryId?: string) => void;
-	onForkMessage?: (message: any) => void;
-	onRewindToMessage?: (message: any) => void;
+	onRemoveMessageImage?: (message: ChatMessage, index: number) => void;
+	onForkMessage?: (message: ChatMessage) => void;
+	onRewindToMessage?: (message: ChatMessage) => void;
 	forkingMessageId?: string | null;
 	onToast: (message: string) => void;
 	onQuickPrompt?: (prompt: string) => void;
@@ -96,10 +105,16 @@ export type SessionViewProps = {
 	terminalOwnerKey?: string;
 	/** agent 或 project 终端目标；undefined 时不渲染 dock */
 	terminalTarget?: TerminalTarget;
+	/** 可选的 target 项目记录：project 终端用它判定远端外观（SSH tab 建立前） */
+	terminalTargetProject?: Project;
 	setTerminalOpenForOwner: (open: boolean) => void;
 	setTerminalCollapsedForOwner: (collapsed: boolean) => void;
 	/** 回写终端分屏高度（全局单份，hook 内部持久化） */
 	setTerminalHeight: (height: number) => void;
+	/** 终端外观设置（App 级单份，随 AppSettings 持久化） */
+	terminalSettings: TerminalDockSettings;
+	/** dock 内主题菜单写回设置 */
+	onTerminalThemeChange: (themeId: TerminalThemeId) => void;
 
 	// ── Other visibility ──
 	settingsOpen: boolean;
@@ -137,6 +152,7 @@ export function SessionView({
 	onResendUserMessage,
 	onEditMessage,
 	onDeleteMessage,
+	onRemoveMessageImage,
 	onForkMessage,
 	onRewindToMessage,
 	forkingMessageId,
@@ -158,15 +174,26 @@ export function SessionView({
 	availableTerminalHeight,
 	terminalOwnerKey,
 	terminalTarget,
+	terminalTargetProject,
 	setTerminalOpenForOwner,
 	setTerminalCollapsedForOwner,
 	setTerminalHeight,
+	terminalSettings,
+	onTerminalThemeChange,
 	settingsOpen,
 	environmentDialog,
 	runCreateSessionDraft,
 	abortAgent: _abortAgent,
 }: SessionViewProps) {
 	const paneServices = useSessionPaneServices();
+	// 落点随本栏时间线挂载/卸载更新；发送控制器仍只有 ComposerArea 内的一份。
+	const [replyActionsTarget, setReplyActionsTarget] = useState<HTMLDivElement | null>(null);
+	// 回复快捷操作规则：全局一份快照（主进程读 userData/reply-actions.json），
+	// SessionReplyActions 只读；保存入口在设置页，保存后整份替换 atom。
+	// 只取 items（规则数组），避免整个 hook 返回值每渲染变引用拖累下游 memo。
+	const { items: replyActionRuleItems } = useReplyActions();
+	// GUI 扩展桥：把扩展的 ctx.ui.setTitle 应用到 document.title（无贡献时不动，§7.4 只追加）
+	useBridgeSessionTitle(sessionId);
 	// 会话身份面包屑的项目名：多 Tab/分屏时提醒当前会话属于哪个项目。
 	// 从会话记录解析 projectId → 项目目录名；无记录（匿名会话等）时省略。
 	const sessionRecord = useAtomValue(sessionRecordByIdAtomFamily(sessionId));
@@ -178,6 +205,9 @@ export function SessionView({
 	const terminalPanelRef = useRef<PanelImperativeHandle | null>(null);
 	const sessionGroupRef = useRef<GroupImperativeHandle | null>(null);
 	const terminalProgrammaticExpireRef = useRef(0);
+	// 折叠/展开动画窗口：terminalCollapsed 翻转后短暂给面板挂 flex-grow 过渡，
+	// 让程序化 setLayout 有 160ms 高度渐变；拖拽时属性不在，直接操作不橡皮筋。
+	const terminalCollapseAnimating = useAnimationWindow(terminalCollapsed, 200);
 
 	const terminalPanelVisible = !isLanWeb && !settingsOpen && !environmentDialog && terminalDockVisible && terminalOpen;
 	// 空会话磁盘就绪后卸底部栏，改由 timeline 内 SessionStartSurface 居中输入。
@@ -202,6 +232,15 @@ export function SessionView({
 		// 新问题已发出但 Agent 尚未产生新 run 时，隐藏上一轮文件，避免误导。
 		return latestRun && latestUserTimestamp <= latestRun.endedAt ? latestRun : undefined;
 	}, [sessionTimeline.messages]);
+	// 右侧边栏「会话状态」面板复用这里算好的 run（文件修改实时增量），不重复解析时间线；
+	// 会话切换/卸载时撤回，避免面板展示过期 run。
+	const publishLatestAgentRun = useSetAtom(publishSessionLatestAgentRunAtom);
+	useEffect(() => {
+		publishLatestAgentRun({ sessionId, run: latestAgentRun });
+	}, [latestAgentRun, publishLatestAgentRun, sessionId]);
+	useEffect(() => () => publishLatestAgentRun({ sessionId, run: undefined }), [publishLatestAgentRun, sessionId]);
+	// 面板正可见地展示本会话时，输入框上方的待办/修改文件/子代理折叠条让位给面板
+	const statusInSidebar = useAtomValue(sessionStatusInSidebarAtomFamily(sessionId));
 	const sessionPanels = { terminal: terminalPanelVisible };
 	const timelineColumnMinSize = bottomComposerVisible ? TIMELINE_MIN_HEIGHT + COMPOSER_MIN_HEIGHT : TIMELINE_MIN_HEIGHT;
 	const timelineColumnStyle = {
@@ -244,17 +283,28 @@ export function SessionView({
 		<div className={splitPane ? `session-split-pane flex h-full min-h-0 flex-col${focused ? " session-split-pane-focused" : ""}` : "contents"} onMouseDown={splitPane ? () => onFocusPane?.() : undefined}>
 			{/* Tab 栏已统一外置；运行控制（停止/重启）在共享 Tab 栏的 Tab 下拉；
           本栏只保留会话状态徽章与分屏身份标题（抽屉开关在共享 Tab 栏）。 */}
-			<SessionHeader
-				headerRef={chatHeaderRef}
-				statusSessionId={sessionId}
-				title={sessionTitle}
-				projectName={projectName}
-				paneTitle={splitPane ? sessionTitle : undefined}
-				onExitSplit={splitPane ? () => paneServices.exitSessionSplit(sessionId) : undefined}
-				isAnonymous={activeAgent?.noSession}
-				duration={sessionDuration}
-				isStarting={isAgentStarting}
-			/>
+			{(!paneServices.simpleNavigation || splitPane) && (
+				<SessionHeader
+					headerRef={chatHeaderRef}
+					statusSessionId={sessionId}
+					title={sessionTitle}
+					projectName={projectName}
+					paneTitle={splitPane ? sessionTitle : undefined}
+					onExitSplit={splitPane ? () => paneServices.exitSessionSplit(sessionId) : undefined}
+					isAnonymous={activeAgent?.noSession}
+					duration={sessionDuration}
+					isStarting={isAgentStarting}
+				/>
+			)}
+			{/* GUI 扩展桥：会话头部状态区落点（ctx.gui.setStatusbarItem）。
+			    紧贴会话头之下的小条目行；无贡献时返回 null，不占位。 */}
+			<BridgeGuiSlot sessionId={sessionId} slot="statusbar.item" className="flex shrink-0 flex-wrap items-center gap-2 px-2 text-xs text-muted-foreground" />
+			{/* GUI 扩展桥：顶部区落点（ctx.ui.setHeader）。无贡献时返回 null，不占位。 */}
+			<BridgeSlot sessionId={sessionId} targetId={BRIDGE_TARGET.header} className="flex flex-col gap-1 px-1" />
+			{/* GUI 扩展桥：顶部横幅通知区落点（ctx.gui.setBanner）。
+			    紧贴会话标题栏之下、聊天区之上 —— 与 SessionBranchBar 同级「旁插」。
+			    无贡献时返回 null，不占位、不挤动下方布局。 */}
+			<BridgeGuiSlot sessionId={sessionId} slot="banner" className="flex flex-col gap-1 px-1" />
 			{/* 分支导航条：仅当当前会话存在 fork 分支关系（父/兄弟/子分支）时显示 */}
 			<SessionBranchBar sessionId={sessionId} onOpenSession={onOpenBranchSession} />
 			{/* 远端会话的 trust 现状提示（P4.2）：标记存在时常驻在会话头下方；
@@ -265,6 +315,7 @@ export function SessionView({
 				key={`${sessionId}:${sessionResizableGroupKey(sessionPanels)}`}
 				orientation="vertical"
 				className="session-v-group"
+				data-terminal-collapse-anim={terminalCollapseAnimating || undefined}
 				groupRef={sessionGroupRef}
 				defaultLayout={sessionGroupDefaultLayout(sessionPanels, terminalCollapsed ? TERMINAL_PANEL_COLLAPSED_SIZE : terminalRowHeight, Math.max(1, window.innerHeight - 120))}
 				resizeTargetMinimumSize={{ fine: 20, coarse: 24 }}
@@ -276,6 +327,7 @@ export function SessionView({
 							sessionTimeline={sessionTimeline}
 							isRestarting={isRestarting}
 							timelineProps={{
+								instantSessionSwitch: paneServices.simpleNavigation,
 								hasProject,
 								onCreateSession: runCreateSessionDraft,
 								showThinking,
@@ -288,11 +340,13 @@ export function SessionView({
 								onResendUserMessage,
 								onEditMessage,
 								onDeleteMessage,
+								onRemoveMessageImage,
 								onForkMessage,
 								onRewindToMessage,
 								forkingMessageId,
 								onToast,
 								onQuickPrompt,
+								replyActionsRef: setReplyActionsTarget,
 							}}
 						/>
 					</div>
@@ -333,20 +387,30 @@ export function SessionView({
 								queuePanel={queuePanel}
 								widgets={
 									<>
-										<SessionTodoStrip sessionId={sessionId} />
-										<SessionFilesStrip sessionId={sessionId} run={latestAgentRun} onOpenFile={onOpenFile} onDiffFile={onDiffFile} />
-										<SessionSubagentsStrip sessionId={sessionId} onOpenChildSession={onOpenBranchSession} />
+										<SessionQueuedMessagesStrip sessionId={sessionId} />
+										{!statusInSidebar && <SessionTodoStrip sessionId={sessionId} />}
+										<SessionTeamStrip sessionId={sessionId} />
+										{!statusInSidebar && <SessionFilesStrip sessionId={sessionId} run={latestAgentRun} onOpenFile={onOpenFile} onDiffFile={onDiffFile} />}
+										{!statusInSidebar && <SessionSubagentsStrip sessionId={sessionId} onOpenChildSession={onOpenBranchSession} />}
 										<SessionGoalStrip sessionId={sessionId} />
 									</>
 								}
+								replyActionMessages={sessionTimeline.messages}
+								replyActionRules={replyActionRuleItems}
+								replyActionsTarget={replyActionsTarget}
+								replyActionsBlocked={askPanelVisible || isRestarting || isAgentStarting || sessionTimeline.isSurfaceLoading}
 							/>
 						</div>
 					)}
+					{/* GUI 扩展桥：时间线底部事件条落点（ctx.gui.setTimelineEvent）。 shrink-0：
+					    限高 flex 列的子项必须 shrink-0，否则压缩时会被挤成横条（AGENTS CSS 红线 6）。 */}
+					<BridgeGuiSlot sessionId={sessionId} slot="timeline.event" className="flex shrink-0 flex-col gap-1 px-2 pb-1" />
 				</ResizablePanel>
 
 				{terminalPanelVisible && (
 					<TerminalDockPanel
 						target={terminalTarget}
+						targetProject={terminalTargetProject}
 						panelRef={terminalPanelRef}
 						open={terminalOpen}
 						closing={terminalDockClosing}
@@ -354,6 +418,8 @@ export function SessionView({
 						height={terminalRowHeight}
 						maxHeight={availableTerminalHeight}
 						terminal={api.terminal}
+						terminalSettings={terminalSettings}
+						onThemeChange={onTerminalThemeChange}
 						ownerKey={terminalOwnerKey}
 						isProgrammaticResize={() => Date.now() < terminalProgrammaticExpireRef.current}
 						onOpenChange={setTerminalOpenForOwner}
@@ -362,6 +428,10 @@ export function SessionView({
 					/>
 				)}
 			</ResizablePanelGroup>
+			{/* GUI 扩展桥：底部状态区落点（ctx.ui.setFooter）+ 覆盖层宿主（ctx.gui.custom）。
+			    两者无内容时都返回 null，PiDeck 原有 DOM 零变化。 */}
+			<BridgeSlot sessionId={sessionId} targetId={BRIDGE_TARGET.footer} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-1" />
+			<BridgeOverlayHost sessionId={sessionId} />
 		</div>
 	);
 }

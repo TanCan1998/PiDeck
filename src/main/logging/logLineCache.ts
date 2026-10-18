@@ -14,19 +14,13 @@
 
 export type LogLineCacheDeps = {
 	readFile: (path: string) => Promise<string>;
+	/** 大文件尾部有界读（stat 预检后只读 maxBytes）：注入时超过 maxBytesPerFile 的
+	 * 日志不再整读进内存；未注入时退回整读+内存截尾（兼容旧 harness）。 */
+	readFileTail?: (path: string, maxBytes: number) => Promise<string>;
 	stat: (path: string) => Promise<{ mtimeMs: number; size: number }>;
 };
 
 type CachedLines = { fingerprint: string; lines: string[] };
-
-async function fileFingerprint(stat: LogLineCacheDeps["stat"], path: string): Promise<string> {
-	try {
-		const s = await stat(path);
-		return `${s.mtimeMs}:${s.size}`;
-	} catch {
-		return "missing";
-	}
-}
 
 export class LogLineCache {
 	private readonly deps: LogLineCacheDeps;
@@ -46,12 +40,18 @@ export class LogLineCache {
 
 	/** 文件的尾部行（指纹未变时零 IO 复用缓存）。 */
 	async linesOf(filePath: string): Promise<string[]> {
-		const fingerprint = await fileFingerprint(this.deps.stat, filePath);
+		// stat 只取一次：指纹与「是否走尾部有界读」共用，避免重复元数据 IO
+		const info = await this.deps
+			.stat(filePath)
+			.then((s) => s)
+			.catch(() => null);
+		const fingerprint = info ? `${info.mtimeMs}:${info.size}` : "missing";
 		const hit = this.cache.get(filePath);
 		if (hit && hit.fingerprint === fingerprint) {
 			return hit.lines;
 		}
-		const raw = await this.deps.readFile(filePath).catch(() => "");
+		// 超过单文件字节预算的日志只读尾部：整读的峰值内存与字符串拷贝都被钉在预算内
+		const raw = info && info.size > this.maxBytesPerFile && this.deps.readFileTail ? await this.deps.readFileTail(filePath, this.maxBytesPerFile).catch(() => "") : await this.deps.readFile(filePath).catch(() => "");
 		const rawLines = raw.split(/\r?\n/).filter(Boolean);
 		// 行数 + 字节双预算：从尾部向前累积（日志只关心最近），
 		// 至少保留一行；line.length 为 UTF-16 单元近似字节数，预算本身是粗粒度防护。

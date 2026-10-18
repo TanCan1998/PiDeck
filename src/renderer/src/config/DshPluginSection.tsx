@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAtomValue } from "jotai";
-import { ChevronDown, ChevronRight, Play, Plus, RefreshCw, Search, Square, Trash2, X } from "lucide-react";
+import { Loader2, ChevronDown, ChevronRight, Play, Plus, RefreshCw, Search, Square, Trash2, X } from "lucide-react";
 import type { DshPluginView, DshStaticPluginView } from "../../../shared/types";
 import { sessionRecordsAtom } from "../atoms";
 import { desktopApi } from "../desktopApi";
@@ -371,7 +371,7 @@ export function PluginInventoryView() {
 						setPage(1);
 					}}
 				>
-					<SelectTrigger className="h-8 w-40">
+					<SelectTrigger size="sm" className="w-40">
 						<SelectValue />
 					</SelectTrigger>
 					<SelectContent>
@@ -391,7 +391,10 @@ export function PluginInventoryView() {
 				</Button>
 			</div>
 			{loading ? (
-				<p className="text-micro text-muted-foreground">{t("common.loading")}</p>
+				<p className="flex items-center gap-1.5 text-micro text-muted-foreground">
+					<Loader2 size={12} className="animate-pideck-spin" aria-hidden="true" />
+					{t("common.loading")}
+				</p>
 			) : entries.length === 0 ? (
 				<p className="text-micro text-muted-foreground">{t("config.dsh.staticPluginsEmpty")}</p>
 			) : filtered.length === 0 ? (
@@ -422,7 +425,7 @@ export function PluginInventoryView() {
 									{open ? <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" /> : <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />}
 								</button>
 								{open && (
-									<div id={detailId} className="border-t border-border/40 px-3 py-2.5">
+									<div id={detailId} className="border-t border-border/40 px-3 py-2.5 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-fast">
 										<code className="block truncate font-mono text-micro text-text-secondary" title={entry.entryId}>
 											{entry.entryId}
 										</code>
@@ -516,7 +519,7 @@ function InstallPluginForm(props: { sessions: Array<{ sessionId: string; title: 
 			<div className="grid gap-1.5">
 				<label className="text-micro text-muted-foreground">{t("config.dsh.pluginSession")}</label>
 				<Select value={sessionId} onValueChange={setSessionId}>
-					<SelectTrigger className="h-8">
+					<SelectTrigger size="sm">
 						<SelectValue />
 					</SelectTrigger>
 					<SelectContent>
@@ -530,15 +533,15 @@ function InstallPluginForm(props: { sessions: Array<{ sessionId: string; title: 
 			</div>
 			<div className="grid gap-1.5">
 				<label className="text-micro text-muted-foreground">{t("config.dsh.pluginIdPrefix")}</label>
-				<Input className="h-8" value={idPrefix} onChange={(event) => setIdPrefix(event.target.value)} />
+				<Input size="sm" value={idPrefix} onChange={(event) => setIdPrefix(event.target.value)} />
 			</div>
 			<div className="grid gap-1.5">
 				<label className="text-micro text-muted-foreground">{t("config.dsh.pluginName")}</label>
-				<Input className="h-8" value={name} onChange={(event) => setName(event.target.value)} />
+				<Input size="sm" value={name} onChange={(event) => setName(event.target.value)} />
 			</div>
 			<div className="grid gap-1.5">
 				<label className="text-micro text-muted-foreground">{t("config.dsh.pluginPurpose")}</label>
-				<Input className="h-8" value={purpose} onChange={(event) => setPurpose(event.target.value)} />
+				<Input size="sm" value={purpose} onChange={(event) => setPurpose(event.target.value)} />
 			</div>
 			<div className="grid gap-1.5">
 				<label className="text-micro text-muted-foreground">{t("config.dsh.pluginHostCode")}</label>

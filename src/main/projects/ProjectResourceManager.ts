@@ -8,8 +8,10 @@ import type { CreateProjectSkillInput, PiExtensionSummary, PiPromptTemplateSumma
 import { isLocalProject } from "../../shared/projectLocation";
 import type { McpConfigFile } from "../../shared/types/mcp";
 import { parseMcpConfigFile, validateMcpConfigFile } from "../config/mcpConfig";
+import { revisionOf } from "../config/piConfigFileStore";
 import type { MainProcessTranslationKey } from "../../shared/i18n/mainProcessCopy";
 import { emptyProjectResourceOverrides, projectResourceOverridesFromRecord, setProjectInheritedResourceEnabled } from "./projectResourceOverrides";
+import { projectResourceEnabled } from "../config/piResourceRules";
 import { discoverExtensionEntries } from "../extensions/extensionDiscovery";
 
 const SKILL_FILE = "SKILL.md";
@@ -28,6 +30,14 @@ function hasErrorCode(value: unknown, code: string): boolean {
 }
 
 /** Validate project settings before any resource mutation so malformed JSON is never overwritten. */
+/** 原生过滤规则写入器（A4）：装配后项目侧开关写 `.pi/settings.json` 的原生条目。 */
+export type ProjectNativeRules = {
+	setResourceEnabled: (projectId: string, kind: "extensions" | "skills" | "prompts", value: string, enabled: boolean) => Promise<{ ok: boolean; error?: string }>;
+	setInheritedOverride: (projectId: string, kind: "extensions" | "skills" | "prompts", value: string, state: "inherit" | "enabled" | "disabled") => Promise<{ ok: boolean; error?: string }>;
+	/** 读取项目层原生条目（列表状态投影）；null = 未装配/无法读取。 */
+	readEntries: (projectId: string, kind: "extensions" | "skills" | "prompts") => Promise<string[] | null>;
+};
+
 async function readProjectSettingsForWrite(settingsFile: string, invalidJsonMessage: string): Promise<Record<string, unknown>> {
 	if (!existsSync(settingsFile)) return {};
 	let parsed: unknown;
@@ -61,6 +71,8 @@ export class ProjectResourceManager {
 			return project.path;
 		},
 		private readonly discoveryDependencies: ProjectResourceDiscoveryDependencies = {},
+		/** 原生过滤规则（A4）：装配后项目侧开关写 `.pi/settings.json` 原生条目。 */
+		private readonly depsNativeProjectRules: ProjectNativeRules | null = null,
 	) {}
 
 	/** Windows fs 边界使用主机路径；store 里的 WSL Linux 路径在此转换。 */
@@ -186,13 +198,29 @@ export class ProjectResourceManager {
 	 * Atomically replace the project-owned `.pi/mcp.json` after boundary and schema checks.
 	 * The temporary file lives beside the destination and is always cleaned up on failure.
 	 */
-	async saveProjectMcpConfig(projectId: string, file: McpConfigFile): Promise<void> {
+	async saveProjectMcpConfig(projectId: string, file: McpConfigFile, options: { expectedRevision?: string } = {}): Promise<{ ok: boolean; error?: string; conflict?: boolean }> {
 		const project = this.requireProject(projectId);
 		const validationError = validateMcpConfigFile(file);
 		if (validationError) throw new Error(validationError);
 
 		const boundary = await this.projectBoundary(project);
 		const lexicalPath = join(this.projectRoot(project), ".pi", "mcp.json");
+		// 乐观锁：页面快照的 revision 与磁盘不一致 = 外部改过（pi/手改），拒绝覆盖让页面重读。
+		// 写入本身仍走下方的临时文件 + rename（含 junction 防护）；预检与写入之间的极小窗口
+		// 由「外部修改只增不丢」的务实权衡接受（与内置扩展开关面板同一策略）。
+		if (options.expectedRevision !== undefined) {
+			let currentRevision = revisionOf("", false);
+			try {
+				const readPath = await resolveProjectFileReadPath(boundary, lexicalPath);
+				currentRevision = revisionOf(await readFile(readPath, "utf8"), true);
+			} catch {
+				// 文件不存在 = missing，与快照侧 revisionOf("", false) 哨兵一致。
+			}
+			if (currentRevision !== options.expectedRevision) {
+				return { ok: false, conflict: true, error: "mcp.json changed on disk; reload before saving." };
+			}
+		}
+
 		const safePath = await this.resolveProjectWritePath(project, lexicalPath);
 		await mkdir(dirname(safePath), { recursive: true });
 
@@ -213,6 +241,7 @@ export class ProjectResourceManager {
 		} finally {
 			await rm(temporaryPath, { force: true }).catch(() => undefined);
 		}
+		return { ok: true };
 	}
 
 	/**
@@ -347,10 +376,94 @@ export class ProjectResourceManager {
 		await trashPath(target, { source: "projects:delete-skill" });
 	}
 
+	/**
+	 * 注入原生过滤规则写入器（A4）：项目侧开关写 `.pi/settings.json` 的
+	 * `extensions/skills/prompts` 精确规则，而不是 PiDeck 私有字段。
+	 * 未装配时退回私有字段（渐进迁移，行为不突变）。
+	 */
+	/**
+	 * 用项目层原生条目覆盖列表里的 enabled（一次读文件，整批投影）。
+	 * 未装配原生规则或读不到条目时保持列表原值（私有字段），行为不突变。
+	 */
+	private async applyNativeProjectState(project: Project, kind: "extensions" | "skills" | "prompts", items: Array<{ path?: string; enabled?: boolean }>): Promise<void> {
+		if (!this.depsNativeProjectRules || items.length === 0) return;
+		const entries = await this.depsNativeProjectRules.readEntries(project.id, kind);
+		if (entries === null) return;
+		const baseDir = join(this.projectRoot(project), ".pi");
+		for (const item of items) {
+			if (!item.path) continue;
+			item.enabled = projectResourceEnabled({ entries, value: item.path, baseDir });
+		}
+	}
+
+	/**
+	 * 读取项目 `.pi/settings.json` 里的 PiDeck 私有禁用记录（迁移用，只读）。
+	 * 这不是 pi 原生字段：迁移会把它们翻译成原生过滤规则，再由 clearProjectLegacyState 清理。
+	 */
+	async readProjectLegacyDisables(projectId: string): Promise<{
+		disabledExtensions: string[];
+		disabledSkills: string[];
+		disabledPrompts: string[];
+		inheritedExtensions: string[];
+		inheritedSkills: string[];
+		inheritedPrompts: string[];
+	} | null> {
+		const project = this.getProject(projectId);
+		if (!project || project.kind === "chat") return null;
+		const settingsFile = join(this.projectRoot(project), ".pi", "settings.json");
+		if (!existsSync(settingsFile)) {
+			return { disabledExtensions: [], disabledSkills: [], disabledPrompts: [], inheritedExtensions: [], inheritedSkills: [], inheritedPrompts: [] };
+		}
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(await readFile(settingsFile, "utf8"));
+		} catch {
+			return null;
+		}
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+		const settings = parsed as Record<string, unknown>;
+		const strings = (value: unknown): string[] => (Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []);
+		return {
+			disabledExtensions: strings(settings.disabledExtensions),
+			disabledSkills: strings(settings.disabledSkills),
+			disabledPrompts: strings(settings.disabledPrompts),
+			inheritedExtensions: strings(settings.pideckDisabledGlobalExtensions),
+			inheritedSkills: strings(settings.pideckDisabledGlobalSkills),
+			inheritedPrompts: strings(settings.pideckDisabledGlobalPrompts),
+		};
+	}
+
+	/**
+	 * 清理已成功迁移的项目私有禁用字段（不碰其它 pi 原生字段与未知键）。
+	 * 未成功迁移的类别由调用方置 false 保留。
+	 */
+	async clearProjectLegacyDisables(projectId: string, patch: { extensions?: boolean; skills?: boolean; prompts?: boolean; inherited?: boolean }): Promise<void> {
+		const project = this.requireProject(projectId);
+		const settingsFile = await this.resolveProjectWritePath(project, join(this.projectRoot(project), ".pi", "settings.json"));
+		if (!existsSync(settingsFile)) return;
+		const settings = await readProjectSettingsForWrite(settingsFile, this.translate("mainConfig.invalidJson"));
+		if (patch.extensions) delete settings.disabledExtensions;
+		if (patch.skills) delete settings.disabledSkills;
+		if (patch.prompts) delete settings.disabledPrompts;
+		if (patch.inherited) {
+			delete settings.pideckDisabledGlobalExtensions;
+			delete settings.pideckDisabledGlobalSkills;
+			delete settings.pideckDisabledGlobalPrompts;
+		}
+		await mkdir(dirname(settingsFile), { recursive: true });
+		await writeFile(settingsFile, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+	}
+
 	async toggleSkill(projectId: string, skillPath: string, enabled: boolean): Promise<PiSkillSummary> {
 		const project = this.requireProject(projectId);
 		const skill = await this.findSkill(project, skillPath);
 		const safeSkillPath = await this.resolveExistingProjectPath(project, skill.path);
+		// 原生过滤规则优先：项目自有技能写 `.pi/settings.json` 的 skills 精确 `-path`。
+		if (this.depsNativeProjectRules) {
+			const result = await this.depsNativeProjectRules.setResourceEnabled(projectId, "skills", skill.path, enabled);
+			if (!result.ok) throw new Error(result.error ?? this.translate("mainProjectResource.skillNotFound"));
+			return this.readSkill(safeSkillPath, this.skillLocations(project).find((l) => l.id === skill.sourceId) ?? this.skillLocations(project)[0], skill.type, new Set());
+		}
 		const settingsFile = await this.resolveProjectWritePath(project, join(this.projectRoot(project), ".pi", "settings.json"));
 		const settings = await readProjectSettingsForWrite(settingsFile, this.translate("mainConfig.invalidJson"));
 		const disabled = Array.isArray(settings.disabledSkills) ? settings.disabledSkills.filter((name): name is string => typeof name === "string") : [];
@@ -372,6 +485,12 @@ export class ProjectResourceManager {
 		const extension = (await this.listExtensions(project)).find((item) => item.path === safeRequestedPath);
 		if (!extension?.path) throw new Error(this.translate("mainProjectResource.extensionNotFound"));
 		await this.resolveExistingProjectPath(project, extension.path);
+		// 原生过滤规则优先：项目自有扩展写 `.pi/settings.json` 的 extensions 精确 `-path`。
+		if (this.depsNativeProjectRules) {
+			const result = await this.depsNativeProjectRules.setResourceEnabled(projectId, "extensions", extension.path, enabled);
+			if (!result.ok) throw new Error(result.error ?? this.translate("mainProjectResource.extensionNotFound"));
+			return;
+		}
 		const settingsFile = await this.resolveProjectWritePath(project, join(this.projectRoot(project), ".pi", "settings.json"));
 		const settings = await readProjectSettingsForWrite(settingsFile, this.translate("mainConfig.invalidJson"));
 		const disabled = Array.isArray(settings.disabledExtensions) ? settings.disabledExtensions.filter((source): source is string => typeof source === "string") : [];
@@ -388,10 +507,18 @@ export class ProjectResourceManager {
 	async toggleInheritedResource(input: ProjectInheritedResourceToggleInput): Promise<ProjectResourceOverrides> {
 		const project = this.requireProject(input.projectId);
 		const rawKey = input.key.trim();
-		const validSkillKey = /^(?:pi-global|agents-global):[^\u0000\r\n]+$/.test(rawKey);
-		const validPlainKey = rawKey.length > 0 && !/[\u0000\r\n]/.test(rawKey);
-		const valid = rawKey.length <= 1024 && (input.kind === "skill" ? validSkillKey : validPlainKey);
+		// key 必须是 pi 能匹配的路径（原生规则）；历史版本曾传身份键（pi-global:<名>），pi 不认，已废弃。
+		const valid = rawKey.length > 0 && rawKey.length <= 1024 && !/[\u0000\r\n]/.test(rawKey);
 		if (!valid) throw new Error(this.translate("mainProjectResource.invalidInheritedKey"));
+		// 原生分支必须保留原始大小写：pi 在 Linux 上按大小写匹配路径，写小写路径会静默失配。
+		// 旧私有字段分支沿用历史惯例（非扩展键统一小写，配合读回的同样小写化）。
+		if (this.depsNativeProjectRules) {
+			const kind = input.kind === "extension" ? "extensions" : input.kind === "skill" ? "skills" : "prompts";
+			const result = await this.depsNativeProjectRules.setInheritedOverride(input.projectId, kind, rawKey, input.enabled ? "enabled" : "disabled");
+			if (!result.ok) throw new Error(result.error ?? this.translate("mainConfig.invalidJson"));
+			const settings = await this.readProjectSettings(project);
+			return projectResourceOverridesFromRecord(settings);
+		}
 		const key = input.kind === "extension" ? rawKey : rawKey.toLowerCase();
 		const settingsFile = await this.resolveProjectWritePath(project, join(this.projectRoot(project), ".pi", "settings.json"));
 		return setProjectInheritedResourceEnabled(settingsFile, input.kind, key, input.enabled, this.translate("mainConfig.invalidJson"));
@@ -422,7 +549,10 @@ export class ProjectResourceManager {
 				}
 			}),
 		);
-		return groups.flat().sort((a, b) => a.name.localeCompare(b.name));
+		const items = groups.flat();
+		// 原生投影优先（迁移后项目私有 disabledSkills 已清空）。
+		await this.applyNativeProjectState(project, "skills", items);
+		return items.sort((a, b) => a.name.localeCompare(b.name));
 	}
 
 	private projectDisabledSkillKeys(settings: Record<string, unknown>): Set<string> {
@@ -519,12 +649,13 @@ export class ProjectResourceManager {
 				// Runtime discovery may see the entry, but management must not cross the project boundary.
 			}
 		}
-		return [...roots.entries()]
-			.map(([source, path]) => ({
-				...this.toExtensionSummary(source, path),
-				enabled: !disabledExts.has(source),
-			}))
-			.sort((a, b) => a.source.localeCompare(b.source));
+		const items = [...roots.entries()].map(([source, path]) => ({
+			...this.toExtensionSummary(source, path),
+			enabled: !disabledExts.has(source),
+		}));
+		// 原生投影优先（迁移后项目私有 disabledExtensions 已清空）。
+		await this.applyNativeProjectState(project, "extensions", items);
+		return items.sort((a, b) => a.source.localeCompare(b.source));
 	}
 
 	private toExtensionSummary(name: string, path: string): PiExtensionSummary {

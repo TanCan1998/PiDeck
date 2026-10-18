@@ -12,11 +12,14 @@ function read(path) {
 test("tab ⋯ menu hides rename for draft sessions", () => {
 	const app = read("src/renderer/src/App.tsx");
 	// 与 canCopySession/canExportHtml 同款草稿闸门：草稿态直接不传 onRenameSession。
-	assert.match(app, /onRenameSession:\s*currentSessionRecord\.status === "draft"\s*\?\s*undefined\s*:\s*\(\) =>/);
+	// 闸门形态随 ⋯ 菜单工厂演进为 canRename（record.status !== "draft"）+ onRename 三元；
+	// 草稿态仍显式给 undefined（菜单项因此不渲染）。
+	assert.match(app, /const canRename = record\.status !== "draft";/);
+	assert.match(app, /onRename: canRename\s*\?\s*\(\) =>\s*\{[\s\S]*?: undefined,/);
 
 	// 菜单项只在回调存在时渲染，因此草稿态不会出现「重命名」。
 	const tabsBar = read("src/renderer/src/components/session/SessionTabsBar.tsx");
-	assert.match(tabsBar, /props\.sessionActions\.onRenameSession\s*&&\s*\(/);
+	assert.match(tabsBar, /props\.sessionActions\.onRename\s*&&\s*\(/);
 });
 
 test("sidebar draft context menu stays rename-free", () => {

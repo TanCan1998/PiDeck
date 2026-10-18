@@ -91,3 +91,15 @@ export function reorderSessionTabs(tabs: readonly string[], pinned: readonly str
 	const nextNormalList = targetPinned ? normalList : insert(normalList, targetId, position);
 	return { tabs: [...nextPinnedList, ...nextNormalList], pinned: nextPinned };
 }
+
+/**
+ * Ctrl+Tab 循环切换：按 Tab 栏顺序返回目标会话 id（到头回绕）。
+ * 当前会话不在 Tab 列表（分屏聚焦外会话/无 Tab）时，正向切到首个、反向切到末个；
+ * 不足 2 个 Tab 无处可切，返回 null。
+ */
+export function cycleSessionTab(tabs: readonly string[], currentSessionId: string | undefined, direction: 1 | -1): string | null {
+	if (tabs.length < 2) return null;
+	const index = currentSessionId ? tabs.indexOf(currentSessionId) : -1;
+	if (index === -1) return direction === 1 ? tabs[0] : (tabs[tabs.length - 1] ?? null);
+	return tabs[(index + direction + tabs.length) % tabs.length] ?? null;
+}

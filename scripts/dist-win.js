@@ -32,6 +32,7 @@ execSync(`npx electron-builder --win ${formats}`, {
 // GitHub Release 同时包含 `latest.yml`、当前版本 setup.exe 和对应 .blockmap；后两
 // 项缺失时客户端无法安全下载或进行差分更新。portable / zip 仅供用户手动下载。
 console.log(`\n✅ 打包完成！产物在 release/ 目录下`);
+console.log(`ℹ 本脚本产物为 stable 通道；需要 dev 通道（PiDeck Dev）请用 npm run dist:win:dev`);
 const releaseDir = path.join(root, "release");
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const productName = packageJson.build?.productName ?? packageJson.name;

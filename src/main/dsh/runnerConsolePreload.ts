@@ -1,4 +1,4 @@
-import { createRequire } from "node:module";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { DSH_RUNNER_NODE_ENV } from "./dshRunnerNodeSidecar";
 import { allocHiddenConsole } from "./allocHiddenConsole";
 
@@ -91,6 +91,8 @@ function patchNestedRunnerWindowsHide(): void {
 			writable: true,
 			configurable: true,
 		});
+		// 嵌套 runner 使用 ESM 的 child_process，CJS 补丁必须同步到 builtin binding。
+		syncBuiltinESMExports();
 	} catch {
 		// 补丁失败时保持 runner 原有行为
 	}

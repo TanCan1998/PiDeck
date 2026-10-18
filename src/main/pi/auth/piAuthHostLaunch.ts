@@ -10,7 +10,7 @@
  * settings 传进来，因此可以在 node --test 里直接跑真实文件系统断言。
  */
 
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
 import type { AppSettings } from "../../../shared/types/settings";
 import type { PiCommandInvocation, PiLocator } from "../PiLocator";
@@ -47,8 +47,9 @@ export type PiAuthHostLaunch =
 	| { ok: false; reason: PiAuthHostLaunchFailureReason /** 诊断细节（日志与「查看详情」用） */; detail?: string };
 
 /** 助手脚本路径：与 skills/xueprompts.db 同一约定（dev 读 appPath/resources，打包读 resourcesPath）。 */
-export function resolvePiAuthHostPath(input: { appPath: string; resourcesPath: string; isPackaged: boolean }): string {
-	return input.isPackaged ? join(input.resourcesPath, PI_AUTH_HOST_FILENAME) : join(input.appPath, "resources", PI_AUTH_HOST_FILENAME);
+export function resolvePiAuthHostPath(input: { appPath: string; resourcesPath: string; isPackaged: boolean; filename?: string }): string {
+	const filename = input.filename ?? PI_AUTH_HOST_FILENAME;
+	return input.isPackaged ? join(input.resourcesPath, filename) : join(input.appPath, "resources", filename);
 }
 
 function tryRealpath(target: string): string | undefined {
@@ -66,7 +67,8 @@ function tryRealpath(target: string): string | undefined {
  * 覆盖三种真实形态：
  * - npm/pnpm 垫片还原出的 `.../@earendil-works/pi-coding-agent/dist/cli.js`；
  * - `node_modules/.bin/pi` 符号链接（先 realpath 再向上）；
- * - 用户自定义路径直接指向包内某个 JS 文件。
+ * - 用户自定义路径直接指向包内某个 JS 文件；
+ * - 官方安装器 managed 布局（`~/.pi/agent/bin/pi(.cmd)` 垫片 + `install/releases/<ver>`）。
  *
  * `maxDepth` 限深是为了避免在异常路径下一路走到磁盘根。
  */
@@ -99,6 +101,93 @@ export function resolvePiSdkEntry(entryJsPath: string, maxDepth = 5): string | u
 		dir = parent;
 	}
 	return undefined;
+}
+
+/** 官方安装器（managed install）的 install 根标记文件；内容与 pi 安装器 `releases-v1` 布局对齐。 */
+const MANAGED_INSTALL_MARKER = "managed-install.json";
+
+/** release 版本号形态：与 pi 安装器的 MANAGED_RELEASE_VERSION_RE 对齐，同时避免把 current-version 内容拼进任意路径。 */
+const MANAGED_RELEASE_VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
+/**
+ * 解析官方安装器（managed install）布局下 pi 的 SDK 入口。
+ *
+ * 官方安装器放在 `~/.pi/agent/bin/pi(.cmd)` 的只是转发到 pi-launcher.js 的小垫片：
+ * 不是 npm 垫片形态，向上也找不到 node_modules，因此 resolvePiSdkEntry 必然失败。
+ * 真正的包在 `<agentDir>/install/releases/<ver>/node_modules/<pkg>`，`install/current-version`
+ * 指向当前激活版本（语义与 pi 安装器的 activateManagedRelease 对齐：写 tmp 后 rename，原子生效）。
+ *
+ * current-version 缺失或指向不完整 release（更新中断）时，退到 releases 下版本号最大的完整
+ * release，保证「能解析到一个可用入口」优先于「严格跟随指针」。
+ */
+export function resolveManagedPiSdkEntry(commandPath: string): string | undefined {
+	const realCommand = tryRealpath(commandPath) ?? commandPath;
+	// 入口可能是软链（如 ~/.local/bin/pi → ~/.pi/agent/bin/pi），realpath 后与原路径各试一次。
+	const agentDirs = [dirname(dirname(commandPath)), dirname(dirname(realCommand))];
+	for (const agentDir of [...new Set(agentDirs)]) {
+		const installRoot = join(agentDir, "install");
+		if (!isManagedInstallRoot(installRoot)) continue;
+		const entry = resolveReleaseSdkEntry(installRoot);
+		if (entry) return entry;
+	}
+	return undefined;
+}
+
+/** 标记文件合法性：kind/schemaVersion/layout 三个字段都必须是安装器写入的值。 */
+function isManagedInstallRoot(installRoot: string): boolean {
+	try {
+		const marker = JSON.parse(readFileSync(join(installRoot, MANAGED_INSTALL_MARKER), "utf8")) as { kind?: unknown; schemaVersion?: unknown; layout?: unknown };
+		return marker.kind === "pi-managed-install" && marker.schemaVersion === 1 && marker.layout === "releases-v1";
+	} catch {
+		// 无标记/损坏 JSON：不是 managed 安装，交给其它解析路径。
+		return false;
+	}
+}
+
+/** 从 install 根解析当前 release 的 SDK 入口；current-version 优先，缺失时取版本号最大的完整 release。 */
+function resolveReleaseSdkEntry(installRoot: string): string | undefined {
+	const releasesDir = join(installRoot, "releases");
+	let currentVersion: string | undefined;
+	try {
+		const raw = readFileSync(join(installRoot, "current-version"), "utf8").trim();
+		if (MANAGED_RELEASE_VERSION_RE.test(raw)) currentVersion = raw;
+	} catch {
+		// current-version 不存在：走 releases 目录回退。
+	}
+	if (currentVersion) {
+		const entry = piSdkEntryIn(join(releasesDir, currentVersion, "node_modules", PI_PACKAGE_NAME));
+		if (entry) return entry;
+	}
+	let fallback: { version: string; numbers: [number, number, number]; entry: string } | undefined;
+	let releaseNames: string[] = [];
+	try {
+		releaseNames = readdirSync(releasesDir);
+	} catch {
+		return undefined;
+	}
+	for (const name of releaseNames) {
+		if (!MANAGED_RELEASE_VERSION_RE.test(name)) continue;
+		const numbers = releaseVersionNumbers(name);
+		if (!numbers) continue;
+		const entry = piSdkEntryIn(join(releasesDir, name, "node_modules", PI_PACKAGE_NAME));
+		if (!entry) continue;
+		// 数值比较 major.minor.patch；基线相同（预发版差异）时用字符串序保证结果确定。
+		if (!fallback || compareReleaseVersion(numbers, name, fallback.numbers, fallback.version) > 0) fallback = { version: name, numbers, entry };
+	}
+	return fallback?.entry;
+}
+
+function releaseVersionNumbers(name: string): [number, number, number] | undefined {
+	const [major, minor, patch] = name.split(".");
+	const parsed = [Number(major), Number(minor), Number(patch.split("-")[0].split("+")[0])];
+	return parsed.every((n) => Number.isInteger(n)) ? ([parsed[0], parsed[1], parsed[2]] as [number, number, number]) : undefined;
+}
+
+function compareReleaseVersion(aNum: [number, number, number], aName: string, bNum: [number, number, number], bName: string): number {
+	for (let i = 0; i < 3; i += 1) {
+		if (aNum[i] !== bNum[i]) return aNum[i] - bNum[i];
+	}
+	return aName < bName ? -1 : aName > bName ? 1 : 0;
 }
 
 /** 裸命令名（靠 PATH 解析）与绝对路径的区分：后者才包含路径分隔符。 */
@@ -150,8 +239,8 @@ function resolveNodeExe(invocation: PiCommandInvocation, userDataPath: string): 
  * 组装助手的启动参数。失败时返回分类原因，由渲染层翻成可读提示（通常是
  * 「请在终端里执行 pi 然后 /login」）——绝不静默失败，否则用户只会看到没反应。
  */
-export function resolvePiAuthHostLaunch(input: { settings: PiAuthHostSettings; locator: PiLocator; userDataPath: string; appPath: string; resourcesPath: string; isPackaged: boolean }): PiAuthHostLaunch {
-	const helperPath = resolvePiAuthHostPath(input);
+export function resolvePiAuthHostLaunch(input: { settings: PiAuthHostSettings; locator: PiLocator; userDataPath: string; appPath: string; resourcesPath: string; isPackaged: boolean /** 复用同套解析逻辑的其它助手脚本文件名（如提示词增强助手）；缺省为认证助手。 */; helperFilename?: string }): PiAuthHostLaunch {
+	const helperPath = resolvePiAuthHostPath({ ...input, filename: input.helperFilename ?? PI_AUTH_HOST_FILENAME });
 	if (!existsSync(helperPath)) {
 		return { ok: false, reason: "helper-missing", detail: helperPath };
 	}
@@ -164,7 +253,9 @@ export function resolvePiAuthHostLaunch(input: { settings: PiAuthHostSettings; l
 
 	const invocation = input.locator.createInvocation(piCommand, []);
 	const candidate = pickPiEntryCandidate(invocation, piCommand);
-	const sdkEntry = candidate ? resolvePiSdkEntry(candidate) : undefined;
+	// managed 安装：pi.cmd/pi 只是转发到 pi-launcher.js 的小垫片，垫片还原与向上找包根都到不了
+	// node_modules，此时按 install/current-version → releases/<ver> 直取包根（issue #335）。
+	const sdkEntry = (candidate ? resolvePiSdkEntry(candidate) : undefined) ?? resolveManagedPiSdkEntry(piCommand);
 	if (!sdkEntry) {
 		// cmd-shim 回退原因（垫片形态不符/入口缺失）一并带出，便于排查装的是什么形态的 pi。
 		return { ok: false, reason: "no-pi-entry", detail: invocation.windowsLaunch?.reason ?? candidate ?? piCommand };

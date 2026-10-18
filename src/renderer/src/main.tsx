@@ -6,6 +6,7 @@ import { AppErrorBoundary } from "./components/app/AppErrorBoundary";
 import { TooltipProvider } from "./components/ui-shadcn/tooltip";
 import { Toaster } from "./components/ui-shadcn/sonner";
 import { t } from "./i18n";
+import { dismissBootOverlay } from "./utils/bootOverlay";
 import { showNotice } from "./utils/notice";
 import "./styles.css";
 
@@ -47,7 +48,12 @@ window.addEventListener("error", (event) => {
 	// 资源加载失败（script/img）也会进 error 事件，但 event.error 通常为空；
 	// 这类错误不适合弹业务 toast，只记日志。
 	const isResourceError = event.target instanceof HTMLElement;
-	writeStartupLog("error", "Renderer uncaught error", {
+	// ResizeObserver loop 警告是 Chromium 的良性通知（同一帧内 RO 回调又触发 resize），
+	// Streamdown 动画 + resizable panels 组合下常见：只记日志、不弹错误 toast。
+	// 日志降到 info：这条会进 EnvironmentDoctor 的「最近 7 天报错」统计，
+	// 用 error 级别会让良性噪音顶掉真正的失败信号。
+	const isBenignResizeObserverLoop = typeof event.message === "string" && event.message.includes("ResizeObserver loop");
+	writeStartupLog(isBenignResizeObserverLoop ? "info" : "error", "Renderer uncaught error", {
 		message: event.message,
 		filename: event.filename,
 		lineno: event.lineno,
@@ -57,9 +63,6 @@ window.addEventListener("error", (event) => {
 	});
 	if (!isResourceError) {
 		const message = formatRuntimeError(event.error ?? event.message);
-		// ResizeObserver loop 警告是 Chromium 的良性通知（同一帧内 RO 回调又触发 resize），
-		// Streamdown 动画 + resizable panels 组合下常见；只记日志，不弹错误 toast 干扰用户。
-		const isBenignResizeObserverLoop = typeof event.message === "string" && event.message.includes("ResizeObserver loop");
 		if (message && !isBenignResizeObserverLoop) {
 			showNotice(`${t("app.runtimeErrorToast")}: ${message}`, 6000, "error");
 		}
@@ -87,6 +90,12 @@ if (!rootElement) {
 	throw new Error("Renderer root element missing");
 }
 
+// 极简浮窗模式：URL query mini-overlay=1 时加 CSS 类（强制单栏布局 + 隐藏侧栏/抽屉/标题栏）
+const isMiniOverlayMode = new URLSearchParams(window.location.search).get("mini-overlay") === "1";
+if (isMiniOverlayMode) {
+	document.body.classList.add("mini-overlay-mode");
+}
+
 ReactDOM.createRoot(rootElement).render(
 	<React.StrictMode>
 		<AppErrorBoundary>
@@ -100,34 +109,16 @@ ReactDOM.createRoot(rootElement).render(
 	</React.StrictMode>,
 );
 
-function dismissBootOverlay() {
-	const overlay = document.getElementById("boot-overlay");
-	if (!overlay) return;
-	if (overlay.dataset.dismissing === "true") return;
-	overlay.dataset.dismissing = "true";
-
-	let removed = false;
-	const removeOverlay = () => {
-		if (removed) return;
-		removed = true;
-		overlay.remove();
-	};
-
-	overlay.classList.add("fade-out");
-	// 过渡结束后从 DOM 移除覆盖层，释放层级上下文。
-	overlay.addEventListener("transitionend", removeOverlay, { once: true });
-	// 兜底：某些环境下 transitionend 可能不触发。
-	window.setTimeout(removeOverlay, 700);
-}
-
 /**
- * React 首次渲染完成后淡出启动遮罩。前台窗口走双 rAF，保证 transition
- * 有独立的布局帧；独立超时不依赖 rAF，因为 Electron 隐藏或后台窗口可将
- * rAF 长时间节流，不能让已挂载的工作台永久被遮挡。
+ * React 首次渲染完成只记里程碑，**不在这里撤遮罩**：首帧工作区尚未恢复会话
+ * （currentSessionId/sessionTabIds 异步到位），按挂载帧撤除会露出「无会话空态
+ * = 引导页」那一帧。撤除时机由内容就绪信号决定（hooks/app/useBootOverlayReady.ts），
+ * 这里只保留硬兜底超时——不依赖 rAF（Electron 隐藏/后台窗口可将 rAF 长时间节流），
+ * 也保证任何异常路径下已挂载的工作台不会被遮罩永久盖住。
+ * 保留 rAF 包裹：此里程碑语义是「首帧已提交」，启动诊断时间线按它读节点。
  */
 requestAnimationFrame(() => {
 	writeStartupLog("info", "Renderer React tree mounted");
-	requestAnimationFrame(dismissBootOverlay);
 });
 
 window.setTimeout(dismissBootOverlay, 1500);

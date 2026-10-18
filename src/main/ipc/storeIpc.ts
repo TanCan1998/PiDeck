@@ -5,11 +5,13 @@
 
 import { ipcMain } from "electron";
 import { ipcChannels } from "../../shared/ipc";
-import type { CreatePiPromptTemplateInput, PiPromptTemplateSummary, PromptStoreItem, PromptStoreRawItem, PromptStoreSearchResponse, PromptStoreSearchResult } from "../../shared/types";
+import type { CreatePiPromptTemplateInput, PiPromptTemplateSummary, PromptStoreItem, PromptStoreRawItem, PromptStoreSearchResponse, PromptStoreSearchResult, SkillHubInstallProgress, SkillHubSearchOptions } from "../../shared/types";
 import type { AppLogger } from "../logging/AppLogger";
 import type { PromptManager } from "../prompts/PromptManager";
 import type { SkillManager } from "../skills/SkillManager";
+import { isNetworkFailure } from "../skills/skillHubInstallProgress";
 import type { XuePromptManager } from "../prompts/XuePromptManager";
+import type { XuePromptDbStore } from "../prompts/XuePromptDbStore";
 import type { ExtensionManager } from "../extensions/ExtensionManager";
 import type { ProjectResourceManager } from "../projects/ProjectResourceManager";
 import type { ConfigManager } from "../config/ConfigManager";
@@ -19,16 +21,31 @@ export type StoreIpcDeps = {
 	promptManager: PromptManager;
 	skillManager: SkillManager;
 	xuePromptManager: XuePromptManager;
+	/** 提示词库 db 远程拉取服务（yaoPromptsDbRetry 用；可选保持 IPC 单测轻量）。 */
+	xuePromptDbStore?: () => XuePromptDbStore | null;
 	extensionManager: ExtensionManager;
 	projectResourceManager: ProjectResourceManager;
 	/** Project trust is checked before any store write; optional keeps isolated IPC tests lightweight. */
 	configManager?: ConfigManager;
 	projectTrustPath?: (projectRoot: string, projectId: string) => string;
+	/**
+	 * 主进程网络请求实现（注入 Electron net.fetch）。
+	 * 商店搜索不能用裸全局 fetch：undici 既不读系统代理也不读 Electron session 代理，
+	 * 需要代理才能出去的网络上会直接挂到超时，表现为「商店加载不动」。
+	 */
+	netFetch?: (url: string, init?: RequestInit) => Promise<Response>;
+	/** 安装子进程的代理 env（git clone 不读 Chromium 代理，只能靠环境变量传递） */
+	resolveInstallProxyEnv?: () => Promise<Record<string, string> | undefined>;
+	/** 安装进度推送（主进程 → 渲染层，通道 skill-hub:install-progress） */
+	sendSkillHubInstallProgress?: (progress: SkillHubInstallProgress) => void;
 	appLogger: AppLogger;
 	mainCopy: (key: string, params?: Record<string, string | number>) => string;
 };
 
-export function registerStoreIpc({ promptManager, skillManager, xuePromptManager, extensionManager, projectResourceManager, configManager, projectTrustPath, appLogger, mainCopy }: StoreIpcDeps): void {
+export function registerStoreIpc({ promptManager, skillManager, xuePromptManager, xuePromptDbStore, extensionManager, projectResourceManager, configManager, projectTrustPath, netFetch, resolveInstallProxyEnv, sendSkillHubInstallProgress, appLogger, mainCopy }: StoreIpcDeps): void {
+	// 商店网络请求统一走注入实现（Electron net.fetch，遵循桌面/系统代理规则）。
+	// 惰性取全局 fetch：测试沙箱没有 fetch 全局，注册阶段直接引用会 ReferenceError。
+	const fetchImpl = netFetch ?? ((url: string, init?: RequestInit) => globalThis.fetch(url, init));
 	const requireText = (value: unknown, label: string, maxLength = 4096): string => {
 		if (typeof value !== "string" || !value.trim() || value.length > maxLength) {
 			throw new Error(`Invalid ${label}.`);
@@ -48,6 +65,18 @@ export function registerStoreIpc({ promptManager, skillManager, xuePromptManager
 		const name = "name" in value ? requireString(value.name, "prompt name", 256) : "";
 		const description = "description" in value ? requireString(value.description, "prompt description", 4096) : "";
 		return { name, description };
+	};
+	/**
+	 * 商店导入载荷校验：渲染层不可信，null/非对象会在解构时变成裸 TypeError，
+	 * content 无上界则可被超大字符串压垮写盘路径。字段上限与 promptsEdit 的
+	 * requireString(content, 4MB) 同构，错误信息带字段名方便排查。
+	 */
+	const requireStoreItem = (value: unknown): { title: string; description: string; content: string } => {
+		if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Invalid store item.");
+		const title = requireString((value as { title?: unknown }).title, "store item title", 512);
+		const description = requireString((value as { description?: unknown }).description, "store item description", 4096);
+		const content = requireString((value as { content?: unknown }).content, "store item content", 4 * 1024 * 1024);
+		return { title, description, content };
 	};
 	const projectRoot = (projectId: unknown): string => {
 		if (typeof projectId !== "string" || !projectId.trim() || projectId.length > 256) {
@@ -93,7 +122,8 @@ export function registerStoreIpc({ promptManager, skillManager, xuePromptManager
 		return promptManager.readContent(validPath);
 	});
 	ipcMain.handle(ipcChannels.promptsListByProject, async (_event, projectId: unknown) => {
-		return promptManager.listByProject(projectRoot(projectId));
+		const root = projectRoot(projectId);
+		return promptManager.listByProject(root, (projectId as string).trim());
 	});
 	ipcMain.handle(ipcChannels.promptsCreateInProject, async (_event, projectId: unknown, input: unknown) => {
 		const validInput = promptInput(input);
@@ -144,7 +174,7 @@ export function registerStoreIpc({ promptManager, skillManager, xuePromptManager
 		if (typeof enabled !== "boolean") {
 			throw new Error("Invalid project prompt toggle input.");
 		}
-		const result = await promptManager.toggleInProject(projectRoot(projectId), validName, enabled);
+		const result = await promptManager.toggleInProject(projectRoot(projectId), validName, enabled, (projectId as string).trim());
 		void appLogger.info("prompt", "Project prompt template toggled", {
 			projectId,
 			name: validName,
@@ -233,7 +263,7 @@ export function registerStoreIpc({ promptManager, skillManager, xuePromptManager
 				if (options?.tag) params.set("tag", options.tag);
 
 				const url = `${PROMPT_STORE_BASE}/prompts?${params.toString()}`;
-				const response = await fetch(url, {
+				const response = await fetchImpl(url, {
 					signal: AbortSignal.timeout(10_000),
 				});
 				if (!response.ok) {
@@ -257,7 +287,7 @@ export function registerStoreIpc({ promptManager, skillManager, xuePromptManager
 	ipcMain.handle(ipcChannels.promptStoreGet, async (_event, id: string) => {
 		try {
 			const url = `${PROMPT_STORE_BASE}/prompts/${encodeURIComponent(id)}`;
-			const response = await fetch(url, {
+			const response = await fetchImpl(url, {
 				signal: AbortSignal.timeout(10_000),
 			});
 			if (!response.ok) {
@@ -276,19 +306,16 @@ export function registerStoreIpc({ promptManager, skillManager, xuePromptManager
 		ipcChannels.promptStoreImport,
 		async (
 			_event,
-			{
-				title,
-				description,
-				content,
-				projectId,
-			}: {
+			payload: {
 				title: string;
 				description: string;
 				content: string;
 				projectId?: unknown;
 			},
 		) => {
-			const target = await projectInstallTarget(projectId);
+			// 渲染层不可信：先校验载荷再解析安装目标，null/超大 content 在此拦截。
+			const { title, description, content } = requireStoreItem(payload);
+			const target = await projectInstallTarget(payload.projectId);
 			try {
 				const name = title
 					.trim()
@@ -340,7 +367,7 @@ export function registerStoreIpc({ promptManager, skillManager, xuePromptManager
 		try {
 			const params = new URLSearchParams({ q: query, perPage: "20" });
 			const url = `https://prompts.chat/api/prompts?${params.toString()}`;
-			const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+			const response = await fetchImpl(url, { signal: AbortSignal.timeout(10_000) });
 			if (!response.ok) throw new Error(`prompts.chat API 返回 ${response.status}`);
 			const raw = (await response.json()) as PromptStoreSearchResponse;
 			const result = {
@@ -357,9 +384,11 @@ export function registerStoreIpc({ promptManager, skillManager, xuePromptManager
 	});
 
 	ipcMain.handle(ipcChannels.skillStoreImport, async (_event, item: PromptStoreItem, locationId: "pi-global" | "agents-global" = "pi-global", projectId?: unknown) => {
+		// 渲染层不可信：先校验载荷再解析安装目标，null/超大 content 在此拦截。
+		const { title, description, content } = requireStoreItem(item);
 		const target = await projectInstallTarget(projectId);
 		try {
-			const name = item.title
+			const name = title
 				.trim()
 				.toLowerCase()
 				.replace(/[^\p{L}\p{N}-]+/gu, "-")
@@ -370,23 +399,23 @@ export function registerStoreIpc({ promptManager, skillManager, xuePromptManager
 			const summary = target
 				? await projectResourceManager.importSkillFromStore(target.id, {
 						name,
-						description: item.description || item.title,
-						content: `# ${item.title}\n\n${item.content}`,
+						description: description || title,
+						content: `# ${title}\n\n${content}`,
 					})
 				: await skillManager.create({
 						name,
-						description: item.description || item.title,
+						description: description || title,
 						locationId: locationId ?? "pi-global",
 					});
 
 			if (!target) {
 				const { writeFile } = await import("node:fs/promises");
-				const skillContent = `---\nname: ${name}\ndescription: ${(item.description || item.title).replace(/[\\r\\n]+/g, " ")}\nsource: prompts.chat\n---\n\n# ${item.title}\n\n${item.content}`;
+				const skillContent = `---\nname: ${name}\ndescription: ${(description || title).replace(/[\\r\\n]+/g, " ")}\nsource: prompts.chat\n---\n\n# ${title}\n\n${content}`;
 				await writeFile(summary.path, skillContent, "utf8");
 			}
 
 			void appLogger.info("skill-store", "Imported skill from store", {
-				title: item.title,
+				title,
 				localName: name,
 				scope: target ? "project" : "global",
 			});
@@ -399,10 +428,12 @@ export function registerStoreIpc({ promptManager, skillManager, xuePromptManager
 	});
 
 	// ── Skills.sh ─────────────────────────
-	ipcMain.handle(ipcChannels.skillHubSearch, async (_event, opts: { query: string; limit?: number }) => {
+	// 入参形状与 preload 共用 SkillHubSearchOptions（只读 query/limit）；旧 page/pageSize/sortBy/order 是
+	// api.skillhub.cn 时代的遗留参数，主进程从未读取——preload 删除后，面板传的第二个参数才真正落到 limit。
+	ipcMain.handle(ipcChannels.skillHubSearch, async (_event, opts: SkillHubSearchOptions) => {
 		const { query, limit = 50 } = opts;
 		try {
-			const response = await fetch(`https://www.skills.sh/api/search?q=${encodeURIComponent(query)}&limit=${limit}`, { signal: AbortSignal.timeout(15_000) });
+			const response = await fetchImpl(`https://www.skills.sh/api/search?q=${encodeURIComponent(query)}&limit=${limit}`, { signal: AbortSignal.timeout(15_000) });
 			if (!response.ok) throw new Error(`API returned ${response.status}`);
 			const json = (await response.json()) as {
 				skills?: Array<{ id: string; skillId: string; name: string; installs: number; source: string }>;
@@ -438,14 +469,14 @@ export function registerStoreIpc({ promptManager, skillManager, xuePromptManager
 		const lastSlash = validSlug.lastIndexOf("/");
 		const pkg = lastSlash > 0 ? validSlug.slice(0, lastSlash) : validSlug;
 		const skillName = lastSlash > 0 ? validSlug.slice(lastSlash + 1) : "";
-		// P0 security: validate each argument before passing it to execFile (shell is disabled).
+		// P0 security: validate each argument before passing it to the install command (shell is disabled).
 		const SAFE_SLUG_RE = /^[a-zA-Z0-9@/\-_.]+$/;
 		if (!validSlug || !SAFE_SLUG_RE.test(pkg) || (skillName && !SAFE_SLUG_RE.test(skillName))) {
 			return { success: false, slug: validSlug, installDir: "", error: mainCopy("store.skillsShInvalidSlug") };
 		}
 		const target = await projectInstallTarget(projectId);
 		try {
-			const { execFile } = await import("node:child_process");
+			const { runSkillHubInstall } = await import("../skills/skillHubInstallRunner");
 			const { buildSkillHubInstallCommand } = await import("../skills/skillHubInstallCommand");
 			// win32 经 cmd.exe /d /s /c 包装（Node 24 Windows 直 spawn .cmd 报 EINVAL），
 			// 非 win 平台数组直调；命令构造见 skillHubInstallCommand.ts 头注释。
@@ -454,27 +485,25 @@ export function registerStoreIpc({ promptManager, skillManager, xuePromptManager
 				skillName,
 				global: !target,
 			});
-			await new Promise<void>((resolve, reject) => {
-				execFile(
-					command,
-					args,
-					{
-						cwd: target?.root,
-						encoding: "utf8",
-						timeout: 120_000,
-						maxBuffer: 10 * 1024 * 1024,
-						shell: false,
-						windowsHide: true,
-					},
-					(error, _stdout, stderr) => {
-						if (error) {
-							const detail = typeof stderr === "string" && stderr.trim() ? `${error.message}: ${stderr.trim()}` : error.message;
-							reject(new Error(detail));
-							return;
-						}
-						resolve();
-					},
-				);
+			// 安装链路（npx → git clone）不吃 Electron 的 session 代理，代理只能靠 env 传进去，
+			// 否则「能搜到、一点安装就失败」——网络受限环境下的实际故障形态。
+			const proxyEnv = await resolveInstallProxyEnv?.();
+			await runSkillHubInstall({
+				command,
+				args,
+				cwd: target?.root,
+				env: proxyEnv,
+				// 进度推送：解析器已按 200ms 节流，阶段切换/百分比推进立即上报。
+				onProgress: sendSkillHubInstallProgress
+					? (update) =>
+							sendSkillHubInstallProgress({
+								slug: validSlug,
+								phase: update.phase,
+								detail: update.detail,
+								...(update.percent === undefined ? {} : { percent: update.percent }),
+								at: Date.now(),
+							})
+					: undefined,
 			});
 			const installDir = target ? await projectResourceManager.ensureResourceDirectory(target.id, "project-pi") : "";
 			void appLogger.info("skill-hub", "Installed skill", {
@@ -488,7 +517,9 @@ export function registerStoreIpc({ promptManager, skillManager, xuePromptManager
 			const message = err instanceof Error ? err.message : String(err);
 			void appLogger.warn("skill-hub", "Install failed", { slug: validSlug, error: message });
 			const brief = message.length > 300 ? `${message.slice(0, 300)}…` : message;
-			return { success: false, slug: validSlug, installDir: "", error: brief };
+			// 命中网络特征时补一句可执行提示（GitHub 不可达 → 引导用户配代理），避免只丢一句 git 报错
+			const hint = isNetworkFailure(message) ? ` ${mainCopy("store.skillsShInstallNetworkHint")}` : "";
+			return { success: false, slug: validSlug, installDir: "", error: `${brief}${hint}` };
 		}
 	});
 
@@ -514,6 +545,14 @@ export function registerStoreIpc({ promptManager, skillManager, xuePromptManager
 			}
 		},
 	);
+
+	// 提示词库 db 重试：失败后用户点击重试按钮触发，绕过 TTL 强制重查远程。
+	// 返回触发时刻快照（downloading/ready/failed），完成态经 yaoPromptsDbState 事件推送。
+	ipcMain.handle(ipcChannels.yaoPromptsDbRetry, async () => {
+		const dbStore = xuePromptDbStore?.() ?? null;
+		if (!dbStore) throw new Error(mainCopy("store.yaoListFailed"));
+		return dbStore.retry();
+	});
 
 	ipcMain.handle(ipcChannels.yaoPromptsDetail, async (_event, slug: string, category: string) => {
 		try {
@@ -562,9 +601,13 @@ export function registerStoreIpc({ promptManager, skillManager, xuePromptManager
 		await extensionManager.restoreBuiltIn(source);
 		void appLogger.info("extension", "Built-in extension restored", { source });
 	});
-	ipcMain.handle(ipcChannels.extensionsUninstall, async (_event, source: string, scope?: "user" | "project" | "unknown") => {
+	ipcMain.handle(ipcChannels.extensionsUninstall, async (_event, source: string, scope?: "user" | "project" | "unknown", projectId?: unknown) => {
 		try {
-			const result = await extensionManager.uninstall(source, scope);
+			// 项目层卸载与安装走同一信任门（projectInstallTarget 内含 resolveProjectRoot + trust 校验）：
+			// 否则 pi remove -l 在错误 cwd 下被推入 --no-approve，pi 以 "Project is not trusted" 拒改本地 packages。
+			const target = scope === "project" ? await projectInstallTarget(projectId) : undefined;
+			if (scope === "project" && !target) throw new Error("Project scope requires a project id.");
+			const result = await extensionManager.uninstall(source, scope, target ? { projectRoot: target.root } : {});
 			void appLogger.info("extension", "Extension uninstalled", { source, scope });
 			return result;
 		} catch (error) {
@@ -586,22 +629,15 @@ export function registerStoreIpc({ promptManager, skillManager, xuePromptManager
 		});
 		return result;
 	});
-	ipcMain.handle(ipcChannels.extensionsToggle, async (_event, source: string, enabled: boolean, scope?: "user" | "project" | "unknown") => {
-		// 内置扩展走 removedBuiltInExtensions + RPC -e，不再写用户扩展目录 / pi disabledExtensions。
-		if (source.startsWith("pi-deck-") && source.endsWith(".ts")) {
-			if (enabled) await extensionManager.restoreBuiltIn(source);
-			else await extensionManager.disableBuiltIn(source);
-		} else {
-			// 非内置扩展禁用记录存 PiDeck settings（scope+source），启动 RPC 时走白名单模式生效。
-			await extensionManager.setEnabled(source, enabled, scope);
-		}
-		void appLogger.info("extension", "Extension toggled", { source, enabled, scope });
-	});
-	ipcMain.handle(ipcChannels.extensionsSetWhitelistDisabled, async (_event, enabled: boolean) => {
-		// 白名单总开关：开启后 PiProcess 不再注入 --no-extensions/-e，pi 默认加载全部扩展，
-		// 禁用列表暂不生效（防御个别扩展的 -e 注入/白名单枚举导致 RPC 启动失败）。
-		await extensionManager.setWhitelistDisabled(Boolean(enabled));
-		void appLogger.info("extension", "Extension whitelist master switch toggled", { whitelistDisabled: !!enabled });
+	ipcMain.handle(ipcChannels.extensionsToggle, async (_event, source: string, enabled: boolean, scope?: "user" | "project" | "unknown", path?: unknown, projectId?: unknown) => {
+		// 原生过滤规则：本地文件扩展要精确路径，项目作用域要 projectId（来自渲染层，主进程校验）。
+		const extensionPath = typeof path === "string" && path.length <= 32_768 ? path : undefined;
+		const resolvedProjectId = typeof projectId === "string" && projectId.trim() && projectId.length <= 256 ? projectId.trim() : undefined;
+		if (scope === "project" && !resolvedProjectId) throw new Error("Project scope requires a project id.");
+		// 内置扩展与原生过滤规则的分流收口在 ExtensionManager.toggleFromUi：与 Web 工作区路由共用同一入口，
+		// 避免两处各写一套「pi-deck-* 前缀 ≠ 内置身份」的白名单判定（issue #321 教训）。
+		await extensionManager.toggleFromUi(source, enabled, scope, extensionPath, resolvedProjectId);
+		void appLogger.info("extension", "Extension toggled", { source, enabled, scope, projectId });
 	});
 	ipcMain.handle(ipcChannels.extensionsUpdate, async () => {
 		const result = await extensionManager.updateExtensions();

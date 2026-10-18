@@ -16,15 +16,20 @@
  *   但跑不起来，必须探测确认而不是 existsSync 就算装好。
  */
 
-import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { DshRuntimeDownloader, DshRuntimeExtractor } from "../dsh/runtime/DshRuntimeManager";
 import { sha256OfFile } from "../dsh/runtime/DshRuntimeManager";
+import { piRuntimeNodeBinDir, piRuntimeNodeExePath, piRuntimeRootDir } from "./piRuntimePaths";
 import { PI_RUNTIME_NODE_VERSION, PI_RUNTIME_NODE_SHA256, piRuntimeNodeArchiveName, piRuntimeNodeDownloadUrls, piRuntimeNodeInnerDir, toPiRuntimePlatform, toPiRuntimeArch, type PiRuntimeNodeInstallResult, type PiRuntimeNodeStatus } from "../../shared/types/piRuntimeNode";
+
+// 便携副本的路径约定（含 POSIX 的 bin/ 层级）统一在 ./piRuntimePaths，避免各处自己拼而漂移；
+// 这里 re-export 保持既有调用方（IPC / 测试）的 import 面不变。
+export { piRuntimeNodeBinDir, piRuntimeNodeExePath, piRuntimeRootDir };
 
 const execFileAsync = promisify(execFile);
 
@@ -36,15 +41,59 @@ export type RuntimeNodeInstallerDeps = {
 	extract: DshRuntimeExtractor;
 };
 
-/** `<userData>/pi-runtime` 根目录。 */
-export function piRuntimeRootDir(userDataPath: string): string {
-	return join(userDataPath, "pi-runtime");
-}
-
-/** 便携 node 可执行文件路径（跨平台）。 */
-export function piRuntimeNodeExePath(userDataPath: string, platform: NodeJS.Platform = process.platform): string {
-	const exe = platform === "win32" ? "node.exe" : "node";
-	return join(piRuntimeRootDir(userDataPath), "node", exe);
+/**
+ * 自愈：修复旧版本 PiDeck 在 POSIX 上装出来的悬空 `npm`/`npx`/`corepack` 软链。
+ *
+ * 成因见 `copyDirEntryVerbatim` 的注释：`cpSync` 默认把相对链接解析成绝对路径，
+ * 指向已删除的解压临时目录（`/tmp/pideck-node-extract-*`）。后果是便携 node “可执行但没 npm”：
+ * 引导第 1 步显示已就绪、第 2 步却报 npm 不可用，而重装又因幂等短路恢复不了（node 本体是好的）。
+ *
+ * 判据保守：只看三类已知可执行入口；只在「确实是绝对链接 + 目标已不存在 + 本地 lib/node_modules
+ * 下对应文件存在」三个条件同时成立时才重写为相对链接（按链接目标里发行包目录名后的尾巴推导）。
+ * 任何一步不满足就原样放过，宁可不修也不改坏用户数据。
+ *
+ * @returns 实际修复的入口名（供测试断言；空数组 = 不需要修）
+ */
+export function repairPortableNodeLinks(userDataPath: string, platform: NodeJS.Platform = process.platform): string[] {
+	// Windows 官方 zip 里 npm.cmd/npx.cmd 是真实文件而非软链，不存在这个问题。
+	if (platform === "win32") return [];
+	const binDir = piRuntimeNodeBinDir(userDataPath, platform);
+	const nodeRoot = join(piRuntimeRootDir(userDataPath), "node");
+	const repaired: string[] = [];
+	for (const name of ["npm", "npx", "corepack"]) {
+		const linkPath = join(binDir, name);
+		let target: string;
+		try {
+			target = readlinkSync(linkPath);
+		} catch {
+			continue; // 不存在或不是软链（真实文件）：不用管
+		}
+		if (!isAbsolute(target)) continue; // 相对链接本来就是对的
+		if (existsSync(linkPath)) continue; // 链接目标还在：无需修复
+		// 从绝对目标里取出发行包目录名之后的尾巴（如 lib/node_modules/npm/bin/npm-cli.js），
+		// 拼回本地已存在的同名文件，再写成从 bin 目录出发的相对链接。
+		const marker = /[/\\]node-v\d+\.\d+\.\d+-[^/\\]+[/\\]/.exec(target);
+		const tail = marker ? target.slice(marker.index + marker[0].length) : "";
+		const localTarget = tail ? join(nodeRoot, tail) : "";
+		if (!localTarget || !existsSync(localTarget)) continue;
+		// Windows 杀毒/索引器会短暂锁住新建的软链，紧接着的 rmSync/symlinkSync 报 EPERM/EBUSY
+		//（2026-10 GitHub runner 复现：输入全部合法但修复静默失败，25-50ms 退避仍不够扫描窗口）。
+		// 阶梯退避最多 ~1.5s，仅修复失败路径触发；Atomics.wait 是主进程同步睡眠的标准做法。
+		const retryBackoffMs = [0, 50, 150, 400, 900];
+		let linked = false;
+		for (let attempt = 0; attempt < retryBackoffMs.length && !linked; attempt += 1) {
+			if (retryBackoffMs[attempt] > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, retryBackoffMs[attempt]);
+			try {
+				rmSync(linkPath, { force: true });
+				symlinkSync(relative(binDir, localTarget), linkPath);
+				linked = true;
+			} catch {
+				// 重试后仍失败（权限等）不影响检测结果，保持原样。
+			}
+		}
+		if (linked) repaired.push(name);
+	}
+	return repaired;
 }
 
 /**
@@ -61,6 +110,10 @@ export async function detectPiRuntimeNode(
 ): Promise<PiRuntimeNodeStatus> {
 	const installSupported = toPiRuntimePlatform(platform) !== null && toPiRuntimeArch(process.arch) !== null;
 	const exePath = piRuntimeNodeExePath(userDataPath, platform);
+	// 旧版本装出来的悬空 npm 在这里顺手修好（见 repairPortableNodeLinks）：
+	// node 本体可用但 npm 没了的话，引导会卡在 npm 步骤且反复重装也没用。
+	// 返回值只给测试用；这里的修复结果是「npm 又能用了」，无需额外字段上报。
+	repairPortableNodeLinks(userDataPath, platform);
 	const systemState = {
 		systemNodeAvailable: systemNodeVersion !== undefined,
 		systemNodeVersion,
@@ -204,10 +257,26 @@ function moveDirContents(src: string, dest: string): void {
 			renameSync(from, to);
 		} catch {
 			// EXDEV（临时目录与 userData 跨盘）等场景退回复制。
-			cpSync(from, to, { recursive: true });
+			copyDirEntryVerbatim(from, to);
 			rmSync(from, { recursive: true, force: true });
 		}
 	}
+}
+
+/**
+ * 跨设备回退的逐条目复制。**必须**带 `verbatimSymlinks: true`，否则整个便携副本会废掉。
+ *
+ * 根因（2026-09-30 在 Linux 上实测复现）：Node 的 `cpSync` 默认 `verbatimSymlinks: false`，
+ * 会把软链目标**解析成绝对路径**。官方 node 包里 `bin/npm`、`bin/npx`、`bin/corepack`
+ * 都是相对链接（`../lib/node_modules/npm/bin/npm-cli.js`），复制后就变成了
+ * `/tmp/pideck-node-extract-xxxx/…` 的绝对链接；解压临时目录一删，便携 npm 全部悬空
+ * （`bin/npm` 不可执行 → 引导回退到系统 npm，没系统 npm 的机器直接卡在第 2 步）。
+ * 必然触发场景：/tmp 是 tmpfs（多数 Linux 发行版默认），rename 跨设备 → 走这条回退。
+ *
+ * 导出仅为让测试锁住“相对链接必须原样保留”这个行为（改回默认会直接红灯）。
+ */
+export function copyDirEntryVerbatim(from: string, to: string): void {
+	cpSync(from, to, { recursive: true, verbatimSymlinks: true });
 }
 
 /** 执行 `node -v`；不可执行/超时返回 undefined（不抛错，调用方按「不可用」处理）。 */

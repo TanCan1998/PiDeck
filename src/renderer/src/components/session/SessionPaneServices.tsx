@@ -1,14 +1,18 @@
 import { createContext, useContext, useMemo, type MutableRefObject, type ReactNode, type RefObject } from "react";
-import type { AgentTab, AgentUiResponse, ChatMessage, GitBranchInfo, ImageContent, Project } from "../../../../shared/types";
+import type { AgentTab, AgentUiResponse, ChatMessage, GitBranchInfo, ImageContent, Project, TerminalThemeId } from "../../../../shared/types";
+import type { HideableComposerFeatureId } from "../../../../shared/composerFeatures";
 import type { QueuedPrompt } from "../../hooks/useQueuedPrompt";
 import type { NoticeId, NoticeKind } from "../../utils/notice";
 import type { TerminalDockStateByOwner } from "../../terminalDockState";
+import type { TerminalDockSettings } from "../terminal/TerminalDock";
 
 /** 打开会话文件时由栏级 injector 绑定的解析与授权上下文。 */
 export type SessionFileOpenContext = {
 	baseDir?: string;
 	projectId?: string;
 	projectRoot?: string;
+	/** 本栏会话身份：项目外路径的安全等级判定按「本栏会话的覆盖等级」走（分屏两栏可能不同） */
+	sessionId?: string;
 };
 
 /**
@@ -16,6 +20,7 @@ export type SessionFileOpenContext = {
  * 身份（sessionId / focused）不进这里，避免大 props 袋透传。
  */
 export type SessionPaneServices = {
+	simpleNavigation?: boolean;
 	/** 把某会话从预览 Tab 晋升为常驻 Tab（发消息等主动交互时调用；非预览时幂等） */
 	promoteSessionToPermanent: (sessionId: string) => void;
 	isLanWeb: boolean;
@@ -38,11 +43,15 @@ export type SessionPaneServices = {
 			behavior?: "steer" | "followUp";
 		},
 	) => boolean;
+	/** 「停止响应」时抑制排队消息自动投递；App 注入 queue.suppressSessionQueueAutoDrain。 */
+	queueSuppressAutoDrain?: (sessionId: string) => void;
 	insertQuickPrompt: (sessionId: string, message: string) => void;
 	ensureSessionId?: (sessionId: string) => Promise<string>;
 	resendUserMessage?: (message: ChatMessage) => void;
-	editMessage?: (messageId: string, newText: string, entryId?: string) => void;
+	editMessage?: (message: ChatMessage, newText: string) => void;
 	deleteMessage?: (messageId: string, entryId?: string) => void;
+	/** 所属 pane 明确传身份；不能使用聚焦会话替非聚焦栏删除图片。 */
+	removeMessageImage?: (sessionId: string, message: ChatMessage, index: number) => void;
 	forkFromUserMessage?: (message: ChatMessage) => void;
 	forkingMessageId?: string | null;
 	openSidebarSessionById?: (projectId: string, sessionId: string) => Promise<void>;
@@ -60,7 +69,6 @@ export type SessionPaneServices = {
 	/** 分屏栏分支变化（切换成功/失败回读）后的回写通知：App 只在 projectId 为当前聚焦项目时采纳，避免非聚焦栏污染全局 Git 抽屉 */
 	onProjectGitChanged?: (projectId: string, info: GitBranchInfo) => void;
 	showThinking: boolean;
-	validCommandNames: Set<string>;
 	validFilePaths: Set<string>;
 	terminalStatesByOwner: TerminalDockStateByOwner;
 	availableTerminalHeight: number;
@@ -71,6 +79,15 @@ export type SessionPaneServices = {
 	setTerminalCollapsedByOwnerKey: (ownerKey: string, collapsed: boolean) => void;
 	/** 回写终端分屏高度（全局单份，useTerminalDock 内部持久化） */
 	setTerminalHeight: (height: number) => void;
+	/** 终端外观设置（App 级单份，随 AppSettings 持久化） */
+	terminalSettings: TerminalDockSettings;
+	/**
+	 * 输入框功能入口隐藏清单（外观设置「输入框功能显示」，App 级单份随 AppSettings 持久化）。
+	 * 只隐藏底栏入口，不停功能与快捷键；成员语义见 shared/composerFeatures.ts。
+	 */
+	hiddenComposerFeatures: readonly (HideableComposerFeatureId | string)[];
+	/** dock 内主题菜单写回设置（单一数据源落点） */
+	onTerminalThemeChange: (themeId: TerminalThemeId) => void;
 	environmentDialog: boolean;
 	/** 修改内置对话区（Chat）的聊天记录保存目录（弹选择器 + 主进程写入 + 重扫会话） */
 	changeChatPath: (project: Project) => Promise<void>;

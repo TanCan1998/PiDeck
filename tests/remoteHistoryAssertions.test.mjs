@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
 const { historyEntries, historyMessages, freshRemoteTurn, assertRemoteMutationMatchesLocal } = loadTsCommonJs("e2e/remoteHistoryAssertions.ts");
+const { SessionFileEditor } = loadTsCommonJs("src/main/pi/SessionFileEditor.ts");
 const header = { type: "session", id: "session", version: 3, timestamp: "2026-01-01T00:00:00.000Z", cwd: "/workspace" };
 const message = (id, parentId, role, text, extra = {}) => ({ type: "message", id, parentId, timestamp: header.timestamp, message: { role, content: [{ type: "text", text }], ...extra } });
 const serialize = (entries) => entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n";
@@ -12,6 +16,26 @@ const assistant = message("a1", "u1", "assistant", "answer");
 const laterUser = message("u2", "a1", "user", "next");
 const before = serialize([header, user, assistant, laterUser]);
 const tombstone = (entry, ts, reason) => ({ type: "deleted", id: entry.id, originalEntryId: entry.id, parentId: entry.parentId, ts, ...(reason ? { reason } : {}) });
+
+/**
+ * 合并后的本机编辑契约（pi 原生 context_edit）：编辑/删除不改写原文，只向文件末尾追加
+ * context_edit（edit: replacement={content}，delete: replacement=null）。远端侧字节用同一份
+ * 真实编辑器生成，再由 oracle 注入相同的 UUID/时钟重算期望值；手写字节不再代表契约。
+ */
+async function localMutation(before, operation, target, startedAt, newText) {
+	const directory = await mkdtemp(join(tmpdir(), "pideck-history-fixture-"));
+	try {
+		const path = join(directory, "session.jsonl");
+		await writeFile(path, before, "utf8");
+		const editor = new SessionFileEditor({ now: () => startedAt });
+		const options = { file: { protocolPath: path, hostPath: path, environment: "native" }, target, reload: async () => undefined };
+		if (operation === "edit") await editor.editMessage({ ...options, newText });
+		else await editor.deleteMessage(options);
+		return await readFile(path, "utf8");
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+}
 
 // 这些判据自己也必须能红：真实主机成功并不能掩盖坏 JSONL、旧回复或宽松的字节比较。
 test("history evidence rejects invalid JSONL, missing header and duplicate identities", () => {
@@ -41,23 +65,31 @@ test("old replies, error/aborted replies and replies outside the new user parent
 
 test("edit oracle compares the entire UTF-8 document, not just the replacement text", async () => {
 	const newText = "中文\n'quoted'\\".repeat(600);
-	const edited = { ...assistant, message: { ...assistant.message, content: [{ type: "text", text: newText }] } };
-	const after = serialize([header, user, edited, laterUser]);
 	const target = historyMessages(before, "assistant")[0];
-	const input = { before, operation: "edit", target, startedAt: Date.now(), newText };
-	await assertRemoteMutationMatchesLocal({ ...input, after });
-	const corruptedOtherEntry = serialize([header, { ...user, parentId: "session" }, edited, laterUser]);
-	await assert.rejects(assertRemoteMutationMatchesLocal({ ...input, after: corruptedOtherEntry }), /REMOTE_MUTATION_DIFFERS_FROM_LOCAL_EDITOR/);
+	const startedAt = Date.now();
+	const after = await localMutation(before, "edit", target, startedAt, newText);
+	const input = { before, after, operation: "edit", target, startedAt, newText };
+	await assertRemoteMutationMatchesLocal(input);
+	// 篡改一条与被编辑条目无关的记录：整份字节比较必须变红（只比对替换文本会假绿）。
+	const corrupted = JSON.parse(JSON.stringify(historyEntries(after)));
+	corrupted.find((entry) => entry.id === "u1").parentId = "session";
+	await assert.rejects(assertRemoteMutationMatchesLocal({ ...input, after: serialize(corrupted) }), /REMOTE_MUTATION_DIFFERS_FROM_LOCAL_EDITOR/);
 });
 
-test("delete oracle verifies reparenting and rejects removal of unrelated fields", async () => {
-	const ts = Date.now();
-	const deleted = tombstone(assistant, ts);
-	const after = serialize([header, user, deleted, { ...laterUser, parentId: "u1" }]);
-	const input = { before, operation: "delete", target: historyMessages(before, "assistant")[0], startedAt: ts };
-	await assertRemoteMutationMatchesLocal({ ...input, after });
-	await assert.rejects(assertRemoteMutationMatchesLocal({ ...input, after: serialize([header, user, deleted, laterUser]) }), /REMOTE_MUTATION_DIFFERS_FROM_LOCAL_EDITOR/);
-	await assert.rejects(assertRemoteMutationMatchesLocal({ ...input, after: serialize([header, user, { ...deleted, ts: ts - 1 }, { ...laterUser, parentId: "u1" }]) }), /MUTATION_TIMESTAMP_INVALID/);
+test("delete oracle verifies the appended context_edit and rejects unrelated changes", async () => {
+	const target = historyMessages(before, "assistant")[0];
+	const startedAt = Date.now();
+	const after = await localMutation(before, "delete", target, startedAt);
+	const input = { before, after, operation: "delete", target, startedAt };
+	await assertRemoteMutationMatchesLocal(input);
+	// 删除只追加 context_edit，不改写后继消息父链；篡改无关字段必须变红。
+	const corrupted = JSON.parse(JSON.stringify(historyEntries(after)));
+	corrupted.find((entry) => entry.id === "u2").parentId = "u1";
+	await assert.rejects(assertRemoteMutationMatchesLocal({ ...input, after: serialize(corrupted) }), /REMOTE_MUTATION_DIFFERS_FROM_LOCAL_EDITOR/);
+	// context_edit 时间戳早于操作开始：必须报 MUTATION_TIMESTAMP_INVALID。
+	const stale = JSON.parse(JSON.stringify(historyEntries(after)));
+	stale.find((entry) => entry.type === "context_edit").timestamp = new Date(startedAt - 1).toISOString();
+	await assert.rejects(assertRemoteMutationMatchesLocal({ ...input, after: serialize(stale) }), /MUTATION_TIMESTAMP_INVALID/);
 });
 
 test("resend oracle permits new appended entries but verifies every old byte and the full tombstone set", async () => {

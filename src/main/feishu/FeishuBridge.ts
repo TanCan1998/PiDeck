@@ -11,7 +11,7 @@
 
 import type { BrowserWindow } from "electron";
 import { ipcChannels } from "../../shared/ipc";
-import type { FeishuBotConfig, FeishuBridgeStatus, FeishuChatBinding, FeishuChatMessage, FeishuTestResult, ImageContent, AvailableModel, AgentRuntimeState, AgentTab, LocalProject } from "../../shared/types";
+import type { FeishuBotConfig, FeishuBridgeStatus, FeishuChatBinding, FeishuChatMessage, FeishuTestResult, ImageContent, AvailableModel, AgentRuntimeState, AgentTab, ChatMessage, ImChannelBackend, LocalProject } from "../../shared/types";
 import type { FeishuGroupInfo, FeishuGroupMember, FeishuImageAttachment, FeishuFileAttachment, FeishuMessageContext, FeishuCardActionEvent } from "./types";
 import { loadBindings, saveBindings, getPersistentChatId, setPersistentChatId, type FeishuChatBindingPersist } from "./FeishuConfig";
 import { chooseMessageMode, buildPostMessages, buildMarkdownCards } from "./rich-text";
@@ -26,18 +26,9 @@ import { buildAskCard, normalizeAskOption, parseAskActionValue, parseAskInputVal
 import { feishuLanguage, feishuT, normalizeFeishuLocale, type FeishuLocale } from "./FeishuI18n";
 import type { AgentManager } from "../pi/AgentManager";
 
-export interface SessionRuntimeBindingGateway {
-	ensureSession(input: { projectId: string; title: string; existingSessionId?: string; sessionPath?: string }): Promise<{ sessionId: string }>;
-	activateRuntime(sessionId: string): Promise<AgentTab>;
-	bindRuntime(input: { projectId: string; agent: AgentTab; existingSessionId?: string }): Promise<{ sessionId: string }>;
-	sendPrompt(input: { sessionId: string; message: string; agentMessage?: string; images?: ImageContent[] }): Promise<void>;
-	abortRuntime(sessionId: string): Promise<void>;
-	listRuntimeModels(sessionId: string): Promise<AvailableModel[]>;
-	getRuntimeState(sessionId: string): Promise<AgentRuntimeState | undefined>;
-	setRuntimeModel(sessionId: string, provider: string, modelId: string): Promise<void>;
-	/** 把 ask/confirm 等扩展 UI 的答案写回 pi（与桌面端弹窗回答同一条链路）。 */
-	sendUIResponse(agentId: string, requestId: string, response: { value?: string | boolean; confirmed?: boolean; cancelled?: boolean }): void;
-}
+import type { SessionRuntimeBindingGateway } from "../sessions/sessionRuntimeBinding";
+
+export type { SessionRuntimeBindingGateway };
 
 // ===== 常量 =====
 const DEDUP_MAX = 200;
@@ -117,6 +108,8 @@ export class FeishuBridge {
 	private cardUpdateFailed = new Set<string>();
 	/** 本轮已成功完成流式卡片终态的 session；agent_end 时跳过二次纯文本同步，避免双消息。 */
 	private cardTerminalSucceeded = new Set<string>();
+	/** 已同步结果指纹（FIFO 上限防长驻无界增长；只在发送成功后记录，失败可重试） */
+	private syncedFingerprints = new Set<string>();
 
 	private unsubscribeLocalEvents: (() => void) | null = null;
 	// 哪些 session 是飞书发起的（不需要 session mirror）
@@ -208,10 +201,21 @@ export class FeishuBridge {
 		this.pushBindings();
 	}
 
+	/** 该 Bot 新建会话使用的后端（设置项，只影响新会话）。 */
+	private botBackend(): ImChannelBackend {
+		return this.botConfig.backend ?? "pi";
+	}
+
+	/** 会话自己的后端：绑定上记录的值优先（随会话走），缺省才回落到 Bot 设置。 */
+	private bindingBackend(binding: FeishuChatBinding): ImChannelBackend {
+		return binding.backend ?? this.botBackend();
+	}
+
 	/** Reuse requires both a live handle and gateway authorization for the same stable Session. */
 	private async authorizeRuntimeAgent(binding: FeishuChatBinding): Promise<string | undefined> {
 		if (!binding.agentId) return undefined;
-		const tab = this.agentManager.list().find((candidate) => candidate.id === binding.agentId);
+		// runtime handle 归属由网关判定：pi 之外的后端（DSH）不在 AgentManager 里。
+		const tab = this.runtimeBindings.findRuntimeAgent(binding.agentId);
 		if (!tab || tab.status === "error" || tab.status === "closed") {
 			this.clearRuntimeAgentId(binding);
 			return undefined;
@@ -233,10 +237,13 @@ export class FeishuBridge {
 		}
 	}
 
-	private async ensureRuntimeBinding(binding: FeishuChatBinding): Promise<string | undefined> {
-		const activeAgentId = await this.authorizeRuntimeAgent(binding);
-		if (activeAgentId) return activeAgentId;
-		const resumed = await this.resumeOrCreateAgent(binding);
+	private async ensureRuntimeBinding(binding: FeishuChatBinding, options?: { forceNew?: boolean }): Promise<string | undefined> {
+		// 换后端时必须跳过句柄复用：旧句柄跑的还是旧引擎，复用它等于没换。
+		if (!options?.forceNew) {
+			const activeAgentId = await this.authorizeRuntimeAgent(binding);
+			if (activeAgentId) return activeAgentId;
+		}
+		const resumed = await this.resumeOrCreateAgent(binding, options);
 		return resumed?.agentId;
 	}
 
@@ -287,6 +294,11 @@ export class FeishuBridge {
 			this.imageConfirmTimers.delete(chatId);
 		}
 		this.lastUserMessageId.delete(chatId);
+		// 解绑时释放该聊天暂存的附件 Buffer 与待答 ask，防解绑后永久驻留
+		this.pendingAttachments.delete(chatId);
+		for (const key of [...this.pendingAsks.keys()]) {
+			if (key.startsWith(`${chatId}:`)) this.pendingAsks.delete(key);
+		}
 		this.updateStatus({ activeBindings: this.chatBindings.size });
 		this.persistBindings();
 		this.pushBindings();
@@ -359,6 +371,7 @@ export class FeishuBridge {
 		this.recentContent.clear();
 		this.processingChats.clear();
 		this.lastUserMessageId.clear();
+		this.syncedFingerprints.clear();
 		this.groupInfoCache.clear();
 		this.userNameCache.clear();
 		this.botOpenId = null;
@@ -595,8 +608,17 @@ export class FeishuBridge {
 
 			// ===== 文件/图片 + 文字 → 一起处理；仅文件/图片 → 暂存等指令 =====
 			if (!text && (imageAttachments.length > 0 || fileAttachments.length > 0)) {
-				// 只有附件没有文字 → 存起来等指令
+				// 只有附件没有文字 → 存起来等指令；但必须有上界：只发文件不发指令的聊天
+				// 会让每个文件（最大 50MB）的完整 Buffer 无限期驻留内存直到进程重启。
 				const existing = this.pendingAttachments.get(chatId);
+				const heldCount = existing ? existing.images.length + existing.files.length : 0;
+				const heldBytes = existing ? [...existing.images, ...existing.files].reduce((n, a) => n + a.data.length, 0) : 0;
+				const incomingCount = imageAttachments.length + fileAttachments.length;
+				const incomingBytes = [...imageAttachments, ...fileAttachments].reduce((n, a) => n + a.data.length, 0);
+				if (heldCount + incomingCount > 20 || heldBytes + incomingBytes > 20 * 1024 * 1024) {
+					await this.sendSmartMessage(chatId, feishuT(this.locale, "attachment.pendingFull"));
+					return;
+				}
 				const merged = existing || { images: [], files: [] };
 				merged.images.push(...imageAttachments);
 				merged.files.push(...fileAttachments);
@@ -721,7 +743,19 @@ export class FeishuBridge {
 
 		// stable sessionId identifies the catalog record; all process operations use agentId.
 		if (binding) {
-			const runtimeAgentId = await this.ensureRuntimeBinding(binding);
+			// 设置里换了 Bot 后端 = 换引擎：旧绑定记的会话文件与模型目录都属于旧引擎，继续复用
+			// 只会让它静默跑在旧引擎上（用户以为切了后端其实没切）。这里改记新后端并强制开新会话，
+			// 由 resumeOrCreateAgent 回一条换绑说明。
+			// 旧绑定的 backend 缺省按 pi 算（功能上线前的绑定都是 pi），不能用 bindingBackend——
+			// 它会回落到当前 Bot 设置，把「老绑定 + 新设置」误判成一致，就永远不会换绑。
+			const settingsBackend = this.botBackend();
+			const currentBackend = binding.backend ?? "pi";
+			const switched = currentBackend !== settingsBackend;
+			if (switched) {
+				log(`[飞书 Bridge] 会话后端变更（${currentBackend} → ${settingsBackend}），换绑新会话`);
+				binding.backend = settingsBackend;
+			}
+			const runtimeAgentId = await this.ensureRuntimeBinding(binding, { forceNew: switched });
 			if (!runtimeAgentId) {
 				await this.sendSmartMessage(chatId, feishuT(this.locale, "session.restoreFailed"));
 				return;
@@ -733,6 +767,8 @@ export class FeishuBridge {
 		}
 		const agentId = binding.agentId;
 		if (!agentId) return;
+		// 会话自己的后端：流式卡片与宿主指令都是 pi 能力，其它后端降级为「最终文本」。
+		const backend = this.bindingBackend(binding);
 
 		// 关闭已有流式卡片
 		const existingCard = this.streamingCards.get(agentId);
@@ -769,14 +805,31 @@ export class FeishuBridge {
 		}
 
 		const initialState = createInitialState();
-		this.streamingRunStates.set(agentId, initialState);
-		this.pendingCardEvents.set(agentId, []);
+		// 卡片事件机由 pi 本地事件驱动（handleAgentEvent）：非 pi 后端没有这些事件，
+		// 既不能开卡片也不能登记缓存表，否则每轮都会留下永不清理的孤儿注册项。
+		const useStreamingCard = backend === "pi";
+		if (useStreamingCard) {
+			this.streamingRunStates.set(agentId, initialState);
+			this.pendingCardEvents.set(agentId, []);
+		}
 
 		// 流式卡片：创建后实时更新活动轨迹和输出
-		const cardPromise = CardStream.open(this.connection.client!, chatId, renderRunCard(initialState, { locale: this.locale }), { replyToMessageId: ctx.chatType === "group" ? ctx.messageId : undefined }).catch((e) => {
-			logErr("[飞书 Bridge] 流式卡片创建失败:", e);
-			return null as CardStream | null;
-		});
+		const cardPromise = useStreamingCard
+			? CardStream.open(this.connection.client!, chatId, renderRunCard(initialState, { locale: this.locale }), { replyToMessageId: ctx.chatType === "group" ? ctx.messageId : undefined }).catch((e) => {
+					logErr("[飞书 Bridge] 流式卡片创建失败:", e);
+					return null as CardStream | null;
+				})
+			: Promise.resolve(null as CardStream | null);
+
+		// 先注册回合结束监听再提交 prompt：快速失败的 run（模型配置错/auth 失败）会在
+		// 卡片创建窗口内结束，注册晚于事件会错过 → 等满 300s 超时，期间
+		// processingChats 持有 chatId，该聊天的后续消息被静默丢弃 5 分钟。
+		// pi 用 agent_end 本地事件；其它后端统一走网关的回合等待器（agents:state 快照 + 时间线错误）。
+		const sinceIndex = this.runtimeBindings.getRuntimeMessages(binding.sessionId).length;
+		const runEndPromise: Promise<{ timedOut: boolean; failed: boolean; errorMessage?: string }> =
+			backend === "pi"
+				? this.waitForAgentEnd(agentId, 300_000).then((timedOut) => ({ timedOut, failed: false }))
+				: this.runtimeBindings.waitForRunEnd({ sessionId: binding.sessionId, sinceIndex, timeoutMs: 300_000 }).then((outcome) => (outcome.kind === "timeout" ? { timedOut: true, failed: false } : { timedOut: false, failed: outcome.failed, ...(outcome.errorMessage ? { errorMessage: outcome.errorMessage } : {}) }));
 
 		this.feishuDrivenRuns.add(agentId);
 		try {
@@ -788,17 +841,20 @@ export class FeishuBridge {
 				"这是飞书群聊消息。请直接回复用户。",
 			].join("\n");
 			const feishuCtx = finalText ? `${feishuActionInstruction}\n\n${finalText}\n\n[这是飞书群聊消息。请直接回复用户。]` : `${feishuActionInstruction}\n\n[飞书群聊消息。请直接回复用户。]`;
-			await this.runtimeBindings.sendPrompt({
-				sessionId: binding.sessionId,
-				message: finalText || "处理附件",
-				agentMessage: feishuCtx,
-				...(images.length > 0 ? { images } : {}),
-			});
+			const promptText = finalText || "处理附件";
+			// pi 走宿主指令通道（agentMessage）；DSH 等后端没有这个通道并会直接拒收整条 prompt，
+			// 因此把同样的内容并进正文——通道约束对它们同样必要。
+			await this.runtimeBindings.sendPrompt(backend === "pi" ? { sessionId: binding.sessionId, message: promptText, agentMessage: feishuCtx, ...(images.length > 0 ? { images } : {}) } : { sessionId: binding.sessionId, message: `${feishuCtx}\n\n${promptText}`, ...(images.length > 0 ? { images } : {}) });
 		} catch (e) {
 			this.feishuDrivenRuns.delete(agentId);
 			this.streamingRunStates.delete(agentId);
 			this.pendingCardEvents.delete(agentId);
 			this.streamingCards.delete(agentId);
+			// sendPrompt 与 CardStream.open 并发：open 较慢时这里先失败，若不关闭
+			// 随后创建成功的卡片，它会成为群里永久「运行中」的孤儿骨架卡。
+			void cardPromise.then((c) => {
+				if (c) void c.close().catch(() => {});
+			});
 			throw e;
 		}
 
@@ -814,33 +870,45 @@ export class FeishuBridge {
 		const startTime = Date.now();
 
 		try {
-			await this.waitForAgentEnd(agentId, 300_000);
+			const runEnd = await runEndPromise;
 			await new Promise((r) => setTimeout(r, 800));
 
-			if (hasCard) {
+			if (runEnd.timedOut) {
+				// run 超过 5 分钟仍在运行：保留卡片/状态注册表，让 handleAgentEvent 的
+				// 终态分支在真正结束时 flush+close+清理。此处删注册表会让卡片永久停在
+				// 中间态且最终结果无任何交付通道（agent_end 迟到时三张 map 已被清空）。
+				log(`[飞书 Bridge] 等待 agent_end 超时（run 仍在运行），保留卡片继续跟进: agentId=${agentId.slice(0, 8)}`);
+				return;
+			}
+
+			if (runEnd.failed) {
+				// 非 pi 后端不会把失败写成时间线里的 assistant 回复，失败文本只能由回合等待器给出。
+				await this.sendSmartMessage(chatId, runEnd.errorMessage ?? feishuT(this.locale, "agent.failed"));
+				this.streamingRunStates.delete(agentId);
+				this.pendingCardEvents.delete(agentId);
+			} else if (hasCard) {
 				if (this.cardUpdateFailed.has(agentId)) {
 					this.cardUpdateFailed.delete(agentId);
 					log(`[飞书 Bridge] 卡片更新失败，降级为文本消息`);
-					await this.sendResultFallback(chatId, agentId, startTime);
+					await this.sendResultFallback(chatId, binding.sessionId, startTime);
 				}
 				this.streamingCards.delete(agentId);
 				this.streamingRunStates.delete(agentId);
 				this.pendingCardEvents.delete(agentId);
 			} else {
-				await this.sendResultFallback(chatId, agentId, startTime);
+				await this.sendResultFallback(chatId, binding.sessionId, startTime);
 				this.streamingRunStates.delete(agentId);
 				this.pendingCardEvents.delete(agentId);
 			}
+			// 标记扫描与文档正文都基于同一份时间线快照（非 pi 后端同样适用）
+			const runMessages = this.runtimeBindings.getRuntimeMessages(binding.sessionId);
 			// 统一扫描 Agent 回复中的飞书标记并执行
-			await this.processFeishuActions(chatId, agentId).catch((e) => logErr("[飞书 Bridge] 处理飞书动作异常:", e));
+			await this.processFeishuActions(chatId, runMessages).catch((e) => logErr("[飞书 Bridge] 处理飞书动作异常:", e));
 
 			// 没有 [CREATE_DOC:] 标记但用户说了要做飞书文档 → 自动创建
 			const docTitle = wantsFeishuDoc(text);
 			if (docTitle) {
-				const lastMsg = this.agentManager
-					.getMessages(agentId)
-					.filter((m) => m.role === "assistant")
-					.pop();
+				const lastMsg = runMessages.filter((m) => m.role === "assistant").pop();
 				if (lastMsg?.text && !lastMsg.text.includes("[CREATE_DOC:")) {
 					const body = stripFeishuActionMarkers(lastMsg.text);
 					if (body) {
@@ -863,6 +931,13 @@ export class FeishuBridge {
 			await this.sendSmartMessage(chatId, feishuT(this.locale, "agent.failed"));
 		} finally {
 			this.feishuDrivenRuns.delete(agentId);
+			// 清理本轮图片临时文件：路径已随 prompt 交给 Agent，run 结束（含 processFeishuActions
+			// 的 [SEND_FILE:] 已执行完）后文件不再有用；不删则 pi-feishu-images 目录无限增长。
+			if (savedImages.length > 0) {
+				void import("node:fs").then(({ unlink }) => {
+					for (const fp of savedImages) unlink(fp, () => {});
+				});
+			}
 		}
 	}
 
@@ -892,18 +967,18 @@ export class FeishuBridge {
 		this.pendingCardEvents.delete(sessionId);
 	}
 
-	private waitForAgentEnd(sessionId: string, timeoutMs: number): Promise<void> {
+	private waitForAgentEnd(sessionId: string, timeoutMs: number): Promise<boolean> {
 		return new Promise((resolve) => {
 			const timer = setTimeout(() => {
 				cleanup();
-				resolve();
+				resolve(true);
 			}, timeoutMs);
 			const handler = (agentId: string, event: unknown) => {
 				if (agentId !== sessionId) return;
 				if (!event || typeof event !== "object") return;
 				if ((event as Record<string, unknown>).type === "agent_end") {
 					cleanup();
-					resolve();
+					resolve(false);
 				}
 			};
 			const unsub = this.agentManager.addLocalEventListener(handler);
@@ -1009,11 +1084,17 @@ export class FeishuBridge {
 		}
 
 		// 只有用户显式手动连接过的 PiDeck 会话，才把 Agent 结果同步到飞书。
-		if (!this.feishuSessions.has(agentId) && !this.feishuDrivenRuns.has(agentId) && !this.cardTerminalSucceeded.has(agentId) && typed.type === "agent_end") {
-			log(`[Feishu Bridge] agent_end 触发 syncPiMessageToFeishu, agentId=${agentId.slice(0, 8)}`);
-			const chatId = this.getBestChatId(agentId);
-			if (chatId && this.connection.client) {
-				this.syncPiMessageToFeishu(agentId, chatId).catch((e) => logErr("[Feishu Bridge] sync Pi message failed:", e));
+		if (typed.type === "agent_end") {
+			// cardTerminalSucceeded 是「本轮已由卡片交付」的预占标记，agent_end 到达即消费；
+			// 若不消费，残留会永久压制同会话后续无卡片 run 的文本同步（结果无任何交付通道）。
+			const deliveredByCard = this.cardTerminalSucceeded.has(agentId);
+			this.cardTerminalSucceeded.delete(agentId);
+			if (!deliveredByCard && !this.feishuSessions.has(agentId) && !this.feishuDrivenRuns.has(agentId)) {
+				log(`[Feishu Bridge] agent_end 触发 syncPiMessageToFeishu, agentId=${agentId.slice(0, 8)}`);
+				const chatId = this.getBestChatId(agentId);
+				if (chatId && this.connection.client) {
+					this.syncPiMessageToFeishu(agentId, chatId).catch((e) => logErr("[Feishu Bridge] sync Pi message failed:", e));
+				}
 			}
 		}
 	}
@@ -1026,22 +1107,23 @@ export class FeishuBridge {
 		const lastAssistant = assistantMessages.pop();
 		if (!lastAssistant?.text?.trim()) return;
 
-		// 去重：用最后一条 assistant 消息的 id + text 前50字符做指纹
+		// 去重：用最后一条 assistant 消息的 id + text 前50字符做指纹。
+		// 指纹只在发送成功后记录：sendSmartMessage 内部吞错，若先记账，瞬时发送失败
+		// 的结果会被指纹永久去重（无重试、无告警，结果丢失）。
 		const fingerprint = `${lastAssistant.id}|${lastAssistant.text.slice(0, 50)}`;
-		const syncedFingerprints = (this as Record<string, unknown>).__feishuSyncFp as Set<string> | undefined;
-		if (syncedFingerprints?.has(fingerprint)) return;
-
-		if (!syncedFingerprints) {
-			(this as Record<string, unknown>).__feishuSyncFp = new Set<string>();
-		}
-		((this as Record<string, unknown>).__feishuSyncFp as Set<string>).add(fingerprint);
+		if (this.syncedFingerprints.has(fingerprint)) return;
 
 		// 清掉标记再发送
 		const cleanText = sanitizeFeishuUserVisibleText(lastAssistant.text);
-		if (cleanText) await this.sendSmartMessage(chatId, cleanText);
+		if (cleanText) {
+			const delivered = await this.sendSmartMessage(chatId, cleanText);
+			if (!delivered) return; // 发送失败：不记指纹，后续 agent_end 仍可重试同步
+		}
+		this.syncedFingerprints.add(fingerprint);
+		if (this.syncedFingerprints.size > 200) this.syncedFingerprints.delete(this.syncedFingerprints.keys().next().value as string);
 
 		// 先扫 [CREATE_DOC:] 标记
-		await this.processFeishuActions(chatId, agentId).catch((e) => logErr("[Feishu Bridge] process PiDeck Feishu actions failed:", e));
+		await this.processFeishuActions(chatId, messages).catch((e) => logErr("[Feishu Bridge] process PiDeck Feishu actions failed:", e));
 
 		// 没有标记但用户说了要做飞书文档 → 用完整回答正文自动创建
 		const pendingTitle = this.pendingDocRequests.get(agentId);
@@ -1101,6 +1183,8 @@ export class FeishuBridge {
 			const session = await this.runtimeBindings.ensureSession({
 				projectId,
 				title: _title?.trim() || ctx.groupName || feishuT(this.locale, "group.defaultSession"),
+				channel: "feishu",
+				backend: this.botBackend(),
 			});
 			const binding: FeishuChatBinding = {
 				chatId,
@@ -1109,6 +1193,7 @@ export class FeishuBridge {
 				sessionId: session.sessionId,
 				workspaceId: this.botConfig.defaultWorkspaceId ?? "",
 				source: "feishu",
+				backend: this.botBackend(),
 				chatType: ctx.chatType,
 				groupName: ctx.groupName,
 				createdAt: Date.now(),
@@ -1135,22 +1220,30 @@ export class FeishuBridge {
 	 * 再由 coordinator 激活 runtime。Bridge 不直接创建或停止 Agent。
 	 * 用 chatId 作为稳定 key（参考上游 ConversationManager 思路），
 	 * 会话文件持久化，重启后优先恢复而不是重建。
+	 *
+	 * `forceNew` 表示本次是设置页把 Bot 后端换成了另一个引擎（pi ↔ dsh）：旧 sessionId/sessionPath
+	 * 属于旧引擎（跨引擎没有可续的历史，模型目录也不是同一套词汇），必须真的开新会话。
 	 */
-	private async resumeOrCreateAgent(binding: FeishuChatBinding): Promise<FeishuChatBinding | undefined> {
+	private async resumeOrCreateAgent(binding: FeishuChatBinding, options?: { forceNew?: boolean }): Promise<FeishuChatBinding | undefined> {
 		const projects = this.getProjects();
 		if (projects.length === 0) {
 			log("[飞书 Bridge] 恢复会话失败：无可用项目");
 			return undefined;
 		}
 		const projectId = projects[0].id;
+		const forceNew = options?.forceNew === true;
 
 		try {
 			const title = binding.groupName || feishuT(this.locale, "group.defaultSession");
 			let session = await this.runtimeBindings.ensureSession({
 				projectId,
 				title,
-				existingSessionId: binding.sessionId,
-				sessionPath: binding.sessionPath,
+				existingSessionId: forceNew ? undefined : binding.sessionId,
+				sessionPath: forceNew ? undefined : binding.sessionPath,
+				channel: "feishu",
+				// 新建会话（首次恢复失败 / 换后端）一律带上会话自己的后端：不带就默默建成 pi，
+				// 让 dsh 绑定挂到 pi 会话上。已有会话命中时这个字段被忽略。
+				backend: this.bindingBackend(binding),
 			});
 			let tab: AgentTab;
 			try {
@@ -1158,7 +1251,7 @@ export class FeishuBridge {
 			} catch (error) {
 				if (!binding.sessionPath) throw error;
 				log(`[飞书 Bridge] sessionPath 恢复失败，创建新 Session: ${error instanceof Error ? error.message : String(error)}`);
-				session = await this.runtimeBindings.ensureSession({ projectId, title });
+				session = await this.runtimeBindings.ensureSession({ projectId, title, channel: "feishu", backend: this.bindingBackend(binding) });
 				tab = await this.runtimeBindings.activateRuntime(session.sessionId);
 			}
 			log(`[飞书 Bridge] 已为 Session ${session.sessionId} 激活 runtime ${tab.id}`);
@@ -1171,7 +1264,7 @@ export class FeishuBridge {
 			this.chatBindings.set(binding.chatId, binding);
 			this.persistBindings();
 			this.pushBindings();
-			await this.sendSmartMessage(binding.chatId, feishuT(this.locale, "session.recovered", { id: binding.sessionId.slice(0, 8) }));
+			await this.sendSmartMessage(binding.chatId, feishuT(this.locale, forceNew ? "session.backendSwitched" : "session.recovered", { id: binding.sessionId.slice(0, 8), backend: this.bindingBackend(binding) === "dsh" ? "DSH" : "pi" }));
 			// 恢复的会话同样带 PIDECK_FEISHU_LINKED，ask 已禁用，同步提示用户。
 			await this.sendSmartMessage(binding.chatId, feishuT(this.locale, "session.askDisabled"));
 			return binding;
@@ -1424,6 +1517,10 @@ export class FeishuBridge {
 
 		const initialState = createInitialState();
 		this.streamingRunStates.set(agentId, initialState);
+		// 与 runAgent 一致：卡片创建窗口（一次网络往返）内到达的 agent 事件（含快速失败
+		// 的终态）必须缓冲，否则 handleAgentEvent 找不到 pending 直接丢弃，卡片永久停
+		// 在初始骨架态且无人回放。
+		this.pendingCardEvents.set(agentId, []);
 
 		try {
 			const cardStream = await CardStream.open(
@@ -1435,9 +1532,11 @@ export class FeishuBridge {
 				}),
 			);
 			this.streamingCards.set(agentId, cardStream);
+			this.replayBufferedEvents(agentId, cardStream);
 		} catch (e) {
 			logErr("[飞书 Session Mirror] 流式卡片创建失败:", e);
 			this.streamingRunStates.delete(agentId);
+			this.pendingCardEvents.delete(agentId);
 		}
 	}
 
@@ -1716,8 +1815,9 @@ export class FeishuBridge {
 
 	// ===== 飞书消息发送（智能模式） =====
 
-	private async sendSmartMessage(chatId: string, text: string): Promise<void> {
-		if (!this.connection.client) return;
+	/** 发送智能消息；返回是否送达（吞错但上报结果，同步去重依赖真实结果决定是否记指纹） */
+	private async sendSmartMessage(chatId: string, text: string): Promise<boolean> {
+		if (!this.connection.client) return false;
 		const mode = chooseMessageMode(text);
 		const language = feishuLanguage(this.locale);
 		try {
@@ -1732,8 +1832,10 @@ export class FeishuBridge {
 			} else {
 				await this.connection.client.im.message.create({ params: { receive_id_type: "chat_id" }, data: { receive_id: chatId, msg_type: "text", content: JSON.stringify({ text }) } });
 			}
+			return true;
 		} catch (e) {
 			logErr("[飞书 Bridge] 发送消息失败:", e);
+			return false;
 		}
 	}
 
@@ -1760,7 +1862,7 @@ export class FeishuBridge {
 	 * 发送 Agent 回复到飞书，并扫描执行 [SEND_FILE:] / [CREATE_DOC:] 标记。
 	 */
 	private async sendResultFallback(chatId: string, sessionId: string, startTime: number): Promise<void> {
-		const messages = this.agentManager.getMessages(sessionId);
+		const messages = this.runtimeBindings.getRuntimeMessages(sessionId);
 		const lastAssistant = messages.filter((m) => m.role === "assistant").pop();
 		const resultText = lastAssistant?.text ?? "";
 		if (!resultText.trim()) return;
@@ -1773,8 +1875,7 @@ export class FeishuBridge {
 	 * 扫描 Agent 回复中的 [SEND_FILE:] / [CREATE_DOC:] 标记并执行飞书操作。
 	 * 如果没有标记，自动检测回复中是否提到了工作目录下的文件并尝试发送。
 	 */
-	private async processFeishuActions(chatId: string, sessionId: string): Promise<void> {
-		const messages = this.agentManager.getMessages(sessionId);
+	private async processFeishuActions(chatId: string, messages: ChatMessage[]): Promise<void> {
 		const lastAssistant = messages.filter((m) => m.role === "assistant").pop();
 		const text = lastAssistant?.text ?? "";
 		if (!text) return;
@@ -1827,12 +1928,13 @@ export class FeishuBridge {
 	 */
 	private async sendFeishuFile(chatId: string, filePath: string, fileName?: string): Promise<string> {
 		if (!this.connection.client) return feishuT(this.locale, "file.bridgeNotReady");
-		const { existsSync, readFileSync } = await import("node:fs");
+		const { existsSync, readFileSync, statSync } = await import("node:fs");
 		const { basename } = await import("node:path");
 		if (!existsSync(filePath)) return feishuT(this.locale, "file.notFound", { path: filePath });
 		const fName = fileName || basename(filePath);
+		// 先 stat 后读：30MB 上限若在整文件进内存后才判，大文件等于白读一次。
+		if (statSync(filePath).size > 30 * 1024 * 1024) return feishuT(this.locale, "file.tooLarge");
 		const fileData = readFileSync(filePath);
-		if (fileData.length > 30 * 1024 * 1024) return feishuT(this.locale, "file.tooLarge");
 
 		try {
 			// 1. 用 SDK im.file.create 上传文件
@@ -1933,20 +2035,43 @@ export class FeishuBridge {
 		return this.downloadMessageResource(messageId, fileKey, "file");
 	}
 
+	/**
+	 * 飞书资源（图片/文件）下载的统一字节上界：超限即中止流并抛错。
+	 * 过去 streamToBuffer 无上界整流到内存，文件型 50MiB 拦截又发生在全量下载之后——
+	 * 飞书侧一个超大附件就能把主进程内存打爆（与 filesReadContent 无界读同族）。
+	 * 64MiB 覆盖 UX 允许的 50MiB 文件上限；图片路径过去完全没有检查，同样受此闸保护。
+	 */
+	private static readonly MAX_RESOURCE_DOWNLOAD_BYTES = 64 * 1024 * 1024;
+
 	private async streamToBuffer(result: unknown): Promise<Buffer> {
 		const resp = result as Record<string, unknown>;
+		const cap = FeishuBridge.MAX_RESOURCE_DOWNLOAD_BYTES;
 		if (typeof resp?.getReadableStream === "function") {
 			const chunks: Buffer[] = [];
+			let total = 0;
 			const readable = (resp.getReadableStream as () => NodeJS.ReadableStream)();
-			for await (const chunk of readable as AsyncIterable<Buffer | string>) {
-				chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+			try {
+				for await (const chunk of readable as AsyncIterable<Buffer | string>) {
+					const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+					total += piece.length;
+					if (total > cap) throw new Error(`FEISHU_RESOURCE_TOO_LARGE:${total}`);
+					chunks.push(piece);
+				}
+			} finally {
+				// 中止后主动销毁底层流，避免连接与缓冲区泄漏（for-await 的 return() 只关迭代器）。
+				const destroyable = readable as { destroy?: (err?: Error) => void };
+				if (total > cap) destroyable.destroy?.(new Error("resource exceeds download budget"));
 			}
 			return Buffer.concat(chunks);
 		}
 		if (typeof (result as AsyncIterable<unknown>)?.[Symbol.asyncIterator] === "function") {
 			const chunks: Buffer[] = [];
+			let total = 0;
 			for await (const chunk of result as AsyncIterable<Buffer | string>) {
-				chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+				const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+				total += piece.length;
+				if (total > cap) throw new Error(`FEISHU_RESOURCE_TOO_LARGE:${total}`);
+				chunks.push(piece);
 			}
 			return Buffer.concat(chunks);
 		}

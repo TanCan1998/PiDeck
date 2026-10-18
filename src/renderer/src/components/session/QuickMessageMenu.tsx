@@ -55,7 +55,7 @@ export function QuickMessageMenu(props: {
 			onOpenChange={setOpen}
 		>
 			<PopoverTrigger asChild>
-				<Button variant="ghost" size="icon" className="composer-bar-btn icon size-7 rounded-md text-foreground hover:bg-muted/60" aria-label={t("app.quickMessagesTitle")} aria-keyshortcuts={shortcutAria} title={triggerTitle} disabled={props.disabled}>
+				<Button variant="ghost" size="icon" className="composer-bar-btn quick-messages icon size-7 rounded-md text-foreground hover:bg-muted/60" aria-label={t("app.quickMessagesTitle")} aria-keyshortcuts={shortcutAria} title={triggerTitle} disabled={props.disabled}>
 					<MessageSquareText size={15} strokeWidth={2} aria-hidden="true" />
 				</Button>
 			</PopoverTrigger>

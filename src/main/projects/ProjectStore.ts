@@ -124,6 +124,27 @@ export class ProjectStore implements HostRebindStorePort {
 
 	private readonly referenceGuard: RemoteReferenceWriteGuard | undefined;
 
+	// 项目集变化监听（托盘菜单等主进程侧 UI 重建用）：所有 mutation 汇聚于 save()，
+	// 此处统一派发，避免在 IPC/自动导入/worktree 等散点各挂一份。
+	private changeListeners: Array<() => void> = [];
+
+	onChanged(listener: () => void): () => void {
+		this.changeListeners.push(listener);
+		return () => {
+			this.changeListeners = this.changeListeners.filter((entry) => entry !== listener);
+		};
+	}
+
+	private emitChanged(): void {
+		for (const listener of this.changeListeners) {
+			try {
+				listener();
+			} catch {
+				// 监听器（如托盘重建）失败不能阻断项目持久化本身
+			}
+		}
+	}
+
 	async load() {
 		let persisted: Awaited<ReturnType<typeof loadProjectStore>>;
 		try {
@@ -431,6 +452,25 @@ export class ProjectStore implements HostRebindStorePort {
 				project.sortOrder = explicitOrder ?? tailStart + currentOrder.indexOf(project.id);
 			});
 
+			await this.save();
+			return this.list();
+		});
+	}
+
+	/**
+	 * 置顶/取消置顶普通项目：聊天项目恒置顶（list 排序里已固定第一），对其置顶无意义，
+	 * 与 rename 一样拋错让调用方在 UI 层隐藏入口。置顶只改排序权重，不动 sortOrder，
+	 * 取消置顶后项目回到拖拽顺序里的原位置。
+	 */
+	async setPinned(id: string, pinned: boolean) {
+		// 写事务包一层：dev 侧 save() 是「标记本次需要落盘」，真正写盘由 commitWrite 在锁内完成；
+		// 裸调 save() 只会置位标记而永远不落盘（幂等点击与重启后被回滚）。
+		return this.commitWrite(async () => {
+			const project = this.projects.find((candidate) => candidate.id === id);
+			if (!project) throw new Error(`Project not found: ${id}`);
+			if (this.isChatProject(project)) throw new Error("PROJECT_PIN_NOT_ALLOWED");
+			if (Boolean(project.pinned) === pinned) return this.list();
+			project.pinned = pinned;
 			await this.save();
 			return this.list();
 		});
@@ -748,5 +788,7 @@ export class ProjectStore implements HostRebindStorePort {
 		await writeProjectStoreSnapshot(this.filePath, state, revision, { skipBackup: this.skipNextBackup });
 		this.revision = revision;
 		this.skipNextBackup = false;
+		// 项目集真正落盘后统一派发（dev 侧 onChanged 语义）：读事务/未变更事务不发。
+		this.emitChanged();
 	}
 }

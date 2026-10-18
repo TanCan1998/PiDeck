@@ -84,10 +84,14 @@ test("tool enter animation has no translateY", () => {
 
 // 跟随开关（followOutput）与用户逃逸/回底（onFollowChange）桥接到引擎：
 // - followOutput=true 时重新锁底（近底 instant / 远处弹簧）
+// - followOutput=false 时主动解锁（引擎不读这个 prop，只 return 等于开关无效）
 // - 引擎 isAtBottom 变化时上报给 controller，controller 再回写 followOutput
 test("followOutput and onFollowChange bridge to the stick engine", () => {
 	assert.match(scrollerSource, /const engineScrollToBottom = stick\.scrollToBottom;/);
-	assert.match(scrollerSource, /if \(!followOutput\) return;/);
+	// false 分支沿触发（React #185：非沿重复解锁会在 layout cascade 里与引擎/controller 乒乓），
+	// 但沿上仍必须主动调 stopScroll（快照 ref + isFollowEscapeEdge）
+	assert.match(scrollerSource, /const previousFollowOutput = previousFollowOutputRef\.current;/);
+	assert.match(scrollerSource, /if \(!followOutput\) \{\s*if \(isFollowEscapeEdge\(previousFollowOutput, followOutput\)\) engineStopScroll\(\);\s*return;/);
 	assert.match(scrollerSource, /engineScrollToBottom\(\{ animation \}\)/);
 	assert.match(scrollerSource, /reduce \|\| distance <= followThreshold \? "instant" : "smooth"/);
 	assert.match(scrollerSource, /onFollowChange\?\.\(isFollowing\)/);
@@ -194,7 +198,8 @@ test("stopReason flows from RPC message_end into ChatMessage", () => {
 	// pending 是骨架占位值，必须被排除（否则 message_end 缺字段时消息永远停 in pending，
 	// 渲染层回退启发式失效——reviewer 指出删掉该守卫测试照样绿的漏洞，故显式断言）。
 	assert.match(agentSource, /extractedStopReason/);
-	assert.match(agentSource, /partialMessage as any\)\.stopReason/);
+	// 入参收窄后不再有 as any：stopReason 经 nonEmptyString(asRecord(partialMessage)) 提取
+	assert.match(agentSource, /nonEmptyString\(asRecord\(partialMessage\)\?\.stopReason\)/);
 	assert.match(agentSource, /existing\.stopReason = finalStopReason/);
 	assert.match(agentSource, /extractedStopReason && extractedStopReason !== "pending"/);
 	// 历史回放路径：JSONL 持久化的 stopReason 透传

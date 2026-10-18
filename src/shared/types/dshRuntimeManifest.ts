@@ -144,9 +144,16 @@ export function resolveDshRuntimeReleaseUrl(release: DshRuntimeRelease, source: 
 /**
  * 为当前 app 版本挑出要安装的版本：兼容区间内 runtimeVersion 最大的一条。
  * 与 selectRuntime 的区别是入参形状不同（索引条目 vs 已安装清单）。
+ *
+ * `requiredVersion`：本版本 app 配套的 dsh 版本（package.json 声明）。状态服务用它做
+ * 硬门控（`isDshRuntimeVersionMismatch` 要求逐字相等），装任何「兼容区间内但不相等」
+ * 的版本都解不开 outdated——用户点安装会毫无变化。给了就必须精确命中，命中不了
+ * 返回 undefined（不静默退回「最接近的兼容版」），由调用方给出可读失败。
+ * 用 compareSemver 而非字符串相等：容忍索引/声明里的 `v` 前缀等写法差异。
  */
-export function selectRelease(releases: readonly DshRuntimeRelease[], appVersion: string): DshRuntimeRelease | undefined {
+export function selectRelease(releases: readonly DshRuntimeRelease[], appVersion: string, requiredVersion?: string): DshRuntimeRelease | undefined {
 	const compatible = releases.filter((release) => compareSemver(appVersion, release.minAppVersion) >= 0 && (!release.maxAppVersion || compareSemver(appVersion, release.maxAppVersion) < 0));
+	if (requiredVersion) return compatible.find((release) => compareSemver(release.runtimeVersion, requiredVersion) === 0);
 	if (compatible.length === 0) return undefined;
 	return compatible.reduce((best, current) => (compareSemver(current.runtimeVersion, best.runtimeVersion) > 0 ? current : best));
 }

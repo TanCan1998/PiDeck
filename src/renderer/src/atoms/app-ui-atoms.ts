@@ -2,9 +2,12 @@ import { atom } from "jotai";
 import { atomWithStorage } from "jotai/utils";
 import type { BusySendDelivery } from "../../../shared/busySendDelivery";
 import type { AgentBackend } from "../../../shared/types";
+import { APP_DISPLAY_NAME_DEFAULT, type LogoStyle } from "../../../shared/types/settings";
 import type { QuickMessagesSnapshot } from "../../../shared/types/quickMessages";
+import type { ReplyActionsSnapshot } from "../../../shared/types/replyActions";
 import { resolveEffectiveAgentBackend } from "../../../shared/types/dshRuntime";
 import { isModuleHidden } from "../../../shared/hiddenModules";
+import { isComposerFeatureHidden } from "../../../shared/composerFeatures";
 import { dshRuntimeStatusAtom } from "./dsh-atoms";
 import type { SettingsFieldAnchorSlug } from "../utils/settingsFieldAnchors";
 import { defaultExpandedSidebarProjects, readExpandedSidebarProjects } from "../utils/sidebarExpandedProjects";
@@ -13,8 +16,26 @@ import { DEFAULT_SIDEBAR_NAV_TAB, readSidebarNavTab, type SidebarNavTab } from "
 /** Settings overlay visibility is shared by Sidebar, Pi environment flow, and Session surface. */
 export const settingsOpenAtom = atom(false);
 
+/** Logo 风格的渲染层镜像（App.tsx 在 settings 变化时同步写入，照 announcement-atoms 模式）。
+ *  LogoMark / PiTuiLogo / AppParts 侧栏 / AboutPopover 订阅，避免 settings props 透传链；
+ *  Web 独立环境无人写入，保持默认 pi-tui（与 settings 默认同源），不引入额外通道。 */
+export const logoStyleAtom = atom<LogoStyle>("pi-tui");
+
+/** 自定义 logo 图片（data URL）的渲染层镜像；空串 = 未设置。
+ *  只服务 logoStyle="custom" 的落点（LogoMark / 品牌区 / 关于弹层 / 来源标），
+ *  未设置时各落点自行回落默认标——atom 里不放回落逻辑，免得多处订阅拿到不同结果。 */
+export const customLogoAtom = atom<string>("");
+
+/** 应用显示名称的渲染层镜像（已解析，空值已是 PiDeck）；品牌区与「关于」弹层订阅。 */
+export const appDisplayNameAtom = atom<string>(APP_DISPLAY_NAME_DEFAULT);
+
+/** 当前活跃编辑器 tab 的文件路径（无 tab 时为 null）：文件抽屉树行高亮用。
+ *  由 useFileEditor 在 activeTab 变化时写入；抽屉树跨六个组件层级订阅，
+ *  走 atom 避免 App→drawerPorts→DrawerSurface→DrawerContent→FilesPanel→FileNode 的 props 透传链。 */
+export const activeEditorFileAtom = atom<string | null>(null);
+
 /** 与 SettingsModal 侧栏 tab 对齐；深链/焦点目标用同一套 id，避免 Git 去设置落到上次记住的非「常用」页。 */
-export type SettingsTabId = "common" | "shortcuts" | "appearance" | "proxy" | "connections" | "web" | "editors" | "git" | "dev" | "im" | "pet" | "notification" | "storage" | "backup" | "usage" | "process" | "vision" | "imagegen";
+export type SettingsTabId = "common" | "shortcuts" | "appearance" | "terminal" | "proxy" | "connections" | "web" | "editors" | "git" | "dev" | "im" | "pet" | "notification" | "storage" | "backup" | "usage" | "process" | "vision" | "imagegen" | "videogen" | "acp" | "hostplugins";
 
 /**
  * 设置页内可直达的锚点 slug（对应 DOM 上的 `id="settings-section-<slug>"`）。
@@ -98,6 +119,22 @@ export const dshModuleHiddenAtom = atom((get) => isModuleHidden(get(hiddenModule
 /** 生图入口是否隐藏：输入框后端下拉里的生图选项。 */
 export const imageGenModuleHiddenAtom = atom((get) => isModuleHidden(get(hiddenModulesAtom), "imagegen"));
 
+/** 生视频入口是否隐藏：输入框后端下拉里的生视频选项 + 生视频设置页。 */
+export const videoGenModuleHiddenAtom = atom((get) => isModuleHidden(get(hiddenModulesAtom), "videogen"));
+
+/**
+ * 用户隐藏的输入框功能入口（设置项 hiddenComposerFeatures 的渲染层快照，清单见
+ * shared/composerFeatures.ts）。App 在 settings 变化时写入；不持有 settings props 的
+ * 消费方（ComposerBottomBar 的底栏入口）从这里读，设置保存后立即生效。默认空 = 全部显示。
+ */
+export const hiddenComposerFeaturesAtom = atom<readonly string[]>([]);
+
+/** 输入框底栏模式选择器是否被隐藏（设置 → 外观 → 输入框功能显示）。 */
+export const composerModesHiddenAtom = atom((get) => isComposerFeatureHidden(get(hiddenComposerFeaturesAtom), "composerModes"));
+
+/** 流式状态条右侧的功能提示轮播是否被隐藏（设置 → 外观 → 功能模块）。 */
+export const respondingTipsHiddenAtom = atom((get) => isModuleHidden(get(hiddenModulesAtom), "respondingTips"));
+
 /**
  * 忙碌时发送消息的默认投递行为（设置项 busySendDelivery 的渲染层快照）。
  * App 在 settings 变化时写入；composer/发送链路在决策时刻读取，
@@ -114,6 +151,13 @@ export const busySendDeliveryAtom = atom<BusySendDelivery>("steer");
  * null = 尚未读到文件（弹框先显示加载态，不把「还没读完」误报成「没有快捷消息」）。
  */
 export const quickMessagesSnapshotAtom = atom<QuickMessagesSnapshot | null>(null);
+
+/**
+ * 回复快捷操作规则快照（配置文件 userData/reply-actions.json，主进程 ReplyActionRuleStore 读写）。
+ * 与 quickMessagesSnapshotAtom 同一套约定：读写入口统一走 useReplyActions，
+ * SessionReplyActions 只读 rules 展示，设置页经 save 落盘后整份替换快照。
+ */
+export const replyActionsSnapshotAtom = atom<ReplyActionsSnapshot | null>(null);
 
 /**
  * 侧栏展开的项目 id 集合（有 id = 展开）。
@@ -148,14 +192,11 @@ export const sidebarNavTabAtom = atom<SidebarNavTab>(readSidebarNavTab(typeof wi
 export type TurnFlowSettings = {
 	/** 流式对话时展开中间过程（默认开：最新轮流式输出时自动展开思考/工具详情）。 */
 	expandInterimDuringStream: boolean;
-	/** 是否按过程组合并显示思考/工具调用（默认关：保持现有平铺显示）。 */
+	/** 是否按过程组合并显示思考/工具调用（默认开：连续思考/工具调用合并成过程组）。 */
 	processGroupDisplay: boolean;
-	/** 新一轮开始时收起上一轮（默认开：发送新消息后收起所有非最新轮，含手动展开的）。 */
-	collapsePrevRunsOnNewTurn: boolean;
 };
 
 export const turnFlowSettingsAtom = atom<TurnFlowSettings>({
 	expandInterimDuringStream: true,
-	processGroupDisplay: false,
-	collapsePrevRunsOnNewTurn: true,
+	processGroupDisplay: true,
 });

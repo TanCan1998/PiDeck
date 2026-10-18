@@ -52,7 +52,7 @@ export const StoreSearchBar = forwardRef<HTMLInputElement, StoreSearchBarProps>(
 					className="min-w-0 flex-1"
 					classNames={{
 						field: "h-9",
-						input: "text-[13px]",
+						input: "text-control",
 					}}
 				/>
 				{onSearch ? (

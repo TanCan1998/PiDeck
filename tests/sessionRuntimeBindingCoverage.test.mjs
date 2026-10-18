@@ -3,9 +3,10 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const coordinator = readFileSync("src/main/sessions/SessionRuntimeCoordinator.ts", "utf8");
-const replacement = readFileSync("src/main/sessions/agentSessionReplacement.ts", "utf8");
 const main = readFileSync("src/main/index.ts", "utf8");
 const agentManager = readFileSync("src/main/pi/AgentManager.ts", "utf8");
+// 扩展 UI 请求闸已迁入 extensionUiGate.ts（AgentManager 拆分 Wave 4B）
+const uiGate = readFileSync("src/main/pi/extensionUiGate.ts", "utf8");
 const sessionIpc = readFileSync("src/main/ipc/sessionIpc.ts", "utf8");
 const app = readFileSync("src/renderer/src/App.tsx", "utf8");
 const runtimeInjector = readFileSync("src/renderer/src/components/session/SessionRuntimeInjector.tsx", "utf8");
@@ -30,10 +31,11 @@ test("unbound interactive UI is cancelled and cannot be surfaced as Session UI",
 
 test("Ask Question keeps normalized batch requests pending for the session responder", () => {
 	assert.match(coordinator, /method === "batch_ask"/);
-	assert.match(agentManager, /hasCustomOption/);
-	assert.match(agentManager, /option\.startsWith\("✎"\)/);
-	assert.match(agentManager, /allowOther: typed\.allowOther === true \|\| hasCustomOption/);
+	assert.match(uiGate, /hasCustomOption/);
+	assert.match(uiGate, /option\.startsWith\("✎"\)/);
+	assert.match(uiGate, /allowOther: typed\.allowOther === true \|\| hasCustomOption/);
 	assert.match(agentManager, /questions: batchQuestions/);
+	assert.match(agentManager, /uiGate\.handleUIRequest\(agentId, typed\)/);
 });
 
 test("session UI requests remain generation-bound and render in the timeline footer", () => {
@@ -60,23 +62,27 @@ test("Web wiring is Session-first and exposes no Agent compatibility creation", 
 	assert.doesNotMatch(main, /LEGACY_EXTERNAL_RUNTIME|ipcChannels\.agentsCreate/);
 });
 
-test("catalog deletion unbinds first then stops the agent in the background", () => {
+test("catalog deletion unbinds first then waits for the agent exit before touching files", () => {
 	assert.match(sessionIpc, /sessionsCatalogDelete[\s\S]*releaseRuntimeForDelete\(sessionId\)/);
 	assert.match(sessionIpc, /sessionsCatalogDelete[\s\S]*rememberDismissedDshSession\(/);
 	assert.match(main, /deleteSessionRecord: async \(sessionId\)[\s\S]*releaseRuntimeForDelete\(sessionId\)/);
 	assert.match(main, /deleteSessionRecord: async \(sessionId\)[\s\S]*rememberDismissedDshSession\(/);
 	assert.match(coordinator, /async releaseRuntimeForDelete\(sessionId: string\)/);
-	assert.match(coordinator, /void this\.agents\s*\.?\s*stop\(target\.agentId\)/);
+	// 先解绑（侧栏立刻可删），但停进程必须等它真的退出：pi 还握着会话文件句柄时删文件会失败（#364）。
+	assert.match(coordinator, /unbindAgentUnchecked\(target\.agentId\)[\s\S]*await this\.stopForDelete\(target\.agentId\)/);
+	assert.match(coordinator, /stopAndWait\.call\(this\.agents, agentId, DELETE_STOP_TIMEOUT_MS\)/);
 	assert.match(coordinator, /isActivating\(sessionId: string\): boolean/);
 });
 
 test("replacement restore is gated by full local/SSH origin identity in the session owner", () => {
-	// index now delegates; the policy remains mandatory in its extracted owner.
-	assert.match(main, /function\s+replaceAgentSession\s*\([^)]*\)[\s\S]*?createAgentSessionReplacer\s*\(/);
-	assert.match(replacement, /const\s+originKey\s*=[\s\S]*?originEntry\?\.filePath[\s\S]*?buildSessionOriginKey\s*\(/);
-	assert.match(replacement, /canRestoreOrigin:\s*\(\)\s*=>\s*\{[\s\S]*?buildSessionOriginKey[\s\S]*?originKey/);
-	assert.match(replacement, /project\.hostId\s*===\s*originLocator\.hostId/);
-	assert.match(replacement, /tab\.sessionPath\s*===\s*originLocator\.remotePath/);
+	// 合并后策略内联进 index.ts（batch A1）：owner 就是这里的 replaceAgentSession，
+	// 所以断言落在它的函数体切片上（整文件的 `[\s\S]*?` 会跨函数误命中）。
+	const owner = main.slice(main.indexOf("async function replaceAgentSession("), main.indexOf("onDetached: emitSessionRuntimeDetach"));
+	assert.ok(owner.length > 0, "index.ts 里必须保留 replaceAgentSession 所有者");
+	assert.match(owner, /const\s+originKey\s*=[\s\S]*?originEntry\?\.filePath[\s\S]*?buildSessionOriginKey\s*\(/);
+	assert.match(owner, /canRestoreOrigin:\s*\(\)\s*=>\s*\{[\s\S]*?buildSessionOriginKey[\s\S]*?originKey/);
+	assert.match(owner, /project\.hostId\s*===\s*originLocator\.hostId/);
+	assert.match(owner, /tab\.sessionPath\s*===\s*originLocator\.remotePath/);
 	assert.match(coordinator, /failClosedRuntimeReplacement/);
 	assert.match(coordinator, /replacementBySession/);
 });

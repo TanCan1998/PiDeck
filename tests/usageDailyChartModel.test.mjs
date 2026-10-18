@@ -94,6 +94,6 @@ test("UsageDailyChart hides zero bars in tooltip and minPointSize", () => {
 test("UsageDayDetail provider bar does not keep a 1% floor for zeros", () => {
 	const source = readFileSync("src/renderer/src/components/app/usageStats/UsageDayDetail.tsx", "utf8");
 	assert.doesNotMatch(source, /Math\.max\(1,\s*\(p\.tokens \/ total\) \* 100\)/);
-	assert.match(source, /row\?\.byProvider\.filter\(\(p\) => p\.tokens > 0\)/);
+	assert.match(source, /agg\.byProvider\.filter\(\(p\) => p\.tokens > 0\)/);
 	assert.match(source, /width: `\$\{\(p\.tokens \/ total\) \* 100}%`/);
 });

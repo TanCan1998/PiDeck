@@ -51,11 +51,15 @@ function adapterFixture(overrides = {}) {
 	const service = { withProjectSession: async (host, root, work) => ({ ok: true, value: await work(session) }) };
 	const { createRemoteTerminalManager } = loadTsCommonJs("src/main/terminal/createRemoteTerminalManager.ts", {
 		stubs: {
-			"node-pty": {
-				spawn: (file, args, options) => {
-					calls.push({ file, args: Array.from(args), cwd: options.cwd, env: { ...options.env } });
-					return native;
-				},
+			// 合并后终端原生模块统一走 nodePtyRuntime 的惰性 createRequire 入口；
+			// 测试桩必须落在该模块边界（直接 stub "node-pty" 不会经过 loadNodePty）。
+			"./nodePtyRuntime": {
+				loadNodePty: () => ({
+					spawn: (file, args, options) => {
+						calls.push({ file, args: Array.from(args), cwd: options.cwd, env: { ...options.env } });
+						return native;
+					},
+				}),
 			},
 		},
 	});

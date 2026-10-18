@@ -1,37 +1,8 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
-import ts from "typescript";
-import vm from "node:vm";
 import { formatPercent } from "../src/renderer/src/components/session/TimelineFormat.ts";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
-
-// 与 sessionWidgetChips.test.mjs 相同的 TSX 编译替身模式：只测公开 helper 与源码结构。
-function compile(filePath, stubs = {}) {
-	const source = readFileSync(filePath, "utf8");
-	const output = ts.transpileModule(source, {
-		compilerOptions: {
-			module: ts.ModuleKind.CommonJS,
-			target: ts.ScriptTarget.ES2022,
-			esModuleInterop: true,
-			jsx: ts.JsxEmit.ReactJSX,
-		},
-		fileName: filePath,
-	}).outputText;
-	const module = { exports: {} };
-	const localRequire = (specifier) => stubs[specifier] ?? {};
-	vm.runInNewContext(
-		output,
-		{
-			module,
-			exports: module.exports,
-			require: localRequire,
-			console,
-		},
-		{ filename: filePath },
-	);
-	return module.exports;
-}
 
 const meterPath = "src/renderer/src/components/session/SessionContextMeter.tsx";
 const meterSource = () => readFileSync(meterPath, "utf8");
@@ -40,12 +11,16 @@ const zh = () => readFileSync("src/renderer/src/i18n/rendererCopy.zh-CN.ts", "ut
 const en = () => readFileSync("src/renderer/src/i18n/rendererCopy.en-US.ts", "utf8");
 
 function loadMeterHelpers() {
-	return compile(meterPath, {
-		react: {},
-		"../../i18n": { t: (key) => key },
-		"../../../../shared/types": {},
-		"../../../../shared/compactFeedback": loadTsCommonJs("src/shared/compactFeedback.ts"),
-		"../ui-shadcn/tooltip": {},
+	return loadTsCommonJs(meterPath, {
+		stubs: {
+			react: {},
+			"../../i18n": { t: (key) => key },
+			"../../../../shared/compactFeedback": loadTsCommonJs("src/shared/compactFeedback.ts"),
+			"../../atoms/app-ui-atoms": {},
+			"../ui-shadcn/tooltip": {},
+			"../app/ProviderUsageDetails": {},
+			"./SurfaceComponents": {},
+		},
 	});
 }
 
@@ -200,10 +175,11 @@ test("panel reuses the SessionStatus detail builder and keeps compact action", (
 	assert.match(source, /const detail = buildSessionStatusDetail\(\s*props\.state,/);
 	assert.match(source, /props\.state\?\.cacheHitAveragePercent \?\? undefined,/);
 	// 明细行与「最近一次回复」性能组分开渲染（不混读为会话均值）；
-	// 输入/输出 token 与最新缓存命中率已常驻输入框下方（ComposerStatsLine），
-	// 圆环面板消费前过滤这两行，避免重复展示
+	// 2027-02 重构后圆环迁入输入框底栏，面板改为保留完整明细
+	// （tokens/hitLatest 不再过滤——源码注释：避免用户从一行截断文本里猜数值）
 	assert.match(source, /panelDetailRows\.map\(/);
-	assert.match(source, /row\.label !== t\("ctx\.detail\.tokens"\) && row\.label !== t\("ctx\.detail\.hitLatest"\)/);
+	assert.match(source, /const panelDetailRows = detail\.detailRows;/);
+	assert.doesNotMatch(source, /row\.label !== t\("ctx\.detail\.tokens"\)/);
 	assert.match(source, /detail\.replyPerfRows\.map\(/);
 	assert.match(source, /t\("ctx\.detail\.lastReply"\)/);
 	// DSH 会话统计组（host sessionStats 投影；回合/墙钟/平均首字/生成速度）
@@ -218,11 +194,11 @@ test("panel reuses the SessionStatus detail builder and keeps compact action", (
 	assert.match(source, /t\("sessionContext\.compact"\)/);
 	assert.match(source, /t\("sessionContext\.compacting"\)/);
 	assert.match(source, /t\("sessionContext\.compactNotReady"\)/);
-	assert.match(source, /compactUi\.urgency === "danger" \? "text-destructive/);
-	assert.match(source, /compactUi\.urgency === "warn" \? "text-amber-500/);
+	assert.match(source, /compactUi\.urgency === "danger"\s*\?\s*"text-destructive/);
+	assert.match(source, /compactUi\.urgency === "warn"\s*\?\s*"text-amber-500/);
 	assert.match(source, /disabled=\{compactDisabled\}/);
-	assert.match(source, /onClick=\{props\.onCompact\}/);
-	assert.match(source, /showCompact = props\.onCompact !== undefined/);
+	assert.match(source, /onClick=\{\(\) => \{/);
+	assert.match(source, /showCompact = props\.onCompact !== undefined \|\|/);
 	assert.match(source, /data-testid="session-context-compact"/);
 });
 
@@ -245,24 +221,30 @@ test("panel re-anchors on scroll instead of closing during streaming", () => {
 	assert.match(source, /addEventListener\("keydown", onKeyDown\)/);
 });
 
-test("bottom bar wires the meter next to send controls and merges model + thinking into one chip", () => {
+test("bottom bar keeps model and thinking together with independent one-click entries", () => {
 	const source = bottomBarSource();
-	// ContextMeter 挂在右侧组（git 分支之前、发送控件同组）
-	assert.match(source, /import \{ SessionContextMeter \} from "\.\/SessionContextMeter"/);
-	assert.match(source, /<SessionContextMeter\s*state=\{props\.state\}\s*onCompact=\{props\.onCompact\}\s*backend=\{usageBackend\}\s*\/\/ [^\n]+\n\s*fallbackProvider=\{modelProvider\}/);
+	// 2027-02 重构（07b7e164c keep context ring beside composer stats）：ContextMeter
+	// 装配点从 composer-bottom-right 容器内迁到 ComposerArea，以 contextMeter prop
+	// 注入 ComposerStatsLine（与统计行并排）；chip 容器仍在 ComposerComponents。
+	const areaSource = readFileSync("src/renderer/src/components/session/ComposerArea.tsx", "utf8");
+	assert.match(areaSource, /import \{ SessionContextMeter \} from "\.\/SessionContextMeter"/);
+	// 装配点契约是「contextMeter prop 注入 SessionContextMeter 且带 backend」，不绑字数：
+	// 组件长出的新 prop / 注释（ACP 分支）会不断撑大这一段，限额只会定期红一次。
+	assert.match(areaSource, /contextMeter=\{[\s\S]*?<SessionContextMeter[\s\S]*?backend=\{composer\.backend === "dsh" \? "dsh" : "pi"\}/);
 	assert.match(source, /composer-bottom-right ml-auto flex shrink-0 items-center gap-2/);
-	// 模型/思考合并 chip：模型名 · 思考档位 + chevron（dsh ModelSelect trigger 形态）
-	assert.match(source, /composer-bar-btn model-thinking/);
-	// 分隔点 span 内的 · 被格式化到独立一行，断言只要求「模型值后紧跟该分隔点 span」。
-	assert.match(source, /\{modelValue\}<\/span>[\s\S]{0,80}?<span className="flex-none text-muted-foreground\/70" aria-hidden="true">[\s\S]{0,10}?·[\s\S]{0,10}?<\/span>/);
-	assert.match(source, /<ChevronDown\s*size=\{12\}/);
-	assert.match(source, /rotate-180/);
-	// root 菜单两行 drill-in：模型/思考 + 当前值 + 右 chevron，点击复用既有 Dialog
-	assert.match(source, /t\("app\.model"\)/);
-	assert.match(source, /t\("app\.think"\)/);
-	assert.match(source, /<ChevronRight size=\{14\}/);
-	assert.match(source, /drillIn\(props\.onPickModel\)/);
-	assert.match(source, /drillIn\(props\.onPickThinking\)/);
+	const chip = readFileSync("src/renderer/src/components/session/ModelThinkingChip.tsx", "utf8");
+	const host = readFileSync("src/renderer/src/components/session/ComposerPickerHost.tsx", "utf8");
+	// 同一紧凑组合保留分隔点，两个入口各自直达目标，不再先弹二级导航菜单。
+	assert.match(source, /<ModelThinkingChip\s/);
+	assert.match(source, /thinkingControl=\{props\.thinkingControl\}/);
+	assert.match(chip, /composer-bar-btn model-thinking/);
+	assert.match(chip, /onClick=\{props\.onPickModel\}/);
+	assert.match(chip, /aria-hidden="true">\s*·\s*<\/span>/);
+	assert.match(chip, /\{props\.thinkingControl\}/);
+	assert.match(chip, /<DropdownMenuRadioGroup\s/);
+	assert.match(host, /<ThinkingLevelDropdown\s/);
+	assert.doesNotMatch(host, /<ThinkingPicker\s/);
+	assert.doesNotMatch(chip, /drillIn|Popover|CommandPickerDialog/);
 	// 旧的分离按钮（绿色思考、斜体模型）不再存在
 	assert.doesNotMatch(source, /composer-bar-btn model flex h-7/);
 	assert.doesNotMatch(source, /composer-bar-btn thinking h-7 max-w-\[10rem\]/);
@@ -438,7 +420,7 @@ test("meter stays visible without capacity: placeholder ring + unavailable panel
 	assert.match(source, /const percent = context\?\.percent \?\? 0;/);
 	assert.doesNotMatch(source, /if \(context === null\) return null/);
 	// 面板标题走 reading（占位时显示 unavailable 文案），figures 仅在可用时渲染
-	assert.match(source, /<span className="text-text-tertiary">\{reading\}<\/span>/);
+	assert.match(source, /<span className="text-text-tertiary" title=\{t\("sessionContext\.usageHint"\)\}>[\s\S]*?\{reading\}[\s\S]*?<\/span>/);
 	assert.match(source, /\{available && figures !== undefined && /);
 	// 不再因 capacity 消失自动关闭面板
 	assert.doesNotMatch(source, /if \(!available && open\) setOpen\(false\)/);

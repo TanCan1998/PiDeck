@@ -126,8 +126,8 @@ test("新增文案中英齐备，且删掉被替换的旧 key", () => {
 });
 
 test("代理提示必须点名具体开关，而不是「去设置里配代理」", () => {
-	assert.match(zhCN["providerLogin.running.proxyHint"], /pi agent 代理/, "中文提示要指向「设置 → 代理设置 → 启用 pi agent 代理」");
-	assert.match(zhCN["providerLogin.running.slowHint"], /pi agent 代理/);
+	assert.match(zhCN["providerLogin.running.proxyHint"], /Pi agent 代理/, "中文提示要指向「设置 → 代理设置 → 启用 Pi agent 代理」");
+	assert.match(zhCN["providerLogin.running.slowHint"], /Pi agent 代理/);
 	assert.match(enUS["providerLogin.running.proxyHint"], /pi agent proxy/i);
 	assert.match(enUS["providerLogin.running.slowHint"], /pi agent proxy/i);
 });

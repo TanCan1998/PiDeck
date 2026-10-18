@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 test("App: attach refs read the authoritative Session draft atom (no stale previous)", () => {
-	const app = readFileSync("src/renderer/src/App.tsx", "utf8");
+	// setPromptForAgent（previous 权威源）已迁入 useSessionPromptDispatch。
+	const app = readFileSync("src/renderer/src/hooks/session/useSessionPromptDispatch.ts", "utf8");
 	// 回归：右键引用 → 删除 → 再引用不得把已删除的旧引用带回输入框。
 	// previous 必须来自 draft atom（输入框编辑/删除的权威源），而不是只在
 	// setPromptForAgent 内更新的 livePromptByAgentRef。

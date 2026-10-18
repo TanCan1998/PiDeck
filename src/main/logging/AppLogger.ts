@@ -2,6 +2,7 @@ import { app, shell } from "electron";
 import { appendFile, mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AppLogEntry, AppLogLevel, AppLogPage, AppLogQuery } from "../../shared/types";
+import { readTextBounded } from "../fs/boundedTextRead";
 import { DEFAULT_PAGE_SIZE, LOG_FILE_PATTERN, MAX_FILE_LINES, filterLogFiles, queryLogLines, toAppLogPage } from "./logQuery";
 import { LogLineCache } from "./logLineCache";
 
@@ -30,7 +31,7 @@ export class AppLogger {
 	private readonly dir = join(app.getPath("userData"), "logs");
 	private writeQueue: Promise<void> = Promise.resolve();
 	/** 历史日志文件行缓存：查询只重读指纹变化的文件（当天 append 文件），避免每次进设置日志 tab 全量读盘 */
-	private readonly lineCache = new LogLineCache({ readFile: (p) => readFile(p, "utf8"), stat }, 32, MAX_FILE_LINES);
+	private readonly lineCache = new LogLineCache({ readFile: (p) => readFile(p, "utf8"), readFileTail: (p, bytes) => readTextBounded(p, bytes, "tail"), stat }, 32, MAX_FILE_LINES);
 
 	log(level: AppLogLevel, scope: string, message: string, detail?: unknown) {
 		const entry: AppLogEntry = {

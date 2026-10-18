@@ -10,7 +10,7 @@
 import { useReducedMotion } from "motion/react";
 import { type ComponentPropsWithRef, type Ref, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { useStickToBottom, type ScrollToBottom, type ScrollByWheel, type StopScroll } from "@/lib/stick-to-bottom";
+import { isFollowEscapeEdge, isFollowSnapshotFresh, useStickToBottom, type ScrollToBottom, type ScrollByWheel, type StopScroll } from "@/lib/stick-to-bottom";
 
 /** 供时间线 controller 调用的引擎滚动 API（回底弹簧 / 原子恢复位置）。 */
 export type MessageScrollerScrollApi = {
@@ -96,6 +96,9 @@ export function MessageScroller({
 	const engineContentRef = stick.contentRef;
 	const engineScrollToBottom = stick.scrollToBottom;
 	const engineIsAtBottom = stick.isAtBottom;
+	// state 是引擎内的可变单例（useMemo([])），isAtBottom 字段始终反映引擎当前实况，
+	// 不随 React 提交快照走——上报新鲜度守卫依赖它区分「过期的 isFollowing」。
+	const engineLiveState = stick.state;
 	const engineRestoreAt = stick.restoreAt;
 	const engineStopScroll = stick.stopScroll;
 	const engineScrollByWheel = stick.scrollByWheel;
@@ -149,8 +152,22 @@ export function MessageScroller({
 	// 重新锁底或逃逸，向上兼容旧的 onFollowChange 语义。
 	const isFollowing = engineIsAtBottom;
 
+	// stopScroll 只在 followOutput true→false 的沿执行一次；ref 切始 true，
+	// 挂载即 follow=false 时也触发首次解锁。其余依赖（阈值/动画偏好）变化时重复
+	// 解锁会在同一 cascade 里与引擎/controller/ResizeObserver 乒乓（React #185 根源之一）。
+	const previousFollowOutputRef = useRef(true);
+
 	useLayoutEffect(() => {
-		if (!followOutput) return;
+		// 关闭跟随必须**主动解锁**：是否追底由引擎自己的 state.isAtBottom 决定，它不读这个 prop。
+		// 只 return 的话「脱离锁底」只会发生在用户上滚那一刻，停在底部时关掉跟随毫无效果
+		// （RPC 日志面板「自动滚动」开关实测无效）。时间线 controller 本就自己调 stopScroll，
+		// 对它是幂等重复（resetReaderUp + escapedFromLock + isAtBottom=false）。
+		const previousFollowOutput = previousFollowOutputRef.current;
+		previousFollowOutputRef.current = followOutput;
+		if (!followOutput) {
+			if (isFollowEscapeEdge(previousFollowOutput, followOutput)) engineStopScroll();
+			return;
+		}
 		// 回底按钮会先 setAutoScroll(true) 再发起弹簧；若这里无条件 instant，
 		// layout 阶段会抢跑把弹簧掐死，观感变成「唰」一下。
 		// 距底较远用弹簧滞空；已在近底则 instant 即可。
@@ -158,11 +175,20 @@ export function MessageScroller({
 		const distance = scroll ? scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight : 0;
 		const animation = reduce || distance <= followThreshold ? "instant" : "smooth";
 		engineScrollToBottom({ animation });
-	}, [followOutput, followThreshold, reduce, engineScrollToBottom]);
+	}, [followOutput, followThreshold, reduce, engineScrollToBottom, engineStopScroll]);
 
 	useEffect(() => {
+		// 新鲜度守卫（ACP 崩溃根因）：isFollowing 是本次渲染提交的快照，而 layout-effect
+		// 级联中（followOutput 效应 → scrollToBottom/stopScroll → engine setState）引擎的
+		// 可变单例 state.isAtBottom 已经再次翻转。把过期快照上报给 controller 会写进
+		// autoScroll → followOutput 反相 → 引擎再翻转 → 下一份反相的过期上报……
+		// 周期-2 永不收敛，最终 Maximum update depth exceeded 崩掉整窗（AppErrorBoundary
+		// 重载后内存缓存全丢 = ACP 会话「切走再切回消息消失」的入口）。丢弃过期上报即可
+		// 断链：引擎每次翻转都会提交一份新快照，收敛后自然有一份新鲜上报补上；级联里被
+		// 合并抵消（净零变化）的翻转本就无需上报。
+		if (!isFollowSnapshotFresh(isFollowing, engineLiveState.isAtBottom)) return;
 		onFollowChange?.(isFollowing);
-	}, [isFollowing, onFollowChange]);
+	}, [isFollowing, onFollowChange, engineLiveState]);
 
 	// 流式结束瞬间：busy true→false，开启 150ms 过渡窗口（期间追底用 instant）。
 	useEffect(() => {

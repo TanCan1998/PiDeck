@@ -21,6 +21,8 @@ function loadCatalog(fsPromises = nodeRequire("node:fs/promises")) {
 	return loadTsCommonJs("src/main/sessions/SessionCatalog.ts", {
 		stubs: {
 			"node:fs/promises": fsPromises,
+			// 假路径场景恒真：existsSync 只被外部删除清理消费，避免条目被剔（同 sessionCatalogForked）。
+			"node:fs": { existsSync: () => true },
 			"../logging/sharedLogger": { getAppLogger: () => null },
 		},
 	});

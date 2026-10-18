@@ -59,8 +59,12 @@ export function CommandPickerGroup(props: {
 				onClick={() => toggleGroup(props.id)}
 			>
 				{expanded ? <ChevronDown className="size-3.5 flex-none" aria-hidden="true" /> : <ChevronRight className="size-3.5 flex-none" aria-hidden="true" />}
-				<span className="max-w-[45%] flex-none truncate">{props.label}</span>
-				{props.count != null && <span className="flex-none font-mono text-caption text-muted-foreground/70">{props.countText ?? props.count}</span>}
+				{/* label/count 用 self-baseline 而不是让容器 items-baseline：名称是 text-control(13px/20px)、数量是
+				    text-caption(12px/18px)，items-center 只对齐行盒中心，两条基线会差约 2px（数量看起来悬在名称上方）。
+				    箭头与 trailing 无文字基线需保持居中，故只在有文字的这两个元素上覆盖对齐方式。 */}
+				<span className="max-w-[45%] flex-none self-baseline truncate">{props.label}</span>
+				{/* 数量不用 font-mono：串内含中文必然回退到 CJK 字体，等宽只对「数字列」有意义，此处混排徒增一套字形。 */}
+				{props.count != null && <span className="flex-none self-baseline text-caption text-muted-foreground/70">{props.countText ?? props.count}</span>}
 				{/* 弹性空隙：把 trailing（用量等）推到行最右，与名称/数量分开，避免挤在一起 */}
 				<span className="min-w-4 flex-1" />
 				{props.trailing}

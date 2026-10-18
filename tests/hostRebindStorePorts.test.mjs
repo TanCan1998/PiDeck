@@ -18,6 +18,7 @@ const LOCK_FILE = "remote-host-rebind.lock";
 
 /** 端口契约（HostRebindJournal §4.4）：before/after 与读回的 locator 都是这份规范 JSON。 */
 const { HostRebindJournal, canonicalHostLocatorJson } = loadTsCommonJs("src/main/remote/HostRebindJournal.ts");
+const { buildSessionOriginKey } = loadTsCommonJs("src/shared/sessionIdentity.ts");
 
 /** 跨 VM realm 的对象比较前先归一化：deepStrictEqual 会比较原型，两个 realm 的字面量原型不同。 */
 function plain(value) {
@@ -279,7 +280,10 @@ test("the session port returns one canonical locator snapshot per requested reco
 test("a rebind moves the ssh hostId and writes through the catalog's own atomic write path", async (t) => {
 	const directory = await makeTempDir(t, "pideck-rebind-port-sessions-write-");
 	const catalogPath = join(directory, "session-catalog.json");
-	await writeCatalogFixture(catalogPath, [catalogEntry({ id: "s-ssh", title: "Remote session", locator: sshLocator(SOURCE) }), catalogEntry({ id: "s-local", title: "Local session", locator: { kind: "local", environment: "native", filePath: "/srv/app/local.jsonl" }, filePath: "/srv/app/local.jsonl" })]);
+	// 合并后 dev 的启动身份修复会为缺 originKey 的本地文件会话重算身份键并落盘；
+	// fixture 要成为「已规范形态」必须自带派生 originKey，否则 load 会做一次归一化写。
+	const localEntry = { ...catalogEntry({ id: "s-local", title: "Local session", locator: { kind: "local", environment: "native", filePath: "/srv/app/local.jsonl" }, filePath: "/srv/app/local.jsonl" }), originKey: buildSessionOriginKey({ source: "pi", environment: "native", filePath: "/srv/app/local.jsonl" }) };
+	await writeCatalogFixture(catalogPath, [catalogEntry({ id: "s-ssh", title: "Remote session", locator: sshLocator(SOURCE) }), localEntry]);
 	const { SessionCatalog } = loadSessionCatalog();
 	const catalog = new SessionCatalog(catalogPath);
 	await catalog.load();

@@ -47,6 +47,10 @@ jobs:
         # 串行执行：并发模式（--test-concurrency=4）下测试文件共享进程全局状态，
         # Windows runner 偶发死锁挂起（二分定位：546 文件串行全过、并发偶发挂）；
         # --test-timeout/--test-force-exit 兜底单测超时与 open handle。
+        # 2026-10：串行模式也出现间歇性整文件挂起（sessionScannerSubagents 在 CI 上
+        # 单文件 47 分钟无输出，本地同文件 2.3s；10-01 曾 6h 空烧）——绿套件约 20-25 分钟，
+        # 45 分钟上限兜底：挂起快速红灯重跑，不再占用 runner 六小时。
+        timeout-minutes: 45
         run: npm run test:serial -- --test-timeout=120000 --test-force-exit
 
       - name: Generate app icon

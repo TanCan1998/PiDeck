@@ -73,7 +73,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input({ l
 			<div
 				ref={fieldRef}
 				data-state={hasError ? "error" : success ? "success" : focused ? "focused" : "idle"}
-				className={cn("relative h-11 overflow-hidden rounded-full border transition-colors duration-200", "border-border", focused && !hasError && "border-foreground/40 ring-2 ring-ring/40", hasError && "border-destructive ring-2 ring-destructive/25", disabled && "opacity-60", classNames?.field)}
+				className={cn("relative h-11 overflow-hidden rounded-full border transition-colors duration-base", "border-border", focused && !hasError && "border-foreground/40 ring-2 ring-ring/40", hasError && "border-destructive ring-2 ring-destructive/25", disabled && "opacity-60", classNames?.field)}
 			>
 				{leftIcon ? <span className={cn("pointer-events-none absolute left-3 top-1/2 flex -translate-y-1/2 items-center text-muted-foreground [&_svg]:h-4 [&_svg]:w-4", classNames?.leftIcon)}>{leftIcon}</span> : null}
 

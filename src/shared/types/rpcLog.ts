@@ -23,3 +23,30 @@ export interface RpcLogBatch {
 	agentId: string;
 	entries: RpcLogEntry[];
 }
+
+/**
+ * 模型请求快照在 RPC 日志条目里的**紧凑摘要**（direction: "model"）。
+ *
+ * 完整请求体（可能上百 KB）不进环形缓冲与 IPC 批次，另存
+ * userData/logs/model-traces/<agentId>-<traceId>.json，面板展开时按 traceId 回读。
+ */
+export interface ModelTraceLogData {
+	/** request = pi 发出的供应商请求；response = 该请求的最终 HTTP 状态。 */
+	kind: "request" | "response";
+	traceId: string;
+	model?: string;
+	provider?: string;
+	messageCount?: number;
+	toolCount?: number;
+	payloadBytes?: number;
+	truncated?: boolean;
+	status?: number;
+	durationMs?: number;
+}
+
+/** 判断一条日志条目的 data 是否为模型快照摘要（渲染层按 kind 区分请求/响应行）。 */
+export function isModelTraceLogData(value: unknown): value is ModelTraceLogData {
+	if (typeof value !== "object" || value === null) return false;
+	const data = value as Record<string, unknown>;
+	return (data.kind === "request" || data.kind === "response") && typeof data.traceId === "string";
+}

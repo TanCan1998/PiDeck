@@ -46,7 +46,7 @@ export function MessageSelectionTree(props: { items: RenderMessage[]; selectedId
 							>
 								<Checkbox checked={runState === "checked" ? true : runState === "indeterminate" ? "indeterminate" : false} aria-label={item.id} className="shrink-0" onClick={(event) => event.stopPropagation()} onCheckedChange={() => props.onToggleRun(item)} />
 								<Brain size={15} className="shrink-0 text-text-tertiary" aria-hidden="true" />
-								<span className="font-mono text-caption font-semibold tracking-[0.4px] uppercase text-text-secondary">pi</span>
+								<span className="font-mono text-caption font-semibold tracking-[0.4px] text-text-secondary">Pi</span>
 								<span className="shrink-0 text-caption whitespace-nowrap text-text-tertiary">{formatTime(item.endedAt)}</span>
 								<span className="ml-auto shrink-0 rounded-full bg-bg-muted px-2 py-0.5 font-mono text-micro text-text-tertiary">{assistantSubs.length}</span>
 							</div>

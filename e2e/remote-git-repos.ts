@@ -85,7 +85,8 @@ export async function verifyRemoteGitRepos(input: { window: Page; credentials: R
 
 	await test.step("面板加载仓库列表：选择器同时列出项目根与嵌套仓库", async () => {
 		await remoteProjectRow(window, root.split("/").pop() ?? "")
-			.locator(".project-draggable")
+			.locator(".conversation-title")
+			.first()
 			.click();
 		await window.getByRole("button", { name: "打开右侧边栏", exact: true }).click();
 		await window.getByTestId("drawer-rail-git").click();

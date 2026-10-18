@@ -1,20 +1,26 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import * as fsModule from "node:fs";
+import * as osModule from "node:os";
+import * as pathModule from "node:path";
 import test from "node:test";
 import ts from "typescript";
 import vm from "node:vm";
 
+import { createTsSandbox } from "./helpers/createTsSandbox.mjs";
+
 const bridgeSource = readFileSync("src/main/feishu/FeishuBridge.ts", "utf8");
 const mainSource = readFileSync("src/main/index.ts", "utf8");
-const i18nSource = readFileSync("src/main/feishu/FeishuI18n.ts", "utf8");
+// 飞书 IPC 处理器已随主进程拆分迁入 ipc/feishuIpc.ts（2027-02），契约同步改读新模块。
+const feishuIpcSource = readFileSync("src/main/ipc/feishuIpc.ts", "utf8");
+const contractSource = readFileSync("src/main/sessions/sessionRuntimeBinding.ts", "utf8");
 
+/**
+ * 真实加载 FeishuI18n：它现在依赖繁体词典与简繁判定，手写沙箱会因缺 require 桥失败，
+ * 统一交给按源文件目录解析的加载器。
+ */
 function compileFeishuI18n() {
-	const output = ts.transpileModule(i18nSource, {
-		compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-	}).outputText;
-	const sandbox = { exports: {} };
-	vm.runInNewContext(output, sandbox, { filename: "FeishuI18n.ts" });
-	return sandbox.exports;
+	return createTsSandbox()("src/main/feishu/FeishuI18n.ts");
 }
 
 /** 真实加载 AskCard（卡片构建/action 解析必须走真实现，mock 会丢断言）。 */
@@ -34,14 +40,16 @@ function compileAskCard(feishuI18n) {
 }
 
 test("FeishuBridge receives a narrow Session runtime binding gateway", () => {
-	assert.match(bridgeSource, /export interface SessionRuntimeBindingGateway/);
+	// 契约类型已抽到共享模块（微信接入时两桥合并到 imSessionRuntimeBindings），桥只负责复用
+	assert.match(contractSource, /export interface SessionRuntimeBindingGateway/);
+	assert.match(bridgeSource, /import type \{ SessionRuntimeBindingGateway \} from "\.\.\/sessions\/sessionRuntimeBinding"/);
 	assert.match(bridgeSource, /private runtimeBindings: SessionRuntimeBindingGateway/);
 	assert.doesNotMatch(bridgeSource, /sessionRuntimeByIdAtom|bindSessionRuntimeAtom/);
 	assert.doesNotMatch(bridgeSource, /this\.agentManager\.(sendPrompt|abort|getRuntimeState|getAvailableModels|setModel)\(/);
 });
 
 test("Feishu commands resolve a fresh Session target instead of persisting a generation", () => {
-	const gateway = mainSource.match(/const feishuSessionRuntimeBindings:[\s\S]*?\n\};/)?.[0] ?? "";
+	const gateway = mainSource.match(/const imSessionRuntimeBindings:[\s\S]*?\n\};/)?.[0] ?? "";
 	assert.match(gateway, /sessionRuntimeCoordinator\.getTarget\(sessionId\)/);
 	assert.match(gateway, /sessionRuntimeCoordinator\.send\(/);
 	assert.match(gateway, /sessionRuntimeCoordinator\.abortRuntime\(target\)/);
@@ -52,18 +60,18 @@ test("Feishu commands resolve a fresh Session target instead of persisting a gen
 // 回归（用户点会话连接飞书时未启动 Agent）：feishuSessionBotSet 必须先自动启动 runtime，
 // 再建飞书镜像；否则无 runtime 的会话（仅浏览过历史）永远报 runtimeUnavailable。
 test("session bot bind auto-starts a missing runtime before mirroring", () => {
-	const bindBlock = mainSource.match(/feishuSessionBotSet, async[\s\S]*?session\.bindFailed"/)?.[0] ?? "";
+	const bindBlock = feishuIpcSource.match(/feishuSessionBotSet, async[\s\S]*?session\.bindFailed"/)?.[0] ?? "";
 	assert.ok(bindBlock, "feishuSessionBotSet handler must exist");
 	// target 必须可重新赋值（const 无法在启动后更新）
-	assert.match(bindBlock, /let target = sessionRuntimeCoordinator\.getTarget\(sessionId\);/);
+	assert.match(bindBlock, /let target = deps\.sessionRuntimeCoordinator\.getTarget\(sessionId\);/);
 	// 未启动时走与桌面端相同的 activateRuntime 链路
-	assert.match(bindBlock, /feishuSessionRuntimeBindings\.activateRuntime\(sessionId\)/);
-	assert.match(bindBlock, /target = sessionRuntimeCoordinator\.getTarget\(sessionId\);/);
+	assert.match(bindBlock, /deps\.feishuSessionRuntimeBindings\.activateRuntime\(sessionId\)/);
+	assert.match(bindBlock, /target = deps\.sessionRuntimeCoordinator\.getTarget\(sessionId\);/);
 	// 启动失败仍要给出 runtimeUnavailable，不能静默继续
 	assert.match(bindBlock, /session\.runtimeUnavailable"/);
-	const activateIndex = bindBlock.indexOf("feishuSessionRuntimeBindings.activateRuntime(sessionId)");
+	const activateIndex = bindBlock.indexOf("deps.feishuSessionRuntimeBindings.activateRuntime(sessionId)");
 	// 激活后重新解析 target 的位置必须晚于激活调用（取最后一次出现，避开 let 声明行）
-	const targetRefreshIndex = bindBlock.lastIndexOf("target = sessionRuntimeCoordinator.getTarget(sessionId)");
+	const targetRefreshIndex = bindBlock.lastIndexOf("target = deps.sessionRuntimeCoordinator.getTarget(sessionId)");
 	assert.ok(activateIndex >= 0 && targetRefreshIndex > activateIndex, "target must be re-resolved after activation");
 });
 
@@ -77,7 +85,7 @@ test("Feishu creation is Catalog-first and never owns Agent lifecycle", () => {
 });
 
 test("main injects an origin-safe catalog gateway into every Feishu bridge", () => {
-	assert.match(mainSource, /const feishuSessionRuntimeBindings/);
+	assert.match(mainSource, /const imSessionRuntimeBindings: SessionRuntimeBindingGateway/);
 	assert.match(mainSource, /const existing = sessionCatalog\.get\(input\.existingSessionId\)/);
 	assert.match(mainSource, /input\.agent\.sessionPath && !canAttachRuntimeMetadata\(existing, input\.agent\)/);
 	assert.match(mainSource, /Existing Session origin does not match runtime/);
@@ -85,14 +93,18 @@ test("main injects an origin-safe catalog gateway into every Feishu bridge", () 
 	const guardIndex = mainSource.indexOf("input.agent.sessionPath && !canAttachRuntimeMetadata(existing, input.agent)");
 	const attachIndex = mainSource.indexOf("await sessionCatalog.attachRuntime(", guardIndex);
 	assert.ok(guardIndex >= 0 && attachIndex > guardIndex, "origin guard must precede runtime metadata attachment");
-	const constructors = [...mainSource.matchAll(/new FeishuBridge\(/g)].length;
-	const injections = [...mainSource.matchAll(/feishuSessionRuntimeBindings/g)].length - 1;
+	// FeishuBridge 构造点已随 IPC 域拆分分布在 index.ts 与 ipc/feishuIpc.ts，
+	// 注入面统计需跨两文件合计，防止新增构造点漏接 gateway。
+	const combined = `${mainSource}\n${feishuIpcSource}`;
+	const constructors = [...combined.matchAll(/new FeishuBridge\(/g)].length;
+	// 声明已合并为 imSessionRuntimeBindings，feishuSessionRuntimeBindings 只剩注入点
+	const injections = [...combined.matchAll(/feishuSessionRuntimeBindings/g)].length;
 	assert.ok(constructors >= 4);
 	assert.ok(injections >= constructors);
 });
 
 test("main gateway rejects terminal or differently coordinated runtimes before binding", () => {
-	const gateway = mainSource.match(/const feishuSessionRuntimeBindings:[\s\S]*?\n\};/)?.[0] ?? "";
+	const gateway = mainSource.match(/const imSessionRuntimeBindings:[\s\S]*?\n\};/)?.[0] ?? "";
 	assert.match(gateway, /input\.agent\.status === "error" \|\| input\.agent\.status === "closed"/);
 	assert.match(gateway, /sessionRuntimeCoordinator\.getRuntimeBinding\(input\.agent\.id\)/);
 	assert.match(gateway, /currentBinding\.sessionId !== existing\.id/);
@@ -101,7 +113,7 @@ test("main gateway rejects terminal or differently coordinated runtimes before b
 });
 
 test("main gateway keeps a pathless existing Session and attaches metadata without file origin", () => {
-	const gateway = mainSource.match(/const feishuSessionRuntimeBindings:[\s\S]*?\n\};/)?.[0] ?? "";
+	const gateway = mainSource.match(/const imSessionRuntimeBindings:[\s\S]*?\n\};/)?.[0] ?? "";
 	assert.match(gateway, /if \(input\.agent\.sessionPath && !canAttachRuntimeMetadata/);
 	assert.match(gateway, /sessionId = existing\.id/);
 	// 块结构可能被 formatter 重排：用缩进无关的锚点在整段里定位 pathless 分支。
@@ -154,7 +166,10 @@ function compileBridge(loadBindings = [], options = {}) {
 			getPersistentChatId: options.getPersistentChatId ?? (() => undefined),
 			setPersistentChatId: () => undefined,
 		},
-		"node:fs": { existsSync: options.existsSync ?? (() => false) },
+		// runAgent 的图片落盘会写真实临时文件：只 stub existsSync 会在写盘时 TypeError。
+		"node:fs": { ...fsModule, existsSync: options.existsSync ?? (() => false) },
+		"node:path": pathModule,
+		"node:os": { tmpdir: () => osModule.tmpdir() },
 		"./rich-text": richText,
 		"./CardStream": { CardStream: { open: async () => ({}) } },
 		"./docActions": { buildFeishuTextChildren: () => [], stripFeishuActionMarkers: (text) => text, wantsFeishuDoc: () => undefined },
@@ -236,6 +251,10 @@ function makeBridge(agents, gateway, calls = {}) {
 			return undefined;
 		},
 		setRuntimeModel: async (sessionId, provider, modelId) => calls.setModel?.push([sessionId, provider, modelId]),
+		// runtime handle 归属与消息读取现在都经网关（pi 之外的后端不在 AgentManager 里）
+		findRuntimeAgent: (agentId) => agents.find((candidate) => candidate.id === agentId),
+		getRuntimeMessages: () => [],
+		waitForRunEnd: async () => ({ kind: "ended", failed: false }),
 		...gateway,
 	};
 	const bridge = new FeishuBridge(
@@ -297,7 +316,7 @@ test("existing Feishu binding is reused by ensureSessionMirror without creating 
 		},
 		() => null,
 		() => [],
-		{ bindRuntime: async () => ({ sessionId: "S", runtimeGeneration: 1 }) },
+		{ findRuntimeAgent: (id) => tabs.find((candidate) => candidate.id === id), bindRuntime: async () => ({ sessionId: "S", runtimeGeneration: 1 }) },
 	);
 	await bridge.loadPersistedBindings();
 	let createCount = 0;
@@ -334,7 +353,7 @@ test("removing a stale binding does not remove another binding's current indexes
 		{ list: () => [] },
 		() => null,
 		() => [],
-		{ bindRuntime: async () => ({ sessionId: "S", runtimeGeneration: 1 }) },
+		{ findRuntimeAgent: () => undefined, bindRuntime: async () => ({ sessionId: "S", runtimeGeneration: 1 }) },
 	);
 	await bridge.loadPersistedBindings();
 	assert.equal(bridge.getSessionChatId("S"), "current");
@@ -362,6 +381,7 @@ test("legacy ID absent from catalog may migrate to a new stable ID during resume
 				return { sessionId: "S2" };
 			},
 			activateRuntime: async () => tab,
+			findRuntimeAgent: () => undefined,
 		},
 	);
 	await bridge.loadPersistedBindings();
@@ -593,6 +613,7 @@ test("persisted path collision with a different source stays unowned when gatewa
 		() => null,
 		() => [],
 		{
+			findRuntimeAgent: (id) => (id === tab.id ? tab : undefined),
 			bindRuntime: async () => {
 				gatewayCalls += 1;
 				throw new Error("source mismatch");
@@ -645,6 +666,7 @@ test("two persisted rows sharing a path stay unowned even with one runtime candi
 		() => null,
 		() => [],
 		{
+			findRuntimeAgent: (id) => (id === "B" ? makeAgent("B", "p", "/same") : undefined),
 			bindRuntime: async (input) => {
 				bindInputs.push(input);
 				return { sessionId: "unexpected", runtimeGeneration: 1 };
@@ -716,7 +738,7 @@ test("Feishu select ask renders option card; button click answers via sendUIResp
 	assert.equal(JSON.stringify(uiResponses), JSON.stringify([["A", "req-1", { value: "生产" }]]));
 	assert.equal(bridge.getPendingAskForChat("chat"), undefined, "pending ask must be cleared");
 	assert.ok(
-		sent.some((s) => s.data.content.includes("已选择：生产")),
+		sent.some((s) => s.data.content.includes("已选择: 生产")),
 		"user should get an answer confirmation",
 	);
 });
@@ -838,7 +860,7 @@ test("Feishu text reply answers a pending input ask instead of queuing a prompt"
 	});
 	assert.equal(JSON.stringify(uiResponses), JSON.stringify([["A", "req-4", { value: "帮我写一个脚本" }]]));
 	assert.equal(prompts.length, 0, "text reply must not be queued as a new prompt");
-	assert.ok(sent.some((s) => s.data.content.includes("已选择：帮我写一个脚本")));
+	assert.ok(sent.some((s) => s.data.content.includes("已选择: 帮我写一个脚本")));
 });
 
 test("Feishu confirm pending: text reply shows guidance instead of answering", async () => {
@@ -899,7 +921,7 @@ test("Feishu card input submit answers the pending ask via input_value", async (
 	});
 	assert.equal(JSON.stringify(uiResponses), JSON.stringify([["A", "req-7", { value: "卡片里输入的回答" }]]));
 	assert.equal(bridge.getPendingAskForChat("chat"), undefined, "pending ask must be consumed");
-	assert.ok(sent.some((s) => s.data.content.includes("已收到回答：卡片里输入的回答")));
+	assert.ok(sent.some((s) => s.data.content.includes("已收到回答: 卡片里输入的回答")));
 });
 
 // 回归（select 编号回复）：卡片列表带编号，纯数字文本回复必须映射到对应选项值。
@@ -924,4 +946,138 @@ test("Feishu numeric text reply maps to the select option value", async () => {
 		sender: { sender_type: "user", sender_id: { open_id: "user" } },
 	});
 	assert.equal(JSON.stringify(uiResponses), JSON.stringify([["A", "req-8", { value: "方案二" }]]), "numeric reply must map to option value");
+});
+
+// ===== 渠道后端（pi / dsh） =====
+
+/** 把 chat 直接绑到一个已有会话/运行时上，跳过建会话链路。 */
+function bindChat(bridge, backend) {
+	const binding = {
+		chatId: "chat",
+		botId: "bot",
+		userId: "u",
+		sessionId: "S1",
+		agentId: "A",
+		sessionPath: "/sessions/S1.json",
+		workspaceId: "",
+		source: "feishu",
+		chatType: "p2p",
+		createdAt: 1,
+		...(backend ? { backend } : {}),
+	};
+	bridge.chatBindings.set("chat", binding);
+	bridge.indexBinding(binding);
+	return binding;
+}
+
+test("新建飞书会话带上 Bot 设置的后端并写进绑定", async () => {
+	const calls = { ensureSession: [] };
+	const { bridge } = makeBridge([], {}, calls);
+	bridge.botConfig.backend = "dsh";
+	bridge.getProjects = () => [{ id: "p", name: "project", path: "." }];
+	bridge.connection.client = mockFeishuClient([]);
+
+	await bridge.createNewSession({ chatId: "chat", senderOpenId: "u", chatType: "p2p", groupName: "", messageId: "m" });
+
+	assert.equal(calls.ensureSession[0].backend, "dsh", "新建会话必须把设置的后端交给网关");
+	assert.equal(bridge.listBindings()[0].backend, "dsh", "后端随会话记录在绑定上");
+});
+
+test("已绑定会话的后端就是 Bot 设置：仍按 dsh 语义提交（不重绑）", async () => {
+	const prompts = [];
+	const calls = { ensureSession: [] };
+	const { bridge } = makeBridge([makeAgent("A")], { sendPrompt: async (input) => prompts.push(input) }, calls);
+	bridge.botConfig.backend = "dsh";
+	bridge.connection.client = mockFeishuClient([]);
+	bindChat(bridge, "dsh");
+
+	await bridge.runAgent({ chatId: "chat", senderOpenId: "u", chatType: "p2p", messageId: "m" }, "hello", [], []);
+
+	assert.equal(calls.ensureSession[0]?.existingSessionId, "S1", "后端一致：仍复用同一个会话（不换绑）");
+	assert.equal(calls.ensureSession[0]?.backend, "dsh", "复用路径也要把会话自己的后端交给网关（命中已有会话时网关忽略它）");
+	assert.equal(prompts.length, 1);
+	assert.equal(prompts[0].agentMessage, undefined, "绑定后端是 dsh：DSH 拒收宿主指令，不能带 agentMessage");
+	assert.ok(prompts[0].message.includes("严禁调用 lark-cli"), "通道约束必须并进正文");
+	assert.ok(prompts[0].message.includes("hello"), "用户消息仍要完整送达");
+	assert.equal(bridge.streamingCards.size, 0, "非 pi 后端不得开流式卡片");
+	assert.equal(bridge.streamingRunStates.size, 0, "非 pi 后端不得留卡片状态注册项");
+	assert.equal(bridge.pendingCardEvents.size, 0, "非 pi 后端不得留事件缓冲注册项");
+});
+
+// 回归（用户报的“切了后端还在旧引擎里跑”）：换 Bot 后端必须换绑新会话，
+// 否则设置形同虚设——消息仍会提交给旧引擎的会话，用户只会看到“失忆”或“没变化”。
+test("切换 Bot 后端：老绑定换绑到新后端的新会话并说明原因", async () => {
+	const prompts = [];
+	const calls = { ensureSession: [] };
+	const listeners = [];
+	const { bridge } = makeBridge([makeAgent("A")], { sendPrompt: async (input) => prompts.push(input) }, calls);
+	bridge.botConfig.backend = "pi";
+	const sent = [];
+	bridge.connection.client = mockFeishuClient(sent);
+	bindChat(bridge, "dsh");
+	// pi 会话的回合收口走本地事件流（与最后一条用例同形）。
+	bridge.agentManager = {
+		addLocalEventListener: (handler) => {
+			listeners.push(handler);
+			return () => undefined;
+		},
+	};
+
+	const run = bridge.runAgent({ chatId: "chat", senderOpenId: "u", chatType: "p2p", messageId: "m" }, "hello", [], []);
+	for (let i = 0; i < 200 && prompts.length === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+
+	assert.equal(calls.ensureSession.length, 1, "换后端要重新过网关建会话");
+	assert.equal(calls.ensureSession[0].backend, "pi", "新会话要用设置里的后端");
+	assert.equal(calls.ensureSession[0].existingSessionId, undefined, "不能续旧引擎的会话（跨引擎没有可续的历史）");
+	assert.equal(calls.ensureSession[0].sessionPath, undefined, "也不能带上旧引擎的会话文件");
+	assert.equal(bridge.listBindings()[0].backend, "pi", "绑定要改记新后端，否则下一条消息又要换一次");
+	assert.ok(
+		sent.some((call) => JSON.stringify(call.data ?? {}).includes("会话后端已切换")),
+		"换绑要主动说明，否则用户会以为会话无故失忆",
+	);
+	assert.equal(prompts.length, 1);
+	assert.ok(prompts[0].agentMessage?.includes("严禁调用 lark-cli"), "换到 pi 之后按 pi 的语义提交（宿主指令可用）");
+
+	for (const listener of listeners) listener("A", { type: "agent_end" });
+	await run;
+});
+
+test("dsh 回合失败时用等待器给出的错误原文回信", async () => {
+	const sent = [];
+	const { bridge } = makeBridge([makeAgent("A")], { sendPrompt: async () => undefined, waitForRunEnd: async () => ({ kind: "ended", failed: true, errorMessage: "供应商 500" }) });
+	// 绑定记着 dsh，Bot 设置也得是 dsh：否则会被认定为「用户刚换了后端」而换绑（那是另一条用例的主题）。
+	bridge.botConfig.backend = "dsh";
+	bridge.connection.client = mockFeishuClient(sent);
+	bindChat(bridge, "dsh");
+
+	await bridge.runAgent({ chatId: "chat", senderOpenId: "u", chatType: "p2p", messageId: "m" }, "hello", [], []);
+
+	assert.ok(
+		sent.some((call) => JSON.stringify(call.data ?? {}).includes("供应商 500")),
+		"非 pi 后端不写 assistant 文本，失败原文只能由等待器给出",
+	);
+});
+
+test("pi 会话仍走宿主指令与本地 agent_end（行为不变）", async () => {
+	let runError;
+	const prompts = [];
+	const listeners = [];
+	const { bridge } = makeBridge([makeAgent("A")], { sendPrompt: async (input) => prompts.push(input) });
+	bridge.agentManager = {
+		addLocalEventListener: (handler) => {
+			listeners.push(handler);
+			return () => undefined;
+		},
+	};
+	bridge.connection.client = mockFeishuClient([]);
+	bindChat(bridge);
+
+	const run = bridge.runAgent({ chatId: "chat", senderOpenId: "u", chatType: "p2p", messageId: "m" }, "hello", [], []).catch((error) => {
+		runError = error;
+	});
+	for (let i = 0; i < 200 && prompts.length === 0 && !runError; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+	if (runError) throw runError;
+	assert.ok(prompts[0].agentMessage.includes("严禁调用 lark-cli"), "pi 的通道约束仍走宿主指令（agentMessage）");
+	for (const listener of listeners) listener("A", { type: "agent_end" });
+	await run;
 });

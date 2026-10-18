@@ -26,25 +26,28 @@ export function WebDshToolsPanel(props: { sessionId: string; onClose: () => void
 	return (
 		<Dialog open onOpenChange={(next) => !next && props.onClose()}>
 			<DialogContent showCloseButton className="sm:max-w-lg">
-				<div className="flex gap-1 border-b border-border-subtle pb-2">
-					<Button variant={tab === "goals" ? "secondary" : "ghost"} size="sm" className="gap-1.5" onClick={() => setTab("goals")}>
+				{/* tab 条横向可滚：4 个 tab 在窄屏放不下会溢出裁切（最后一个 tab 被裁掉），滚动保完整。 */}
+				<div className="flex gap-1 overflow-x-auto border-b border-border-subtle pb-2">
+					<Button variant={tab === "goals" ? "secondary" : "ghost"} size="sm" className="shrink-0 gap-1.5" onClick={() => setTab("goals")}>
 						<Target size={14} aria-hidden="true" />
 						{t("dshTools.goals")}
 					</Button>
-					<Button variant={tab === "subagents" ? "secondary" : "ghost"} size="sm" className="gap-1.5" onClick={() => setTab("subagents")}>
+					<Button variant={tab === "subagents" ? "secondary" : "ghost"} size="sm" className="shrink-0 gap-1.5" onClick={() => setTab("subagents")}>
 						<Users size={14} aria-hidden="true" />
 						{t("dshTools.subagents")}
 					</Button>
-					<Button variant={tab === "skills" ? "secondary" : "ghost"} size="sm" className="gap-1.5" onClick={() => setTab("skills")}>
+					<Button variant={tab === "skills" ? "secondary" : "ghost"} size="sm" className="shrink-0 gap-1.5" onClick={() => setTab("skills")}>
 						<Sparkles size={14} aria-hidden="true" />
 						{t("dshTools.skills")}
 					</Button>
-					<Button variant={tab === "plugins" ? "secondary" : "ghost"} size="sm" className="gap-1.5" onClick={() => setTab("plugins")}>
+					<Button variant={tab === "plugins" ? "secondary" : "ghost"} size="sm" className="shrink-0 gap-1.5" onClick={() => setTab("plugins")}>
 						<Boxes size={14} aria-hidden="true" />
 						{t("config.dsh.dynamicPlugins")}
 					</Button>
 				</div>
-				<div className="min-h-40 overflow-y-auto">
+				{/* 内容限高：静态插件清单可达 30+ 条，不限高会把 Dialog 撑出屏幕；
+					60vh 上限 + 内部滚动，tab 条与关闭钮始终在视口内。 */}
+				<div className="max-h-[60vh] min-h-40 overflow-y-auto">
 					{tab === "goals" && <GoalsTab sessionId={props.sessionId} />}
 					{tab === "subagents" && <SubagentsTab sessionId={props.sessionId} />}
 					{tab === "skills" && <SkillsTab sessionId={props.sessionId} />}

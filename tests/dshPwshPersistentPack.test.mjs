@@ -45,12 +45,14 @@ test("electron-vite externalizes the standalone pwsh package", () => {
 	assert.doesNotMatch(src, /pideckPwshPersistent:/);
 });
 
-test("standalone package peers pin the host rc line, not wildcard", () => {
+// 精确 pin（无 ^）：prerelease 的 caret 会匹配到同一 major.minor.patch 更大的 prerelease
+// （^0.2.1-rc.1 会解析到 rc.2），让 runtime 里出现两套 peer 副本。
+test("standalone package peers pin the exact host rc line, not wildcard", () => {
 	const pkg = JSON.parse(readFileSync(join(repoRoot, "packages/dsh-tool-pwsh-persistent/package.json"), "utf8"));
-	// 0.1.5 迁移：host rc 线从 0.1.0-rc.8 升到 0.1.5-rc.1（docs/dsh-0.1.5-typert-migration.md）。
-	assert.equal(pkg.peerDependencies["@deepseek-ai/dsh-tools"], "^0.1.5-rc.1");
-	assert.equal(pkg.peerDependencies["@deepseek-ai/dsh-timeout"], "^0.1.5-rc.1");
-	assert.equal(pkg.peerDependencies["@deepseek-ai/dsh-pwsh-local"], "^0.1.5-rc.1");
+	const host = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
+	assert.equal(pkg.peerDependencies["@deepseek-ai/dsh-tools"], host.dshRuntimeVersion);
+	assert.equal(pkg.peerDependencies["@deepseek-ai/dsh-timeout"], host.dshRuntimeVersion);
+	assert.equal(pkg.peerDependencies["@deepseek-ai/dsh-pwsh-local"], host.dshRuntimeVersion);
 	assert.notEqual(pkg.peerDependencies["@deepseek-ai/dsh-tools"], "*");
 });
 

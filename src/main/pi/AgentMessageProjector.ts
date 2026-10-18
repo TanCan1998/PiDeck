@@ -1,7 +1,16 @@
 import type { ChatMessage, ImageContent } from "../../shared/types";
 import type { MainProcessTranslationKey } from "../../shared/i18n/mainProcessCopy";
-import { extractToolResultText as extractSharedToolResultText, formatToolDetail as formatSharedToolDetail, safeJson as sharedSafeJson, truncateDetailWithMeta as truncateSharedDetailWithMeta, truncateForDetail as truncateSharedForDetail } from "../../shared/formatToolDetail";
+import {
+	extractPiToolTruncation as extractSharedPiTruncation,
+	extractToolResultText as extractSharedToolResultText,
+	formatToolDetail as formatSharedToolDetail,
+	safeJson as sharedSafeJson,
+	truncateDetailWithMeta as truncateSharedDetailWithMeta,
+	truncateForDetail as truncateSharedForDetail,
+	type ToolDetailStatus,
+} from "../../shared/formatToolDetail";
 import { extractMessageText } from "./messageContent";
+import { asRecord } from "./agentUtils";
 import { isRoleMessageRole, takeActiveEntryId } from "./sessionEntryIds";
 
 export type AgentMessageProjectorDeps = {
@@ -61,7 +70,7 @@ export class AgentMessageProjector {
 			rawMessages
 				.flatMap<ChatMessage>((message, index) => {
 					if (!message || typeof message !== "object") return [];
-					const typed = message as any;
+					const typed = message as Record<string, unknown>;
 
 					if (typed.role === "user") {
 						// 先消费 activeEntryIds 槽位，再决定是否渲染。
@@ -79,7 +88,7 @@ export class AgentMessageProjector {
 								agentId,
 								role: "user" as const,
 								text,
-								timestamp: typed.timestamp ?? Date.now(),
+								timestamp: typeof typed.timestamp === "number" ? typed.timestamp : Date.now(),
 								meta: {
 									...(currentEntryId ? { entryId: currentEntryId } : {}),
 									// 保留 _piDeckMsgSeq 作为旧版本回退兼容
@@ -127,13 +136,18 @@ export class AgentMessageProjector {
 						// stopReason（provider 归一化）：历史 JSONL 已持久化，
 						// 渲染层据此精确区分中间/最终回复（与 live 路径同源）。
 						const stopReason = typeof typed.stopReason === "string" && typed.stopReason ? typed.stopReason : undefined;
+						// 本条消息用的模型：pi 会话文件每条 assistant 消息自带 provider/model。
+						// 同一会话里用户会频繁换模型，时间线按条展示需要这个字段。
+						const modelProvider = typeof typed.provider === "string" ? typed.provider : "";
+						const modelId = typeof typed.model === "string" ? typed.model : "";
+						const model = modelProvider && modelId ? { provider: modelProvider, modelId } : undefined;
 						return [
 							{
 								id: `${agentId}-history-${currentEntryId ?? index}`,
 								agentId,
 								role: "assistant" as const,
 								text,
-								timestamp: typed.timestamp ?? Date.now(),
+								timestamp: typeof typed.timestamp === "number" ? typed.timestamp : Date.now(),
 								meta: {
 									...(currentEntryId ? { entryId: currentEntryId } : {}),
 									_piDeckMsgSeq: index,
@@ -142,6 +156,7 @@ export class AgentMessageProjector {
 								...(thinking ? { thinking } : {}),
 								...(images.length > 0 ? { images } : {}),
 								...(stopReason ? { stopReason } : {}),
+								...(model ? { model } : {}),
 							},
 						];
 					}
@@ -160,37 +175,41 @@ export class AgentMessageProjector {
 							details: typed.details,
 						};
 						const filePath = this.getToolPathFromArgs(historicalCall?.args);
-						const piDeckOriginalContent = typed.details?._piDeckOriginalContent as string | undefined;
+						// 历史工具结果同样带 pi 0.99 的截断信息（details.truncation / fullOutputPath）
+						const piTruncation = extractSharedPiTruncation(result);
+						const detailsRecord = asRecord(typed.details);
+						const piDeckOriginalContent = typeof detailsRecord?._piDeckOriginalContent === "string" ? detailsRecord._piDeckOriginalContent : undefined;
 						const originalContent = piDeckOriginalContent ?? (filePath ? historicalOriginalContentByPath.get(filePath) : undefined);
-						const detailText = this.formatToolDetail(toolName, historicalCall?.args, result, isError);
+						const detailText = this.formatToolDetail(toolName, historicalCall?.args, result, isError ? "error" : "done");
 						// detailText 整体截断（拼接后可能超单段上限）并标记 truncated/fullLength，
 						// 渲染层据此提供「查看完整输出」按需加载（sessionsCatalogReadMessageFullText）。
 						const detailDelivery = this.truncateDetailWithMeta(detailText);
 						// 从历史工具结果中提取 ask_question 详情，用于渲染提问卡片（支持单问题和批量格式）。
 						const askCard = (() => {
-							if (toolName !== "ask_question" || !typed.details) return undefined;
+							const askRecord = asRecord(typed.details);
+							if (toolName !== "ask_question" || !askRecord) return undefined;
 							// abort 时发 value:null 导致 answer 为 null，但 pi 可能已默认选了第一选项。
 							// 覆写 answer 为 null、answered 为 false，确保卡片显示"已取消"。
 							const aborted = this.deps.isAskAborted(agentId);
 							// 单问题格式：details.question (string), details.answer
-							if (typed.details.question) {
+							if (askRecord.question) {
 								return {
-									question: typed.details.question,
-									type: typed.details.type,
-									answered: aborted ? false : typed.details.answered,
-									answer: aborted ? null : typed.details.answer,
-									answerLabel: aborted ? undefined : typed.details.answerLabel,
-									options: typed.details.options,
+									question: askRecord.question,
+									type: askRecord.type,
+									answered: aborted ? false : askRecord.answered === true,
+									answer: aborted ? null : askRecord.answer,
+									answerLabel: aborted ? undefined : askRecord.answerLabel,
+									options: askRecord.options,
 								};
 							}
 							// 批量格式：details.questions / details.answers 数组，取第一组问答
-							if (Array.isArray(typed.details.answers) && typed.details.answers.length > 0) {
-								const firstQuestion = Array.isArray(typed.details.questions) ? typed.details.questions[0] : undefined;
-								const firstAnswer = typed.details.answers[0];
+							if (Array.isArray(askRecord.answers) && askRecord.answers.length > 0) {
+								const firstQuestion = Array.isArray(askRecord.questions) ? askRecord.questions[0] : undefined;
+								const firstAnswer = askRecord.answers[0];
 								return {
 									question: firstQuestion?.question ?? String(firstAnswer.id ?? ""),
 									type: firstAnswer.type ?? firstQuestion?.type ?? "input",
-									answered: !typed.details.cancelled && firstAnswer.value !== null,
+									answered: askRecord.cancelled !== true && firstAnswer.value !== null,
 									answer: firstAnswer.value,
 									answerLabel: firstAnswer.label,
 									options: firstQuestion?.options,
@@ -205,7 +224,7 @@ export class AgentMessageProjector {
 								agentId,
 								role: "tool" as const,
 								text: `${isError ? "✗" : "✓"} ${toolName}`,
-								timestamp: typed.timestamp ?? Date.now(),
+								timestamp: typeof typed.timestamp === "number" ? typed.timestamp : Date.now(),
 								meta: {
 									...(currentEntryId ? { entryId: currentEntryId } : {}),
 									_piDeckMsgSeq: index,
@@ -217,6 +236,8 @@ export class AgentMessageProjector {
 									args: this.truncateForDetail(this.safeJson(historicalCall?.args)),
 									result: this.truncateForDetail(this.extractToolResultText(result) || this.safeJson(result)),
 									isError,
+									// pi 侧截断（与 truncated 的展示层截断区分）：历史会话回看时也能拿到完整输出路径
+									...(piTruncation ? { resultTruncation: piTruncation } : {}),
 									detailText: detailDelivery.text,
 									...(detailDelivery.truncated ? { truncated: true, fullLength: detailDelivery.fullLength } : {}),
 									// 历史会话不保存 originalContent（full file），diff 使用工具参数
@@ -235,13 +256,13 @@ export class AgentMessageProjector {
 								id: `${agentId}-meta-${metaSeq}`,
 								agentId,
 								role: "system" as const,
-								text: typed.summary ?? (isCompaction ? "Session compacted" : "Branch summarized"),
+								text: typeof typed.summary === "string" ? typed.summary : isCompaction ? "Session compacted" : "Branch summarized",
 								timestamp: typeof typed.timestamp === "number" ? typed.timestamp : Date.now(),
 								meta: {
 									type: isCompaction ? "compaction" : "branchSummary",
-									tokensBefore: typed.tokensBefore,
+									tokensBefore: typeof typed.tokensBefore === "number" ? typed.tokensBefore : undefined,
 									// 保留压缩次数（桌面端从会话文件解析得到），供前端展示“已压缩 N 次”
-									...(isCompaction && typed.meta?.compactionCount != null ? { compactionCount: typed.meta.compactionCount } : {}),
+									...(isCompaction && asRecord(typed.meta)?.compactionCount != null ? { compactionCount: asRecord(typed.meta)?.compactionCount } : {}),
 								},
 							},
 						];
@@ -259,11 +280,11 @@ export class AgentMessageProjector {
 		const calls = new Map<string, { name: string; args: unknown; timestamp?: number }>();
 		for (const message of rawMessages) {
 			if (!message || typeof message !== "object") continue;
-			const typed = message as any;
+			const typed = message as Record<string, unknown>;
 			if (typed.role !== "assistant" || !Array.isArray(typed.content)) continue;
 			for (const block of typed.content) {
 				if (!block || typeof block !== "object") continue;
-				const toolCall = block as any;
+				const toolCall = block as Record<string, unknown>;
 				if (toolCall.type !== "toolCall" || !toolCall.id) continue;
 				// pi 的历史文件把工具参数保存在 assistant.content 的 toolCall 块中，
 				// toolResult 只带结果；恢复历史详情时必须先建立 toolCallId → 参数映射。
@@ -283,7 +304,7 @@ export class AgentMessageProjector {
 		const originals = new Map<string, string>();
 		for (const message of rawMessages) {
 			if (!message || typeof message !== "object") continue;
-			const typed = message as any;
+			const typed = message as Record<string, unknown>;
 			if (typed.role !== "toolResult") continue;
 			const toolCallId = String(typed.toolCallId ?? "");
 			const historicalCall = historicalToolCalls.get(toolCallId);
@@ -300,12 +321,12 @@ export class AgentMessageProjector {
 
 	private getToolPathFromArgs(args: unknown) {
 		if (!args || typeof args !== "object") return "";
-		const typed = args as any;
+		const typed = args as Record<string, unknown>;
 		return String(typed.path ?? typed.filePath ?? typed.file ?? typed.target_file ?? typed.targetFile ?? "");
 	}
 
-	formatToolDetail(toolName: string, args: unknown, result: unknown, isError: boolean) {
-		return formatSharedToolDetail(toolName, args, result, isError, this.deps.translate);
+	formatToolDetail(toolName: string, args: unknown, result: unknown, status: ToolDetailStatus) {
+		return formatSharedToolDetail(toolName, args, result, status, this.deps.translate);
 	}
 
 	/** 对超长工具文本做首尾截断，保留头部和尾部以兼顾开头信息和错误堆栈。 */
@@ -343,10 +364,11 @@ export class AgentMessageProjector {
 		if (!Array.isArray(content)) return [];
 		return content.flatMap<ImageContent>((item) => {
 			if (!item || typeof item !== "object") return [];
-			const typed = item as any;
+			const typed = item as Record<string, unknown>;
 			if (typed.type !== "image") return [];
-			const data = typeof typed.data === "string" ? typed.data : typeof typed.source?.data === "string" ? typed.source.data : "";
-			const mimeType = typeof typed.mimeType === "string" ? typed.mimeType : typeof typed.mime_type === "string" ? typed.mime_type : typeof typed.source?.media_type === "string" ? typed.source.media_type : "image/png";
+			const source = typed.source && typeof typed.source === "object" ? (typed.source as Record<string, unknown>) : undefined;
+			const data = typeof typed.data === "string" ? typed.data : typeof source?.data === "string" ? source.data : "";
+			const mimeType = typeof typed.mimeType === "string" ? typed.mimeType : typeof typed.mime_type === "string" ? typed.mime_type : typeof source?.media_type === "string" ? source.media_type : "image/png";
 			return data ? [{ type: "image", data, mimeType }] : [];
 		});
 	}
@@ -357,7 +379,7 @@ export class AgentMessageProjector {
 		const raw = content
 			.map((item) => {
 				if (!item || typeof item !== "object") return "";
-				const typed = item as any;
+				const typed = item as Record<string, unknown>;
 				if (typed.type !== "thinking") return "";
 				return String(typed.thinking ?? typed.text ?? "");
 			})

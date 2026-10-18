@@ -12,7 +12,7 @@ test("sanitizeDevBranchSegment 把路径分隔符和非法字符收成目录安�
 	assert.equal(sanitizeDevBranchSegment("///"), "detached");
 });
 
-test("main/dev/master 继续用历史 pi-desktop-dev 和 5181", () => {
+test("main/dev/master 共用 PiDeck-dev 和 5181", () => {
 	for (const branch of ["main", "master", "dev", "develop", "Dev", undefined, ""]) {
 		assert.equal(isSharedDevBranch(branch), true, String(branch));
 		assert.equal(resolveDevUserDataDirName(branch), DEFAULT_DEV_USER_DATA_NAME);
@@ -21,7 +21,7 @@ test("main/dev/master 继续用历史 pi-desktop-dev 和 5181", () => {
 });
 
 test("功能分支拆开 userData 目录且不用 5181", () => {
-	assert.equal(resolveDevUserDataDirName("feat/dsh-agent-mvp"), "pi-desktop-dev-feat-dsh-agent-mvp");
+	assert.equal(resolveDevUserDataDirName("feat/dsh-agent-mvp"), "PiDeck-dev-feat-dsh-agent-mvp");
 	const port = resolveDevVitePort("feat/dsh-agent-mvp");
 	assert.notEqual(port, DEFAULT_DEV_VITE_PORT);
 	assert.ok(port >= 5182 && port <= 5281);
@@ -34,12 +34,14 @@ test("electron-vite renderer 用同一套端口解析，避免和主进程 userD
 	assert.match(src, /port:\s*resolveDevVitePort\(readDevGitBranch\(\)\)/);
 });
 
-test("主进程未打包时按分支解析 userData，打包 dev 构建仍固定历史目录", () => {
+test("主进程未打包时按分支解析 userData；打包态（含 dev 通道安装包）走共用正式目录", () => {
 	const src = readFileSync("src/main/index.ts", "utf8");
 	assert.match(src, /from "\.\/devIsolation"/);
 	assert.match(src, /const isolateDevByGitBranch = !app\.isPackaged/);
 	assert.match(src, /resolveDevUserDataDirName\(devGitBranch\)/);
-	assert.match(src, /app\.setPath\("userData", join\(app\.getPath\("appData"\), devUserDataDirName\)\)/);
+	// 契约：分支目录名只影响未打包调试态；打包态（stable 与 dev 通道安装包）经
+	// resolveAppUserDataDir 共用正式目录（见 portableUserData.test.mjs）。
+	assert.match(src, /unpackagedDevDir:\s*devDirectoryMigration\.unpackagedDevDir/);
 });
 
 test("readDevGitBranch 优先读环境变量，否则走 git", () => {

@@ -74,6 +74,43 @@ export type ClaudeImportReport = {
 	failed: number;
 };
 
+// ── Qoder Session Import Types ─────────────────────────────────────────
+// Qoder 与 Claude 同构（导入器直接复用其管线），汇总结构与 Claude 一致。
+
+export type QoderImportStatus = "new" | "current" | "outdated";
+
+export type QoderSessionSummary = {
+	id: string;
+	sourcePath: string;
+	targetPath: string;
+	cwd: string;
+	title: string;
+	preview: string;
+	createdAt: number;
+	updatedAt: number;
+	messageCount: number;
+	status: QoderImportStatus;
+	sourceSize: number;
+	importedSourceMtime?: number;
+};
+
+export type QoderImportResult = {
+	id: string;
+	sourcePath: string;
+	targetPath?: string;
+	title?: string;
+	success: boolean;
+	overwritten?: boolean;
+	messageCount?: number;
+	error?: string;
+};
+
+export type QoderImportReport = {
+	results: QoderImportResult[];
+	imported: number;
+	failed: number;
+};
+
 // ── OpenCode Session Import Types ──────────────────────────────────────
 
 export type OpenCodeImportStatus = "new" | "current" | "outdated";
@@ -221,7 +258,137 @@ export type CursorImportReport = {
 	failed: number;
 };
 
+// ── Kimi Code Session Import Types ─────────────────────────────────────
+
+/** Kimi Code 会话导入状态：未导入 / 已是最新 / 源更新后可覆盖。 */
+export type KimiImportStatus = "new" | "current" | "outdated";
+
+export type KimiSessionSummary = {
+	id: string;
+	sourcePath: string;
+	targetPath: string;
+	cwd: string;
+	title: string;
+	preview: string;
+	createdAt: number;
+	updatedAt: number;
+	messageCount: number;
+	status: KimiImportStatus;
+	sourceSize: number;
+	importedSourceMtime?: number;
+};
+
+export type KimiImportResult = {
+	id: string;
+	sourcePath: string;
+	targetPath?: string;
+	title?: string;
+	success: boolean;
+	overwritten?: boolean;
+	messageCount?: number;
+	error?: string;
+};
+
+export type KimiImportReport = {
+	results: KimiImportResult[];
+	imported: number;
+	failed: number;
+};
+
 // ── Directory (外置目录) Session Import Types ──────────────────────────
+// Kimi Work（桌面版）与 Kimi Code（CLI）是两个独立的数据源：
+// - 数据目录（daimon-share）位置不固定：默认 %APPDATA%/kimi-desktop/daimon-share，
+//   也可能被用户自定义到任意盘符（如 D:\KimiData\daimon-share），实际位置记录在
+//   %APPDATA%/kimi-desktop/daimon-storage.json 的 shareDir 字段。
+// - 会话索引在 conversations.sqlite（而不是 session_index.jsonl），正文 wire.jsonl
+//   的助手输出只存在于 context.append_loop_event 事件流（CLI 版是快照式记录）。
+
+/** Kimi Work 会话导入状态：未导入 / 已是最新 / 源更新后可覆盖。 */
+export type KimiWorkImportStatus = "new" | "current" | "outdated";
+
+/** Kimi Work 数据目录的来源：用户在 PiDeck 里显式指定 / Kimi 配置文件里记录的自定义位置 / 默认安装位置。 */
+export type KimiWorkShareRootOrigin = "settings" | "app-config" | "default";
+
+/** Kimi Work 数据目录探测结果（导入弹窗展示 + 导入器共用）。 */
+export type KimiWorkShareRootInfo = {
+	/** daimon-share 根目录（探测失败为 null，渲染层提示「未找到 Kimi Work」）。 */
+	root: string | null;
+	origin: KimiWorkShareRootOrigin | null;
+	/** 会话索引目录是否存在（root 找到但 sessions 缺失 = 装了但还没有会话）。 */
+	sessionsFound: boolean;
+};
+
+export type KimiWorkSessionSummary = {
+	id: string;
+	sourcePath: string;
+	targetPath: string;
+	title: string;
+	preview: string;
+	createdAt: number;
+	updatedAt: number;
+	messageCount: number;
+	status: KimiWorkImportStatus;
+	sourceSize: number;
+	importedSourceMtime?: number;
+};
+
+export type KimiWorkImportResult = {
+	id: string;
+	sourcePath: string;
+	targetPath?: string;
+	title?: string;
+	success: boolean;
+	overwritten?: boolean;
+	messageCount?: number;
+	error?: string;
+};
+
+export type KimiWorkImportReport = {
+	results: KimiWorkImportResult[];
+	imported: number;
+	failed: number;
+};
+
+// ── Minimax Code Session Import Types ────────────────────────────────
+// MinimaxCode（CLI 编码助手）：会话落在 ~/.minimax/v2/sessions/
+// YYYY/MM/DD/<HH-mm-ss-sid>-session_<id>/ 目录，内含 manifest.json（sessionId/
+// createdAtMs/title 等）、messages.jsonl（anthropic 风格 role+content blocks）与
+// llm-call.json（systemPrompt 内含 working directory，作为 cwd 来源）。
+
+/** Minimax Code 会话导入状态：未导入 / 已是最新 / 源更新后可覆盖。 */
+export type MinimaxImportStatus = "new" | "current" | "outdated";
+
+export type MinimaxSessionSummary = {
+	id: string;
+	sourcePath: string;
+	targetPath: string;
+	cwd: string;
+	title: string;
+	preview: string;
+	createdAt: number;
+	updatedAt: number;
+	messageCount: number;
+	status: MinimaxImportStatus;
+	sourceSize: number;
+	importedSourceMtime?: number;
+};
+
+export type MinimaxImportResult = {
+	id: string;
+	sourcePath: string;
+	targetPath?: string;
+	title?: string;
+	success: boolean;
+	overwritten?: boolean;
+	messageCount?: number;
+	error?: string;
+};
+
+export type MinimaxImportReport = {
+	results: MinimaxImportResult[];
+	imported: number;
+	failed: number;
+};
 //
 // 场景：项目目录被移动/改名后，pi 会话仍按「旧 cwd 的 encoded 分组目录」留在
 // ~/.pi/agent/sessions 下，与新项目的路径不再匹配 → 侧栏看不到历史。

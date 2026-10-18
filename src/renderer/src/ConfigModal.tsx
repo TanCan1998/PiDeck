@@ -3,7 +3,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui-shadcn
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from "./components/ui-shadcn/dialog";
 import { ConfirmDialog } from "./components/ui-shadcn/ConfirmDialog";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "./components/ui-shadcn/alert-dialog";
-import { X, Cpu, FileCode2, FileText, KeyRound, Puzzle, Settings2, Shield, ShieldCheck, Sparkles, PlugZap, FolderOpen } from "lucide-react";
+import { X, Blocks, Cpu, FileCode2, FileText, KeyRound, Loader2, Puzzle, Settings2, Shield, ShieldCheck, Sparkles, PlugZap, FolderOpen } from "lucide-react";
 import { cn } from "./lib/utils";
 import { deepClone } from "./utils/deepEqual";
 import { showNotice } from "./utils/notice";
@@ -30,7 +30,11 @@ import { SettingsTab } from "./config/SettingsTab";
 import { PromptsTab } from "./config/PromptsTab";
 import { SkillsTab } from "./config/SkillsTab";
 import { ExtensionsTab } from "./config/ExtensionsTab";
-import { type ResourceScope } from "./config/ResourceScopeSelector";
+import type { DiscoveredExtensionItem } from "./config/extensionsTableRows";
+// 桥贡献的「独立配置页」落点：每个 gui:config.page:* 贡献在「Agent 能力」组里占一个导航页。
+// 会话取值 / 落点 id 映射 / 「页消失就回退」都收在 hook 里（PR 评审 §3）。
+import { BridgeGuiSingleSlot } from "./components/bridge/BridgeSlot";
+import { guiPageSectionId, useBridgeConfigPages } from "./hooks/useBridgeConfigPages";
 import { SecuritySection, type SecuritySectionHandle } from "./components/config/SecuritySection";
 import { DshLogo, PiLogo } from "./components/session/SessionSourceBadge";
 import { DshConfigTab, type DshConfigTabHandle } from "./config/DshConfigTab";
@@ -39,11 +43,15 @@ import { CodeMirrorEditor } from "./components/app/CodeMirrorEditor";
 import { translateBuiltinPromptDescription } from "./composerBehavior";
 import type { AuthFile, ConfigTab, ModelItem, ModelsFile, SettingsFile } from "./config/configTypes";
 import type { ConfigFileDiagnostic, PiExtensionListResult, PiExtensionSummary, PiPromptTemplateListResult, PiPromptTemplateSummary, PiSkillListResult, PiSkillLocation, PiSkillSummary, Project, ProjectResourceDiscoveryResult, ProjectResourceListResult } from "../../shared/types";
-import { globalPromptOverrideKey, globalSkillOverrideKey, isGlobalSkillSourceId } from "../../shared/resourceIdentity";
-import { emptyDiscoveryData, emptyProjectResourceData, GLOBAL_SKILL_SOURCES, isGlobalSkill, isProjectExtension, isProjectPrompt, isProjectSkill, PROJECT_SKILL_SOURCES } from "./config/resourceScopeModel";
-import { getModelUserAgentOverride, getProviderHeaders, KNOWN_PROVIDER_ENDPOINTS, setModelUserAgentOverride } from "./config/providerHeaders";
+import { isGlobalSkillSourceId } from "../../shared/resourceIdentity";
+import { emptyDiscoveryData, emptyProjectResourceData, GLOBAL_SKILL_SOURCES, isGlobalSkill, isProjectExtension, isProjectPrompt, isProjectSkill, PROJECT_SKILL_SOURCES, type ResourceScope } from "./config/resourceScopeModel";
+import { getModelUserAgentOverride, getProviderHeaders, KNOWN_PROVIDER_ENDPOINTS, pruneModelOverrides, readModelOverrides, setModelUserAgentOverride } from "./config/providerHeaders";
 import { TOKENDANCE_PROVIDER } from "../../shared/tokendance";
-import { ALL_CONFIG_DIRTY_KEYS, dirtyKeysClearedByReload, dirtyKeysPreservedOnReload, reconcileConfigDirty } from "./config/configDirtyMarks";
+import { ALL_CONFIG_DIRTY_KEYS, dirtyKeysClearedByReload, dirtyKeysPreservedOnReload, orderDirtyKeysForSave, reconcileConfigDirty } from "./config/configDirtyMarks";
+import { modelThinkingLevelOf, pruneModelThinkingLevelOrphans, replaceModelThinkingLevels, withModelThinkingLevelDefault, withModelThinkingLevelEnabled } from "../../shared/modelThinkingLevels";
+import type { ModelThinkingLevel } from "../../shared/modelThinkingLevels";
+import { pruneHiddenModelOrphans, replaceProviderHiddenIds, sameHiddenModelEntries, toggleHiddenModelKey } from "./config/hiddenModels";
+import type { ProviderModelIdIndex } from "../../shared/types/modelSpecs";
 import { formatConfigUnsavedMessage, summarizeConfigUnsavedChanges, type ConfigUnsavedItem } from "./config/configUnsavedChangesSummary";
 import { DirtyMarker } from "./components/app/settings/SettingRows";
 import { isValidProviderName } from "../../shared/providerName";
@@ -58,9 +66,12 @@ const api: PiDesktopApi = (window as unknown as { piDesktop: PiDesktopApi }).piD
 // config 组子页（模型/认证/设置/信任/MCP/原始文件）用 "config:<tab>" 复合值，
 // 其余组直接以 section 名作 value；Tabs 受控 value 由此编码，业务仍走 section/tab 双 state，
 // loadConfig 等既有依赖零改动。
-type ConfigSection = "config" | "security" | "skills" | "prompts" | "extensions";
+// `page.*` 是桥贡献的独立配置页（落点 `config.page`）—— 数量由扩展决定，不是静态枚举。
+type ConfigSection = "config" | "security" | "skills" | "prompts" | "extensions" | "mcp" | `page.${string}`;
 
 // 注意：修改 ConfigSection/ConfigTab 枚举时需同步更新 CONFIG_SECTIONS/CONFIG_TABS 校验数组
+
+// 注意：`guiPageSectionId` 的实现与单测在 hooks/useBridgeConfigPages.ts（这里直接复用，避免漂移）
 
 /** section+tab → Tabs value（config 组子页编码为 "config:<tab>"）。 */
 function sectionTabValue(section: ConfigSection, tab: ConfigTab): string {
@@ -83,7 +94,7 @@ function loadLastConfigBackendPane(): "dsh" | "pi" {
 }
 
 /** 全部合法 section / config 组子 tab，用于校验持久化值（避免版本更新后残留旧值导致无高亮）。 */
-const CONFIG_SECTIONS: readonly ConfigSection[] = ["config", "security", "skills", "prompts", "extensions"];
+const CONFIG_SECTIONS: readonly ConfigSection[] = ["config", "security", "skills", "prompts", "extensions", "mcp"];
 const CONFIG_TABS: readonly ConfigTab[] = ["models", "auth", "settings", "trust", "mcp", "raw"];
 /**
  * 读取上次打开的 tab；localStorage 不可用、无记录或值已失效时返回 null（由调用方回退默认值）。
@@ -94,7 +105,9 @@ function loadLastConfigTab(): { section: ConfigSection; tab?: ConfigTab } | null
 		const raw = localStorage.getItem(CONFIG_LAST_TAB_KEY);
 		if (!raw) return null;
 		const parsed = parseSectionTabValue(raw);
-		if (!CONFIG_SECTIONS.includes(parsed.section)) return null;
+		// `page.*` 的合法性没法在这里判（贡献列表要等 pi 起来才有）—— 先放行，
+		// 由 ConfigModalContent 里的 effect 在贡献确实不存在时拉回 config。
+		if (!CONFIG_SECTIONS.includes(parsed.section) && !parsed.section.startsWith("page.")) return null;
 		if (parsed.section === "config" && (!parsed.tab || !CONFIG_TABS.includes(parsed.tab))) return null;
 		return parsed;
 	} catch {
@@ -137,6 +150,15 @@ function normalizeModelsFile(value: unknown): ModelsFile {
 		};
 	}
 	return { providers };
+}
+
+/**
+ * provider → 该供应商当前模型 id 集合（配置写盘前清理孤儿键用）。
+ * 只包含 models.json 里的供应商：不在表里的 provider 一律不动——pi 内置 provider
+ * （没写进用户 models.json 的 anthropic 等）的档位与隐藏设置是合法的。
+ */
+function modelIdIndex(providers: ModelsFile["providers"]): ProviderModelIdIndex {
+	return new Map(Object.entries(providers).map(([name, provider]) => [name, new Set(provider.models.map((model) => model.id).filter(Boolean))] as const));
 }
 
 function ConfigDiagnosticCard(props: { diagnostic: ConfigFileDiagnostic; onOpenDocs: () => void; onOpenRaw: () => void }) {
@@ -364,12 +386,24 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 	 * - 主配置页固定 global（全局安装 + 用户 ~/.pi 自装 + PiDeck 内置）；项目级技能/扩展/提示词
 	 *   的管理入口在项目右键的「资源管理」弹窗，这里不再提供全局/项目下拉（双入口反而混乱）。
 	 * - 资源管理器模式（resourceOnly，项目右键进入）固定为入口项目。
-	 * MCP 页例外：项目级 mcp.json 没有其它管理入口，作用域切换内聚在 McpTab 自己的 state 里。
+	 * MCP 页同样固定全局：只显示/操作 ~/.pi/agent/mcp.json 与全局只读层，不提供项目作用域。
 	 */
 	const resourceScope: ResourceScope = resourceOnly ? "project" : "global";
 	/** scope=project 时实际使用的项目 id；资源管理器模式直接使用入口项目（Chat 项目无项目资源目录）。 */
 	const effectiveProjectId = resourceOnly && projectKind !== "chat" ? projectId : undefined;
 	const hasProject = Boolean(effectiveProjectId);
+	// UI 计时器（Saved 徽章复位、退场动画）：Radix Dialog 关闭即卸载内容，
+	// 未清理的计时器会在卸载后 setState。统一登记，卸载时批量满 timeout。
+	const uiTimerIdsRef = useRef<number[]>([]);
+	useEffect(
+		() => () => {
+			for (const id of uiTimerIdsRef.current) window.clearTimeout(id);
+		},
+		[],
+	);
+	const scheduleUiTimer = useCallback((fn: () => void, ms: number) => {
+		uiTimerIdsRef.current.push(window.setTimeout(fn, ms));
+	}, []);
 	// 弹窗每次打开都会重新挂载（Radix Dialog 关闭即卸载内容），
 	// 用 lazy initializer 在挂载时读一次 localStorage，恢复到上次所在 tab。
 	const [lastTab] = useState(loadLastConfigTab);
@@ -379,6 +413,12 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 	const [section, setSection] = useState<ConfigSection>(resourceOnly ? "skills" : focusConfigTab || focusProvider ? "config" : (lastTab?.section ?? "config"));
 	// 深链（如圆球面板「去配置用量」）优先于上次记住的配置分页。
 	const [tab, setTab] = useState<ConfigTab>(focusConfigTab ?? lastTab?.tab ?? "models");
+	// 桥贡献的配置页：会话取值 / 落点 id 映射 / 「页消失就回退」都由该 hook 拥有
+	// （PR 评审 §3：这段业务逻辑不留在 3000 行的装配组件里）。
+	const { sessionId: bridgeSessionId, pages: configPages } = useBridgeConfigPages({
+		activeSection: section,
+		onPageMissing: () => setSection("config"),
+	});
 	// 深链 provider：models 页展开该供应商卡片并滚动高亮（ModelsTab 消费）。
 	const [focusedProvider, setFocusedProvider] = useState<string | undefined>(focusProvider);
 	// 用量探针配置弹窗：由模型/认证/DSH 卡片触发（provider + backend 决定配置落盘位置）。
@@ -451,6 +491,8 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 	dirtyTabsRef.current = dirtyTabs;
 	/** MCP 页句柄：自管加载/保存，顶部统一保存按钮经 saveByKey 转发。 */
 	const mcpTabRef = useRef<McpTabHandle>(null);
+	/** 项目资源管理器里的 MCP 页句柄（项目作用域；主配置页没有这个 section）。 */
+	const resourceMcpTabRef = useRef<McpTabHandle>(null);
 	/** 关闭弹框时存在未保存修改 → 弹出保存确认（借鉴设置页关闭逻辑） */
 	const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
 	/** 远端目标（Batch B）：缺省本机；切换前若远端有未应用 patch，显式确认丢弃。 */
@@ -516,6 +558,11 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 	const [modelsData, setModelsData] = useState<ModelsFile>({ providers: {} });
 	const [authData, setAuthData] = useState<AuthFile>({});
 	const [settingsData, setSettingsData] = useState<SettingsFile>({});
+	/**
+	 * settings.json 是否已真实读入内存。模型页也要读写 settings（每模型默认思考档位），
+	 * 但在它读成功前不能渲染该编辑入口——否则会把空对象当磁盘内容保存，覆盖 settings.json。
+	 */
+	const [settingsLoaded, setSettingsLoaded] = useState(false);
 	/** 自动发现的模型：auth-only 供应商通过已知端点获取的模型列表 */
 	const [discoveredModels, setDiscoveredModels] = useState<Record<string, Array<{ id: string; name?: string }>>>({});
 	const [trustData, setTrustData] = useState<Record<string, boolean>>({});
@@ -570,6 +617,8 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 	/** 待确认删除的 Prompt 模板（删除前弹确认框） */
 	const [deletePromptConfirm, setDeletePromptConfirm] = useState<PiPromptTemplateSummary | null>(null);
 	const [uninstallExtensionConfirm, setUninstallExtensionConfirm] = useState<PiExtensionSummary | null>(null);
+	/** 项目包发现行（package-project）的卸载确认：走 `pi remove <source> -l`，只删项目层记账。 */
+	const [uninstallProjectPackageConfirm, setUninstallProjectPackageConfirm] = useState<{ source: string } | null>(null);
 	const [rawContent, setRawContent] = useState("");
 	const [rawFileName, setRawFileName] = useState("models.json");
 	// pi 全局配置目录（源文件页标注实际编辑位置）；加载失败时静默降级不显示路径。
@@ -640,14 +689,14 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 		});
 	}, []);
 	/** 切换模型隐藏状态：本地立即生效 + 持久化到 AppSettings。 */
-	const handleToggleHiddenModel = useCallback((provider: string, modelId: string) => {
-		const key = `${provider}/${modelId}`;
+	const handleToggleHiddenModel = (provider: string, modelId: string) => {
 		setHiddenModels((prev) => {
-			const next = prev.includes(key) ? prev.filter((item) => item !== key) : [...prev, key];
+			// 写盘前顺手清孤儿（模型已不在列表里的旧 ID），与保存时同一套规则
+			const next = pruneHiddenModelOrphans(toggleHiddenModelKey(prev, provider, modelId), modelIdIndex(modelsData.providers));
 			void api.settings.update({ hiddenModels: next }).catch(() => undefined);
 			return next;
 		});
-	}, []);
+	};
 	/** 切换认证供应商隐藏状态：本地立即生效 + 持久化到 AppSettings（auth.json 保留不变供运行时读取）。 */
 	const handleToggleHiddenAuthProvider = useCallback((name: string) => {
 		setHiddenAuthProviders((prev) => {
@@ -732,6 +781,14 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 				return t("config.fetchModelsHintGoogle");
 			case "mistral-conversations":
 				return t("config.fetchModelsHintMistral");
+			case "azure-openai-responses":
+				return t("config.fetchModelsHintAzure");
+			case "google-vertex":
+				return t("config.fetchModelsHintVertex");
+			case "bedrock-converse-stream":
+				return t("config.fetchModelsHintBedrock");
+			case "pi-messages":
+				return t("config.fetchModelsHintPiMessages");
 			default:
 				// 未知 API 类型时使用通用提示
 				return t("config.fetchModelsHint");
@@ -763,6 +820,39 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 		onConfirm: () => void;
 	} | null>(null);
 
+	/**
+	 * 检测成功且实际走通 /v1（或 /v1beta）时，把表单里的 baseUrl 自动改成带版本路径。
+	 * 原因：检测侧会兼容补路径，但 pi 会话会原样读 models.json；不改写则「测试正常、会话 404」。
+	 * 仅改内存表单，需用户点保存后才写入磁盘。
+	 * 后端仅在确实需要改写时返回 suggestedBaseUrl，前端直接应用即可。
+	 * 声明在 loadConfig 之前：后台自动发现分支要在闭包里引用它（TDZ）。
+	 */
+	const applySuggestedBaseUrl = useCallback(
+		(providerName: string, suggestedBaseUrl?: string) => {
+			if (!suggestedBaseUrl) return false;
+			const next = suggestedBaseUrl.replace(/\/+$/, "");
+			if (!next) return false;
+			// 函数式更新，避免 async 返回时闭包拿到旧 modelsData。
+			setModelsData((prev) => {
+				const provider = prev.providers[providerName];
+				if (!provider) return prev;
+				const current = (provider.baseUrl ?? "").replace(/\/+$/, "");
+				if (current === next) return prev;
+				return {
+					...prev,
+					providers: {
+						...prev.providers,
+						[providerName]: { ...provider, baseUrl: next },
+					},
+				};
+			});
+			// 检测/测试自动改写 baseUrl 同样属于表单修改，标记未保存
+			markDirty("config:models");
+			return true;
+		},
+		[markDirty],
+	);
+
 	const loadConfig = useCallback(
 		async (target: ConfigTab, options?: { force?: boolean; silent?: boolean }) => {
 			// silent：测试连接成功后回读磁盘用——不置 loading，避免 ModelsTab 在
@@ -780,11 +870,22 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 				const skipMcp = preserved.has("config:mcp");
 				const skipRaw = preserved.has("config:raw");
 				if (target === "models") {
-					const res = await api.config.getModels();
+					// 模型页也要 settingsData：每模型默认思考档位写的就是 settings.json 的
+					// modelThinkingLevels（与全局默认档位同一条写入链路）。
+					// settings 读失败只降级（本页主数据是 models.json），settingsLoaded 保持 false
+					// 让编辑入口不渲染，避免空对象被当成磁盘内容保存。
+					const [res, settingsRes] = await Promise.all([api.config.getModels(), api.config.getSettings().catch(() => null)]);
 					if (!skipModels) {
 						const parsed = normalizeModelsFile(res.parsed);
 						setModelsData(parsed);
 						baselineModelsRef.current = deepClone(parsed);
+					}
+					if (settingsRes) {
+						if (!skipSettings) {
+							setSettingsData(settingsRes.parsed as SettingsFile);
+							baselineSettingsRef.current = deepClone(settingsRes.parsed as SettingsFile);
+						}
+						setSettingsLoaded(true);
 					}
 					if (!skipRaw) {
 						setRawContent(res.raw);
@@ -811,6 +912,7 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 						setSettingsData(settingsRes.parsed as SettingsFile);
 						baselineSettingsRef.current = deepClone(settingsRes.parsed as SettingsFile);
 					}
+					setSettingsLoaded(true);
 					if (!skipAuth) {
 						setAuthData(authRes.parsed as AuthFile);
 						baselineAuthRef.current = deepClone(authRes.parsed as AuthFile);
@@ -855,6 +957,11 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 								.then((result) => {
 									if (result.success && result.models) {
 										discovered[providerName] = result.models;
+										// 后台发现与手动「获取模型」同源：检测走通了 /v1 而 models.json 仍是根路径时
+										// 同步改写表单 baseUrl（仅内存 + markDirty，用户保存才落盘），
+										// 避免「列表拉到了、会话仍 404」。KNOWN_PROVIDER_ENDPOINTS 的
+										// provider 不在 modelsData 里时该调用是 no-op。
+										applySuggestedBaseUrl(providerName, result.suggestedBaseUrl);
 									}
 								})
 								.catch(() => {
@@ -923,7 +1030,7 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 				setLoading(false);
 			}
 		},
-		[tab, clearDirty],
+		[tab, clearDirty, applySuggestedBaseUrl],
 	);
 
 	useEffect(() => {
@@ -1043,6 +1150,31 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 	 * 新增供应商（一步弹窗）：携带完整草稿（名字 + 服务商字段 + 模型列表），
 	 * 直接写入 modelsData 并展开卡片；不再先输名字再展开。
 	 */
+	/**
+	 * 供应商页确认后落盘两项「按 provider/modelId 建键」的设置（新增与编辑共用）。
+	 *
+	 * 页面把这两份设置整页读进草稿，确认时交回**绝对快照**，所以这里是替换而不是增删：
+	 * 页内删掉的模型不会留下设置（设置跟着模型走），页内改名也不会把键留在旧名字下。
+	 * 草稿里没带某项 = 页面没有这个入口（settings 未加载 / 未提供隐藏列表）→ 该项一个都不动。
+	 */
+	const applyProviderPageModelSettings = (draft: AddProviderDraft, savedName: string, finalName: string) => {
+		if (draft.modelThinkingLevelDefaults) {
+			const nextSettings = replaceModelThinkingLevels(settingsData, savedName, finalName, draft.modelThinkingLevelDefaults);
+			if (nextSettings !== settingsData) {
+				setSettingsData(nextSettings);
+				markDirty("config:settings");
+			}
+		}
+		if (draft.hiddenModelIds) {
+			// hiddenModels 是 AppSettings（没有配置草稿），与卡片眼睛按钮同一语义：立即持久化
+			const nextHidden = replaceProviderHiddenIds(hiddenModels, savedName, finalName, draft.hiddenModelIds);
+			if (!sameHiddenModelEntries(hiddenModels, nextHidden)) {
+				setHiddenModels(nextHidden);
+				void api.settings.update({ hiddenModels: nextHidden }).catch(() => undefined);
+			}
+		}
+	};
+
 	const handleAddProvider = (draft: AddProviderDraft) => {
 		const providerName = draft.name.trim();
 		// 非法字符：提示规则，避免 DSH credentialRefFor 把含特殊字符的名字转成
@@ -1061,6 +1193,8 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 		};
 		setModelsData(updated);
 		markDirty("config:models");
+		// 页内草稿里的两项设置按最终名字落盘（新增时没有旧名字，savedName 传空）
+		applyProviderPageModelSettings(draft, "", providerName);
 		setExpandedProvider(providerName);
 		setAddingProvider(false);
 	};
@@ -1101,6 +1235,8 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 		}
 		setModelsData({ ...modelsData, providers });
 		markDirty("config:models");
+		// 页内草稿的两项设置按最终名字替换式落盘：改名时旧名字下的键一并清掉（无需单独的改名迁移）
+		applyProviderPageModelSettings(draft, oldName, newName);
 		setEditingProvider(null);
 	};
 
@@ -1153,38 +1289,6 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 		// 展开新复制的 provider
 		setExpandedProvider(newName);
 	};
-
-	/**
-	 * 检测成功且实际走通 /v1（或 /v1beta）时，把表单里的 baseUrl 自动改成带版本路径。
-	 * 原因：检测侧会兼容补路径，但 pi 会话会原样读 models.json；不改写则「测试正常、会话 404」。
-	 * 仅改内存表单，需用户点保存后才写入磁盘。
-	 * 后端仅在确实需要改写时返回 suggestedBaseUrl，前端直接应用即可。
-	 */
-	const applySuggestedBaseUrl = useCallback(
-		(providerName: string, suggestedBaseUrl?: string) => {
-			if (!suggestedBaseUrl) return false;
-			const next = suggestedBaseUrl.replace(/\/+$/, "");
-			if (!next) return false;
-			// 函数式更新，避免 async 返回时闭包拿到旧 modelsData。
-			setModelsData((prev) => {
-				const provider = prev.providers[providerName];
-				if (!provider) return prev;
-				const current = (provider.baseUrl ?? "").replace(/\/+$/, "");
-				if (current === next) return prev;
-				return {
-					...prev,
-					providers: {
-						...prev.providers,
-						[providerName]: { ...provider, baseUrl: next },
-					},
-				};
-			});
-			// 检测/测试自动改写 baseUrl 同样属于表单修改，标记未保存
-			markDirty("config:models");
-			return true;
-		},
-		[markDirty],
-	);
 
 	// 从 provider 的 baseUrl + apiKey 拉取可用模型列表
 	const handleFetchModels = async (providerName: string) => {
@@ -1366,47 +1470,44 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 	 * 逐模型 User-Agent：写 provider.modelOverrides[modelId].headers["User-Agent"]。
 	 * 该结构由 pi 在发请求前最后合并（优先级高于 provider.headers），用于
 	 * 「同一供应商里只有个别模型需要特殊 UA」的场景（如某个模型走 Response 协议）。
+	 * 按 modelId 建键：卡片与编辑页共用同一回调，编辑页的模型草稿可能增删/重排，
+	 * 不能用下标（草稿下标与已保存数组会错位，写错模型）。
 	 */
-	const handleUpdateModelUserAgent = (providerName: string, index: number, value: string) => {
+	const handleUpdateModelUserAgent = (providerName: string, modelId: string, value: string) => {
 		const provider = modelsData.providers[providerName];
-		const model = provider?.models[index];
-		if (!provider || !model) return;
+		if (!provider || !modelId) return;
 		setModelsData({
 			...modelsData,
 			providers: {
 				...modelsData.providers,
 				[providerName]: {
 					...provider,
-					modelOverrides: setModelUserAgentOverride(provider.modelOverrides, model.id, value),
+					modelOverrides: setModelUserAgentOverride(provider.modelOverrides, modelId, value),
 				},
 			},
 		});
 		markDirty("config:models");
 	};
 
-	const handleUpdateModelThinkingLevel = (providerName: string, index: number, key: "xhigh" | "max", value: "" | "xhigh" | "max") => {
+	const handleUpdateModelThinkingLevel = (providerName: string, index: number, level: ModelThinkingLevel, enabled: boolean) => {
 		const provider = modelsData.providers[providerName];
 		const currentModel = provider?.models[index];
 		if (!provider || !currentModel) return;
 		const models = [...provider.models];
-		const nextThinkingLevelMap = {
-			...(currentModel.thinkingLevelMap ?? {}),
-		};
-		if (value) nextThinkingLevelMap[key] = value;
-		else delete nextThinkingLevelMap[key];
+		const nextThinkingLevelMap = withModelThinkingLevelEnabled(currentModel.thinkingLevelMap, level, enabled);
 		const nextModel = {
 			...currentModel,
-			// xhigh/max 只有 reasoning 模型才有意义；打开映射时同步开启。
-			reasoning: value ? true : currentModel.reasoning,
+			// xhigh/max 只有 reasoning 模型才有意义；打开任意档位时同步开启。
+			reasoning: enabled ? true : currentModel.reasoning,
 		};
-		if (Object.keys(nextThinkingLevelMap).length > 0) {
+		if (nextThinkingLevelMap) {
 			nextModel.thinkingLevelMap = nextThinkingLevelMap;
 		} else {
 			delete nextModel.thinkingLevelMap;
 		}
 		models[index] = nextModel;
 
-		const nextProvider = value
+		const nextProvider = enabled
 			? {
 					...provider,
 					compat: {
@@ -1424,6 +1525,18 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 			},
 		});
 		markDirty("config:models");
+	};
+
+	/**
+	 * 每模型默认思考档位：写 pi settings.json 的 modelThinkingLevels（键 `provider/modelId`），
+	 * 与 Settings 页的全局默认档位共用同一条草稿保存链路（脏标记记在 config:settings 上）。
+	 * 值不做白名单裁剪——档位最终由 pi 按该模型可用档位收敛；空值 = 删键（跟随全局默认）。
+	 */
+	const handleUpdateModelThinkingLevelDefault = (providerName: string, modelId: string, level: string) => {
+		// 键由 provider/modelId 拼成；空 id（未填完的新行）无法定位。
+		if (!modelId) return;
+		setSettingsData((previous) => withModelThinkingLevelDefault(previous, providerName, modelId, level));
+		markDirty("config:settings");
 	};
 
 	const handleDeleteModel = (providerName: string, index: number) => {
@@ -1490,22 +1603,45 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 		// 保存前规范化所有供应商的 compat 字段，确保布尔值显式写入而不依赖后端默认值；
 		// supportsReasoningEffort 联动档位映射、requiresReasoningContentOnAssistantMessages
 		// 按 DeepSeek 特征判定（均见 deriveProviderCompat，传名字以便按 provider 名识别）。
-		const normalizedData = {
-			...base,
-			providers: Object.fromEntries(
-				Object.entries(base.providers).map(([name, provider]) => [
-					name,
-					{
-						...provider,
-						compat: deriveProviderCompat(provider, name),
-					},
-				]),
-			),
-		};
+		// 显式标注 providers：铺开的字面量会丢掉 ProviderConfig 的索引签名，后面读 modelOverrides 等
+		// 高级字段就拿不到了（不靠 as 强转，靠变量标注把类型钉死）。
+		const normalizedProviders: ModelsFile["providers"] = Object.fromEntries(
+			Object.entries(base.providers).map(([name, provider]) => [
+				name,
+				{
+					...provider,
+					compat: deriveProviderCompat(provider, name),
+				},
+			]),
+		);
+		const normalizedData: ModelsFile = { ...base, providers: normalizedProviders };
+		// 设置跟着模型走：保存前清掉「模型已不在列表里」的孤儿（改过模型 ID / 删过模型之后）。
+		// 只清 models.json 里存在的供应商；pi 内置 provider 的高级覆盖一律不碰。
+		const prunedProviders = Object.fromEntries(
+			Object.entries(normalizedData.providers).map(([name, provider]) => {
+				const current = readModelOverrides(provider.modelOverrides);
+				if (!current) return [name, provider];
+				const pruned = pruneModelOverrides(
+					current,
+					provider.models.map((model) => model.id),
+				);
+				if (pruned === current) return [name, provider];
+				const nextProvider = { ...provider };
+				if (pruned) nextProvider.modelOverrides = pruned;
+				else delete nextProvider.modelOverrides;
+				return [name, nextProvider];
+			}),
+		);
+		const prunedData = { ...normalizedData, providers: prunedProviders };
+		const prunedHidden = pruneHiddenModelOrphans(hiddenModels, modelIdIndex(prunedProviders));
+		if (!sameHiddenModelEntries(hiddenModels, prunedHidden)) {
+			setHiddenModels(prunedHidden);
+			void api.settings.update({ hiddenModels: prunedHidden }).catch(() => undefined);
+		}
 		setSaving(true);
 		setError(null);
 		try {
-			const result = await api.config.saveModels(normalizedData);
+			const result = await api.config.saveModels(prunedData);
 			if (!result.valid) {
 				setError(result.error ?? t("config.saveFailed"));
 				return false;
@@ -1596,6 +1732,12 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 		setExpandedAuth(newName);
 	};
 
+	// 导入面板把合并结果写入未保存草稿；用户在配置页检查后点「保存」才落盘（设计决策 #7）
+	const handleApplyModelsTransfer = (next: ModelsFile) => {
+		setModelsData(next);
+		markDirty("config:models");
+	};
+
 	const handleDeleteProviders = (names: string[]) => {
 		setDeleteConfirm({
 			type: "batch",
@@ -1636,9 +1778,33 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 
 	// ── Settings 操作 ────────────────────────────────────
 
+	/**
+	 * 落 settings.json 前清掉「模型已不在列表里」的孤儿档位键（设置跟着模型走），
+	 * 清理结果同步回 UI 草稿（否则界面还挂着已经写掉的旧值）。
+	 */
+	const pruneProviderThinkingLevelOrphans = (): Record<string, unknown> => {
+		const pruned = pruneModelThinkingLevelOrphans(settingsData, modelIdIndex(modelsData.providers));
+		if (pruned !== settingsData) setSettingsData(pruned);
+		return pruned;
+	};
+
 	const handleSaveSettings = async (): Promise<boolean> => {
-		const ok = await saveAndReload(() => api.config.saveSettings(settingsData), undefined, "config:settings");
+		const pruned = pruneProviderThinkingLevelOrphans();
+		const ok = await saveAndReload(() => api.config.saveSettings(pruned), undefined, "config:settings");
 		await loadConfig("settings", { force: true });
+		return ok;
+	};
+
+	/**
+	 * 只落 settings.json 并把该草稿标记为干净，**不**整页重载。
+	 * 模型页保存顺带提交 settings 草稿时用它：handleSaveSettings 的 force 重载会连带拉取
+	 * models/auth/raw，把它们的未保存草稿静默冲掉。
+	 */
+	const saveSettingsDraftOnly = async (): Promise<boolean> => {
+		const pruned = pruneProviderThinkingLevelOrphans();
+		const ok = await saveAndReload(() => api.config.saveSettings(pruned), undefined, "config:settings");
+		// 基准同步到刚写下的内容，否则脏检测（数据 vs 基准）会把刚清掉的黄点又标回来。
+		if (ok) baselineSettingsRef.current = deepClone(pruned);
 		return ok;
 	};
 
@@ -1797,7 +1963,7 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 		setEditPromptLoading(true);
 		setError(null);
 		try {
-			const content = isProjectPrompt(template) && effectiveProjectId ? await window.piDesktop.files.readContent(template.path, undefined, { projectId: effectiveProjectId }) : await api.prompts.edit(template.path);
+			const content = isProjectPrompt(template) && effectiveProjectId ? await api.files.readContent(template.path, undefined, { projectId: effectiveProjectId }) : await api.prompts.edit(template.path);
 			setEditPromptContent(content as string);
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
@@ -1828,7 +1994,7 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 				});
 				await api.prompts.edit(created.path, editPromptContent);
 			} else if (isProjectPrompt(editingPrompt) && effectiveProjectId) {
-				await window.piDesktop.files.writeContent(editingPrompt.path, editPromptContent, { projectId: effectiveProjectId });
+				await api.files.writeContent(editingPrompt.path, editPromptContent, { projectId: effectiveProjectId });
 			} else {
 				await api.prompts.edit(editingPrompt.path, editPromptContent);
 			}
@@ -1882,7 +2048,8 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 					await api.projectResources.toggleInherited({
 						projectId: effectiveProjectId,
 						kind: "prompt",
-						key: globalPromptOverrideKey(template.name),
+						// 原生规则写的是 pi 能匹配的文件路径；不能传 PiDeck 身份键（pi 不认，写了也不生效）
+						key: template.path,
 						enabled,
 					});
 				}
@@ -1909,7 +2076,7 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 				});
 				await api.prompts.edit(created.path, editPromptContent);
 			} else if (isProjectPrompt(editingPrompt) && effectiveProjectId) {
-				await window.piDesktop.files.writeContent(editingPrompt.path, editPromptContent, { projectId: effectiveProjectId });
+				await api.files.writeContent(editingPrompt.path, editPromptContent, { projectId: effectiveProjectId });
 			} else {
 				await api.prompts.edit(editingPrompt.path, editPromptContent);
 			}
@@ -1989,7 +2156,8 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 					await api.projectResources.toggleInherited({
 						projectId: effectiveProjectId,
 						kind: "skill",
-						key: globalSkillOverrideKey(skill.sourceId, skill.name),
+						// 原生规则写的是 pi 能匹配的文件路径；身份键（pi-global:<名>）pi 不认，写了也不生效
+						key: skill.path,
 						enabled,
 					});
 				}
@@ -2057,7 +2225,7 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 		setError(null);
 		try {
 			const accessScope = isProjectSkill(skill) && effectiveProjectId ? { projectId: effectiveProjectId } : undefined;
-			const content = await window.piDesktop.files.readContent(skill.path, undefined, accessScope);
+			const content = await api.files.readContent(skill.path, undefined, accessScope);
 			setEditGlobalContent(content);
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
@@ -2087,10 +2255,10 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 		setError(null);
 		try {
 			const accessScope = isProjectSkill(editingGlobalSkill) && effectiveProjectId ? { projectId: effectiveProjectId } : undefined;
-			await window.piDesktop.files.writeContent(editingGlobalSkill.path, editGlobalContent, accessScope);
+			await api.files.writeContent(editingGlobalSkill.path, editGlobalContent, accessScope);
 			clearDirty("skills");
 			setEditGlobalSaved(true);
-			window.setTimeout(() => setEditGlobalSaved(false), 2000);
+			scheduleUiTimer(() => setEditGlobalSaved(false), 2000);
 			bumpResourceGeneration();
 			await refreshSkills();
 			return true;
@@ -2148,13 +2316,15 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 				await api.projectResources.toggleInherited({
 					projectId: effectiveProjectId,
 					kind: "extension",
-					key: extension.source,
+					// 文件扩展用路径；包扩展回退 source（包级过滤走 packages，路径形态 pi 同样能匹配到入口文件时才生效）
+					key: extension.path ?? extension.source,
 					enabled,
 				});
 			}
 			return;
 		}
-		await api.extensions.toggle(extension.source, enabled, extension.scope);
+		// 传路径与项目上下文：本地文件扩展需要精确路径，项目作用域需要 projectId 写项目 .pi/settings.json。
+		await api.extensions.toggle(extension.source, enabled, extension.scope, extension.path, effectiveProjectId);
 	};
 
 	const handleRequestExtensionUninstall = (extension: PiExtensionSummary) => {
@@ -2163,10 +2333,24 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 		setUninstallExtensionConfirm(extension);
 	};
 
+	const handleRequestProjectPackageUninstall = (item: DiscoveredExtensionItem) => {
+		setUninstallProjectPackageConfirm({ source: item.source });
+	};
+
 	const handleOpenExtensionLocation = async (extension: PiExtensionSummary) => {
 		if (!extension.path) return;
 		try {
-			await window.piDesktop.files.showInFolder(extension.path, extension.scope === "project" && effectiveProjectId ? { projectId: effectiveProjectId } : undefined);
+			await api.files.showInFolder(extension.path, extension.scope === "project" && effectiveProjectId ? { projectId: effectiveProjectId } : undefined);
+		} catch (err) {
+			setError(err instanceof Error ? err.message : String(err));
+		}
+	};
+
+	/** 发现行打开安装位置：包缓存（user 层）走默认边界，项目目录内文件（settings-project 等）需带 projectId 走项目读边界。 */
+	const handleOpenDiscoveredLocation = async (item: DiscoveredExtensionItem) => {
+		if (!item.path) return;
+		try {
+			await api.files.showInFolder(item.path, item.physicalScope === "project" && effectiveProjectId ? { projectId: effectiveProjectId } : undefined);
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
 		}
@@ -2179,7 +2363,7 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 		// 立刻进入卸载态以触发卡片退场动画，同时发起真实卸载；两者并行，避免"删完才闪一下"。
 		setUninstallingExtensionSource(target.source);
 		const exitAnimation = new Promise<void>((resolve) => {
-			window.setTimeout(resolve, 280);
+			scheduleUiTimer(resolve, 280);
 		});
 		try {
 			await Promise.all([
@@ -2189,7 +2373,7 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 					} else if (target.builtIn) {
 						await api.extensions.removeBuiltIn(target.source);
 					} else {
-						await api.extensions.uninstall(target.source, target.scope);
+						await api.extensions.uninstall(target.source, target.scope, target.scope === "project" ? effectiveProjectId : undefined);
 					}
 				})(),
 				exitAnimation,
@@ -2204,6 +2388,35 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 			}
 			// Package uninstall failures include the equivalent CLI command as a manual fallback.
 			const uninstallCmd = `pi uninstall ${target.source}${target.scope === "project" ? " -l" : ""}`;
+			showNotice(t("config.extensionUninstallFailed", { error: formatIpcError(e) }) + " " + t("config.extensionUninstallManual", { command: uninstallCmd }), 6000, "error", undefined, {
+				action: {
+					label: t("config.copyUninstallCmd"),
+					onClick: () => void navigator.clipboard.writeText(uninstallCmd),
+				},
+			});
+		} finally {
+			setUninstallingExtensionSource(null);
+		}
+	};
+
+	/**
+	 * 项目包卸载：`pi remove <source> -l` 删项目层记账条目（<项目>/.pi/settings.json 的 packages），
+	 * 不动全局缓存与磁盘文件；卸载态复用 uninstallingExtensionSource（发现行按 source 匹配）。
+	 */
+	const confirmUninstallProjectPackage = async () => {
+		if (!uninstallProjectPackageConfirm) return;
+		const target = uninstallProjectPackageConfirm;
+		setUninstallProjectPackageConfirm(null);
+		setUninstallingExtensionSource(target.source);
+		try {
+			// 与全局包卸载一致：失败时给等价 CLI 手动回退（项目层加 -l）。项目层要带 effectiveProjectId，
+			// 后端经信任门解析项目根后再执行 pi remove -l（无 id 会被拒绝，不会误删别的项目）。
+			await api.extensions.uninstall(target.source, "project", effectiveProjectId);
+			await refreshExtensions(true);
+			showToast(t("config.extensionUninstalledToast"));
+		} catch (e) {
+			// 与全局包卸载一致：失败时给等价 CLI 手动回退（项目层加 -l）。
+			const uninstallCmd = `pi uninstall ${target.source} -l`;
 			showNotice(t("config.extensionUninstallFailed", { error: formatIpcError(e) }) + " " + t("config.extensionUninstallManual", { command: uninstallCmd }), 6000, "error", undefined, {
 				action: {
 					label: t("config.copyUninstallCmd"),
@@ -2269,6 +2482,16 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 		[markDirty, clearDirty],
 	);
 
+	/** 资源管理器（项目作用域）MCP 页脏状态。必须 memo：McpTab 的 load 依赖这个回调，
+	 *  传内联箭头会让每次父组件渲染都重跑 load，用磁盘内容冲掉正在输入的表单（见 McpTab 的 ref 兼底）。 */
+	const handleResourceMcpDirtyChange = useCallback(
+		(dirty: boolean) => {
+			if (dirty) markDirty("mcp");
+			else clearDirty("mcp");
+		},
+		[markDirty, clearDirty],
+	);
+
 	/** 按 tab 编码分发到对应保存 handler；返回是否保存成功（false = 保存失败，由错误提示区展示原因）。 */
 	const saveByKey = async (tabKey: string): Promise<boolean> => {
 		switch (tabKey) {
@@ -2290,7 +2513,14 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 					providerPageSaveRef.current?.();
 					return true;
 				}
-				return handleSaveModels();
+				{
+					const ok = await handleSaveModels();
+					// 模型页的「每模型默认思考档位」写的是 settings.json：同一次保存顺带落盘该草稿，
+					// 否则用户在本页点保存后 settings 黄点仍在、也不知道还要去设置页再存一次。
+					// 只走「只写不重载」路径，避免冲掉 auth/raw 等其它页的未保存草稿。
+					if (ok && dirtyTabsRef.current.has("config:settings")) return saveSettingsDraftOnly();
+					return ok;
+				}
 			case "config:auth":
 				return handleSaveAuth();
 			case "config:settings":
@@ -2301,6 +2531,15 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 				const ok = (await mcpTabRef.current?.save()) ?? false;
 				if (ok) {
 					clearDirty("config:mcp");
+					onSaved();
+					showToast(t("config.saved"));
+				}
+				return ok;
+			}
+			case "mcp": {
+				const ok = (await resourceMcpTabRef.current?.save()) ?? false;
+				if (ok) {
+					clearDirty("mcp");
 					onSaved();
 					showToast(t("config.saved"));
 				}
@@ -2393,7 +2632,7 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 				for (const key of dirtyTabs) {
 					roots.add(key.startsWith("dsh:") ? "dsh" : key);
 				}
-				for (const key of roots) {
+				for (const key of orderDirtyKeysForSave(roots)) {
 					const ok = await saveByKey(key);
 					if (!ok) return false;
 				}
@@ -2427,13 +2666,14 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 	/**
 	 * 关闭确认框选择保存并关闭：汇总**全部**脏来源逐个保存（不是只存当前 tab），
 	 * dsh:<nav> 归并到 dsh 一个保存入口；任一保存失败则留下重试（错误已展示在内容区）。
+	 * 顺序由 orderDirtyKeysForSave 保证 settings 最后（它的重载会连带刷新 models/auth/raw）。
 	 */
 	const handleSaveAndClose = async () => {
 		const roots = new Set<string>();
 		for (const key of dirtyTabs) {
 			roots.add(key.startsWith("dsh:") ? "dsh" : key);
 		}
-		for (const key of roots) {
+		for (const key of orderDirtyKeysForSave(roots)) {
 			const ok = await saveByKey(key);
 			if (!ok) return;
 		}
@@ -2465,7 +2705,12 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 	// 同一 JSX element 可在多处渲染，不会造成重复副作用。
 	const statusBlock = (
 		<>
-			{loading && <div className="py-12 text-center text-control text-muted-foreground">{t("common.loading")}</div>}
+			{loading && (
+				<div className="flex items-center justify-center gap-2 py-12 text-control text-muted-foreground">
+					<Loader2 size={14} className="animate-pideck-spin" aria-hidden="true" />
+					{t("common.loading")}
+				</div>
+			)}
 			{error && <div className="mb-3.5 rounded-sm border border-danger/20 bg-danger-soft px-3.5 py-2.5 text-control leading-relaxed text-danger whitespace-pre-line">{error}</div>}
 		</>
 	);
@@ -2488,12 +2733,12 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 						variant={embedded ? "line" : "default"}
 						className={cn("shrink-0", embedded ? "justify-start gap-1 px-3" : "config-backend-switch h-9 justify-start gap-1 border-b border-border/60 px-3")}
 					>
-						<TabsTrigger variant={embedded ? "line" : "default"} value="pi" className={cn("h-8 gap-1.5 px-3 text-[13px] font-medium", !embedded && "config-backend-tab")}>
+						<TabsTrigger variant={embedded ? "line" : "default"} value="pi" className={cn("h-8 gap-1.5 px-3 text-control font-medium", !embedded && "config-backend-tab")}>
 							<PiLogo className="size-3.5 shrink-0" />
 							{t("config.backend.pi")}
 							{hasPiDirty ? <span className="size-1.5 rounded-full bg-amber-500" aria-hidden="true" /> : null}
 						</TabsTrigger>
-						<TabsTrigger variant={embedded ? "line" : "default"} value="dsh" className={cn("h-8 gap-1.5 px-3 text-[13px] font-medium", !embedded && "config-backend-tab")}>
+						<TabsTrigger variant={embedded ? "line" : "default"} value="dsh" className={cn("h-8 gap-1.5 px-3 text-control font-medium", !embedded && "config-backend-tab")}>
 							<DshLogo className="size-3.5 shrink-0" />
 							{t("config.backend.dsh")}
 							{/* 后端分页黄点：该后端任意分区有草稿时提醒 */}
@@ -2566,6 +2811,16 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 									</span>
 									{t("config.nav.extensions")}
 								</TabsTrigger>
+								{/* MCP 在配置管理弹窗里由「配置文件」组的 config:mcp 承担（全局作用域 + 导入扫描源）；
+								    这里只在项目资源管理器（resourceOnly）提供项目作用域入口，避免同名双入口用户无法选择。 */}
+								{resourceOnly && (
+									<TabsTrigger value="mcp" className="config-nav-btn h-8 justify-start gap-1.5 px-2.5 text-control font-medium">
+										<span className="config-nav-icon">
+											<PlugZap size={14} aria-hidden="true" />
+										</span>
+										{t("config.nav.mcp")}
+									</TabsTrigger>
+								)}
 								<TabsTrigger value="skills" className="config-nav-btn h-8 justify-start gap-1.5 px-2.5 text-control font-medium">
 									<span className="config-nav-icon">
 										<Sparkles size={14} aria-hidden="true" />
@@ -2578,9 +2833,30 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 									</span>
 									{t("config.nav.prompts")}
 								</TabsTrigger>
+								{/* 桥贡献的独立配置页（落点 `config.page`）：标题取贡献自己的 slot.title，
+								    缺省用 key；排序已在 useGuiContributions 里按 order + key 做好。 */}
+								{configPages.map((page) => (
+									<TabsTrigger key={page.targetId} value={guiPageSectionId(page.targetId)} className="config-nav-btn h-8 justify-start gap-1.5 px-2.5 text-control font-medium">
+										<span className="config-nav-icon">
+											<Blocks size={14} aria-hidden="true" />
+										</span>
+										{page.node.slot?.title ?? page.key}
+									</TabsTrigger>
+								))}
 							</div>
 						</TabsList>
 
+						{/* 桥贡献的独立配置页内容：一项一个 Tab，按完整落点 id 精确取项。 */}
+						{configPages.map((page) => (
+							<TabsContent key={page.targetId} value={guiPageSectionId(page.targetId)} className="config-main min-w-0">
+								{/* 与原生 tab 同构：TabsContent > .config-content（滚动容器）> 内容。
+								    少了 .config-content 这层，页面内容既不滚、也会被 .config-main 裁掉；
+								    页面内的 sticky/absolute 还会挂到弹窗的滚动视口上（页脚悬到列表中间）。 */}
+								<div className="config-content">
+									<BridgeGuiSingleSlot sessionId={bridgeSessionId} slot="config.page" targetId={page.targetId} />
+								</div>
+							</TabsContent>
+						))}
 						<TabsContent value="config:models" className="config-main min-w-0">
 							<div className="config-content">
 								<PiConfigTargetSelector target={configTarget} hosts={remoteConfigHosts} disabled={saving} onChange={handleConfigTargetChange} />
@@ -2630,15 +2906,14 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 													onDeleteProvider={handleDeleteProvider}
 													onDuplicateProvider={handleDuplicateProvider}
 													onDeleteProviders={handleDeleteProviders}
+													onApplyModelsTransfer={handleApplyModelsTransfer}
 													onAddModel={handleAddModel}
 													onUpdateModel={handleUpdateModel}
 													onUpdateModelThinkingLevel={handleUpdateModelThinkingLevel}
 													onUpdateModelUserAgent={handleUpdateModelUserAgent}
-													getModelUserAgentOverride={(providerName, index) => {
-														const provider = modelsData.providers[providerName];
-														const model = provider?.models[index];
-														return model ? getModelUserAgentOverride(provider.modelOverrides, model.id) : "";
-													}}
+													getModelUserAgentOverride={(providerName, modelId) => getModelUserAgentOverride(modelsData.providers[providerName]?.modelOverrides, modelId)}
+													onUpdateModelThinkingLevelDefault={settingsLoaded ? handleUpdateModelThinkingLevelDefault : undefined}
+													getModelThinkingLevelDefault={settingsLoaded ? (providerName, modelId) => modelThinkingLevelOf(settingsData, providerName, modelId) ?? "" : undefined}
 													onDeleteModel={handleDeleteModel}
 													onDeleteModels={handleDeleteModels}
 													onResetModel={handleResetModelToAdaptive}
@@ -2775,7 +3050,10 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 													</div>
 												</div>
 												{editGlobalLoading ? (
-													<div className="py-12 text-center text-control text-text-tertiary">{t("common.loading")}</div>
+													<div className="flex items-center justify-center gap-2 py-12 text-control text-text-tertiary">
+														<Loader2 size={14} className="animate-pideck-spin" aria-hidden="true" />
+														{t("common.loading")}
+													</div>
 												) : (
 													<div className="prompts-monaco-wrap">
 														<CodeMirrorEditor
@@ -2886,9 +3164,14 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 									data={extensionsData}
 									loading={extensionsLoading}
 									uninstallingSource={uninstallingExtensionSource}
-									onRefresh={() => void refreshExtensions(true)}
+									onRefresh={() => refreshExtensions(true)}
+									// 开关后的刷新刻意走轻量路径：开关只改 enabled，主进程缓存里重投影即可，
+									// 不必付出一次全量扫描（pi list + npm view）——那会让开关行长时间处于 pending。
+									onRefreshAfterToggle={() => refreshExtensions(false)}
 									onToggle={handleToggleExtension}
 									onUninstall={handleRequestExtensionUninstall}
+									onUninstallProjectPackage={handleRequestProjectPackageUninstall}
+									onShowDiscoveredInFolder={(item) => void handleOpenDiscoveredLocation(item)}
 									onShowInFolder={(extension) => void handleOpenExtensionLocation(extension)}
 								/>
 							</div>
@@ -2909,12 +3192,30 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 									<RemoteConfigUnsupportedNotice bodyKey={REMOTE_CONFIG_UNSUPPORTED_TAB_COPY.mcp.bodyKey} code={REMOTE_CONFIG_UNSUPPORTED_TAB_COPY.mcp.code} hostLabel={remoteHostLabel} testId="remote-config-unsupported-mcp" />
 								) : (
 									<>
-										{/* MCP 页自持作用域：项目级 mcp.json 仅此入口，项目下拉与脏保护都在 McpTab 内部 */}
-										<McpTab ref={mcpTabRef} projects={projects} activeProjectId={projectId} onDirtyChange={handleMcpDirtyChange} />
+										{/* 全局作用域：activeProjectId 只作导入扫描的项目来源，配置仍写全局 mcp.json。 */}
+										<McpTab
+											ref={mcpTabRef}
+											activeProjectId={projectId}
+											onGoToExtensions={() => {
+												// 同区导航：扩展页与 MCP 页都属于配置区/项目资源区，保留当前作用域。
+												setSection("extensions");
+											}}
+											onDirtyChange={handleMcpDirtyChange}
+										/>
 									</>
 								)}
 							</div>
 						</TabsContent>
+
+						{/* 只有项目资源管理器会走到这里（见左侧导航同名开关）；forceMount：面板自管草稿，
+						    切走再回来不能丢未保存编辑，inactive 必须 hidden，否则叠在别的 tab 上。 */}
+						{resourceOnly ? (
+							<TabsContent value="mcp" forceMount className="config-main min-w-0 data-[state=inactive]:hidden">
+								<div className="config-content flex min-h-0 flex-col">
+									<McpTab ref={resourceMcpTabRef} projectId={resourceOnly && projectKind !== "chat" ? effectiveProjectId : undefined} projectName={resourceOnly ? projectName : undefined} onGoToExtensions={() => setSection("extensions")} onDirtyChange={handleResourceMcpDirtyChange} />
+								</div>
+							</TabsContent>
+						) : null}
 
 						<TabsContent value="config:trust" className="config-main min-w-0">
 							<div className="config-content">
@@ -2996,6 +3297,10 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 					onConfirm={confirmUninstallExtension}
 					onCancel={() => setUninstallExtensionConfirm(null)}
 				/>
+			)}
+
+			{uninstallProjectPackageConfirm && (
+				<ConfirmDialog title={t("config.deleteExtensionTitle")} message={t("config.deleteExtensionBody", { source: uninstallProjectPackageConfirm.source })} confirmLabel={t("common.delete")} danger onConfirm={confirmUninstallProjectPackage} onCancel={() => setUninstallProjectPackageConfirm(null)} />
 			)}
 
 			{deletePromptConfirm && (

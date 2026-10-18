@@ -147,7 +147,7 @@ export function SessionHoverCard({ children, session, title, projectName, status
 			<HoverCardTrigger asChild ref={triggerRef} onPointerDown={handleTriggerPointerDown}>
 				{children}
 			</HoverCardTrigger>
-			<HoverCardContent ref={contentRef} side="right" align="start" sideOffset={10} className="w-84 max-w-[calc(100vw-320px)] p-3.5 shadow-xl select-text">
+			<HoverCardContent ref={contentRef} side="right" align="start" sideOffset={10} className="w-84 max-w-[calc(100vw-320px)] p-3.5 shadow-[var(--shadow-popover)] select-text">
 				{/* 1. 会话正文预览区：有明确标题和独立摘要时分层展示，否则展示主体内容；两者皆空才显示占位 */}
 				<div className="max-h-48 overflow-y-auto select-text">
 					{validTitle && validPreview && !isSameContent ? (

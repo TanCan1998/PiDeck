@@ -84,6 +84,18 @@ function customMessage(id, parentId, options = {}) {
 	});
 }
 
+/** appendEntry（type:"custom"）会话条目：扩展输出，data 为任意 JSON 载荷。 */
+function customEntry(id, parentId, customType, data, options = {}) {
+	return JSON.stringify({
+		type: "custom",
+		customType,
+		data,
+		id,
+		parentId,
+		timestamp: options.timestamp ?? "2026-09-20T10:00:00.000Z",
+	});
+}
+
 /** 消息列表的「角色/类型 + 文本」摘要，用于断言顺序。 */
 function outline(messages) {
 	// 注意：先 [...spread] 再 map。投影器来自 vm 加载的模块，其数组是另一个 realm 的
@@ -91,6 +103,7 @@ function outline(messages) {
 	// prototype 不同而报「same structure but not reference-equal」。
 	return [...messages].map((message) => {
 		if (message.meta?.type === "customMessage") return `custom:${message.meta.customType}`;
+		if (message.meta?.type === "customEntry") return `entry:${message.meta.customType}`;
 		if (message.meta?.type === "compaction") return "compaction";
 		return `${message.role}:${message.text}`;
 	});
@@ -187,4 +200,51 @@ test("空正文通知不占位", async () => {
 	const window = await createReader().readLoadWindow(filePath, "agent-1", 20, 500);
 
 	assert.deepEqual(outline(window.messages), ["user:q1", "assistant:a1", "assistant:a2"]);
+});
+
+test("扩展输出条目（appendEntry）投影为 customEntry 卡片并插在下一条消息之前", async () => {
+	const filePath = writeSession("entry-basic.jsonl", [header(), userMessage("u1", "session-1", "q1"), assistantMessage("a1", "u1", "a1"), customEntry("e1", "a1", "pi-plan-btw", { query: "帮我看下迁移进度", depth: "brief" }), assistantMessage("a2", "e1", "a2")]);
+	const window = await createReader().readLoadWindow(filePath, "agent-1", 20, 500, { entryRendererTypes: ["pi-plan-btw"] });
+
+	assert.deepEqual(outline(window.messages), ["user:q1", "assistant:a1", "entry:pi-plan-btw", "assistant:a2"]);
+	const card = window.messages[2];
+	assert.equal(card.role, "system");
+	assert.equal(card.meta.type, "customEntry");
+	assert.equal(card.meta.entryId, "e1");
+	// data 原样透传给渲染层（格式化是渲染层职责）；text 是折叠行预览（首个字符串字段）
+	assert.deepEqual({ ...card.meta.data }, { query: "帮我看下迁移进度", depth: "brief" });
+	assert.equal(card.text, "帮我看下迁移进度");
+	assert.equal(card.id, "agent-1-customentry-e1");
+});
+
+test("内部记账类 customType（subagents: / pi-deck- 前缀）不投影成卡片", async () => {
+	const filePath = writeSession("entry-internal.jsonl", [
+		header(),
+		userMessage("u1", "session-1", "q1"),
+		assistantMessage("a1", "u1", "a1"),
+		customEntry("e-record", "a1", "subagents:record", { id: "run-1", status: "running" }),
+		customEntry("e-todo", "a1", "pi-deck-todo", { items: [] }),
+		assistantMessage("a2", "e-todo", "a2"),
+	]);
+	const window = await createReader().readLoadWindow(filePath, "agent-1", 20, 500);
+
+	// 高频记账快照不进时间线，否则子代理运行期会刷屏
+	assert.deepEqual(outline(window.messages), ["user:q1", "assistant:a1", "assistant:a2"]);
+});
+
+test("未注册 registerEntryRenderer 的 customType 不投影成卡片（白名单口径）", async () => {
+	const filePath = writeSession("entry-unregistered.jsonl", [header(), userMessage("u1", "session-1", "q1"), assistantMessage("a1", "u1", "a1"), customEntry("e1", "a1", "codemode-store", { set: {} }), assistantMessage("a2", "e1", "a2")]);
+	// 扩展没注册渲染器（如 codemode 的内部 KV 写入）→ 时间线不出现裸 JSON 卡
+	const window = await createReader().readLoadWindow(filePath, "agent-1", 20, 500, { entryRendererTypes: [] });
+	assert.deepEqual(outline(window.messages), ["user:q1", "assistant:a1", "assistant:a2"]);
+});
+
+test("超大 data 载荷不进入渲染层：只带 dataTruncated 标记", async () => {
+	const filePath = writeSession("entry-oversize.jsonl", [header(), userMessage("u1", "session-1", "q1"), assistantMessage("a1", "u1", "a1"), customEntry("e-big", "a1", "dump-snapshot", { blob: "x".repeat(20 * 1024) }), assistantMessage("a2", "e-big", "a2")]);
+	const window = await createReader().readLoadWindow(filePath, "agent-1", 20, 500, { entryRendererTypes: ["dump-snapshot"] });
+
+	const card = window.messages.find((message) => message.meta?.type === "customEntry");
+	assert.ok(card, "条目本身仍应可见（可见性不应依赖载荷大小）");
+	assert.equal(card.meta.dataTruncated, true);
+	assert.equal("data" in card.meta, false, "超大载荷不得透传给渲染层");
 });

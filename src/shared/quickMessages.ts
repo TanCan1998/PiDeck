@@ -25,6 +25,10 @@ export const MAX_QUICK_MESSAGE_LENGTH = 200;
 export const QUICK_MESSAGES_FILE_NAME = "quick-messages.json";
 export const QUICK_MESSAGES_DEFAULT_RESOURCE_NAME = "quick-messages.default.json";
 
+/** 回复快捷操作：用户规则文件名与随包出厂规则资源名（与快捷消息同构）。 */
+export const REPLY_ACTIONS_FILE_NAME = "reply-actions.json";
+export const REPLY_ACTIONS_DEFAULT_RESOURCE_NAME = "reply-actions.default.json";
+
 /** 配置文件结构版本；将来结构变更时用它做迁移判据（当前只为可读性写入）。 */
 export const QUICK_MESSAGES_FILE_VERSION = 1;
 

@@ -108,6 +108,16 @@ export class QuickTaskController {
 				const workArea = this.deps.workArea(saved.bounds);
 				window.setMinimumSize(Math.min(480, workArea.width), Math.min(480, workArea.height));
 				window.setBounds(compactTaskBounds(saved.bounds, workArea));
+				// floater 模式：主窗口隐藏时，compact 窗口独立显示（不显示主窗口）
+				// Linux Wayland：setAlwaysOnTop 可能无效（compositor 决定），macOS floating level 行为不同
+				// 平台特判：Linux 下 transparent 窗口需 compositor，Wayland 下 setIgnoreMouseEvents 行为不同
+				if (process.platform !== "linux") {
+					window.setAlwaysOnTop(true, "floating");
+				} else {
+					// Linux：部分 DE 不支持 floating level，退化为普通窗口置顶
+					window.setAlwaysOnTop(true);
+				}
+				window.setSkipTaskbar(false);
 			};
 			// Electron's fullscreen transition can be asynchronous. Apply geometry only afterwards.
 			if (saved.fullscreen) {
@@ -127,6 +137,9 @@ export class QuickTaskController {
 		if (window && !window.isDestroyed() && this.saved) {
 			window.setMinimumSize(this.saved.minimum[0] ?? 880, this.saved.minimum[1] ?? 600);
 			window.setBounds(this.saved.bounds);
+			// floater 模式退出：恢复 alwaysOnTop / skipTaskbar
+			window.setAlwaysOnTop(false);
+			window.setSkipTaskbar(false);
 			if (this.saved.maximized) window.maximize();
 			if (this.saved.fullscreen) window.setFullScreen(true);
 		}

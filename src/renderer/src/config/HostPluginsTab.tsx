@@ -1,0 +1,427 @@
+import { useState } from "react";
+import { useAtomValue, useSetAtom } from "jotai";
+import { FolderOpen, FolderPlus, PackagePlus, RefreshCw, Puzzle, BookOpen, FilePlus2, Trash2, ChevronDown, Power, PowerOff, PanelTop } from "lucide-react";
+import type { HostPluginInfo, HostPluginPermission } from "../../../shared/types/hostPlugin";
+import { LOCAL_SERVICE_IDS } from "../../../shared/localServices";
+import { hostPluginCatalogAtom, hostPluginPanelAtom } from "../atoms/host-plugin-atoms";
+import { settingsOpenAtom } from "../atoms/app-ui-atoms";
+import { desktopApi } from "../desktopApi";
+import { t } from "../i18n";
+import { showNotice } from "../utils/notice";
+import { Alert, AlertDescription } from "../components/ui-shadcn/alert";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "../components/ui-shadcn/alert-dialog";
+import { Badge } from "../components/ui-shadcn/badge";
+import { Button } from "../components/ui-shadcn/button";
+import { ButtonGroup } from "../components/ui-shadcn/button-group";
+import { Checkbox } from "../components/ui-shadcn/checkbox";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "../components/ui-shadcn/dropdown-menu";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../components/ui-shadcn/dialog";
+import { Input } from "../components/ui-shadcn/input";
+import { Label } from "../components/ui-shadcn/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui-shadcn/select";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui-shadcn/table";
+import { HOST_PLUGIN_PERMISSION_OPTIONS, HostPluginPermissionDetails } from "./HostPluginPermissionDetails";
+import { hostPluginScaffoldInput, initialHostPluginScaffoldDraft } from "./hostPluginScaffoldDraft";
+
+/** Desktop-owned plugins are global packages with project-scoped data grants, separate from pi extensions. */
+export function HostPluginsTab() {
+	const { catalog, error } = useAtomValue(hostPluginCatalogAtom);
+	const setCatalog = useSetAtom(hostPluginCatalogAtom);
+	const openPanel = useSetAtom(hostPluginPanelAtom);
+	const setSettingsOpen = useSetAtom(settingsOpenAtom);
+	const [consent, setConsent] = useState<HostPluginInfo | null>(null);
+	// 卸载确认：删目录不可逆，与启用授权一样走一次显式确认。
+	const [removing, setRemoving] = useState<HostPluginInfo | null>(null);
+	const [busy, setBusy] = useState(false);
+	const [createOpen, setCreateOpen] = useState(false);
+	// 默认勾上一个最常见的权限：新手生成的示例直接能看到内容，而不是一打开就报权限错误。
+	const [draft, setDraft] = useState(initialHostPluginScaffoldDraft);
+	const fail = (code: string) => showNotice(t("hostPlugins.failed", { code }), 4500, "error");
+	const rescan = async () => {
+		setBusy(true);
+		try {
+			const result = await desktopApi.hostPlugins.rescan();
+			if (result.ok) setCatalog({ catalog: result.value });
+			else fail(result.code);
+		} catch {
+			fail("plugin-host-unavailable");
+		} finally {
+			setBusy(false);
+		}
+	};
+	/** 归档与目录两个来源共用：失败码里只有 canceled 是正常取消，不弹错误。 */
+	const install = async (source: "archive" | "directory") => {
+		setBusy(true);
+		try {
+			const result = source === "archive" ? await desktopApi.hostPlugins.install() : await desktopApi.hostPlugins.installDirectory();
+			if (result.ok) {
+				setCatalog({ catalog: result.value });
+				showNotice(t("hostPlugins.installSuccess"), 4500, "info");
+			} else if (result.code !== "canceled") fail(result.code);
+		} catch {
+			fail("plugin-host-unavailable");
+		} finally {
+			setBusy(false);
+		}
+	};
+	const toggle = async (plugin: HostPluginInfo, enabled: boolean) => {
+		setBusy(true);
+		try {
+			const result = await desktopApi.hostPlugins.setEnabled(plugin.manifest.id, enabled, plugin.fingerprint);
+			if (result.ok) setCatalog({ catalog: result.value });
+			else fail(result.code);
+		} catch {
+			fail("plugin-host-unavailable");
+		} finally {
+			setBusy(false);
+		}
+	};
+	/** 卸载：删掉插件目录并清掉授权；内置示例会被主进程拒（plugin-builtin），提示用户改用禁用。 */
+	const remove = async (plugin: HostPluginInfo) => {
+		setBusy(true);
+		try {
+			const result = await desktopApi.hostPlugins.remove(plugin.manifest.id);
+			if (result.ok) {
+				setCatalog({ catalog: result.value });
+				showNotice(t("hostPlugins.removed", { name: plugin.manifest.name }), 4500, "info");
+			} else fail(result.code);
+		} catch {
+			fail("plugin-host-unavailable");
+		} finally {
+			setBusy(false);
+			setRemoving(null);
+		}
+	};
+	/** 脚手架：先落盘再重扫描，生成的插件直接出现在下表里（默认禁用，仍需授权启用）。 */
+	const scaffold = async () => {
+		const input = hostPluginScaffoldInput(draft);
+		if (!input) return;
+		setBusy(true);
+		try {
+			const result = await desktopApi.hostPlugins.scaffold(input);
+			if (result.ok) {
+				setCatalog({ catalog: result.value });
+				setCreateOpen(false);
+				showNotice(t("hostPlugins.scaffoldCreated", { id: draft.id }), 6000, "info");
+			} else fail(result.code);
+		} catch {
+			fail("plugin-host-unavailable");
+		} finally {
+			setBusy(false);
+		}
+	};
+	const togglePermission = (permission: HostPluginPermission, checked: boolean) =>
+		setDraft((current) => ({
+			...current,
+			permissions: checked ? [...current.permissions, permission] : current.permissions.filter((item) => item !== permission),
+			// 勾上服务控制时预置 PiDeck 已实现的服务（作者仍可逐个取消）；不预置会因缺 services 被 manifest 校验拒。
+			...(permission === "service.local" && checked && current.services.length === 0 ? { services: [...LOCAL_SERVICE_IDS] } : {}),
+		}));
+	const draftReady = hostPluginScaffoldInput(draft) !== null;
+	return (
+		<section className="flex flex-col gap-4">
+			<Alert>
+				<Puzzle />
+				<AlertDescription>{t("hostPlugins.description")}</AlertDescription>
+			</Alert>
+			<div className="flex flex-wrap items-center gap-2">
+				<Button variant="outline" size="sm" disabled={busy} onClick={() => void rescan()}>
+					<RefreshCw data-icon="inline-start" />
+					{t("hostPlugins.rescan")}
+				</Button>
+				<Button variant="outline" size="sm" disabled={busy} onClick={() => void install("archive")}>
+					<PackagePlus data-icon="inline-start" />
+					{t("hostPlugins.install")}
+				</Button>
+				<Button variant="outline" size="sm" disabled={busy} onClick={() => void install("directory")}>
+					<FolderPlus data-icon="inline-start" />
+					{t("hostPlugins.installDirectory")}
+				</Button>
+				<Button
+					variant="outline"
+					size="sm"
+					disabled={busy}
+					onClick={() => {
+						setDraft(initialHostPluginScaffoldDraft());
+						setCreateOpen(true);
+					}}
+				>
+					<FilePlus2 data-icon="inline-start" />
+					{t("hostPlugins.scaffold")}
+				</Button>
+				<Button
+					variant="outline"
+					size="sm"
+					disabled={!catalog}
+					onClick={() =>
+						void desktopApi.hostPlugins
+							.openDirectory()
+							.then((result) => {
+								if (!result.ok) fail(result.code);
+							})
+							.catch(() => fail("plugin-host-unavailable"))
+					}
+				>
+					<FolderOpen data-icon="inline-start" />
+					{t("hostPlugins.openDirectory")}
+				</Button>
+				{/* 路径可能很长：truncate 让它在工具行内收口（overflow:hidden 使 flex 自动最小宽度归 0），完整值放 title */}
+				{catalog && (
+					<span className="min-w-40 truncate text-xs text-muted-foreground" title={catalog.directory}>
+						{catalog.directory}
+					</span>
+				)}
+				<span className="flex-1" />
+				{/* 开发指南外链：指向仓库内的单一数据源（docs/host-plugin-dev-guide.md），与插件作者所见一致 */}
+				<Button
+					variant="ghost"
+					size="sm"
+					onClick={() => {
+						void desktopApi.app.openExternal("https://github.com/ayuayue/PiDeck/blob/main/docs/host-plugin-dev-guide.md", true).catch(() => fail("plugin-host-unavailable"));
+					}}
+				>
+					<BookOpen data-icon="inline-start" />
+					{t("hostPlugins.devGuide")}
+				</Button>
+			</div>
+			{error && (
+				<Alert variant="destructive">
+					<AlertDescription>{t("hostPlugins.failed", { code: error })}</AlertDescription>
+				</Alert>
+			)}
+			{/* 三列宽度靠表头约束：插件列吃掉剩余空间、权限列给固定占比、动作列收缩到内容宽，
+			    单元格一律允许换行—— TableCell 基类是 whitespace-nowrap，长描述会把表格顶出横向滚动条。 */}
+			<Table>
+				<TableHeader>
+					<TableRow>
+						<TableHead className="w-full">{t("hostPlugins.plugin")}</TableHead>
+						<TableHead className="w-[34%]">{t("hostPlugins.permission")}</TableHead>
+						<TableHead className="w-px text-right">{t("hostPlugins.actions")}</TableHead>
+					</TableRow>
+				</TableHeader>
+				<TableBody>
+					{catalog?.plugins.map((plugin) => (
+						<TableRow key={plugin.manifest.id}>
+							<TableCell className="w-full break-words whitespace-normal align-top">
+								<div className="flex flex-col gap-1">
+									<strong className="break-words">{plugin.manifest.name}</strong>
+									<span className="break-all text-xs text-muted-foreground">
+										{plugin.manifest.id} / {plugin.manifest.version}
+									</span>
+									{plugin.manifest.description && (
+										<span className="line-clamp-3 text-xs leading-relaxed text-muted-foreground" title={plugin.manifest.description}>
+											{plugin.manifest.description}
+										</span>
+									)}
+								</div>
+							</TableCell>
+							<TableCell className="whitespace-normal align-top">
+								<div className="flex flex-col items-start gap-2">
+									<HostPluginPermissionDetails manifest={plugin.manifest} />
+									<Badge variant="secondary">{t(plugin.enabled ? "hostPlugins.enabled" : plugin.requiresConsent ? "hostPlugins.changed" : "hostPlugins.disabled")}</Badge>
+								</div>
+							</TableCell>
+							<TableCell className="text-right align-top">
+								{/* 拆分按钮（split button）形态：主钮直接露出唯一高频且可逆的动作（启用/禁用），
+								    不可逆的卸载与面板入口收进右侧下拉，避免误点卸载、也不必先点开菜单才能启停。 */}
+								<ButtonGroup>
+									<Button
+										variant="outline"
+										size="sm"
+										disabled={busy}
+										onClick={() => {
+											if (plugin.enabled) void toggle(plugin, false);
+											else setConsent(plugin);
+										}}
+									>
+										{plugin.enabled ? <PowerOff data-icon="inline-start" /> : <Power data-icon="inline-start" />}
+										{t(plugin.enabled ? "hostPlugins.disable" : "hostPlugins.enableShort")}
+									</Button>
+									<DropdownMenu>
+										<DropdownMenuTrigger asChild>
+											<Button variant="outline" size="icon-sm" disabled={busy} aria-label={t("hostPlugins.moreActions")} title={t("hostPlugins.moreActions")}>
+												<ChevronDown size={14} aria-hidden="true" />
+											</Button>
+										</DropdownMenuTrigger>
+										<DropdownMenuContent align="end" className="min-w-[10rem]">
+											{plugin.enabled && plugin.manifest.contributes.panels.length > 0 && (
+												<>
+													<DropdownMenuLabel>{t("hostPlugins.panels")}</DropdownMenuLabel>
+													{plugin.manifest.contributes.panels.map((panel) => (
+														<DropdownMenuItem
+															key={panel.id}
+															onClick={() => {
+																setSettingsOpen(false);
+																openPanel({ pluginId: plugin.manifest.id, panelId: panel.id });
+															}}
+														>
+															<PanelTop size={14} aria-hidden="true" />
+															{panel.title}
+														</DropdownMenuItem>
+													))}
+													<DropdownMenuSeparator />
+												</>
+											)}
+											<DropdownMenuItem variant="destructive" onClick={() => setRemoving(plugin)}>
+												<Trash2 size={14} aria-hidden="true" />
+												{t("hostPlugins.remove")}
+											</DropdownMenuItem>
+										</DropdownMenuContent>
+									</DropdownMenu>
+								</ButtonGroup>
+							</TableCell>
+						</TableRow>
+					))}
+					{catalog && catalog.plugins.length === 0 && (
+						<TableRow>
+							<TableCell colSpan={3}>{t("hostPlugins.empty")}</TableCell>
+						</TableRow>
+					)}
+				</TableBody>
+			</Table>
+			{catalog?.issues.map((issue) => (
+				<Alert key={`${issue.directory}:${issue.code}`} variant="destructive">
+					<AlertDescription>{t("hostPlugins.packageRejected", { directory: issue.directory, code: issue.code })}</AlertDescription>
+				</Alert>
+			))}
+			<AlertDialog
+				open={Boolean(consent)}
+				onOpenChange={(open) => {
+					if (!open) setConsent(null);
+				}}
+			>
+				<AlertDialogContent className="max-h-[calc(100vh-64px)] overflow-y-auto">
+					<AlertDialogHeader>
+						<AlertDialogTitle>{t("hostPlugins.consentTitle", { name: consent?.manifest.name ?? "" })}</AlertDialogTitle>
+						<AlertDialogDescription>{t("hostPlugins.consentDescription")}</AlertDialogDescription>
+					</AlertDialogHeader>
+					{consent && <HostPluginPermissionDetails manifest={consent.manifest} warnings />}
+					<p className="break-all text-xs text-muted-foreground">{consent?.fingerprint}</p>
+					<AlertDialogFooter>
+						<AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+						<AlertDialogAction
+							disabled={busy}
+							onClick={() => {
+								if (consent) void toggle(consent, true);
+							}}
+						>
+							{t("hostPlugins.enable")}
+						</AlertDialogAction>
+					</AlertDialogFooter>
+				</AlertDialogContent>
+			</AlertDialog>
+			<AlertDialog
+				open={Boolean(removing)}
+				onOpenChange={(open) => {
+					if (!open) setRemoving(null);
+				}}
+			>
+				<AlertDialogContent>
+					<AlertDialogHeader>
+						<AlertDialogTitle>{t("hostPlugins.removeConfirmTitle", { name: removing?.manifest.name ?? "" })}</AlertDialogTitle>
+						<AlertDialogDescription>{t("hostPlugins.removeConfirmDescription")}</AlertDialogDescription>
+					</AlertDialogHeader>
+					<AlertDialogFooter>
+						<AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+						<AlertDialogAction
+							disabled={busy}
+							onClick={() => {
+								if (removing) void remove(removing);
+							}}
+						>
+							{t("hostPlugins.remove")}
+						</AlertDialogAction>
+					</AlertDialogFooter>
+				</AlertDialogContent>
+			</AlertDialog>
+			{/* 只生成静态页面与示例 JS，不执行生成物、不启动服务；网络目的地随后仍需显式授权。 */}
+			<Dialog open={createOpen} onOpenChange={setCreateOpen}>
+				<DialogContent className="flex max-h-[calc(100vh-64px)] max-w-[min(600px,calc(100vw-48px))] flex-col gap-4 overflow-y-auto">
+					<DialogHeader>
+						<DialogTitle>{t("hostPlugins.scaffoldTitle")}</DialogTitle>
+						<DialogDescription>{t("hostPlugins.scaffoldDescription")}</DialogDescription>
+					</DialogHeader>
+					<div className="flex flex-col gap-3">
+						<div className="flex flex-col gap-1.5">
+							<Label htmlFor="host-plugin-scaffold-id">{t("hostPlugins.scaffoldId")}</Label>
+							<Input id="host-plugin-scaffold-id" spellCheck={false} className="font-mono" placeholder="my-plugin" value={draft.id} onChange={(event) => setDraft((current) => ({ ...current, id: event.target.value.trim().toLowerCase() }))} />
+							<span className="text-xs text-muted-foreground">{t("hostPlugins.scaffoldIdHint")}</span>
+						</div>
+						<div className="flex flex-col gap-1.5">
+							<Label htmlFor="host-plugin-scaffold-name">{t("hostPlugins.scaffoldName")}</Label>
+							<Input id="host-plugin-scaffold-name" placeholder="My Plugin" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} />
+						</div>
+						<div className="flex flex-col gap-2">
+							<Label>{t("hostPlugins.scaffoldPermissions")}</Label>
+							{HOST_PLUGIN_PERMISSION_OPTIONS.map(([permission, label, hint]) => {
+								const checked = draft.permissions.includes(permission);
+								return (
+									<div key={permission} className="flex items-start gap-2">
+										<Checkbox id={`host-plugin-permission-${permission}`} checked={checked} onCheckedChange={(value) => togglePermission(permission, value === true)} />
+										<Label htmlFor={`host-plugin-permission-${permission}`} className="flex cursor-pointer flex-col items-start gap-0.5 text-left">
+											<span className="text-sm">{t(label)}</span>
+											<span className="text-xs font-normal text-muted-foreground">{t(hint)}</span>
+										</Label>
+									</div>
+								);
+							})}
+						</div>
+						{draft.permissions.includes("network.https") && (
+							<div className="flex flex-col gap-1.5">
+								<Label htmlFor="host-plugin-https-origins">{t("hostPlugins.httpsOrigins")}</Label>
+								<Input id="host-plugin-https-origins" spellCheck={false} className="font-mono" placeholder="https://api.example.com" aria-describedby="host-plugin-https-hint" value={draft.httpsOrigins} onChange={(event) => setDraft((current) => ({ ...current, httpsOrigins: event.target.value }))} />
+								<span id="host-plugin-https-hint" className="text-xs text-muted-foreground">
+									{t("hostPlugins.httpsOriginsHint")}
+								</span>
+							</div>
+						)}
+						{draft.permissions.includes("network.local") && (
+							<div className="flex flex-col gap-1.5">
+								<Label htmlFor="host-plugin-local-ports">{t("hostPlugins.localPorts")}</Label>
+								<Input id="host-plugin-local-ports" spellCheck={false} className="font-mono" placeholder="4187" aria-describedby="host-plugin-local-hint" value={draft.localPorts} onChange={(event) => setDraft((current) => ({ ...current, localPorts: event.target.value }))} />
+								<span id="host-plugin-local-hint" className="text-xs text-muted-foreground">
+									{t("hostPlugins.localPortsHint")}
+								</span>
+							</div>
+						)}
+						{draft.permissions.includes("service.local") && (
+							<div className="flex flex-col gap-2">
+								<Label>{t("hostPlugins.scaffoldServices")}</Label>
+								{LOCAL_SERVICE_IDS.map((id) => (
+									<div key={id} className="flex items-start gap-2">
+										<Checkbox id={`host-plugin-service-${id}`} checked={draft.services.includes(id)} onCheckedChange={(value) => setDraft((current) => ({ ...current, services: value === true ? [...current.services, id] : current.services.filter((item) => item !== id) }))} />
+										<Label htmlFor={`host-plugin-service-${id}`} className="cursor-pointer font-mono text-sm">
+											{id}
+										</Label>
+									</div>
+								))}
+								<span className="text-xs text-muted-foreground">{t("hostPlugins.scaffoldServicesHint")}</span>
+							</div>
+						)}
+						<div className="flex flex-col gap-1.5">
+							<Label>{t("hostPlugins.scaffoldPresentation")}</Label>
+							<Select value={draft.presentation} onValueChange={(value) => setDraft((current) => ({ ...current, presentation: value === "page" || value === "popover" ? value : "modal" }))}>
+								<SelectTrigger className="w-full">
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									<SelectItem value="modal">{t("hostPlugins.scaffoldModal")}</SelectItem>
+									<SelectItem value="popover">{t("hostPlugins.scaffoldPopover")}</SelectItem>
+									<SelectItem value="page">{t("hostPlugins.scaffoldPage")}</SelectItem>
+								</SelectContent>
+							</Select>
+						</div>
+					</div>
+					<DialogFooter>
+						<Button variant="ghost" size="sm" onClick={() => setCreateOpen(false)}>
+							{t("common.cancel")}
+						</Button>
+						<Button size="sm" disabled={busy || !draftReady} onClick={() => void scaffold()}>
+							{t("hostPlugins.scaffoldCreate")}
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
+		</section>
+	);
+}

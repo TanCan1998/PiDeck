@@ -26,6 +26,7 @@ const { AgentManager } = loadTsCommonJs("src/main/pi/AgentManager.ts", { stubs: 
 const { SessionCatalog } = loadTsCommonJs("src/main/sessions/SessionCatalog.ts", { stubs: { "../logging/sharedLogger": { getAppLogger: () => null } } });
 const { SessionRuntimeCoordinator } = loadTsCommonJs("src/main/sessions/SessionRuntimeCoordinator.ts");
 const { createAgentSessionReplacer } = loadTsCommonJs("src/main/sessions/agentSessionReplacement.ts");
+const { createSessionForkCommands } = loadTsCommonJs("src/main/sessions/sessionForkCommands.ts");
 const { createRemoteRuntimePort } = loadTsCommonJs("src/main/pi/remoteRuntimePort.ts");
 const { ipcChannels } = loadTsCommonJs("src/shared/ipc.ts");
 const HOST = "11111111-1111-4111-8111-111111111111";
@@ -129,7 +130,8 @@ async function setup(t, behavior = "success") {
 	});
 	manager.messages.set(tab.id, [{ id: "old-message", role: "user", text: "Origin-only tail", timestamp: 1 }]);
 	manager.sessionFileVersionByAgent.set(tab.id, "old-version");
-	manager.pendingAutomaticTitles.set(tab.id, { title: "Pending origin", sessionId: origin.record.id, runtimeGeneration: 1 });
+	// 合并后自动标题的待决标记在 ExtensionUiGate 内（dev 拆分 Wave 4B），不再挂在 AgentManager 顶层。
+	manager.uiGate.pendingAutomaticTitles.set(tab.id, { title: "Pending origin", sessionId: origin.record.id, runtimeGeneration: 1 });
 	const coordinator = new SessionRuntimeCoordinator(
 		catalog,
 		manager,
@@ -156,6 +158,16 @@ async function setup(t, behavior = "success") {
 			throw new Error("SESSION_CATALOG_BUSY");
 		};
 	const handlers = new Map();
+	// dev 把 fork/clone 命令链收口到 sessionForkCommands（桌面 IPC 与 Web 共用）：IPC 只转发，
+	// 真正的替换语义仍由本文件注入的 replacer 承担，所以这里用与 main/index.ts 同形的装配。
+	const sessionForkCommands = createSessionForkCommands({
+		sessionRuntimeCoordinator: coordinator,
+		agentManager: manager,
+		replaceAgentSession: replace,
+		isDshAgent: () => false,
+		logger: { info: () => undefined },
+		notifyForkCatalogRefreshed: () => undefined,
+	});
 	const { registerSessionIpc } = loadTsCommonJs("src/main/ipc/sessionIpc.ts", { stubs: { electron: { ipcMain: { handle: (name, handler) => handlers.set(name, handler) }, dialog: {}, app: { getPath: () => dir } } } });
 	registerSessionIpc({
 		projectStore: { get: () => PROJECT },
@@ -164,6 +176,7 @@ async function setup(t, behavior = "success") {
 		settingsStore: { get: () => ({}) },
 		sessionRuntimeCoordinator: coordinator,
 		agentManager: manager,
+		sessionForkCommands,
 		replaceAgentSession: replace,
 		mainCopy: (key) => key,
 		appLogger: { info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined },
@@ -189,7 +202,7 @@ for (const operation of ["fork", "clone"]) {
 		assert.equal(h.tab.sessionPath, NEW);
 		assert.equal(h.tab.sessionId, "pi-new");
 		assert.equal(h.tab.deckSessionId, id);
-		assert.equal(h.manager.pendingAutomaticTitles.has(h.tab.id), false);
+		assert.equal(h.manager.uiGate.pendingAutomaticTitles.has(h.tab.id), false, "换绑成功后旧会话的待决自动标题必须清掉");
 		assert.equal(h.coordinator.getSessionId(h.tab.id), id);
 		assert.equal(h.coordinator.getAgentId(h.origin.record.id), undefined);
 		assert.equal(h.coordinator.validateTarget({ sessionId: h.origin.record.id, agentId: h.tab.id, runtimeGeneration: 1 }).ok, false);
@@ -224,7 +237,7 @@ for (const operation of ["fork", "clone"]) {
 		assert.equal(h.coordinator.getSessionId(h.tab.id), h.origin.record.id);
 		assert.equal(h.manager.getMessages(h.tab.id)[0].id, "old-message");
 		assert.equal(h.manager.getMessageWindow(h.tab.id).fileVersion, "old-version");
-		assert.equal(h.manager.pendingAutomaticTitles.has(h.tab.id), true);
+		assert.equal(h.manager.uiGate.pendingAutomaticTitles.has(h.tab.id), true, "取消的 fork 不得丢失原会话的待决标题");
 		assert.deepEqual(plain(h.catalog.get(h.origin.record.id)), h.oldEntry);
 		assert.deepEqual(h.forbidden, []);
 		assert.deepEqual(

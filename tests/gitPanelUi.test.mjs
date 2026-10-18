@@ -10,7 +10,14 @@ const panelControls = readFileSync("src/renderer/src/components/app/git/GitPanel
 const gitSurface = [panel, resourceTree, graph, panelControls].join("\n");
 const styles = readRendererStyles();
 const i18n = [readFileSync("src/renderer/src/i18n.ts", "utf8"), readFileSync("src/renderer/src/i18n/rendererCopy.zh-CN.ts", "utf8"), readFileSync("src/renderer/src/i18n/rendererCopy.en-US.ts", "utf8")].join("\n");
-const app = [readFileSync("src/renderer/src/hooks/useFileEditor.ts", "utf8"), readFileSync("src/renderer/src/App.tsx", "utf8"), readFileSync("src/renderer/src/components/app/AppShell.tsx", "utf8"), readFileSync("src/renderer/src/components/workspace/DrawerSurface.tsx", "utf8")].join("\n");
+const app = [
+	readFileSync("src/renderer/src/hooks/useFileEditor.ts", "utf8"),
+	readFileSync("src/renderer/src/App.tsx", "utf8"),
+	readFileSync("src/renderer/src/hooks/app/useAppBootstrapInfo.ts", "utf8"),
+	readFileSync("src/renderer/src/components/app/AppShell.tsx", "utf8"),
+	readFileSync("src/renderer/src/components/workspace/DrawerSurface.tsx", "utf8"),
+	readFileSync("src/renderer/src/hooks/workspace/useSessionFileLinks.ts", "utf8"),
+].join("\n");
 const preload = readFileSync("src/preload/index.ts", "utf8");
 const main = readFileSync("src/main/index.ts", "utf8");
 const systemIpc = readFileSync("src/main/ipc/systemIpc.ts", "utf8");
@@ -32,11 +39,17 @@ function cssRule(selector) {
 const gitKeys = ["git.sourceControl", "git.changes", "git.mergeChanges", "git.stagedChanges", "git.sourceControlGraph", "git.compareChanges", "git.commit", "git.resizePanes", "git.relativeSeconds", "git.loadingCommitDetails", "git.loadingCommitFiles", "git.renamedFrom"];
 
 describe("Git panel VS Code Source Control contract", () => {
-	test("uses a CSS triangle twistie without structural icon imports", () => {
+	test("twistie and stage glyphs use lucide icons instead of text glyphs", () => {
+		// 折叠箭头与 ＋/− 暂存符号统一走 lucide 矢量图标：字符字形（▶ / text-xl ＋/－）跨平台笔画不稳、基线靠 translateY 补丁，与全局图标体系不一致
 		const twistie = sourceBetween("function Twistie(", "function GitStageGlyph(");
-		assert.match(twistie, /before:content-\['▶'\]/);
+		assert.match(twistie, /<ChevronDown\s/);
+		assert.match(twistie, /transition-transform\s+duration-fast\$\{open\s\?\s*""\s*:\s*"\s*-rotate-90"\}/);
+		assert.doesNotMatch(twistie, /before:content-\['▶'\]/);
 		assert.doesNotMatch(twistie, /\.git-twistie/);
-		assert.doesNotMatch(twistie, /ChevronDown|ChevronRight|GitBranch|GitCommit|GitCompare|GitGraph|Ellipsis|Minus|Plus/);
+		const glyph = sourceBetween("function GitStageGlyph(", "\n}");
+		assert.match(glyph, /const\s+Glyph\s*=\s*unstage\s*\?\s*Minus\s*:\s*Plus/);
+		assert.doesNotMatch(glyph, /text-xl/);
+		assert.doesNotMatch(glyph, /-translate-y-px/);
 	});
 
 	test("uses exactly three independently collapsible persisted panes with Changes open by default", () => {
@@ -73,9 +86,9 @@ describe("Git panel VS Code Source Control contract", () => {
 		assert.match(panel, /groups\.merge\.length \+ stagedCount \+ workingChanges\.length/);
 		assert.match(resourceTree, /function GitStageGlyph/);
 		assert.match(resourceTree, /className=\{`size-6 rounded/);
-		assert.match(resourceTree, /text-xl font-medium/);
-		assert.match(resourceTree, /w-4 shrink-0/);
-		assert.match(resourceTree, /ml-\[5px\]/);
+		// 状态字母挂 .git-decoration 让 workspace.css 的 status-* 语义色（A 绿/M 黄/D 红）生效，不再被内联 text-[var(--git-desc-fg)] 锁灰
+		assert.match(resourceTree, /git-decoration\s+flex\s+items-center\s+justify-end/);
+		assert.doesNotMatch(resourceTree, /text-\[var\(--git-desc-fg\)\][^"]*"\s*aria-hidden="true">\s*\{opening/);
 		assert.match(resourceTree, /case GitStatus\.INDEX_ADDED:/);
 		assert.match(resourceTree, /case GitStatus\.BOTH_MODIFIED:/);
 		assert.doesNotMatch(gitSurface, /status === [0-9]/);
@@ -118,8 +131,8 @@ describe("Git panel VS Code Source Control contract", () => {
 		assert.match(preload, /preferredSystemLanguages/);
 		assert.match(app, /api\.app\s*\.preferredSystemLanguages\(\)/);
 		assert.match(i18n, /navigator\.languages\?\.\[0\]/);
-		assert.match(i18n, /mode === "zh-CN" \|\| mode === "en-US" \|\| mode === "pseudo"/);
-		assert.match(i18n, /normalized === "zh" \|\| normalized\.startsWith\("zh-"\)/);
+		assert.match(i18n, /mode === "zh-CN" \|\| mode === "zh-TW" \|\| mode === "en-US" \|\| mode === "pseudo"/);
+		assert.match(i18n, /isTraditionalChineseLanguageTag\s*\(normalized\)\s*\?\s*"zh-TW"\s*:\s*"zh-CN"/);
 	});
 
 	test("aligns the commit-log IPC boundary with allBranches filtering", () => {
@@ -179,7 +192,7 @@ describe("Git panel VS Code Source Control contract", () => {
 		assert.match(panelControls, /SelectValue/);
 		assert.match(panelControls, /position="popper"/);
 		// 面板标题不截断，避免被右侧筛选挤成「源…」；且不用 mono，与 --git-ui-font / 项目中文栈对齐
-		assert.match(panelControls, /whitespace-nowrap text-\[13px\] font-semibold/);
+		assert.match(panelControls, /whitespace-nowrap text-control font-semibold/);
 		assert.doesNotMatch(panelControls, /font-mono text-\[13px\] font-semibold/);
 		assert.doesNotMatch(panelControls, /min-w-0 flex-1 truncate font-mono text-\[13px\] font-semibold/);
 		// 路径 / 提交说明 / 作者 / 分支徽标走面板 UI 字体；仅 commit hash 保留 mono

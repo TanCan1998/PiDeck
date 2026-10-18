@@ -50,6 +50,8 @@ export class LogBundleExporter {
 		if (canceled || !filePath) return { ok: false, canceled: true };
 		try {
 			await writeFile(filePath, markdown, "utf8");
+			// 诊断产物写到应用目录之外，属数据出域动作，留痕便于事后确认外发了什么
+			void this.deps.appLogger.info("diagnostics", "Diagnostics report exported", { path: filePath, bytes: markdown.length });
 			return { ok: true, canceled: false, path: filePath };
 		} catch (error) {
 			return { ok: false, canceled: false, error: this.describeError(error) };
@@ -81,6 +83,7 @@ export class LogBundleExporter {
 				});
 			}
 			await writeFile(filePath, buildZip(entries));
+			void this.deps.appLogger.info("diagnostics", "Log bundle exported (redacted logs included)", { path: filePath, files: entries.length });
 			return { ok: true, canceled: false, path: filePath };
 		} catch (error) {
 			return { ok: false, canceled: false, error: this.describeError(error) };

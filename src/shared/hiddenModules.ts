@@ -8,6 +8,7 @@
  * HIDEABLE_MODULE_IDS 加一项即可扩展，不用每次改 AppSettings 类型和 SettingsStore。
  * 存储层只做去重去空、不按清单过滤——未知 id 原样保留（可能来自更新的版本），
  * 读取方按需判断成员关系即可，不会因未知值报错。
+ * 注意：输入框相关的入口（含模式选择器）归 shared/composerFeatures.ts，不进本清单。
  */
 
 /**
@@ -15,13 +16,15 @@
  * 顺序即外观设置里开关的排列顺序，与侧栏分组顺序一致（扩展集成 → 开发者工具 → 开发与维护）。
  * 常用 / 快捷键 / 通知 / 外观 / 代理 / 外部编辑器 / 开发设置 / 缓存 / 备份 是应用基础项，不提供隐藏。
  */
-export const HIDEABLE_SETTINGS_TAB_IDS = ["im", "pet", "vision", "imagegen", "web", "git", "usage", "process"] as const;
+export const HIDEABLE_SETTINGS_TAB_IDS = ["im", "pet", "vision", "imagegen", "videogen", "acp", "hostplugins", "web", "git", "usage", "process"] as const;
 
 /**
  * 全部可隐藏模块：设置 tab + `dsh`（DSH 后端不是设置 tab，它对应配置管理的 DSH 分页
- * 与新建会话的 DSH 后端选项）。
+ * 与新建会话的 DSH 后端选项）+ `respondingTips`（流式状态条右侧的功能提示轮播）。
+ *
+ * respondingTips 没有自己的设置页，但同属「只收起界面入口」语义，所以挂在同一张清单里。
  */
-export const HIDEABLE_MODULE_IDS = [...HIDEABLE_SETTINGS_TAB_IDS, "dsh"] as const;
+export const HIDEABLE_MODULE_IDS = [...HIDEABLE_SETTINGS_TAB_IDS, "dsh", "respondingTips"] as const;
 
 export type HideableSettingsTabId = (typeof HIDEABLE_SETTINGS_TAB_IDS)[number];
 export type HideableModuleId = (typeof HIDEABLE_MODULE_IDS)[number];

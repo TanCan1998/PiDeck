@@ -3,12 +3,14 @@ import { useAtomValue } from "jotai";
 import { useSessionPaneServices } from "./SessionPaneServices";
 import { ComposerArea } from "./ComposerArea";
 import { QueuedPromptPanel } from "./ComposerPanels";
+import { SessionAcpRestoreStrip } from "./SessionAcpRestoreStrip";
 import { SessionFilesStrip } from "./SessionFilesStrip";
 import { SessionGoalStrip } from "./SessionGoalStrip";
 import { SessionSubagentsStrip } from "./SessionSubagentsStrip";
 import { SessionTodoStrip } from "./SessionTodoStrip";
 import { LogoMark } from "./SurfaceParts";
 import { sessionRecordByIdAtomFamily } from "../../atoms/session-selectors";
+import { sessionStatusInSidebarAtomFamily } from "../../atoms/right-sidebar-atoms";
 import { usePaneGitInfo } from "../../hooks/usePaneGitInfo";
 
 /**
@@ -37,6 +39,8 @@ export function SessionStartSurface(props: {
 	const { gitInfo } = usePaneGitInfo(startProjectId);
 	const queuedTrackRef = useRef<HTMLElement | null>(null);
 	const activeQueuedPrompts = services.queuedPromptsBySession[props.sessionId] ?? [];
+	// 右侧边栏「会话状态」面板正可见地展示本会话时，同类折叠条让位给面板（同 SessionView）
+	const statusInSidebar = useAtomValue(sessionStatusInSidebarAtomFamily(props.sessionId));
 
 	return (
 		// session-start-surface 保留类名供壁纸模式契约（bg-transparent 透出下层壁纸）；
@@ -56,9 +60,10 @@ export function SessionStartSurface(props: {
 					bootstrapProjectId={props.bootstrapProjectId}
 					widgets={
 						<>
-							<SessionTodoStrip sessionId={props.sessionId} />
-							<SessionFilesStrip sessionId={props.sessionId} />
-							<SessionSubagentsStrip sessionId={props.sessionId} />
+							{/* 未激活 ACP 会话：历史存 agent CLI 侧，时间线暂空（非新会话）。 */ <SessionAcpRestoreStrip sessionId={props.sessionId} />}
+							{!statusInSidebar && <SessionTodoStrip sessionId={props.sessionId} />}
+							{!statusInSidebar && <SessionFilesStrip sessionId={props.sessionId} />}
+							{!statusInSidebar && <SessionSubagentsStrip sessionId={props.sessionId} />}
 							<SessionGoalStrip sessionId={props.sessionId} />
 						</>
 					}

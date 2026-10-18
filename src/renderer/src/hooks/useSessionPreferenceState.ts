@@ -19,6 +19,7 @@ import { showNotice } from "../utils/notice";
 import { isLiveRuntimeStatus } from "../utils/sessionCommands";
 import { resolveComposerLiveModel, resolveGuideDisplayModel, type ModelPending } from "../utils/modelPendingDisplay";
 import { resolveComposerThinkingLevel } from "../utils/thinkingDisplay";
+import { modelThinkingLevelOfMap } from "../../../shared/modelThinkingLevels";
 import { modelKey } from "../utils/preferenceCycle";
 import { GUIDE_BOOTSTRAP_SESSION_ID, WELCOME_DSH_MODEL_KEY, WELCOME_MODEL_KEY, isWelcomeModelLost, readWelcomeBackendPreference, readWelcomeDshModelPreference, readWelcomeModelPreference, readWelcomeThinkingPreference, shouldClearWelcomePreference } from "../utils/chatSessionBootstrap";
 
@@ -40,6 +41,9 @@ export function useSessionPreferenceState(options: {
 	/** DSH 部署默认模型（草稿期高亮） */
 	defaultModel?: { provider?: string; modelId?: string; modelName?: string };
 	defaultThinkingLevel?: string;
+	/** pi settings.modelThinkingLevels 快照（sessions.resolve-launch-defaults 回传）：
+	 *  引导页改选模型后按当前模型反查每模型默认档位，与创建时的解析同序。 */
+	modelThinkingLevels?: Record<string, string>;
 }) {
 	const { sessionId } = options;
 	const record = useAtomValue(sessionRecordByIdAtomFamily(sessionId));
@@ -222,12 +226,16 @@ export function useSessionPreferenceState(options: {
 		dshReasoningEfforts: currentModelEntry?.reasoningEfforts,
 	});
 	// 无 record 的引导页以用户刚点选的档位为最高优先级；只有尚未点选时，
-	// 才依次回退 settings.defaultThinkingLevel 与模型自身 defaultEffort。
+	// 才依次回退「当前模型的每模型默认」→ settings.defaultThinkingLevel → 模型自身 defaultEffort。
+	// 每模型默认必须按当前展示的模型查（用户可在引导页改选模型）：createDraft 也按
+	// 最终生效的模型查同一张表，次序一致才能保证「显示的就是创建时套用的」。
 	const welcomeThinking = !record ? readWelcomeThinkingPreference()?.thinkingLevel : undefined;
+	const perModelThinkingDefault = modelThinkingLevelOfMap(options.modelThinkingLevels, resolvedLiveModel.provider, resolvedLiveModel.modelId);
 	const currentThinkingLevel = resolveComposerThinkingLevel({
 		record: record?.thinkingLevel,
-		// 无 record（引导页）：显式点选 > 配置默认 > 模型默认（与底栏同规则）。
-		fallback: welcomeThinking ?? options.defaultThinkingLevel ?? currentModelEntry?.defaultEffort,
+		// 无 record（引导页）：显式点选 > 每模型默认 > 配置默认 > 模型默认（与底栏同规则）。
+		fallback: welcomeThinking ?? perModelThinkingDefault ?? options.defaultThinkingLevel ?? currentModelEntry?.defaultEffort,
+		allowedLevels: thinkingLevels,
 	});
 
 	function setModelPending(pending: ModelPending | undefined) {

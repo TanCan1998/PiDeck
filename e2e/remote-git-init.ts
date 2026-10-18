@@ -38,7 +38,8 @@ export async function verifyRemoteGitInit(input: { window: Page; credentials: Re
 
 	await test.step("非仓库根：面板说明不会自动初始化，并给出显式入口", async () => {
 		await remoteProjectRow(window, root.split("/").pop() ?? "")
-			.locator(".project-draggable")
+			.locator(".conversation-title")
+			.first()
 			.click();
 		await window.getByRole("button", { name: "打开右侧边栏", exact: true }).click();
 		await window.getByTestId("drawer-rail-git").click();

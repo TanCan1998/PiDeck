@@ -1,11 +1,12 @@
 import { dialog, ipcMain, type BrowserWindow } from "electron";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { ipcChannels } from "../../shared/ipc";
 import { isLocalProject, isRemoteProject } from "../../shared/projectLocation";
 import type { FeedbackProjectContext, LocalProject } from "../../shared/types";
 import type { ProjectStore } from "../projects/ProjectStore";
 import type { SettingsStore } from "../settings/SettingsStore";
+import { readTextBounded } from "../fs/boundedTextRead";
 import type { GitService } from "../git/GitService";
 import type { WorktreeService } from "../git/WorktreeService";
 import type { AgentManager } from "../pi/AgentManager";
@@ -14,6 +15,7 @@ import type { ProjectResourceManager } from "../projects/ProjectResourceManager"
 import type { SessionCatalog } from "../sessions/SessionCatalog";
 import { attachProjectPresence } from "../projects/projectPresence";
 import { removeProjectWithSessions } from "../projects/projectRemoval";
+import { consumeUserDataNameMigrationNotice } from "../projects/userDataNameMigration";
 import { registerProjectResourceIpc } from "./projectResourceIpc";
 import { normalizeSelectedWslProjectPath, toWindowsHostPath, type WslEnvironment } from "../wsl/WslPaths";
 
@@ -100,12 +102,17 @@ export function registerProjectsIpc({ projectStore, settingsStore, gitService, w
 		return project;
 	});
 	ipcMain.handle(ipcChannels.projectsRemove, async (_event, id: string) => {
+		const removed = projectStore.get(id);
+		const childIds = removed ? projectStore.listWorktreeChildren(removed.id).map((child) => child.id) : [];
+		// 预热进程属于本项目但 UI 不可见：不先回收，它会以「仍有运行中的 Agent」挡住删除，
+		// 而用户在界面上找不到可停止的会话（issue #360）。
+		for (const projectId of [id, ...childIds]) agentManager.releaseStandbyAgent(projectId);
 		// 删除前拦截：项目仍有运行中的 Agent（pi 子进程）时禁止删除，避免进程悬挂后台继续占用资源。
 		if (agentManager.hasAgentForProject(id)) {
 			throw new Error("PROJECT_HAS_RUNNING_AGENT");
 		}
-		const removed = projectStore.get(id);
-		const childIds = removed ? projectStore.listWorktreeChildren(removed.id).map((child) => child.id) : [];
+		// 进程已退出、runtime 还留在内存里的会话随项目一起丢弃，避免删后残留幽灵会话。
+		for (const projectId of [id, ...childIds]) agentManager.discardStoppedAgentsForProject(projectId);
 		// 先清 catalog 引用、再删项目（顺序与理由见 removeProjectWithSessions）：两个 store 没有共同
 		// 提交点，只有这个顺序保证任一段失败时都不会留下指向已删项目的倒挂引用；失败不再被吞成“0 条”。
 		await removeProjectWithSessions({ projects: projectStore, sessions: sessionCatalog }, id, { childProjectIds: childIds });
@@ -116,6 +123,17 @@ export function registerProjectsIpc({ projectStore, settingsStore, gitService, w
 		const result = await projectStore.reorder(projectIds);
 		void appLogger.info("project", "Projects reordered", { count: projectIds.length });
 		return getVisibleProjects();
+	});
+
+	// 项目置顶/取消置顶：入参边界校验后落库，广播 projectsChanged 让其他渲染实例同步排序。
+	ipcMain.handle(ipcChannels.projectsSetPinned, async (_event, id: unknown, pinned: unknown) => {
+		if (typeof id !== "string" || !id) throw new Error("invalid projectId");
+		if (typeof pinned !== "boolean") throw new Error("invalid pinned");
+		await projectStore.setPinned(id, pinned);
+		const visible = await getVisibleProjects();
+		getMainWindow()?.webContents.send(ipcChannels.projectsChanged, visible);
+		void appLogger.info("project", "Project pin toggled", { projectId: id, pinned });
+		return visible;
 	});
 
 	// 重命名项目显示名：仅改 label 不动磁盘目录。聊天项目 / worktree 子项目由
@@ -198,6 +216,10 @@ export function registerProjectsIpc({ projectStore, settingsStore, gitService, w
 		return project;
 	});
 
+	// userData 更名（pi-desktop → PiDeck）的一次性迁移提示：启动早期已同步完成迁移，
+	// 渲染层首挂载领取一次即清空（消费式），保证「只提示一次、之后不再打扰」。
+	ipcMain.handle(ipcChannels.userDataMigrationConsumeNotice, async () => consumeUserDataNameMigrationNotice());
+
 	registerProjectResourceIpc({
 		appLogger,
 		projectResourceManager,
@@ -208,6 +230,8 @@ export function registerProjectsIpc({ projectStore, settingsStore, gitService, w
 	// 只读文件内容，不写任何数据；路径来自 projectStore（用户已信任的项目），无需再次弹信任。
 
 	const FEEDBACK_AGENTS_MD_MAX_CHARS = 14_000;
+	// 头部有界读：UTF-8 最坏 4B/字符，64KB 覆盖字符预算；超大 AGENTS.md 不再整读进内存
+	const FEEDBACK_AGENTS_MD_MAX_BYTES = 64 * 1024;
 	ipcMain.handle(ipcChannels.appFeedbackProjectContext, async (_event, projectId: unknown): Promise<FeedbackProjectContext> => {
 		if (typeof projectId !== "string" || !projectId) {
 			throw new Error("invalid projectId");
@@ -220,7 +244,8 @@ export function registerProjectsIpc({ projectStore, settingsStore, gitService, w
 		// AGENTS.md 缺失时返回空串而非报错：不是所有项目都写了规范文件
 		let agentsMd = "";
 		try {
-			agentsMd = await readFile(join(hostPath, "AGENTS.md"), "utf8");
+			// head 模式自带行对齐：不会把半截代码行带给提示词
+			agentsMd = await readTextBounded(join(hostPath, "AGENTS.md"), FEEDBACK_AGENTS_MD_MAX_BYTES, "head");
 		} catch {
 			agentsMd = "";
 		}

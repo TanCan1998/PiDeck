@@ -3,14 +3,19 @@ import { atom, useAtomValue, useSetAtom } from "jotai";
 import { desktopApi } from "../desktopApi";
 import type { SessionProcessEvent } from "../../../shared/types/trajectory";
 import type { SessionRecord } from "../../../shared/types";
-import { prependSessionHistoryPageAtom, prependSessionMessagePageAtom, sessionMessageCacheBySessionIdAtomFamily, sessionRecordByIdAtomFamily, type SessionMessageCacheEntry } from "../atoms";
+import { isModelTraceLogData } from "../../../shared/types/rpcLog";
+import { prependSessionHistoryPageAtom, prependSessionMessagePageAtom, sessionMessageCacheBySessionIdAtomFamily, sessionRecordByIdAtomFamily, sessionRuntimeBySessionIdAtomFamily, type SessionMessageCacheEntry, type SessionRuntimeViewState } from "../atoms";
 import { sessionHistoryUnavailableState } from "../utils/sessionHistoryAvailability";
+import { isLiveRuntimeStatus } from "../utils/sessionCommands";
+import { parseModelTracePayload } from "../utils/modelTraceParse";
+import type { TrajectoryModelTraceSummary } from "../components/session/trajectory/buildTrajectory";
 
 /** 与时间线 runtime 翻页对齐：一次补 3 轮，复用同一份消息缓存。 */
 const RUNTIME_HISTORY_TURN_PAGE_SIZE = 3;
 
 const EMPTY_CACHE_ATOM = atom<SessionMessageCacheEntry | undefined>(undefined);
 const EMPTY_RECORD_ATOM = atom<SessionRecord | undefined>(undefined);
+const EMPTY_RUNTIME_ATOM = atom<SessionRuntimeViewState | undefined>(undefined);
 
 /**
  * 轨迹抽屉的数据源：只订本会话 cache family，把 runtime 历史前缀与窗口段拼成一条账本。
@@ -24,13 +29,16 @@ export function useSessionTrajectorySource(sessionId: string | undefined) {
 	// pi 的系统提示（2026-08 用户反馈）。
 	const record = useAtomValue(sessionId ? sessionRecordByIdAtomFamily(sessionId) : EMPTY_RECORD_ATOM);
 	const isDshSession = record?.backend === "dsh";
+	const runtime = useAtomValue(sessionId ? sessionRuntimeBySessionIdAtomFamily(sessionId) : EMPTY_RUNTIME_ATOM);
 	const prependMessagePage = useSetAtom(prependSessionMessagePageAtom);
 	const prependHistoryPage = useSetAtom(prependSessionHistoryPageAtom);
 	const [isLoadingMore, setIsLoadingMore] = useState(false);
 	const [processEvents, setProcessEvents] = useState<SessionProcessEvent[]>([]);
 	const [systemPrompt, setSystemPrompt] = useState<string | undefined>(undefined);
+	const [modelTraces, setModelTraces] = useState<TrajectoryModelTraceSummary[]>([]);
 	const loadSequenceRef = useRef(0);
 	const processSequenceRef = useRef(0);
+	const traceSequenceRef = useRef(0);
 
 	useEffect(() => {
 		if (!sessionId) {
@@ -49,7 +57,16 @@ export function useSessionTrajectorySource(sessionId: string | undefined) {
 			});
 	}, [sessionId, cachedEntry?.revision, cachedEntry?.updatedAt]);
 
-	// 系统提示参考：pi 会话加载本地 pi-system 模板（Pi 不落盘，仅作参考记录）；
+	// 模型请求快照（model-trace）：pi 会话的账本补充数据源（拉取 effect 在 messages
+	// 之后声明，重拉触发器之一是 messages.length）。DSH 请求体不走 pi 桥，无 trace。
+	// 活运行时传 target（主进程校验后按 agent 过滤）；历史/已停止会话不传 target 会拿到
+	// 全部 agent 的日志，再按会话最后已知 agentId 客户端过滤（重启前的旧 agent 世代快照
+	// 暂无法归属，接受缺失——快照保留 30 天，近期会话不受影响）。
+	const runtimeAgentId = runtime?.agentId;
+	const lastKnownAgentId = runtimeAgentId;
+
+	// 系统提示：pi 会话优先用最近一次模型请求快照里的真实 system（含技能上下文，
+	// 与发给供应商的请求体同源）；无快照/解析失败退回 pi-system 模板参考。
 	// dsh 会话从 host 的 request/header 事件读当轮真实系统提示（harness 按
 	// persona + sections 在请求时组装，dsh-web 轨迹同源），未装配/无数据时不展示。
 	useEffect(() => {
@@ -58,17 +75,8 @@ export function useSessionTrajectorySource(sessionId: string | undefined) {
 			return;
 		}
 		let cancelled = false;
-		if (isDshSession) {
-			void desktopApi.sessions
-				.readDshSystemPrompt(sessionId)
-				.then((prompt) => {
-					if (cancelled) return;
-					setSystemPrompt(prompt);
-				})
-				.catch(() => {
-					if (!cancelled) setSystemPrompt(undefined);
-				});
-		} else {
+		const loadPiTemplate = () => {
+			if (cancelled) return;
 			void desktopApi.prompts
 				.list()
 				.then((result) => {
@@ -79,11 +87,43 @@ export function useSessionTrajectorySource(sessionId: string | undefined) {
 				.catch(() => {
 					if (!cancelled) setSystemPrompt(undefined);
 				});
+		};
+		if (isDshSession) {
+			void desktopApi.sessions
+				.readDshSystemPrompt(sessionId)
+				.then((prompt) => {
+					if (cancelled) return;
+					setSystemPrompt(prompt);
+				})
+				.catch(() => {
+					if (!cancelled) setSystemPrompt(undefined);
+				});
+			return () => {
+				cancelled = true;
+			};
 		}
+		const latest = modelTraces.at(-1);
+		if (!latest?.agentId) {
+			loadPiTemplate();
+			return () => {
+				cancelled = true;
+			};
+		}
+		void desktopApi.rpcLogs
+			.getModelTrace({ agentId: latest.agentId, traceId: latest.traceId })
+			.then((traceRecord) => {
+				if (cancelled) return;
+				const systemText = traceRecord ? parseModelTracePayload(traceRecord.payloadJson).system?.text : undefined;
+				if (systemText && systemText.trim()) setSystemPrompt(systemText);
+				else loadPiTemplate();
+			})
+			.catch(() => {
+				if (!cancelled) loadPiTemplate();
+			});
 		return () => {
 			cancelled = true;
 		};
-	}, [sessionId, isDshSession]);
+	}, [sessionId, isDshSession, modelTraces]);
 
 	const messages = useMemo(() => {
 		if (!cachedEntry) return [];
@@ -92,6 +132,42 @@ export function useSessionTrajectorySource(sessionId: string | undefined) {
 		}
 		return cachedEntry.messages;
 	}, [cachedEntry]);
+
+	useEffect(() => {
+		if (!sessionId || isDshSession) {
+			setModelTraces([]);
+			return;
+		}
+		const sequence = ++traceSequenceRef.current;
+		const live = isLiveRuntimeStatus(runtime?.status);
+		const options = live && runtimeAgentId ? { target: { sessionId, agentId: runtimeAgentId, runtimeGeneration: runtime?.runtimeGeneration ?? 0 }, days: 30, limit: 10000 } : { days: 30, limit: 10000 };
+		void desktopApi.rpcLogs
+			.get(options)
+			.then((entries) => {
+				if (traceSequenceRef.current !== sequence) return;
+				const summaries: TrajectoryModelTraceSummary[] = [];
+				for (const entry of entries) {
+					if (entry.direction !== "model" || !isModelTraceLogData(entry.data) || entry.data.kind !== "request") continue;
+					if (!lastKnownAgentId || entry.agentId !== lastKnownAgentId) continue;
+					summaries.push({
+						traceId: entry.data.traceId,
+						agentId: entry.agentId,
+						time: entry.time,
+						model: entry.data.model,
+						provider: entry.data.provider,
+						messageCount: entry.data.messageCount,
+						toolCount: entry.data.toolCount,
+						payloadBytes: entry.data.payloadBytes,
+						truncated: entry.data.truncated,
+					});
+				}
+				summaries.sort((left, right) => left.time - right.time);
+				setModelTraces(summaries);
+			})
+			.catch(() => {
+				if (traceSequenceRef.current === sequence) setModelTraces([]);
+			});
+	}, [sessionId, isDshSession, runtime?.status, runtimeAgentId, runtime?.runtimeGeneration, lastKnownAgentId, messages.length]);
 
 	const diskPage = cachedEntry?.source === "disk" ? cachedEntry.page : undefined;
 	const runtimeHistory = cachedEntry?.source === "runtime" ? cachedEntry.history : undefined;
@@ -150,6 +226,7 @@ export function useSessionTrajectorySource(sessionId: string | undefined) {
 		messages,
 		processEvents,
 		systemPrompt,
+		modelTraces,
 		isDshSession,
 		hasMoreMessages: hasMore,
 		isLoadingMoreMessages: hasMore ? isLoadingMore : false,

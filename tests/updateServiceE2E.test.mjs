@@ -12,6 +12,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import ts from "typescript";
 import vm from "node:vm";
+import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
 function loadUpdateService() {
 	// vm 沙箱依赖解析：UpdateService 现在依赖 updateSources（其依赖 shared/updateSources）。
@@ -108,6 +109,8 @@ function createFakeUpdater() {
 		checkCalls: 0,
 		downloadCalls: 0,
 		installCalls: 0,
+		/** setAllowPrerelease 调用记录（dev 通道语义断言用）。 */
+		allowPrereleaseCalls: [],
 		checkImpl: null,
 		downloadImpl: null,
 		installImpl: null,
@@ -116,6 +119,9 @@ function createFakeUpdater() {
 		},
 		setFeedUrl(url) {
 			updater.feedUrl = url;
+		},
+		setAllowPrerelease(enabled) {
+			updater.allowPrereleaseCalls.push(enabled);
 		},
 		isAutoDownload() {
 			return updater.autoDownload !== false;
@@ -180,10 +186,12 @@ function createAutomaticService(options = {}) {
 		settingsStore: settings,
 		checkPiUpdate: options.checkPiUpdate,
 		checkCatalogUpdate: options.checkCatalogUpdate,
+		updateCatalog: options.updateCatalog,
 		sendToRenderer: (snapshot) => snapshots.push(structuredClone(snapshot)),
 		log: (level, message, details) => logs.push({ level, message, details }),
 		getCurrentVersion: () => "0.7.3-beta",
 		deliveryMode: "automatic",
+		channel: options.channel,
 		autoUpdater: updater,
 		prepareForInstall: options.prepareForInstall,
 		rollbackInstallPreparation: options.rollbackInstallPreparation,
@@ -192,7 +200,7 @@ function createAutomaticService(options = {}) {
 	return { service, updater, settings, snapshots, logs };
 }
 
-function createManualService(checkManualAppUpdate) {
+function createManualService(checkManualAppUpdate, options = {}) {
 	const settings = createSettingsStore();
 	const snapshots = [];
 	const logs = [];
@@ -202,6 +210,7 @@ function createManualService(checkManualAppUpdate) {
 		log: (level, message, details) => logs.push({ level, message, details }),
 		getCurrentVersion: () => "0.7.3-beta",
 		deliveryMode: "manual",
+		channel: options.channel,
 		checkManualAppUpdate,
 	});
 	return { service, settings, snapshots, logs };
@@ -461,6 +470,160 @@ test("a rejected catalog checker logs a warning and keeps the previous snapshot"
 	assert.ok(logs.some(({ level, message }) => level === "warn" && message.includes("Catalog")));
 });
 
+// --- catalog (model directory) auto update -----------------------------
+
+/**
+ * 拼装层守卫：自动更新靠 main/index.ts 注入 updateCatalog、设置页把开关接到 UpdateService。
+ * 这两处都不在 UpdateService 的行为测试覆盖范围内，漏了会退化成「开关无效但仍然显示已开启」。
+ */
+test("catalog auto update is wired end to end", () => {
+	const main = readFileSync("src/main/index.ts", "utf8");
+	const devTab = readFileSync("src/renderer/src/components/app/settings/DevTab.tsx", "utf8");
+	assert.match(main, /updateCatalog: \(\) => catalogUpdater\.update\(\)/);
+	assert.match(devTab, /onAutoUpdateChange=\{\(checked\) => updateDraft\(\{ catalogAutoUpdate: checked \}\)\}/);
+});
+
+/** 检查器固定返回「发现 1.2.0 新版本」，便于只变化自动更新那一路。 */
+function detectedCatalogCheck() {
+	return async () => ({ ok: true, remoteVersion: "1.2.0", localVersion: "1.0.4", hasUpdate: true });
+}
+
+test("catalog auto update pulls a detected catalog during the background check", async (t) => {
+	const updater = createFakeUpdater();
+	updater.checkImpl = async () => {
+		updater.emitChecking();
+		updater.emitNotAvailable();
+	};
+	let calls = 0;
+	const { service, snapshots, logs } = createAutomaticService({
+		updater,
+		checkPiUpdate: async () => ({ hasUpdate: false }),
+		checkCatalogUpdate: detectedCatalogCheck(),
+		updateCatalog: async () => {
+			calls += 1;
+			return { ok: true, updated: true };
+		},
+	});
+	stopAfter(t, service);
+
+	await service.checkNow();
+	// 设置未显式关闭（默认开）→ 后台检查发现新版本直接拉取，不需用户点「更新到最新」
+	assert.equal(calls, 1);
+	const snapshot = snapshots.at(-1);
+	assert.equal(snapshot.catalog.hasUpdate, false);
+	assert.equal(snapshot.catalog.localVersion, "1.2.0");
+	assert.equal(snapshot.catalog.latestVersion, "1.2.0");
+	assert.ok(logs.some(({ level, message }) => level === "info" && message === "Catalog auto updated"));
+});
+
+test("catalog auto update stays off when the setting is disabled", async (t) => {
+	const updater = createFakeUpdater();
+	updater.checkImpl = async () => {
+		updater.emitChecking();
+		updater.emitNotAvailable();
+	};
+	let calls = 0;
+	const { service, snapshots } = createAutomaticService({
+		updater,
+		settings: { catalogAutoUpdate: false },
+		checkCatalogUpdate: detectedCatalogCheck(),
+		updateCatalog: async () => {
+			calls += 1;
+			return { ok: true, updated: true };
+		},
+	});
+	stopAfter(t, service);
+
+	await service.checkNow();
+	// 关掉自动更新 = 旧行为：只提示，等用户手动点按钮
+	assert.equal(calls, 0);
+	assert.equal(snapshots.at(-1).catalog.hasUpdate, true);
+});
+
+test("catalog auto update does not run when the check found nothing newer", async (t) => {
+	const updater = createFakeUpdater();
+	updater.checkImpl = async () => {
+		updater.emitChecking();
+		updater.emitNotAvailable();
+	};
+	let calls = 0;
+	const { service } = createAutomaticService({
+		updater,
+		checkCatalogUpdate: async () => ({ ok: true, remoteVersion: "1.2.0", localVersion: "1.2.0", hasUpdate: false }),
+		updateCatalog: async () => {
+			calls += 1;
+			return { ok: true, updated: false };
+		},
+	});
+	stopAfter(t, service);
+
+	await service.checkNow();
+	assert.equal(calls, 0);
+});
+
+test("catalog auto update keeps the pending state when the updater reports no change", async (t) => {
+	const updater = createFakeUpdater();
+	updater.checkImpl = async () => {
+		updater.emitChecking();
+		updater.emitNotAvailable();
+	};
+	const { service, snapshots, logs } = createAutomaticService({
+		updater,
+		checkCatalogUpdate: detectedCatalogCheck(),
+		// 远端不高于当前生效版本（例如另一实例刚更新过）：没实际落盘就不能标记为已处理
+		updateCatalog: async () => ({ ok: true, updated: false }),
+	});
+	stopAfter(t, service);
+
+	await service.checkNow();
+	assert.equal(snapshots.at(-1).catalog.hasUpdate, true);
+	assert.ok(logs.some(({ level, message }) => level === "info" && message.includes("no newer catalog")));
+});
+
+test("catalog auto update failure is logged and leaves the manual entry usable", async (t) => {
+	const updater = createFakeUpdater();
+	updater.checkImpl = async () => {
+		updater.emitChecking();
+		updater.emitNotAvailable();
+	};
+	const { service, snapshots, logs } = createAutomaticService({
+		updater,
+		checkCatalogUpdate: detectedCatalogCheck(),
+		updateCatalog: async () => ({ ok: false, code: "network", message: "both mirrors failed" }),
+	});
+	stopAfter(t, service);
+
+	await service.checkNow();
+	// 失败不掩盖「有更新」：设置页仍可手动重试；日志带失败码便于定位
+	assert.equal(snapshots.at(-1).catalog.hasUpdate, true);
+	const warn = logs.find(({ level, message }) => level === "warn" && message === "Catalog auto update failed");
+	assert.equal(warn?.details?.code, "network");
+});
+
+test("catalog auto update rejection cannot fail the whole check", async (t) => {
+	const updater = createFakeUpdater();
+	updater.checkImpl = async () => {
+		updater.emitChecking();
+		updater.emitNotAvailable();
+	};
+	const { service, snapshots, logs } = createAutomaticService({
+		updater,
+		checkPiUpdate: async () => ({ hasUpdate: false, latestVersion: "0.9.0" }),
+		checkCatalogUpdate: detectedCatalogCheck(),
+		updateCatalog: async () => {
+			throw new Error("download exploded");
+		},
+	});
+	stopAfter(t, service);
+
+	await service.checkNow();
+	// 自动更新在后台跑，异常不得冒泡打断本轮检查（app/pi 两路结果照常入快照）
+	const snapshot = snapshots.at(-1);
+	assert.equal(snapshot.catalog.hasUpdate, true);
+	assert.equal(snapshot.piCli.latestVersion, "0.9.0");
+	assert.ok(logs.some(({ level, message, details }) => level === "warn" && message === "Catalog auto update failed" && /download exploded/.test(String(details?.error))));
+});
+
 // --- manual delivery (unsigned macOS) ----------------------------------
 
 test("manual delivery only exposes availability; download and install are no-ops", async (t) => {
@@ -542,6 +705,65 @@ test("switching update source rebuilds the generic feed URL immediately", async 
 	assert.equal(updater.feedUrl, null);
 });
 
+// 真实 updater 路径（createRealAutoUpdater）：fake updater 测不到 currentFeedUrl 去重守卫。
+// 桩注入 electron / node:fs / electron-updater，验证源切换往返不被 early-return 吞掉。
+test("real updater setFeedUrl: github -> mirror -> github round trip rebuilds the github provider", (t) => {
+	const setFeedURLCalls = [];
+	const electronUpdaterStub = {
+		autoUpdater: {
+			autoDownload: true,
+			setFeedURL: (config) => setFeedURLCalls.push(config),
+			on: () => {},
+			off: () => {},
+		},
+	};
+	// feedOverride 必须为 null：显式 options.feedUrl / env 注入会让 setFeedUrl 恒 early-return。
+	const savedE2E = process.env.PIDECK_E2E;
+	const savedFeedEnv = process.env.PIDEK_UPDATE_FEED_URL;
+	delete process.env.PIDECK_E2E;
+	delete process.env.PIDEK_UPDATE_FEED_URL;
+	t.after(() => {
+		if (savedE2E === undefined) delete process.env.PIDECK_E2E;
+		else process.env.PIDECK_E2E = savedE2E;
+		if (savedFeedEnv === undefined) delete process.env.PIDEK_UPDATE_FEED_URL;
+		else process.env.PIDEK_UPDATE_FEED_URL = savedFeedEnv;
+	});
+
+	// existsSync→true：跳过兜底 app-update.yml 写盘分支，测试零文件副作用。
+	const { createRealAutoUpdater } = loadTsCommonJs("src/main/update/createAutoUpdater.ts", {
+		stubs: {
+			electron: { app: { isPackaged: false, getAppPath: () => "/test-app", getPath: () => "/test-userdata" } },
+			"node:fs": { existsSync: () => true, mkdirSync: () => undefined, writeFileSync: () => undefined },
+			"electron-updater": electronUpdaterStub,
+		},
+	});
+	const real = createRealAutoUpdater();
+	const atomgitUrl = "https://atomgit.com/ayuayue/PiDeck/releases/download/latest";
+
+	// 初始 github 源：currentFeedUrl 初始即 null，early-return，不触碰 provider。
+	real.setFeedUrl(null);
+	assert.deepEqual(setFeedURLCalls, []);
+
+	// 切到镜像：generic provider 整体接管。（vm 沙箱跨 realm，不能 deepEqual 对象，逐字段断言。）
+	real.setFeedUrl(atomgitUrl);
+	assert.equal(setFeedURLCalls.length, 1);
+	assert.equal(setFeedURLCalls[0].provider, "generic");
+	assert.equal(setFeedURLCalls[0].url, atomgitUrl);
+
+	// 回归点：切回 github 官方源必须重建 github provider。若 currentFeedUrl 缺少赋值，
+	// 这里命中 null === null early-return，镜像 provider 残留（stable 既有功能回归）。
+	real.setFeedUrl(null);
+	assert.equal(setFeedURLCalls.length, 2);
+	assert.equal(setFeedURLCalls[1].provider, "github");
+	assert.equal(setFeedURLCalls[1].owner, "ayuayue");
+	assert.equal(setFeedURLCalls[1].repo, "PiDeck");
+	assert.equal(electronUpdaterStub.autoUpdater.forceDevUpdateConfig, true);
+
+	// 去重守卫仍有效：重复 setFeedUrl(null) 不得再次触发 setFeedURL。
+	real.setFeedUrl(null);
+	assert.equal(setFeedURLCalls.length, 2);
+});
+
 test("atomgit source is applied as generic feed URL on start", async (t) => {
 	const { service, updater } = createAutomaticService({
 		settings: { updateSource: "atomgit" },
@@ -549,6 +771,52 @@ test("atomgit source is applied as generic feed URL on start", async (t) => {
 	stopAfter(t, service);
 	service.start({ startDelayMs: 0, intervalMs: 60_000 });
 	assert.equal(updater.feedUrl, "https://atomgit.com/ayuayue/PiDeck/releases/download/latest");
+});
+
+test("dev channel: feed is forced to GitHub and allowPrerelease=true regardless of the configured source", async (t) => {
+	const { service, updater, settings } = createAutomaticService({
+		channel: "dev",
+		settings: { updateSource: "atomgit" },
+	});
+	stopAfter(t, service);
+	service.start({ startDelayMs: 0, intervalMs: 60_000 });
+	// dev 恒官方 GitHub：null = 恢复原生 provider；预发布恒开启。
+	assert.equal(updater.feedUrl, null);
+	assert.deepEqual(updater.allowPrereleaseCalls, [true]);
+
+	// 设置项切换后重新应用：dev 语义不随 updateSource 漂移。
+	await settings.update({ updateSource: "atomgit" });
+	service.applyUpdateSource();
+	assert.equal(updater.feedUrl, null);
+	assert.deepEqual(updater.allowPrereleaseCalls, [true, true]);
+});
+
+test("stable channel behavior is unchanged: atomgit feed applies and prerelease stays explicitly false", async (t) => {
+	const { service, updater } = createAutomaticService({
+		channel: "stable",
+		settings: { updateSource: "atomgit" },
+	});
+	stopAfter(t, service);
+	service.start({ startDelayMs: 0, intervalMs: 60_000 });
+	assert.equal(updater.feedUrl, "https://atomgit.com/ayuayue/PiDeck/releases/download/latest");
+	// 显式重置 false（声明式保障，防残留）；绝不为 stable 开启预发布。
+	assert.deepEqual(updater.allowPrereleaseCalls, [false]);
+});
+
+test("manual delivery on dev channel checks GitHub even when atomgit source is configured", async (t) => {
+	let receivedUrl;
+	const { service, settings } = createManualService(
+		(latestReleaseUrl) => {
+			receivedUrl = latestReleaseUrl;
+			return Promise.resolve({ hasUpdate: false, latestVersion: "0.7.3-beta" });
+		},
+		{ channel: "dev" },
+	);
+	stopAfter(t, service);
+	await settings.update({ updateSource: "atomgit" });
+	await service.checkNow();
+	// dev 强制官方 GitHub：latestReleaseUrl 为 undefined（镜像 URL 不得传入检查器）。
+	assert.equal(receivedUrl, undefined);
 });
 
 test("manual delivery uses latestReleaseUrl from the configured atomgit source per check", async (t) => {

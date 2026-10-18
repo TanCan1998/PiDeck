@@ -5,11 +5,8 @@ import { useAtomValue } from "jotai";
 import { projectByIdAtomFamily } from "../atoms/project-atoms";
 import { isLocalProject } from "../../../shared/projectLocation";
 
-/** 分支信息轮询周期：与 App Git 抽屉同一节奏，外部终端/IDE 切分支 4s 内追平。 */
-const GIT_INFO_POLL_MS = 4000;
-
 type UsePaneGitInfoOptions = {
-	/** 分支信息变化（轮询发现变更 / 切换成功或失败回读）时回写；App 只在 projectId 为聚焦项目时采纳。 */
+	/** 分支信息变化（refs 事件发现外部变更 / 切换成功或失败回读）时回写；App 只在 projectId 为聚焦项目时采纳。 */
 	onChanged?: (projectId: string, info: GitBranchInfo) => void;
 	/** 切换分支失败时给调用方的用户反馈；内部已回读最新分支兜底恢复显示。 */
 	onSwitchError?: (error: unknown) => void;
@@ -41,7 +38,7 @@ export function usePaneGitInfo(projectId: string | undefined, options?: UsePaneG
 			try {
 				const next = await desktopApi.git.branches(projectId);
 				if (stopped) return;
-				// 只在真实变化时更新，避免 4s 轮询写相同对象引发本栏无谓重渲染。
+				// 只在真实变化时更新，避免每次回读写相同对象引发本栏无谓重渲染。
 				setGitInfo((current) => (current.current === next.current && current.branches.join("\n") === next.branches.join("\n") ? current : next));
 			} catch {
 				if (!stopped) setGitInfo({ current: null, branches: [] });
@@ -50,12 +47,28 @@ export function usePaneGitInfo(projectId: string | undefined, options?: UsePaneG
 		// 项目身份切换后先清空旧分支再加载新项目，避免短暂显示上一个 worktree 的分支。
 		setGitInfo({ current: null, branches: [] });
 		void refresh();
-		const timer = window.setInterval(() => {
+		// 分支信息事件源：主进程 GitRefsWatcher 按 (projectId, repoPath) 复用一份 1.5s
+		// refs 签名轮询，代替本栏 4s 盲轮询——分屏 N 栏同仓也只有主进程一份开销，
+		// 外部终端/IDE 切分支的追平延迟上限即 watcher 的 1.5 秒。
+		// 订阅失败（非 git 项目、磁盘不可读）时静默降级：初始 refresh 已给出空态，
+		// 本仓库内的切换由 switchBranch 回读兜底。
+		const offRefsChanged = desktopApi.git.onRefsChanged((changedWatchId) => {
+			if (changedWatchId !== watchId || stopped) return;
 			void refresh();
-		}, GIT_INFO_POLL_MS);
+		});
+		const watchPromise = desktopApi.git.watchRefs(projectId).catch(() => null);
+		let watchId: string | null = null;
+		void watchPromise.then((id) => {
+			watchId = id;
+		});
 		return () => {
 			stopped = true;
-			window.clearInterval(timer);
+			offRefsChanged();
+			// 竞态安全：卸载时 watch 可能尚未 resolve，退订等它落地后执行；
+			// 未知 watchId 主进程静默忽略，重复退订安全。
+			void watchPromise.then((id) => {
+				if (id) void desktopApi.git.unwatchRefs(id);
+			});
 		};
 	}, [projectId, enabled]);
 

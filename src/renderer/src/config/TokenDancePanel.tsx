@@ -11,10 +11,12 @@
  * - 侵入性最低：只在配置页显示；不启动弹通知，用户不打开配置页则完全无感知。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronUp, ExternalLink, KeyRound, Loader2, PlugZap, ShieldCheck, Sparkles } from "lucide-react";
+import { ChevronDown, ChevronUp, ExternalLink, KeyRound, Loader2, PlugZap, ShieldCheck, Sparkles, Wallet } from "lucide-react";
 import { t } from "../i18n";
 import { desktopApi } from "../desktopApi";
 import { showNotice } from "../utils/notice";
+import { useProviderUsageRefresh } from "../hooks/useProviderUsage";
+import { TokenDanceTopUpDialog } from "./TokenDanceTopUpDialog";
 import { Button } from "../components/ui-shadcn/button";
 import { Input } from "../components/ui-shadcn/input";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../components/ui-shadcn/dialog";
@@ -216,12 +218,12 @@ function TokenDanceSetupDialog(props: {
 									{t("config.tokendance.advantageCredit")}
 								</li>
 							</ul>
-							<p className="rounded-sm border border-border-subtle bg-bg-subtle/60 px-2.5 py-2 text-[11px] text-muted-foreground">{t("config.tokendance.installWrites")}</p>
+							<p className="rounded-sm border border-border-subtle bg-bg-subtle/60 px-2.5 py-2 text-micro text-muted-foreground">{t("config.tokendance.installWrites")}</p>
 						</>
 					)}
 
 					{/* 归因说明：Key 会带上 app_url，用户可核对不是 PiDeck 偷偷收集信息 */}
-					<p className="text-[11px] text-text-tertiary">{t("config.tokendance.oauthAppUrl", { appUrl: TOKENDANCE_APP_URL })}</p>
+					<p className="text-micro text-text-tertiary">{t("config.tokendance.oauthAppUrl", { appUrl: TOKENDANCE_APP_URL })}</p>
 
 					{/* 进度反馈：waiting 是主路径的关键提示，告诉用户「回浏览器点确认就行」 */}
 					{(waiting || busy) && (
@@ -236,17 +238,17 @@ function TokenDanceSetupDialog(props: {
 					{/* 手动降级区：只在自动接收不可用（或用户主动选择）时展开，避免主路径被干扰 */}
 					{phase === "manual" && (
 						<div className="flex min-w-0 flex-col gap-2.5 rounded-sm border border-border-subtle bg-bg-subtle/40 p-2.5">
-							<p className="text-[11px] text-text-tertiary">{t("config.tokendance.manualHint")}</p>
+							<p className="text-micro text-text-tertiary">{t("config.tokendance.manualHint")}</p>
 
 							{flow && (
-								<p className="w-full min-w-0 truncate font-mono text-[11px] text-text-tertiary" title={flow.authUrl}>
+								<p className="w-full min-w-0 truncate font-mono text-micro text-text-tertiary" title={flow.authUrl}>
 									{authUrlLabel(flow.authUrl)}
 								</p>
 							)}
 
 							{/* 路径 A：粘贴一次性授权码（headless 交换） */}
 							<div className="flex min-w-0 items-start gap-2">
-								<span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-[var(--color-accent-soft)] font-mono text-[11px] font-semibold text-[var(--color-accent)]">1</span>
+								<span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-[var(--color-accent-soft)] font-mono text-micro font-semibold text-[var(--color-accent)]">1</span>
 								{/* min-w-0 必须在每一层（grid item → flex 行 → flex-1 列）：否则长内容
 								    的 min-content 会把 DialogContent 的 grid 单列轨道撑宽，输入框画出弹窗。 */}
 								<div className="min-w-0 flex-1">
@@ -259,7 +261,7 @@ function TokenDanceSetupDialog(props: {
 										</Button>
 									</div>
 									{flow && (
-										<Button variant="ghost" size="sm" className="mt-1.5 h-7 px-0 text-[11px]" onClick={() => void desktopApi.app.openExternal(flow.authUrl, true).catch(() => undefined)}>
+										<Button variant="ghost" size="sm" className="mt-1.5 h-7 px-0 text-micro" onClick={() => void desktopApi.app.openExternal(flow.authUrl, true).catch(() => undefined)}>
 											<ExternalLink className="size-3.5" aria-hidden="true" />
 											{t("config.tokendance.oauthReopen")}
 										</Button>
@@ -269,7 +271,7 @@ function TokenDanceSetupDialog(props: {
 
 							{/* 路径 B：直接粘贴已自建 API Key（完全跳过授权页） */}
 							<div className="flex min-w-0 items-start gap-2">
-								<span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-[var(--color-accent-soft)] font-mono text-[11px] font-semibold text-[var(--color-accent)]">2</span>
+								<span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-[var(--color-accent-soft)] font-mono text-micro font-semibold text-[var(--color-accent)]">2</span>
 								<div className="min-w-0 flex-1">
 									<p className="text-xs">{t("config.tokendance.keyOptionPaste")}</p>
 									<div className="mt-1.5 flex items-center gap-1.5">
@@ -324,7 +326,11 @@ export function TokenDancePanel(props: TokenDancePanelProps) {
 		error: null,
 	});
 	const [setupOpen, setSetupOpen] = useState(false);
+	const [topUpOpen, setTopUpOpen] = useState(false);
 	const [installing, setInstalling] = useState(false);
+	// 到账后刷新余额缓存：会话上下文面板与用量弹窗订阅同一 atom，一处刷新多处联动。
+	const refreshUsage = useProviderUsageRefresh();
+	const handlePaid = useCallback(() => refreshUsage(TOKENDANCE_PROVIDER), [refreshUsage]);
 
 	// 目录只读展示（模型数/时效）；失败不阻塞「配置」——写入时主进程会再取目录并报错。
 	const loadCatalog = useCallback(async (): Promise<ModelItem[]> => {
@@ -399,7 +405,7 @@ export function TokenDancePanel(props: TokenDancePanelProps) {
 			{expanded && (
 				<>
 					{/* 平台优势（聚合 + 特价 + 新用户体验额度）；详情给官网链接，由用户自行核对 */}
-					<ul className="mt-2 grid gap-1 text-xs text-text-secondary">
+					<ul className="mt-2 grid gap-1 text-xs text-text-secondary motion-safe:animate-in motion-safe:fade-in motion-safe:duration-fast">
 						<li className="flex items-start gap-1.5">
 							<span className="mt-0.5 shrink-0 text-[var(--color-accent)]">●</span>
 							{t("config.tokendance.advantageOne")}
@@ -418,7 +424,7 @@ export function TokenDancePanel(props: TokenDancePanelProps) {
 					<div className="mt-2 grid gap-1.5 text-xs text-text-secondary">
 						<div className="flex items-center gap-1.5">
 							<span className="min-w-[72px] shrink-0 text-text-tertiary">{t("config.field.baseUrl")}</span>
-							<code className="truncate font-mono text-[11px] text-text-primary">{TOKENDANCE_BASE_URL}</code>
+							<code className="truncate font-mono text-micro text-text-primary">{TOKENDANCE_BASE_URL}</code>
 						</div>
 						<div className="flex items-center gap-1.5">
 							<span className="min-w-[72px] shrink-0 text-text-tertiary">{t("config.tokendance.modelsCount")}</span>
@@ -435,11 +441,11 @@ export function TokenDancePanel(props: TokenDancePanelProps) {
 						</div>
 						<div className="flex items-center gap-1.5">
 							<span className="min-w-[72px] shrink-0 text-text-tertiary">{t("config.tokendance.appUrlLabel")}</span>
-							<code className="truncate font-mono text-[11px] text-text-primary">{TOKENDANCE_APP_URL}</code>
+							<code className="truncate font-mono text-micro text-text-primary">{TOKENDANCE_APP_URL}</code>
 						</div>
 					</div>
 
-					<p className="mt-2 text-[11px] leading-relaxed text-text-tertiary">{t("config.tokendance.hint")}</p>
+					<p className="mt-2 text-micro leading-relaxed text-text-tertiary">{t("config.tokendance.hint")}</p>
 				</>
 			)}
 
@@ -449,10 +455,17 @@ export function TokenDancePanel(props: TokenDancePanelProps) {
 					{props.configured ? t("config.tokendance.alreadyConfigured") : t("config.tokendance.addToConfig")}
 				</Button>
 				{props.configured && (
-					<Button size="sm" variant="outline" onClick={() => setSetupOpen(true)}>
-						<KeyRound className="size-3.5" aria-hidden="true" />
-						{t("config.tokendance.oauthButton")}
-					</Button>
+					<>
+						<Button size="sm" variant="outline" onClick={() => setSetupOpen(true)}>
+							<KeyRound className="size-3.5" aria-hidden="true" />
+							{t("config.tokendance.oauthButton")}
+						</Button>
+						{/* 充值入口：只在已配置（已有 API Key）时出现——未配置时无 Key，无法发起充值 */}
+						<Button size="sm" variant="outline" onClick={() => setTopUpOpen(true)}>
+							<Wallet className="size-3.5" aria-hidden="true" />
+							{t("config.tokendance.topUpButton")}
+						</Button>
+					</>
 				)}
 				<Button size="sm" variant="ghost" onClick={openSite}>
 					<ExternalLink className="size-3.5" aria-hidden="true" />
@@ -462,6 +475,8 @@ export function TokenDancePanel(props: TokenDancePanelProps) {
 
 			{/* 单一操作弹窗：授权 + 交换 Key + 写入配置一次完成 */}
 			<TokenDanceSetupDialog open={setupOpen} onOpenChange={setSetupOpen} configured={props.configured} modelCount={catalog.models.length} onDone={props.onInstalled} />
+			{/* 充值弹窗：创建支付会话（主进程）→ 扫码 → 轮询到账 */}
+			<TokenDanceTopUpDialog open={topUpOpen} onOpenChange={setTopUpOpen} onPaid={handlePaid} />
 		</section>
 	);
 }

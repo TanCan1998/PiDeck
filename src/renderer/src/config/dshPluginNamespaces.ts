@@ -13,7 +13,7 @@ export const RESERVED_DSH_NAMESPACES: ReadonlySet<string> = new Set([
 	"llm-deepseek", // 「模型」tab（DeepseekRouteCard 独占）
 	"llm-pi-ai", // 「模型」tab（PiAiProvidersCard 独占）
 	"permission", // 「安全」tab（SecurityTab 独占）
-	"agent-presets", // 「预设设置」tab（PresetsTab 独占）
+	"agent-preset-registry", // 「预设设置」tab（PresetsTab 独占）
 ]);
 
 /** 已知插件命名空间 → 标题文案 key；未收录的新插件回退显示 ns 原名。 */

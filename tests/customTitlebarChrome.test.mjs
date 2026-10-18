@@ -18,7 +18,7 @@ const quickTaskSurface = readFileSync("src/renderer/src/components/app/QuickTask
 test("compact task shell participates in the shared custom titlebar contract", () => {
 	// 小任务复用主窗口的标题栏按钮和拖拽层；根节点必须进入同一套 CSS 作用域，
 	// 否则 --window-drag-height / --window-controls-width 会退回无效默认值。
-	assert.match(shell, /if \(props\.compactContent\)[\s\S]*?"wechat-shell quick-task-shell"/);
+	assert.match(shell, /if \(props\.compactContent\)[\s\S]*?"wechat-shell quick-task-shell/);
 	assert.match(shell, /!useNativeTitleBar && platform === "darwin" \? "mac-custom-titlebar" : ""/);
 	assert.match(quickTaskSurface, /BrandLockup/);
 	assert.match(quickTaskSurface, /list-toolbar flex h-10/);
@@ -121,11 +121,12 @@ test("window control hover uses solid hover surface", () => {
 });
 
 test("brand lockup is larger inside the 40px titlebar", () => {
-	// 品牌区：官方 pi canvas logo + PiDeck 字标；
+	// 品牌区：官方 pi canvas logo + 应用显示名称字标（未设置时就是 PiDeck）；
 	// 功能分支时分支名只保留在 title/aria-label，不上视觉
 	assert.match(brand, /PiLogoCanvas size=\{18\}/);
 	assert.match(brand, /brand-wordmark/);
-	assert.match(brand, /PiDeck · \$\{branch\}/);
+	assert.match(brand, /const displayName = useAppDisplayName\(\)/);
+	assert.match(brand, /\$\{displayName\} · \$\{branch\}/);
 	assert.match(sidebar, /list-toolbar flex h-10/);
 	assert.doesNotMatch(sidebar, /list-toggle-native floating/);
 });
@@ -133,12 +134,14 @@ test("brand lockup is larger inside the 40px titlebar", () => {
 test("mac custom titlebar uses system traffic lights and insets collapsed tabs", () => {
 	const header = readFileSync("src/renderer/src/components/AppHeader.tsx", "utf8");
 	const app = readFileSync("src/renderer/src/App.tsx", "utf8");
+	const appBootstrap = readFileSync("src/renderer/src/hooks/app/useAppBootstrapInfo.ts", "utf8");
 	const settingsStore = readFileSync("src/main/settings/SettingsStore.ts", "utf8");
 	// 右侧 Win 控件只在非 darwin 渲染；mac 靠 hiddenInset 红绿灯。
 	assert.match(header, /const showWinWindowControls = platform !== "darwin"/);
 	assert.match(shell, /mac-custom-titlebar/);
 	assert.match(app, /platform=\{appInfo\.platform\}/);
-	assert.match(app, /detectRendererPlatform\(\)/);
+	// 首帧同步平台探测已随 appInfo 状态迁入 useAppBootstrapInfo
+	assert.match(appBootstrap, /detectRendererPlatform\(\)/);
 	assert.match(settingsStore, /titleBarStyle: useNative[\s\S]*hiddenInset/);
 	assert.match(settingsStore, /trafficLightPosition: \{ x: 14, y: 14 \}/);
 	assert.match(foundation, /\.wechat-shell\.custom-titlebar-enabled\.mac-custom-titlebar \{[\s\S]*--window-controls-width:\s*0px;/);

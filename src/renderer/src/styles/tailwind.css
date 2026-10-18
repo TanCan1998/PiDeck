@@ -92,9 +92,17 @@
   --color-border: var(--color-border-default);
   --color-input: var(--color-border-default);
   --color-ring: var(--color-accent-strong);
+  --radius-xs: var(--radius-xs);
   --radius-sm: var(--radius-sm);
   --radius-md: var(--radius-md);
   --radius-lg: var(--radius-lg);
+  /* 尺寸档阴影桥接：shadow-* utility 从 Tailwind 默认灰切到 foundation 主题档
+     （浅色值与默认刻度一致，暗色加深）；同名声明被 legacy 层 foundation.css 覆盖生效 */
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+  --shadow-xl: var(--shadow-xl);
+  --shadow-2xl: var(--shadow-2xl);
 
   --font-sans: var(--font-family-base);
   --font-brand: var(--font-family-brand);
@@ -114,6 +122,9 @@
      但随 data-ui-font-size / data-chat-font-size 设置缩放（全局统一字号规范） */
   --text-micro: var(--font-size-micro);
   --text-micro--line-height: var(--line-height-micro);
+  /* 会话 Tab 栏标题：随「会话 Tab 栏字号」设置缩放（--font-size-tab，见 foundation.css） */
+  --text-tab: var(--font-size-tab);
+  --text-tab--line-height: var(--line-height-tab);
   --text-caption: var(--font-size-caption);
   --text-caption--line-height: var(--line-height-caption);
   --text-control: var(--font-size-control);
@@ -132,6 +143,14 @@
   --text-body--line-height: var(--line-height-body);
   --text-chat: var(--font-size-chat);
   --text-chat--line-height: var(--line-height-chat);
+  /* 过程层（组头 / 工具调用 / 思考 / 重试错误 / 提问卡 / 大折叠栏胶囊）字号体系。
+     与 --text-chat 同源派生，随「会话正文字号」缩放，**不随界面字号**。
+     只有两档，保证层级任何档位下都恒定且肉眼可辨：row(正文−2) > detail(正文−4)。
+     徽章用 detail 档（靠 chip 底色区分，不单独设字号）。 */
+  --text-chat-row: var(--font-size-chat-row);
+  --text-chat-row--line-height: var(--line-height-chat-row);
+  --text-chat-detail: var(--font-size-chat-detail);
+  --text-chat-detail--line-height: var(--line-height-chat-detail);
   --text-input: var(--font-size-input);
   --text-input--line-height: var(--line-height-input);
   --text-title: var(--font-size-title);

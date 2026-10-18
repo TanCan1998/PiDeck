@@ -1,4 +1,7 @@
-import { memo, useState } from "react";
+import { memo, useCallback, useState } from "react";
+import { cn } from "../../lib/utils";
+import { ProcessEntryReturnToStart } from "./turn/ProcessEntryReturnToStart";
+import { useProcessEntryStickyHeader } from "./turn/useProcessEntryStickyHeader";
 import { AlertTriangle, Brain, ChevronDown, ChevronRight, ChevronUp, RefreshCw } from "lucide-react";
 import type { ChatMessage } from "../../../../shared/types";
 import { t, translateI18nDescriptor } from "../../i18n";
@@ -6,15 +9,19 @@ import { formatDuration, formatTime, stripAnsi } from "./TimelineFormat";
 import { Textarea } from "../ui-shadcn/textarea";
 import { StackTrace } from "../ui-shadcn/stack-trace";
 import { ApprovalCard } from "../ui-shadcn/approval-card";
+import { BridgeGuiSlot } from "../bridge/BridgeSlot";
 import { TimelineMarker } from "./TimelineMarker";
 import { LiveDuration } from "./LiveDuration";
 import { MarkdownStream } from "./MarkdownStream";
 import { ShimmerText } from "./ShimmerText";
 import { ReasoningText } from "../agents/loading-states/reasoning-text";
 import { Loader } from "../motion/loader";
+import { RespondingTips } from "./RespondingTips";
 import { useSmoothStream } from "../../utils/useSmoothStream";
 import { SingleLinePreview } from "./SingleLinePreview";
+import { RowText } from "./RowText";
 import { deriveRespondingKind, type RespondingKind } from "./timeline/respondingKind";
+import { getToolPhrase } from "./timeline/toolPhrase";
 import { isRetryStatusMessage } from "./timelineFailureNotice";
 
 // Button 收口状态（P0）：本文件按钮全部保留原生——
@@ -81,8 +88,21 @@ export const ThinkingBlock = memo(
 		isStreaming?: boolean;
 		onOpenExternal: (url: string) => void;
 		onOpenFile?: (path: string) => void;
+		/** 所属会话：GUI 扩展桥的 thinking.extra 落点按它取贡献 */
+		sessionId?: string;
+		/** GUI 扩展桥：ctx.ui.setHiddenThinkingLabel 设的折叠标签（有值时替换耗时小字） */
+		hiddenLabel?: string;
 	}) {
 		const [expanded, setExpanded] = useState(props.defaultExpanded ?? false);
+		const sticky = useProcessEntryStickyHeader(expanded);
+		const toggleExpanded = useCallback(() => {
+			sticky.prepareCollapse();
+			setExpanded((value) => !value);
+		}, [sticky.prepareCollapse]);
+		const collapse = useCallback(() => {
+			sticky.prepareCollapse();
+			setExpanded(false);
+		}, [sticky.prepareCollapse]);
 		// 折叠行的打字机：流式中始终推进（预览吃 displayedContent + 尾部跟随 = 跑马灯）。
 		// 展开正文由 MarkdownStream 自己打字，这里不能 disabled 跟 expanded 绑——
 		// 用户中途收起时还要接得上单行预览。非流式关掉 rAF，避免历史卡片空转。
@@ -103,39 +123,50 @@ export const ThinkingBlock = memo(
 				// 与工具行一样压扁底距：思考不再是「标题行 + 虚线框」双行块
 				contentClassName="pb-1"
 			>
-				<section className="w-full min-w-0 overflow-hidden rounded-md border-0">
-					{/* 整行可点，结构对齐 ToolCard trigger：图标 + 耗时 + chevron + 折叠预览。 */}
-					<button
-						type="button"
-						className="group relative flex min-h-7 w-full min-w-0 cursor-pointer items-center gap-2 rounded-md px-1 py-1 text-left text-control leading-5 transition-[background-color,transform] duration-150 motion-reduce:transition-none hover:bg-[color:color-mix(in_srgb,var(--color-bg-hover)_50%,transparent)] active:scale-[0.99] focus-visible:-outline-offset-2 focus-visible:outline-2 focus-visible:outline-[var(--focus-ring)]"
-						onClick={() => setExpanded((v) => !v)}
-						aria-expanded={expanded}
-						title={expanded ? t("thinking.collapse") : t("thinking.expand")}
-					>
-						{/* 流式思考中整行扫光（dsh-web reasoning-row-sweep 同款）。
+				<section ref={sticky.entryRef} data-thinking-step="true" className={cn("w-full min-w-0 rounded-md border-0", sticky.insideProcessGroup ? "overflow-visible" : "overflow-hidden")}>
+					{/* 原始标题在本项内吸顶，不复制标题或把正文另套一条滚轮。 */}
+					<div ref={sticky.headerRef} data-process-entry-header="" data-process-entry-pinned={sticky.pinned} className={cn("relative flex min-h-7 items-center", sticky.sticky && "sticky top-0 z-10", sticky.pinned && "rounded-none bg-bg-app shadow-[0_1px_0_var(--color-border-subtle)]")}>
+						<button
+							type="button"
+							className="group relative flex min-h-7 w-full min-w-0 cursor-pointer overflow-hidden items-center gap-2 rounded-md px-1 py-1 text-left text-chat-row transition-[background-color,transform] duration-fast motion-reduce:transition-none hover:bg-[color:color-mix(in_srgb,var(--color-bg-hover)_50%,transparent)] active:scale-[0.99] focus-visible:-outline-offset-2 focus-visible:outline-2 focus-visible:outline-[var(--focus-ring)]"
+							onClick={toggleExpanded}
+							aria-expanded={expanded}
+							title={expanded ? t("thinking.collapse") : t("thinking.expand")}
+						>
+							{/* 流式思考中整行扫光（dsh-web reasoning-row-sweep 同款）。
 				    预览嵌在同一行里，不再给 SingleLinePreview 第二道光带，避免叠扫。 */}
-						{props.isStreaming && <span aria-hidden className="pointer-events-none absolute inset-y-0 left-[-300px] w-[300px] animate-thinking-sweep motion-reduce:animate-none bg-[linear-gradient(90deg,transparent,color-mix(in_srgb,var(--color-bg-app)_55%,transparent),transparent)]" />}
-						<Brain size={16} className="thinking-row-icon shrink-0" aria-hidden="true" />
-						{(hasEnded || props.isStreaming) && props.startedAt && (
-							<small className="shrink-0 text-caption tabular-nums text-text-faint">
-								{hasEnded ? (
-									t("thinking.duration", { duration: durationText })
-								) : (
-									// 流式中：思考未结束，用同一「思考了 Xs」文案 + LiveDuration 实时跳动，
-									// 思考结束只是数字冻结，不会出现前缀/文案整体蹦出。
-									<>
-										{t("thinking.durationPrefix")}
-										<LiveDuration startedAt={props.startedAt} isStreaming />
-									</>
-								)}
-							</small>
-						)}
-						{/* chevron 语言对齐工具行：折叠 ChevronRight，展开 ChevronDown */}
-						{expanded ? <ChevronDown size={14} className="shrink-0 text-text-faint" aria-hidden="true" /> : <ChevronRight size={14} className="shrink-0 text-text-faint" aria-hidden="true" />}
-						{/* 折叠才挂预览：与工具 displayLabel 一样 truncate 在同一行；
-				    展开后正文在下方，行内预览会抢宽度、和打字机重复。 */}
-						{!expanded && <SingleLinePreview text={displayedContent} running={props.isStreaming} showSweep={false} className="min-w-0 flex-[1_1_auto] font-mono text-caption text-text-faint" />}
-					</button>
+							{props.isStreaming && <span aria-hidden className="pointer-events-none absolute inset-y-0 left-[-300px] w-[300px] animate-thinking-sweep motion-reduce:animate-none bg-[linear-gradient(90deg,transparent,color-mix(in_srgb,var(--color-bg-app)_55%,transparent),transparent)]" />}
+							<Brain size={16} className="thinking-row-icon shrink-0" aria-hidden="true" />
+							{/* 文本段：「思考了 Xs」（14px）与折叠预览（12px 等宽）必须共基线，否则预览
+						    比左侧文本高约 3px（原理解释见 RowText）。chevron 是盒子，self-center。 */}
+							<RowText className="flex-[1_1_auto]">
+								{/* GUI 扩展桥：ctx.ui.setHiddenThinkingLabel —— 有值时**替换**折叠行的耗时小字（§8.2 A 组）。
+							    这是 pi 的「折叠思考块标签」语义：扩展想换掉这行提示文案。 */}
+								{props.hiddenLabel ? (
+									<small className="shrink-0 text-chat-row text-text-faint">{props.hiddenLabel}</small>
+								) : (hasEnded || props.isStreaming) && props.startedAt ? (
+									<small className="shrink-0 text-chat-row tabular-nums text-text-faint">
+										{hasEnded ? (
+											t("thinking.duration", { duration: durationText })
+										) : (
+											// 流式中：思考未结束，用同一「思考了 Xs」文案 + LiveDuration 实时跳动，
+											// 思考结束只是数字冻结，不会出现前缀/文案整体蹦出。
+											<>
+												{t("thinking.durationPrefix")}
+												<LiveDuration startedAt={props.startedAt} isStreaming />
+											</>
+										)}
+									</small>
+								) : null}
+								{/* chevron 语言对齐工具行：折叠 ChevronRight，展开 ChevronDown */}
+								{expanded ? <ChevronDown size={14} className="shrink-0 self-center text-text-faint" aria-hidden="true" /> : <ChevronRight size={14} className="shrink-0 self-center text-text-faint" aria-hidden="true" />}
+								{/* 折叠才挂预览：与工具 displayLabel 一样 truncate 在同一行；
+							    展开后正文在下方，行内预览会抢宽度、和打字机重复。 */}
+								{!expanded && <SingleLinePreview text={displayedContent} running={props.isStreaming} showSweep={false} className="min-w-0 flex-[1_1_auto] font-mono text-chat-detail text-text-faint" />}
+							</RowText>
+						</button>
+						{sticky.pinned && <ProcessEntryReturnToStart onClick={sticky.returnToStart} />}
+					</div>
 					{expanded && (
 						<div className="relative ml-5 mt-1 mb-2 rounded-b-sm border-l-2 border-border-subtle bg-transparent pl-3 animate-in fade-in duration-100 motion-reduce:animate-none">
 							<div className="markdown-body px-0 pt-1 pb-1 text-text-tertiary">
@@ -145,13 +176,16 @@ export const ThinkingBlock = memo(
 							<div className="flex pb-1.5">
 								<button
 									type="button"
-									className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-micro text-text-tertiary transition-colors duration-150 hover:bg-[color:color-mix(in_srgb,var(--color-bg-hover)_45%,transparent)] hover:text-text-secondary focus-visible:outline-2 focus-visible:outline-[var(--focus-ring)]"
-									onClick={() => setExpanded(false)}
+									className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-chat-detail text-text-tertiary transition-colors duration-fast hover:bg-[color:color-mix(in_srgb,var(--color-bg-hover)_45%,transparent)] hover:text-text-secondary focus-visible:outline-2 focus-visible:outline-[var(--focus-ring)]"
+									onClick={collapse}
 								>
 									<ChevronUp size={12} aria-hidden="true" />
 									{t("thinking.collapse")}
 								</button>
 							</div>
+							{/* GUI 扩展桥：折叠思考块内附加落点（ctx.gui.setThinkingExtra）。
+							 **在默认内容下方追加**，不顶替思考正文（§7.1-B / §7.4）。无贡献时不占位。 */}
+							<BridgeGuiSlot sessionId={props.sessionId} slot="thinking.extra" className="flex flex-col gap-1 pb-1" />
 						</div>
 					)}
 				</section>
@@ -160,7 +194,17 @@ export const ThinkingBlock = memo(
 	},
 	// 外部链接回调通常稳定；文件回调会随分屏栏的 cwd/project 变化，必须参与比较，
 	// 否则展开后的 Markdown 会继续使用旧栏的文件授权上下文。
-	(prev, next) => prev.text === next.text && prev.startedAt === next.startedAt && prev.endedAt === next.endedAt && prev.showThinking === next.showThinking && prev.isStreaming === next.isStreaming && prev.onOpenExternal === next.onOpenExternal && prev.onOpenFile === next.onOpenFile,
+	// 桥新增的 sessionId / hiddenLabel 同样必须参与比较，否则会话切换或扩展改标签后不重渲。
+	(prev, next) =>
+		prev.text === next.text &&
+		prev.startedAt === next.startedAt &&
+		prev.endedAt === next.endedAt &&
+		prev.showThinking === next.showThinking &&
+		prev.isStreaming === next.isStreaming &&
+		prev.onOpenExternal === next.onOpenExternal &&
+		prev.onOpenFile === next.onOpenFile &&
+		prev.sessionId === next.sessionId &&
+		prev.hiddenLabel === next.hiddenLabel,
 );
 
 /**
@@ -178,16 +222,33 @@ export const ThinkingBlock = memo(
  * 每种状态一组 i18n 短语轮播；状态切换用 key 重建，从第一条短语重新开始。
  */
 
-/** 每种状态对应的轮播短语组（i18n；waiting 单条即不轮播）。 */
+/** 每种状态的短语组。只有 starting 保留多条轮播——它是唯一「后台在预热、渲染层观测不到
+ *  子阶段」的状态；其余各态都对应一个可观测的真实阶段，一律用单条短语
+ *  （beUI ReasoningText 在 phrases.length < 2 时不启动轮播），状态条文案因此始终等于
+ *  后台正在做的事，而不是每 1.8s 换一句猜测（用户反馈：动画不能真实反映后台）。 */
 const RESPONDING_PHRASES: Record<RespondingKind, string[]> = {
 	compacting: [t("agent.loading.compacting")],
 	starting: [t("agent.loading.starting1"), t("agent.loading.starting2"), t("agent.loading.starting3")],
-	executing: [t("agent.loading.executing1"), t("agent.loading.executing2"), t("agent.loading.executing3")],
-	responding: [t("agent.loading.responding1"), t("agent.loading.responding2"), t("agent.loading.responding3")],
+	executing: [t("agent.loading.executing1")],
+	thinking: [t("agent.loading.responding1")],
+	responding: [t("agent.loading.responding3")],
 	waiting: [t("agent.loading.waiting")],
 };
 
-export function RespondingIndicator(props: { isCompacting?: boolean; isStarting?: boolean; isExecutingTool?: boolean; liveTextStreaming?: boolean; liveThinkingStreaming?: boolean }) {
+/**
+ * 工具执行态文案：用 runtime 上报的真实工具名生成短语（「正在读取文件...」
+ * 「正在执行命令...」），而不是「执行工具 / 读取文件 / 应用改动」的轮播猜测。
+ * 工具名缺失时（旧 pi / DSH 快照未上报 executingToolName）退回通用「执行工具」；
+ * 过长（扩展 / MCP 工具名）时截断——状态条是单行 nowrap，否则会把消息流撑宽。
+ */
+function executingPhrases(toolName: string | undefined): string[] {
+	const fallback = t("agent.loading.executing1");
+	if (!toolName) return [fallback];
+	const label = getToolPhrase(toolName, {}).loadingLabel || fallback;
+	return [label.length > 48 ? `${label.slice(0, 47)}…` : label];
+}
+
+export function RespondingIndicator(props: { isCompacting?: boolean; isStarting?: boolean; isExecutingTool?: boolean; executingToolName?: string; liveTextStreaming?: boolean; liveThinkingStreaming?: boolean }) {
 	// 判定抽到 deriveRespondingKind：pi / DSH 共用，状态条跟「此刻有没有字/工具」对齐。
 	const kind = deriveRespondingKind({
 		isCompacting: props.isCompacting,
@@ -196,6 +257,8 @@ export function RespondingIndicator(props: { isCompacting?: boolean; isStarting?
 		liveTextStreaming: props.liveTextStreaming,
 		liveThinkingStreaming: props.liveThinkingStreaming,
 	});
+	// executing 的短语依赖真实工具名（动态），无法放进静态短语表
+	const phrases = kind === "executing" ? executingPhrases(props.executingToolName) : RESPONDING_PHRASES[kind];
 
 	return (
 		<div className="responding-indicator" data-kind={kind}>
@@ -204,12 +267,15 @@ export function RespondingIndicator(props: { isCompacting?: boolean; isStarting?
 			   不用官方默认的 ascii 终端字符；文字放大到 text-base */}
 			<ReasoningText
 				key={kind}
-				phrases={RESPONDING_PHRASES[kind]}
+				phrases={phrases}
 				variant="swap"
 				interval={1800}
 				indicator={<Loader variant="dot-matrix" size={18} speed={1.1} label={t("agent.loading.aria")} />}
 				// 字号用官方默认（text-sm）：实测语义 token 缩放的观感不如官方字阶，保持官方原样
 			/>
+			{/* 功能提示轮播：等待期是用户的注意力空档，用它曝光「没有可见入口」的能力
+			    （命令面板、划选引用、排队发送…）。内容与收录规则见 RespondingTips.tsx / sessionFeatureTips.ts。 */}
+			<RespondingTips />
 		</div>
 	);
 }

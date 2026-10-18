@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const appSource = readFileSync("src/renderer/src/App.tsx", "utf8");
+const sessionRunControlSource = readFileSync("src/renderer/src/hooks/session/useSessionRunControl.ts", "utf8");
 const sessionViewSource = readFileSync("src/renderer/src/components/session/SessionView.tsx", "utf8");
 const sessionSurfaceSource = readFileSync("src/renderer/src/components/session/SessionSurfaceStage.tsx", "utf8");
 const sessionActionsSource = readFileSync("src/renderer/src/hooks/useSessionActions.ts", "utf8");
@@ -45,8 +46,8 @@ test("App routes project and Session selection through the command owner", () =>
 	assert.match(appSource, /selectProject: selectProjectCommand/);
 	assert.match(appSource, /selectSession: selectSessionCommand/);
 	assert.match(appSource, /selectSessionCommand\(session\.projectId, session\.id, false\)/);
-	assert.match(appSource, /selectSessionCommand\(projectId, targetSessionId, true\)/);
-	assert.match(appSource, /sessionRecordByIdAtomFamily\(target\.sessionId\)/);
+	// 重启/克隆后拉起新会话的路径已迁入 useSessionRunControl（App 只接线）
+	assert.match(sessionRunControlSource, /selectSessionCommand\(projectId, targetSessionId, true\)/);
 	// select 口只负责选中 + 交给统一的按需加载入口，「什么时候该扫、什么时候该跳过」
 	// 的规则留在 ensureProjectCatalogLoaded 一处，不在 select 口重复一份（防止规则漂移）。
 	assert.match(appSource, /select: \(projectId\) => \{\s*selectProjectCommand\(projectId\);[\s\S]*?ensureProjectCatalogLoaded\(projectId\);/);
@@ -86,13 +87,15 @@ test("typing in the current Composer prewarms its runtime once", () => {
 });
 
 test("forking a user message opens the new session as a permanent tab", () => {
-	const body = functionBody("forkFromUserMessage", sessionHistoryMutationsSource);
 	// fork 做于 Tab 栏之前：只刷新列表不切焦点/不登记，新会话会出现但点 Tab 对不上 runtime。
 	// fork 结果统一交给会话工作区 chrome 登记永久 Tab，并切换到新会话。
-	assert.match(body, /openReplacedRuntimeSession\(/);
-	assert.match(functionBody("openReplacedRuntimeSession"), /registerOpenSession\(targetSessionId, "permanent"\)/);
-	assert.match(functionBody("openReplacedRuntimeSession"), /selectSessionCommand\(projectId, targetSessionId, true\)/);
-	assert.match(functionBody("cloneAgentSession"), /openReplacedRuntimeSession\(/);
+	// 消息锚点与分支树条目共用同一生命周期，登记/切换不分叉为两条路径。
+	assert.match(sessionHistoryMutationsSource, /const\s+forkFromUserMessage\s*=\s*useCallback\(\s*\(message:\s*ChatMessage\)\s*=>\s*runExplicitFork\(message,\s*message\.text,\s*message\.id,\s*message\.images\)/);
+	assert.match(sessionHistoryMutationsSource, /const\s+forkAtEntry\s*=\s*useCallback\(\s*\(entryId:\s*string,\s*fallbackText:\s*string,\s*busyKey:\s*string,\s*images\?:\s*ImageContent\[\]\)\s*=>\s*runExplicitFork\(entryId,\s*fallbackText,\s*busyKey,\s*images\)/);
+	assert.match(functionBody("runExplicitFork", sessionHistoryMutationsSource), /await\s+latest\.openReplacedRuntimeSession\(projectId,\s*targetSessionId\)/);
+	assert.match(functionBody("openReplacedRuntimeSession", sessionRunControlSource), /registerOpenSession\(targetSessionId, "permanent"\)/);
+	assert.match(functionBody("openReplacedRuntimeSession", sessionRunControlSource), /selectSessionCommand\(projectId, targetSessionId, true\)/);
+	assert.match(functionBody("cloneAgentSession", sessionRunControlSource), /openReplacedRuntimeSession\(/);
 });
 
 test("active Agent identity is derived from the selected Session runtime", () => {

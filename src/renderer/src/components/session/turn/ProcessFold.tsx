@@ -45,19 +45,35 @@ export const ProcessFold = memo(function ProcessFold(props: ProcessFoldProps) {
 	// 与 TurnRow 既有模式一致：用「已展开的那一批」而不是布尔量，换 run 自然重置，无需额外 effect。
 	const [expandedNodesId, setExpandedNodesId] = useState<string | undefined>(undefined);
 	const mounted = useMemo(() => boundMountedSteps(props.nodes, PROCESS_FOLD_NODE_LIMIT, expandedNodesId !== undefined), [props.nodes, expandedNodesId]);
-	// 只有本轮仍在跑时，最后一个过程组才是「运行中」（决定 shimmer 与「正在…」文案）。
+	// 只有本轮仍在跑、且**最后一个节点就是这个组**时它才算「运行中」（决定 shimmer 与「正在…」文案）。
 	// 用**节点 id** 而不是数组下标判定：下面渲染的是尾部切片 `mounted.items`，
 	// 下标在裁剪后与 `props.nodes` 不对应，按下标比较会把「运行中」标到错误的组上。
-	const runningGroupId = props.agentRunning ? lastProcessGroup(props.nodes)?.id : undefined;
+	// 尾部判定不能用「最后一个组」（2026-08 审计修复）：尾部一旦追加中间回复 / 重试 / 错误行，
+	// 说明那个组已经跑完，继续挂 shimmer 报「正在…」就是在撒谎。
+	const lastNode = props.nodes[props.nodes.length - 1];
+	const runningGroupId = props.agentRunning && lastNode?.kind === "group" ? lastNode.id : undefined;
 
 	const renderNode = (node: TurnProcessNode): ReactNode => {
 		switch (node.kind) {
 			case "group":
-				return <ProcessGroupStep group={node} running={node.id === runningGroupId} open={isGroupOpen(props.groupState, node.id)} onToggle={(open) => props.onToggleGroup(node.id, open)} showThinking={props.showThinking} sessionId={props.sessionId} onOpenFile={props.onOpenFile} onOpenExternal={props.onOpenExternal} />;
+				return (
+					<ProcessGroupStep
+						group={node}
+						running={node.id === runningGroupId}
+						open={isGroupOpen(props.groupState, node.id)}
+						autoOpen={props.groupState.autoGroupId === node.id}
+						onToggle={(open) => props.onToggleGroup(node.id, open)}
+						showThinking={props.showThinking}
+						sessionId={props.sessionId}
+						onOpenFile={props.onOpenFile}
+						onOpenExternal={props.onOpenExternal}
+					/>
+				);
 			case "interim":
 				// live 那一条由 TurnRow 挂在大折叠栏外，这里跳过以免同一段正文出现两份
 				if (node.id === props.liveInterimId) return null;
-				return <InterimAnswer mode="settled" text={node.message.text} hidden={false} isStreaming={false} variant="process" onOpenExternal={props.onOpenExternal} onOpenFile={props.onOpenFile} />;
+				// 中间回复引用锚点：settled 正文根节点带 data-message-id，划选可解析来源消息。
+				return <InterimAnswer mode="settled" text={node.message.text} hidden={false} isStreaming={false} variant="process" messageId={node.id} onOpenExternal={props.onOpenExternal} onOpenFile={props.onOpenFile} />;
 			case "entry": {
 				// 自动重试 / 错误诊断：与中间回复同级的一级行（状态色沿用现状，不做改动）。
 				// `TurnStandaloneEntry` 的联合只有这两种，用局部常量收窄即可，不需要兜底分支。
@@ -73,7 +89,7 @@ export const ProcessFold = memo(function ProcessFold(props: ProcessFoldProps) {
 				// 超出挂载预算的早期条目入口：与既有「显示更早的 N 条步骤」同款观感
 				<button
 					type="button"
-					className="mt-1 inline-flex h-[26px] items-center gap-2 self-start rounded-[var(--radius-md)] border border-border-subtle bg-[var(--color-chat-card-bg)] px-3 text-[length:var(--font-size-caption)] font-medium text-text-secondary transition-colors hover:border-border-strong hover:bg-bg-hover hover:text-text-primary"
+					className="mt-1 inline-flex h-[26px] items-center gap-2 self-start rounded-[var(--radius-md)] border border-border-subtle bg-[var(--color-chat-card-bg)] px-3 text-chat-detail font-medium text-text-secondary transition-colors hover:border-border-strong hover:bg-bg-hover hover:text-text-primary"
 					onClick={() => setExpandedNodesId("all")}
 					title={t("timeline.showEarlierSteps", { count: mounted.hiddenCount })}
 				>

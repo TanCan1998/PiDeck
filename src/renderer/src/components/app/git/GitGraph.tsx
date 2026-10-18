@@ -234,7 +234,7 @@ function CommitFileRow(props: { file: GitChangedFile; row: GraphRow; onOpen: () 
 	return (
 		<button
 			type="button"
-			className={`git-history-file-row grid min-h-[26px] w-full cursor-pointer appearance-none grid-cols-[auto_minmax(0,1fr)_16px] items-center gap-2 border-0 bg-transparent p-0 pr-2.5 pl-0.5 text-[13px] leading-[26px] text-left text-inherit focus-visible:shadow-[inset_var(--focus-ring)] focus-visible:outline-none disabled:cursor-progress disabled:opacity-70 hover:bg-[var(--git-panel-hover)] active:bg-[var(--git-panel-selection)] ${statusTone(file.status, true)}`}
+			className={`git-history-file-row grid min-h-[26px] w-full cursor-pointer appearance-none grid-cols-[auto_minmax(0,1fr)_16px] items-center gap-2 border-0 bg-transparent p-0 pr-2.5 pl-0.5 text-control leading-[26px] text-left text-inherit focus-visible:shadow-[inset_var(--focus-ring)] focus-visible:outline-none disabled:cursor-progress disabled:opacity-70 hover:bg-[var(--git-panel-hover)] active:bg-[var(--git-panel-selection)] ${statusTone(file.status, true)}`}
 			title={file.originalPath ? `${file.originalPath} → ${file.path}` : file.path}
 			aria-label={t("git.openFileDiff", { path: file.path })}
 			aria-busy={opening}
@@ -689,7 +689,13 @@ export function SourceControlGraph(props: GitGraphProps) {
 						</div>
 					)}
 					{error && <div className="git-status-msg error">{error}</div>}
-					{!loading && !error && !commits.length && <div className="git-status-msg">{t("git.noCommits")}</div>}
+					{!loading && !error && !commits.length && (
+						/* 空仓库/无匹配提交：居中图标 + 文案的完成态，替代顶部一行小灰字（面板主体留白时缺少视觉锚点） */
+						<div className="flex min-h-[120px] flex-1 flex-col items-center justify-center gap-2 px-4 py-8 text-center">
+							<GitBranch aria-hidden="true" size={26} strokeWidth={1.5} className="text-text-tertiary" />
+							<div className="text-control font-medium text-[var(--git-desc-fg)]">{t("git.noCommits")}</div>
+						</div>
+					)}
 					{commits.length > 0 && (
 						<div className="min-h-0 flex-1 overflow-auto overscroll-contain [scrollbar-gutter:stable]" role="list" onScroll={dismissHover}>
 							{graphRows.map((row) => {
@@ -733,9 +739,9 @@ export function SourceControlGraph(props: GitGraphProps) {
 											{ref && <span className={`max-w-[108px] truncate rounded-full border border-current px-[7px] text-xs font-medium leading-[18px]${ref.kind === "branch" ? " text-[var(--git-modified)]" : " text-[var(--git-conflict)]"}`}>{ref.label}</span>}
 										</button>
 										{expanded && (
-											<div className="min-w-0">
+											<div className="min-w-0 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-fast">
 												{detailState?.loading && (
-													<div className="grid min-h-[26px] grid-cols-[auto_minmax(0,1fr)_16px] items-center gap-2 px-2.5 pl-0.5 text-[13px] leading-[26px] text-[var(--git-desc-fg)]">
+													<div className="grid min-h-[26px] grid-cols-[auto_minmax(0,1fr)_16px] items-center gap-2 px-2.5 pl-0.5 text-control leading-[26px] text-[var(--git-desc-fg)]">
 														<GraphContinuation row={row} />
 														<span className="flex min-w-0 items-center gap-[5px] truncate">
 															<Loader2 size={13} className="animate-pideck-spin" /> {t("git.loadingCommitFiles")}
@@ -743,13 +749,13 @@ export function SourceControlGraph(props: GitGraphProps) {
 													</div>
 												)}
 												{detailState?.error && !detailState.loading && (
-													<div className="grid min-h-[26px] grid-cols-[auto_minmax(0,1fr)_16px] items-center gap-2 px-2.5 pl-0.5 text-[13px] leading-[26px] text-[var(--git-desc-fg)] text-[var(--color-danger)]">
+													<div className="grid min-h-[26px] grid-cols-[auto_minmax(0,1fr)_16px] items-center gap-2 px-2.5 pl-0.5 text-control leading-[26px] text-[var(--git-desc-fg)] text-[var(--color-danger)]">
 														<GraphContinuation row={row} />
 														<span className="flex min-w-0 items-center gap-[5px] truncate">{detailState.error}</span>
 													</div>
 												)}
 												{detailState?.detail && commitFiles.length === 0 && (
-													<div className="grid min-h-[26px] grid-cols-[auto_minmax(0,1fr)_16px] items-center gap-2 px-2.5 pl-0.5 text-[13px] leading-[26px] text-[var(--git-desc-fg)]">
+													<div className="grid min-h-[26px] grid-cols-[auto_minmax(0,1fr)_16px] items-center gap-2 px-2.5 pl-0.5 text-control leading-[26px] text-[var(--git-desc-fg)]">
 														<GraphContinuation row={row} />
 														<span className="flex min-w-0 items-center gap-[5px] truncate">{t("git.noCommitFiles")}</span>
 													</div>
@@ -768,7 +774,7 @@ export function SourceControlGraph(props: GitGraphProps) {
 									type="button"
 									variant="ghost"
 									size="sm"
-									className="w-full border border-dashed border-border-subtle py-2 text-xs text-text-secondary transition-colors duration-150 hover:bg-bg-hover hover:text-text-primary"
+									className="w-full border border-dashed border-border-subtle py-2 text-xs text-text-secondary transition-colors duration-fast hover:bg-bg-hover hover:text-text-primary"
 									onClick={() => {
 										setLoadCount((prev) => prev + 30);
 									}}

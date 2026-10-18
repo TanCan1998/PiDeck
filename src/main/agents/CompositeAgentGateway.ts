@@ -7,6 +7,8 @@ import type {
 	ChatMessage,
 	CreateAgentInput,
 	ImageContent,
+	SessionMessageImageTarget,
+	PiCommand,
 	RewindCheckpointPage,
 	RewindCheckpointPageParams,
 	RewindRestoreResult,
@@ -16,6 +18,7 @@ import type {
 	SessionRuntimeModelSelection,
 	SessionUiResponseInput,
 } from "../../shared/types";
+import type { BridgeEvent } from "../../shared/types/bridge";
 import type { SessionAgentGateway } from "../sessions/SessionRuntimeCoordinator";
 
 /**
@@ -91,6 +94,27 @@ export class CompositeAgentGateway implements SessionAgentGateway {
 		return this.gateways.flatMap((gateway) => gateway.list());
 	}
 
+	/**
+	 * 激活/重启/换绑后的状态+消息窗口重下发（index.ts emitReplacementState 消费）。
+	 * pi 网关实现窗口协议（窗口段 + windowStart/totalLength/fileVersion）；其余后端
+	 * 没有 getMessageWindow，回退全量消息（ACP/DSH 的 live 列表本身有界，全量即窗口）。
+	 * 此前 emitReplacementState 只查 pi AgentManager，ACP/DSH 的 tab 查不到直接 return，
+	 * 重启/换绑后的状态与消息窗口重下发全部静默失效（2027-03 审计发现 B）。
+	 */
+	getMessageWindow(agentId: string): {
+		messages: ChatMessage[];
+		windowStart?: number;
+		totalLength: number;
+		fileVersion?: string;
+		windowStartFilePos?: number;
+	} {
+		const gateway = this.owner(agentId);
+		const ownerWindow = (gateway as { getMessageWindow?: (id: string) => { messages: ChatMessage[]; windowStart?: number; totalLength: number; fileVersion?: string; windowStartFilePos?: number } }).getMessageWindow;
+		if (typeof ownerWindow === "function") return ownerWindow.call(gateway, agentId);
+		const messages = gateway.getMessages(agentId);
+		return { messages, totalLength: messages.length };
+	}
+
 	async sendPrompt(input: SendPromptInput): Promise<SendPromptResult> {
 		return this.owner(input.agentId).sendPrompt(input);
 	}
@@ -104,6 +128,27 @@ export class CompositeAgentGateway implements SessionAgentGateway {
 		const tab = await gateway.create(input);
 		this.ownerByAgent.set(tab.id, gateway);
 		return tab;
+	}
+
+	/** standby 认领只路由 pi 网关（dsh 无进程池概念）；命中后登记归属供后续 owner() 定位。 */
+	async claimStandbyAgent(input: { projectId: string; sessionId: string; noSession?: boolean }): Promise<AgentTab | null> {
+		const gateway = this.byBackend.get("pi");
+		if (typeof gateway?.claimStandbyAgent !== "function") return null;
+		const tab = await gateway.claimStandbyAgent(input);
+		if (tab) this.ownerByAgent.set(tab.id, gateway);
+		return tab;
+	}
+
+	/** standby 补热只路由 pi 网关；dsh-only 部署不会因此多 spawn pi 进程。 */
+	ensureStandbyAgent(projectId: string): void {
+		this.byBackend.get("pi")?.ensureStandbyAgent?.(projectId);
+	}
+
+	/** 草稿命令预览只路由 pi 网关（dsh 无 standby 池）；网关缺失/失败返回 null。 */
+	async draftCommands(projectId: string): Promise<PiCommand[] | null> {
+		const gateway = this.byBackend.get("pi");
+		if (typeof gateway?.draftCommands !== "function") return null;
+		return gateway.draftCommands(projectId);
 	}
 
 	async restart(agentId: string): Promise<AgentTab> {
@@ -199,13 +244,14 @@ export class CompositeAgentGateway implements SessionAgentGateway {
 	async mutatePersistedSessionMessage(
 		sessionPath: string,
 		messageId: string,
-		operation: "edit" | "delete" | "resend",
+		operation: "edit" | "delete" | "resend" | "remove-image",
 		options?: {
 			newText?: string;
 			environment?: import("../../shared/types").SessionEnvironment;
 			wslDistro?: string;
 			/** 渲染层消息的文件条目 id（meta.entryId），live randomUUID 的文件定位锚点。 */
 			entryId?: string;
+			imageTarget?: SessionMessageImageTarget;
 		},
 	): Promise<{ text: string; images?: ImageContent[] } | undefined> {
 		const gateway = this.resolveBackend("pi");
@@ -243,6 +289,32 @@ export class CompositeAgentGateway implements SessionAgentGateway {
 	notifyModelPreferenceIgnored(agentId: string, provider: string, modelId: string): void {
 		const gateway = this.owner(agentId);
 		gateway.notifyModelPreferenceIgnored?.(agentId, provider, modelId);
+	}
+
+	/**
+	 * 可选能力透传：渲染层→pi 的 GUI 桥事件回灌（§8.3）。
+	 *
+	 * **必须显式转发**：`SessionRuntimeCoordinator` 走的是 `agents.pushBridgeEvent?.(...) ?? false`，
+	 * 本类漏实现时可选调用链会直接短路——渲染层所有桥事件（勾选/输入/按钮）
+	 * 都变成静默丢弃，表现为「面板点了没反应」。DSH 网关未实现则返回 false（同样静默）。
+	 */
+	pushBridgeEvent(agentId: string, event: BridgeEvent): boolean {
+		try {
+			return this.owner(agentId).pushBridgeEvent?.(agentId, event) ?? false;
+		} catch {
+			// 未知 agent（已停止 / 从未创建）：桥事件是 fire-and-forget 的 UI 交互，
+			// 静默丢弃并返回 false，不要把异常抛回 IPC 边界。
+			return false;
+		}
+	}
+
+	/**
+	 * 可选能力透传：请求桥下一次轮询时全量重推一次（§9.4）。
+	 *
+	 * 与 `pushBridgeEvent` 同因：漏转发会让开设置弹窗/切会话/应用启动时的"重推"全部静默失效。
+	 */
+	requestBridgeResync(agentId: string): boolean {
+		return this.owner(agentId).requestBridgeResync?.(agentId) ?? false;
 	}
 
 	async publishRuntimeState(agentId: string): Promise<void> {

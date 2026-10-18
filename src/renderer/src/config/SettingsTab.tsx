@@ -10,7 +10,12 @@ import { Checkbox } from "../components/ui-shadcn/checkbox";
 import { Label } from "../components/ui-shadcn/label";
 import { SettingBox, SettingRow, SettingSwitchRow, ClearableSettingsInput } from "../components/app/settings/SettingRows";
 import { SettingsSection } from "../components/app/settings/SettingsStorageTab";
+import { DefaultToolsInput } from "./DefaultToolsInput";
+import { defaultToolsDisablesAll, mergeCodemodeSetting, normalizeCodemodeInlineBudget, normalizeCodemodeMode } from "../../../shared/defaultTools";
+import { COMPACT_REFERENCE_WINDOW_TOKENS, COMPACTION_SLIDER_MAX_PERCENT, COMPACTION_SLIDER_MIN_PERCENT, compactionPercentToTokens, compactionTokensToPercent } from "../../../shared/compactionSlider";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui-shadcn/popover";
+import { Slider } from "../components/ui-shadcn/slider";
+import { desktopApi } from "../desktopApi";
 import { Command, CommandGroup, CommandInput, CommandItem, CommandList } from "../components/ui-shadcn/command";
 
 // ── 可用模型列表聚合（含供应商信息，供 enabledModels 多选用） ──
@@ -62,8 +67,34 @@ const TRANSPORT_OPTIONS = ["sse", "websocket", "websocket-cached", "auto"].map((
 /** steering / follow-up 消息发送模式（pi 文档："all" 一次全部发送，"one-at-a-time" 逐条，默认 one-at-a-time）。 */
 const SEND_MODE_OPTIONS = ["all", "one-at-a-time"].map((v) => ({ value: v, label: v }));
 
+/** pi 1.0 起 quietStartup 是 boolean | "header" 三态（"header" 保留版本横幅、隐藏其余启动输出）。 */
+const QUIET_STARTUP_OPTIONS: Array<{ value: string; labelKey: "config.general.quietStartup.off" | "config.general.quietStartup.true" | "config.general.quietStartup.header" }> = [
+	{ value: "false", labelKey: "config.general.quietStartup.off" },
+	{ value: "true", labelKey: "config.general.quietStartup.true" },
+	{ value: "header", labelKey: "config.general.quietStartup.header" },
+];
+
 /** 项目信任兜底策略（pi 文档：ask/always/never，仅全局设置生效；RPC 模式不弹信任询问，靠此值决定是否加载项目 .pi 资源）。 */
 const PROJECT_TRUST_OPTIONS = ["ask", "always", "never"].map((v) => ({ value: v, label: v }));
+
+/** codemode.mode 枚举（pi settings.md#tools：on 默认声明并存、only 模型只能经脚本调工具）。 */
+const CODEMODE_MODE_OPTIONS = [
+	{ value: "on", label: "on" },
+	{ value: "only", label: "only" },
+];
+
+/**
+ * 写回 codemode 子设置：只 patch 用户改动的键，保留未知嵌套字段；
+ * 合并后对象为空则移除整个键（避免落盘 codemode:{} 脏数据）。
+ */
+function withCodemode(data: SettingsFile, existing: unknown, patch: { mode?: string | undefined; inlineBudget?: number | undefined }): SettingsFile {
+	const next = mergeCodemodeSetting(existing, patch);
+	if (next === undefined) {
+		const { codemode: _removed, ...rest } = data;
+		return rest;
+	}
+	return { ...data, codemode: next };
+}
 
 export function SettingsTab(props: {
 	data: SettingsFile;
@@ -99,16 +130,24 @@ export function SettingsTab(props: {
 			key !== "steeringMode" &&
 			key !== "followUpMode" &&
 			key !== "defaultProjectTrust" &&
-			key !== "transport",
+			key !== "transport" &&
+			// 「工具与 Codemode」区块占用：不走「其他设置项」的 JSON 兜底
+			key !== "defaultTools" &&
+			key !== "codemode" &&
+			// 「会话压缩」常驻区块占用：开关 + 百分比滑条已在专项区块编辑，
+			// 原始 JSON 对象再出现在其他设置里就是同一配置的两处入口（重复）
+			key !== "compaction",
 	);
 
 	/**
 	 * 设置页只暴露外层重试次数和基础延迟。
 	 * provider 级 timeout/maxRetries 的单位和 SDK 语义容易误解，写入后可能导致立即超时或长时间重试卡住。
 	 */
+	const retryRaw = data && typeof data === "object" ? (data as Record<string, unknown>).retry : undefined;
+	const retryRecord = retryRaw && typeof retryRaw === "object" ? (retryRaw as Record<string, unknown>) : undefined;
 	const retryConfig = {
-		maxRetries: (data as any).retry?.maxRetries ?? 10,
-		baseDelayMs: (data as any).retry?.baseDelayMs ?? 5000,
+		maxRetries: typeof retryRecord?.maxRetries === "number" ? retryRecord.maxRetries : 10,
+		baseDelayMs: typeof retryRecord?.baseDelayMs === "number" ? retryRecord.baseDelayMs : 5000,
 	};
 
 	/**
@@ -172,6 +211,45 @@ export function SettingsTab(props: {
 	};
 
 	/**
+	 * 压缩百分比滑条的换算基数：默认模型的上下文窗口。
+	 * pi 的触发条件是 contextTokens > contextWindow - reserveTokens，两个 token 值
+	 * 的直观语义本来就是「窗口占比」。解析顺序：models.json 显式配置优先（同步、
+	 * 用户手填即真相），缺省时异步查 pi-ai 模型目录；都拿不到则回退数值输入。
+	 */
+	const defaultProvider = typeof data.defaultProvider === "string" ? data.defaultProvider : "";
+	const defaultModel = typeof data.defaultModel === "string" ? data.defaultModel : "";
+	const explicitContextWindow = defaultProvider && defaultModel ? props.modelsData?.providers[defaultProvider]?.models.find((m) => m.id === defaultModel)?.contextWindow : undefined;
+	const [catalogContextWindow, setCatalogContextWindow] = useState<number | undefined>(undefined);
+	useEffect(() => {
+		if (explicitContextWindow) {
+			setCatalogContextWindow(undefined);
+			return;
+		}
+		if (!defaultProvider || !defaultModel) {
+			setCatalogContextWindow(undefined);
+			return;
+		}
+		let cancelled = false;
+		desktopApi.projects
+			.getModelSpec(defaultProvider, defaultModel)
+			.then((spec) => {
+				if (!cancelled && typeof spec?.contextWindow === "number" && spec.contextWindow > 0) setCatalogContextWindow(spec.contextWindow);
+			})
+			.catch(() => {
+				/* 目录未命中时保持 undefined，UI 回退数值输入 */
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [defaultProvider, defaultModel, explicitContextWindow]);
+	// 识别不到模型窗口时也始终提供滑条：按参考窗口换算（业界最常见 200k；pi 默认值 16384/20000 恰为 8%/10%）。
+	// token 数始终如实展示，百分比只是编辑手感。
+	const hasModelWindow = typeof explicitContextWindow === "number" || typeof catalogContextWindow === "number";
+	const compactionContextWindow = explicitContextWindow ?? catalogContextWindow ?? COMPACT_REFERENCE_WINDOW_TOKENS;
+	const percentToTokens = (percent: number) => compactionPercentToTokens(percent, compactionContextWindow);
+	const tokensToPercent = (tokens: number) => compactionTokensToPercent(tokens, compactionContextWindow);
+
+	/**
 	 * 配置键名 → 显示标签。
 	 * 已登记 i18n 的键走多语言；未登记回退原始 key，避免未知字段空白。
 	 */
@@ -227,8 +305,6 @@ export function SettingsTab(props: {
 				return t("config.label.quietStartup");
 			case "collapseChangelog":
 				return t("config.label.collapseChangelog");
-			case "compaction":
-				return t("config.label.compaction");
 			case "sessionDir":
 				return t("config.label.sessionDir");
 			case "steeringMode":
@@ -274,7 +350,7 @@ export function SettingsTab(props: {
 	return (
 		<div className="config-settings-tab">
 			<div className="mb-3 flex items-center justify-between gap-3">
-				<span className="font-mono text-xs tabular-nums text-text-tertiary">{t("config.count.configItems", { count: entries.length })}</span>
+				<span className="font-mono text-xs tabular-nums text-muted-foreground">{t("config.count.configItems", { count: entries.length })}</span>
 			</div>
 
 			{/* ── 模型切换列表（enabledModels）：单行分区，行标题即一级标题（同「常用设置」语言分区） ── */}
@@ -313,9 +389,20 @@ export function SettingsTab(props: {
 					</ClearableSettingsInput>
 				</SettingRow>
 
-				{/* 布尔开关行：hideThinkingBlock / quietStartup，直接写 true/false */}
+				{/* 布尔开关行：hideThinkingBlock 直接写 true/false。 */}
 				<SettingSwitchRow title={configLabel("hideThinkingBlock")} description={t("config.general.hideThinkingBlockHint")} checked={data.hideThinkingBlock === true} onChange={(checked) => props.onChange({ ...data, hideThinkingBlock: checked })} />
-				<SettingSwitchRow title={configLabel("quietStartup")} description={t("config.general.quietStartupHint")} checked={data.quietStartup === true} onChange={(checked) => props.onChange({ ...data, quietStartup: checked })} />
+				{/* quietStartup 是三态（pi 1.0 新增 "header"）：布尔开关会把 "header" 覆盖成
+				    true/false 造成数据丢失，必须用下拉表达完整枚举。 */}
+				<SettingRow title={<span>{configLabel("quietStartup")}</span>} description={t("config.general.quietStartupHint")} alignEnd={false}>
+					<ClearableSettingsInput empty={data.quietStartup !== true && data.quietStartup !== "header"} onClear={() => props.onChange({ ...data, quietStartup: false })}>
+						<ConfigSelect
+							value={data.quietStartup === true ? "true" : data.quietStartup === "header" ? "header" : "false"}
+							options={QUIET_STARTUP_OPTIONS.map((option) => ({ value: option.value, label: t(option.labelKey) }))}
+							onChange={(v) => props.onChange({ ...data, quietStartup: v === "true" ? true : v === "header" ? "header" : false })}
+							placeholder="false"
+						/>
+					</ClearableSettingsInput>
+				</SettingRow>
 
 				{/* steeringMode / followUpMode：steering 与 follow-up 消息的发送模式，
 				    all 一次全部发送，one-at-a-time 逐条（pi 默认），RPC 场景下影响 API 调用方式 */}
@@ -343,6 +430,62 @@ export function SettingsTab(props: {
 						<ConfigSelect value={typeof data.transport === "string" ? data.transport : ""} options={TRANSPORT_OPTIONS} onChange={(v) => props.onChange({ ...data, transport: v })} placeholder={t("config.general.transportPlaceholder")} />
 					</ClearableSettingsInput>
 				</SettingRow>
+			</SettingsSection>
+
+			{/* ── 工具与 Codemode：defaultTools 单一字段 + codemode 子设置（计划 S 篇）── */}
+			<SettingsSection title={t("config.tools.title")} description={t("config.tools.hint")}>
+				<SettingRow title={<span>{t("config.tools.defaultTools")}</span>} description={t("config.tools.defaultToolsHint")} stacked>
+					<DefaultToolsInput
+						value={Array.isArray(data.defaultTools) ? (data.defaultTools as string[]) : undefined}
+						onChange={(next) => {
+							// undefined = 移除键（回到 pi 默认）；[] = 禁用全部内置工具（pi 语义）
+							if (next === undefined) {
+								const { defaultTools: _removed, ...rest } = data;
+								props.onChange(rest);
+								return;
+							}
+							props.onChange({ ...data, defaultTools: next });
+						}}
+					/>
+					{defaultToolsDisablesAll(data.defaultTools as readonly string[] | undefined) ? <small className="text-caption text-danger">{t("config.tools.allDisabledWarn")}</small> : null}
+				</SettingRow>
+
+				{(() => {
+					const codemode = data.codemode && typeof data.codemode === "object" && !Array.isArray(data.codemode) ? (data.codemode as { mode?: unknown; inlineBudget?: unknown }) : undefined;
+					// 子设置始终允许预配置：codemode 扩展可用且工具被手动/MCP 自动激活后才生效；
+					// 不能仅因为当前 defaultTools 里没写 "+codemode" 就禁用输入（裸名列表、继承层、
+					// MCP 自动激活都会让 codemode 生效）。仅在扩展层被显式关闭时提示原因，不自动改写工具选择。
+					const codemodeDisabledByExtension = (Array.isArray(data.extensions) ? (data.extensions as string[]) : []).some((entry) => entry === "-builtin:codemode");
+					const mode = normalizeCodemodeMode(codemode?.mode);
+					const budget = normalizeCodemodeInlineBudget(codemode?.inlineBudget);
+					return (
+						<>
+							<SettingRow title={<span>{t("config.tools.codemodeMode")}</span>} description={codemodeDisabledByExtension ? t("config.tools.codemodeBuiltinDisabled") : t("config.tools.codemodeModeHint")} alignEnd={false}>
+								<div className={codemodeDisabledByExtension ? "pointer-events-none opacity-50" : ""}>
+									<ClearableSettingsInput empty={typeof mode !== "string"} onClear={() => props.onChange(withCodemode(data, codemode, { mode: undefined }))}>
+										<ConfigSelect value={mode ?? ""} options={CODEMODE_MODE_OPTIONS} onChange={(v) => props.onChange(withCodemode(data, codemode, { mode: normalizeCodemodeMode(v) }))} placeholder={t("config.tools.codemodeModePlaceholder")} />
+									</ClearableSettingsInput>
+								</div>
+							</SettingRow>
+							<SettingRow title={<span>{t("config.tools.codemodeBudget")}</span>} description={codemodeDisabledByExtension ? t("config.tools.codemodeBuiltinDisabled") : t("config.tools.codemodeBudgetHint")} alignEnd>
+								<div className={codemodeDisabledByExtension ? "pointer-events-none opacity-50" : ""}>
+									<Input
+										type="number"
+										min={0}
+										step={500}
+										value={typeof budget === "number" ? budget : ""}
+										onChange={(e) => {
+											const raw = e.target.value.trim();
+											props.onChange(withCodemode(data, codemode, { inlineBudget: raw === "" ? undefined : normalizeCodemodeInlineBudget(Number(raw)) }));
+										}}
+										className="h-8 w-24 rounded-sm border border-border-subtle bg-bg-panel px-3 text-control text-text-primary outline-none focus:border-[var(--color-accent)] focus:shadow-[var(--focus-ring)]"
+										placeholder="3000"
+									/>
+								</div>
+							</SettingRow>
+						</>
+					);
+				})()}
 			</SettingsSection>
 
 			{/* ── 全局会话目录（仅编辑 ~/.pi/agent/settings.json 的 sessionDir） ── */}
@@ -382,37 +525,45 @@ export function SettingsTab(props: {
 				</SettingRow>
 			</SettingsSection>
 
-			{/* ── 会话压缩：拆成开关 + 两个 token 数，避免用户直接改 JSON 对象 ── */}
+			{/* ── 会话压缩：开关 + 百分比滑条（基数=默认模型窗口，识别不到时按参考窗口 200k，滑条始终可用）── */}
 			<SettingsSection title={t("config.compaction.title")} description={t("config.compaction.hint")}>
 				<SettingSwitchRow title={t("config.compaction.enabled")} checked={compactionConfig.enabled} onChange={(checked) => updateCompaction({ enabled: checked })} />
-				<SettingRow title={<span>{t("config.compaction.reserveTokens")}</span>} description={t("config.compaction.reserveTokensHint")}>
-					<Input
-						className="h-8 w-24 rounded-sm border border-border-subtle bg-bg-panel px-3 text-control text-text-primary outline-none focus:border-[var(--color-accent)] focus:shadow-[var(--focus-ring)]"
-						type="number"
-						min={0}
-						step={1024}
-						value={compactionConfig.reserveTokens}
-						onChange={(e) =>
-							updateCompaction({
-								reserveTokens: Math.max(0, Math.floor(Number(e.target.value) || 0)),
-							})
-						}
-					/>
+				{/* 百分比标签显示真实占比（不限制在滑条范围内）；滑条 value 用约束后的百分比，拖动时再换算回绝对 tokens */}
+				<SettingRow title={<span>{t("config.compaction.reserveTokens")}</span>} description={t("config.compaction.reserveTokensHint")} stacked>
+					<div className="flex w-full items-center gap-3">
+						<Slider
+							className="h-4 min-w-0 flex-1"
+							min={COMPACTION_SLIDER_MIN_PERCENT}
+							max={COMPACTION_SLIDER_MAX_PERCENT}
+							step={1}
+							value={[tokensToPercent(compactionConfig.reserveTokens)]}
+							onValueChange={([pct]) => updateCompaction({ reserveTokens: percentToTokens(pct ?? 0) })}
+							aria-label={t("config.compaction.reserveTokens")}
+						/>
+						<span className="w-32 shrink-0 text-right text-control text-text-secondary">
+							{Math.round((compactionConfig.reserveTokens / compactionContextWindow) * 100)}% · ≈{compactionConfig.reserveTokens.toLocaleString()}t
+						</span>
+					</div>
 				</SettingRow>
-				<SettingRow title={<span>{t("config.compaction.keepRecentTokens")}</span>} description={t("config.compaction.keepRecentTokensHint")}>
-					<Input
-						className="h-8 w-24 rounded-sm border border-border-subtle bg-bg-panel px-3 text-control text-text-primary outline-none focus:border-[var(--color-accent)] focus:shadow-[var(--focus-ring)]"
-						type="number"
-						min={0}
-						step={1024}
-						value={compactionConfig.keepRecentTokens}
-						onChange={(e) =>
-							updateCompaction({
-								keepRecentTokens: Math.max(0, Math.floor(Number(e.target.value) || 0)),
-							})
-						}
-					/>
+				<SettingRow title={<span>{t("config.compaction.keepRecentTokens")}</span>} description={t("config.compaction.keepRecentTokensHint")} stacked>
+					<div className="flex w-full items-center gap-3">
+						<Slider
+							className="h-4 min-w-0 flex-1"
+							min={COMPACTION_SLIDER_MIN_PERCENT}
+							max={COMPACTION_SLIDER_MAX_PERCENT}
+							step={1}
+							value={[tokensToPercent(compactionConfig.keepRecentTokens)]}
+							onValueChange={([pct]) => updateCompaction({ keepRecentTokens: percentToTokens(pct ?? 0) })}
+							aria-label={t("config.compaction.keepRecentTokens")}
+						/>
+						<span className="w-32 shrink-0 text-right text-control text-text-secondary">
+							{Math.round((compactionConfig.keepRecentTokens / compactionContextWindow) * 100)}% · ≈{compactionConfig.keepRecentTokens.toLocaleString()}t
+						</span>
+					</div>
 				</SettingRow>
+				<div className="px-1 pb-2 pt-1.5">
+					<small className="text-caption leading-relaxed text-muted-foreground">{hasModelWindow ? t("config.compaction.windowBaseHint", { window: compactionContextWindow.toLocaleString() }) : t("config.compaction.windowRefHint", { window: COMPACT_REFERENCE_WINDOW_TOKENS.toLocaleString() })}</small>
+				</div>
 				<div className="px-1 pb-2 pt-1.5">
 					<small className="text-caption leading-relaxed text-muted-foreground">{t("config.compaction.manualHint")}</small>
 				</div>
@@ -551,9 +702,9 @@ function EnabledModelsInput(props: {
 								onSelect={() => toggleModel(filter)}
 								className={`border border-dashed border-[var(--color-accent)] bg-[color:color-mix(in_srgb,var(--color-accent)_6%,var(--color-bg-popover))] text-control text-text-primary hover:bg-[color:color-mix(in_srgb,var(--color-accent)_12%,transparent)]${selected.has(filter) ? " border-[var(--color-danger)] bg-[color:color-mix(in_srgb,var(--color-danger)_6%,var(--color-bg-popover))]" : ""}`}
 							>
-								<span className="flex size-[18px] shrink-0 items-center justify-center rounded-[4px] border-[1.5px] border-border-strong text-[color:var(--color-accent)]">{selected.has(filter) && <Check size={12} />}</span>
+								<span className="flex size-[18px] shrink-0 items-center justify-center rounded-xs border-[1.5px] border-border-strong text-[color:var(--color-accent)]">{selected.has(filter) && <Check size={12} />}</span>
 								<span className="font-mono text-xs">{filter}</span>
-								<span className="ml-auto font-mono text-[11px] text-text-tertiary">{t("config.settings.enabledModelsGlobHint")}</span>
+								<span className="ml-auto font-mono text-micro text-text-tertiary">{t("config.settings.enabledModelsGlobHint")}</span>
 							</CommandItem>
 						)}
 						{hasResults &&
@@ -574,7 +725,7 @@ function EnabledModelsInput(props: {
 											}}
 										>
 											<span className="flex-1">{provider}</span>
-											<span className="font-mono text-[11px] text-text-tertiary">{grouped[provider].length}</span>
+											<span className="font-mono text-micro text-text-tertiary">{grouped[provider].length}</span>
 										</button>
 									}
 								>
@@ -582,7 +733,7 @@ function EnabledModelsInput(props: {
 										grouped[provider].map((m) => (
 											<CommandItem key={m.fullKey} value={m.fullKey} onSelect={() => toggleModel(m.fullKey)} className={`cursor-pointer gap-2 py-[7px] pr-3 pl-7 text-control text-text-primary ${selected.has(m.fullKey) ? "bg-[color:color-mix(in_srgb,var(--color-accent)_6%,var(--color-bg-panel))]" : ""}`}>
 												<span
-													className={`flex size-[18px] shrink-0 items-center justify-center rounded-[4px] border-[1.5px] border-border-strong text-[color:var(--color-accent)] transition-[border-color,background-color] duration-100${selected.has(m.fullKey) ? " border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)]" : ""}`}
+													className={`flex size-[18px] shrink-0 items-center justify-center rounded-xs border-[1.5px] border-border-strong text-[color:var(--color-accent)] transition-[border-color,background-color] duration-100${selected.has(m.fullKey) ? " border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)]" : ""}`}
 												>
 													{selected.has(m.fullKey) && <Check size={12} />}
 												</span>

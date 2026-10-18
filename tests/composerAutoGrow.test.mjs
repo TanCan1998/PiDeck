@@ -52,7 +52,10 @@ test("footer sizes to content and does not hug a measured pixel height", () => {
 test("extras wrapper rerenders with disclosure so the footer can follow content", () => {
 	assert.match(composerArea, /function ComposerMeasuredExtras/);
 	assert.match(composerArea, /useComposerWidgetLayoutValue\(/);
-	assert.match(composerArea, /<ComposerMeasuredExtras[\s\S]*widgets=\{props\.widgets \?\? null\}/);
+	// widgets 槽直接透传给测量包装（与提交/推送建议条合流的一步已去掉）；
+	// props.widgets 的 ?? null 兜底就在挂载处。
+	assert.match(composerArea, /<ComposerMeasuredExtras[\s\S]{0,200}?widgets=\{props\.widgets \?\? null\}/);
+	assert.match(composerArea, /\{props\.widgets \?\? null\}/);
 });
 
 test("image attachment bar stays glued to the input box", () => {

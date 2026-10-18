@@ -68,7 +68,8 @@ export function AutomationTaskEditor({ task, defaultProjectId, lockProject = fal
 	const [selectedModel, setSelectedModel] = useState<{ provider: string; modelId: string } | undefined>(task?.model);
 	// 执行后端：旧任务无 backend 字段时缺省 pi。切换 dsh 后 mode/thinking 会被
 	// 锁定回继承/普通（DSH 无 plan/goal 扩展与独立思考档位，见下方 UI 约束）。
-	const [backend, setBackend] = useState<TaskBackend>(task?.backend ?? "pi");
+	// automation 首版不支持 acp 后端（主进程白名单同源收窄），显式归一防枚举扩散。
+	const [backend, setBackend] = useState<TaskBackend>(task?.backend === "dsh" ? "dsh" : "pi");
 	const [thinkingLevel, setThinkingLevel] = useState(task?.thinkingLevel ?? "");
 	// 缺省（含旧任务）不在下拉里显示普通模式，而显示「跟随项目/全局」——
 	// 普通模式本就是默认行为，说「跟随」比说「普通」更贴近实际语义。
@@ -287,10 +288,10 @@ export function AutomationTaskEditor({ task, defaultProjectId, lockProject = fal
 						{t("automation.project")} <span className="text-destructive">*</span>
 					</Label>
 					{lockProject ? (
-						<Input id="task-project" value={lockedProjectName} className="h-8 text-xs" disabled />
+						<Input id="task-project" value={lockedProjectName} size="sm" className="text-xs" disabled />
 					) : (
 						<Select value={projectId} onValueChange={setProjectId}>
-							<SelectTrigger id="task-project" className="h-8 text-xs">
+							<SelectTrigger id="task-project" size="sm" className="text-xs">
 								<SelectValue placeholder={t("automation.projectSelect")} />
 							</SelectTrigger>
 							<SelectContent>
@@ -313,7 +314,7 @@ export function AutomationTaskEditor({ task, defaultProjectId, lockProject = fal
 						{t("automation.backend")}
 					</Label>
 					<Select value={backend} onValueChange={(value) => setBackend(value as TaskBackend)}>
-						<SelectTrigger id="task-backend" className="h-8 text-xs">
+						<SelectTrigger id="task-backend" size="sm" className="text-xs">
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>
@@ -328,9 +329,9 @@ export function AutomationTaskEditor({ task, defaultProjectId, lockProject = fal
 					{isDsh && dshBlockReason ? (
 						// DSH runtime 缺失/损坏/过旧：触发时 host 无法 fork，发送会被拦截。
 						// 只提示不动手（安装入口在设置），与 App 发送链路的拦截口径一致。
-						<p className="text-[11px] leading-snug text-destructive">{t("automation.backendDshUnavailable")}</p>
+						<p className="text-micro leading-snug text-destructive">{t("automation.backendDshUnavailable")}</p>
 					) : (
-						<p className="text-[11px] leading-snug text-muted-foreground">{t("automation.backendHint")}</p>
+						<p className="text-micro leading-snug text-muted-foreground">{t("automation.backendHint")}</p>
 					)}
 				</div>
 
@@ -345,7 +346,7 @@ export function AutomationTaskEditor({ task, defaultProjectId, lockProject = fal
 							setMode(value === THINKING_INHERIT ? "" : (value as AutomationTaskMode));
 						}}
 					>
-						<SelectTrigger id="task-mode" className="h-8 text-xs">
+						<SelectTrigger id="task-mode" size="sm" className="text-xs">
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>
@@ -359,7 +360,7 @@ export function AutomationTaskEditor({ task, defaultProjectId, lockProject = fal
 							))}
 						</SelectContent>
 					</Select>
-					<p className="text-[11px] leading-snug text-muted-foreground">{isDsh ? t("automation.dshModeHint") : t("automation.modeHint")}</p>
+					<p className="text-micro leading-snug text-muted-foreground">{isDsh ? t("automation.dshModeHint") : t("automation.modeHint")}</p>
 				</div>
 			</div>
 
@@ -397,7 +398,7 @@ export function AutomationTaskEditor({ task, defaultProjectId, lockProject = fal
 							setThinkingLevel(value === THINKING_INHERIT ? "" : value);
 						}}
 					>
-						<SelectTrigger id="task-thinking" className="h-8 text-xs">
+						<SelectTrigger id="task-thinking" size="sm" className="text-xs">
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>
@@ -421,20 +422,20 @@ export function AutomationTaskEditor({ task, defaultProjectId, lockProject = fal
 				</Label>
 				<div className="grid grid-cols-2 gap-3 md:grid-cols-4">
 					<div className="flex flex-col gap-1">
-						<span className="text-[11px] text-muted-foreground">{t("automation.timeoutMinutes")}</span>
-						<Input type="number" min="1" value={timeoutMinutes} onChange={(e) => setTimeoutMinutes(e.target.value)} placeholder="30" className="h-7 font-mono text-xs" />
+						<span className="text-micro text-muted-foreground">{t("automation.timeoutMinutes")}</span>
+						<Input type="number" min="1" value={timeoutMinutes} onChange={(e) => setTimeoutMinutes(e.target.value)} placeholder="30" size="sm" className="font-mono text-xs" />
 					</div>
 					<div className="flex flex-col gap-1">
-						<span className="text-[11px] text-muted-foreground">{t("automation.maxTokens")}</span>
-						<Input type="number" min="1000" value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} placeholder="e.g. 500000" className="h-7 font-mono text-xs" />
+						<span className="text-micro text-muted-foreground">{t("automation.maxTokens")}</span>
+						<Input type="number" min="1000" value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} placeholder="e.g. 500000" size="sm" className="font-mono text-xs" />
 					</div>
 					<div className="flex flex-col gap-1">
-						<span className="text-[11px] text-muted-foreground">{t("automation.maxCostUsd")}</span>
-						<Input type="number" step="0.01" min="0.01" value={maxCostUsd} onChange={(e) => setMaxCostUsd(e.target.value)} placeholder="e.g. 1.00" className="h-7 font-mono text-xs" />
+						<span className="text-micro text-muted-foreground">{t("automation.maxCostUsd")}</span>
+						<Input type="number" step="0.01" min="0.01" value={maxCostUsd} onChange={(e) => setMaxCostUsd(e.target.value)} placeholder="e.g. 1.00" size="sm" className="font-mono text-xs" />
 					</div>
 					<div className="flex flex-col gap-1">
-						<span className="text-[11px] text-muted-foreground">{t("automation.maxSteps")}</span>
-						<Input type="number" min="1" value={maxSteps} onChange={(e) => setMaxSteps(e.target.value)} placeholder="e.g. 50" className="h-7 font-mono text-xs" />
+						<span className="text-micro text-muted-foreground">{t("automation.maxSteps")}</span>
+						<Input type="number" min="1" value={maxSteps} onChange={(e) => setMaxSteps(e.target.value)} placeholder="e.g. 50" size="sm" className="font-mono text-xs" />
 					</div>
 				</div>
 			</div>

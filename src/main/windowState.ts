@@ -17,6 +17,7 @@ export type LastWindowBounds = {
 	x?: number;
 	y?: number;
 	maximized?: boolean;
+	workArea?: WindowWorkArea;
 };
 
 /** BrowserWindow 当前的最小产品尺寸；workArea 不足时仍优先保留这两个下限。 */
@@ -24,8 +25,8 @@ export const MIN_WINDOW_WIDTH = 880;
 export const MIN_WINDOW_HEIGHT = 640;
 
 /**
- * 普通还原窗口相对显示器 workArea 的安全内边距（DIP）。
- * Windows 原生 resize frame 可能在 Electron bounds 外扩，整 workArea 尺寸会因此越界。
+ * 无位置记录或需要纠正离屏几何时，相对 workArea 的安全内边距（DIP）。
+ * 已记录的可见窗口不套用内边距，否则贴边/吸附位置与尺寸会被改写。
  */
 export const WINDOW_WORK_AREA_INSET = 16;
 
@@ -52,7 +53,11 @@ function normalizeWorkAreaDimension(value: number): number | null {
 /**
  * 将启动几何收敛到目标显示器的 workArea。
  *
- * 尺寸先按 workArea 减安全内边距裁到可容纳；workArea 某一维小于最小窗口尺寸时无法同时
+ * 已记录的位置和尺寸在 workArea 内时直接还原；工作区未变时也保留与其相交的原生外框，
+ * 因为 Windows 的不可见 resize border 可伸出 workArea，并不表示可见窗口越界。
+ * https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowrect
+ *
+ * 其余情况按 workArea 减安全内边距裁到可容纳；workArea 某一维小于最小窗口尺寸时无法同时
  * 满足「完全适配」和现有最小窗口约束，因此保留最小值，避免额外引入会改变产品行为的动态
  * minWidth/minHeight。
  *
@@ -70,6 +75,19 @@ export function constrainWindowBoundsToWorkArea(bounds: LastWindowBounds, workAr
 
 	if (areaWidth === null || areaHeight === null) {
 		return { x: 0, y: 0, width: requestedWidth, height: requestedHeight };
+	}
+
+	if (typeof bounds.x === "number" && typeof bounds.y === "number" && Number.isFinite(bounds.x) && Number.isFinite(bounds.y)) {
+		const x = Math.round(bounds.x);
+		const y = Math.round(bounds.y);
+		const right = x + requestedWidth;
+		const bottom = y + requestedHeight;
+		const areaRight = areaX + areaWidth;
+		const areaBottom = areaY + areaHeight;
+		const fits = x >= areaX && y >= areaY && right <= areaRight && bottom <= areaBottom;
+		const sameWorkArea = bounds.workArea?.x === areaX && bounds.workArea.y === areaY && bounds.workArea.width === areaWidth && bounds.workArea.height === areaHeight;
+		const intersects = x < areaRight && y < areaBottom && right > areaX && bottom > areaY;
+		if (fits || (sameWorkArea && intersects)) return { x, y, width: requestedWidth, height: requestedHeight };
 	}
 
 	const availableWidth = areaWidth - WINDOW_WORK_AREA_INSET * 2;
@@ -113,6 +131,7 @@ export function readLastWindowBounds(dir: string): LastWindowBounds | null {
 				height: Math.round(data.height),
 				...readPosition(data.x, data.y),
 				...(data.maximized === true ? { maximized: true } : {}),
+				...readWorkArea(data.workArea),
 			};
 		}
 	} catch {
@@ -130,6 +149,7 @@ export function saveLastWindowBounds(dir: string, bounds: LastWindowBounds): voi
 			height: Math.round(bounds.height),
 			...readPosition(bounds.x, bounds.y),
 			...(bounds.maximized === true ? { maximized: true } : {}),
+			...readWorkArea(bounds.workArea),
 		};
 		writeFileSync(join(dir, "last-window-bounds.json"), JSON.stringify(payload), "utf8");
 	} catch {
@@ -143,4 +163,14 @@ function readPosition(x: unknown, y: unknown): { x: number; y: number } | Record
 		return { x: Math.round(x), y: Math.round(y) };
 	}
 	return {};
+}
+
+/** 工作区快照用于判断是否可以精确恢复原生外框；旧记录或无效快照仍走原有离屏纠正。 */
+function readWorkArea(value: unknown): { workArea: WindowWorkArea } | Record<string, never> {
+	if (!value || typeof value !== "object" || !("x" in value) || !("y" in value) || !("width" in value) || !("height" in value)) return {};
+	if (typeof value.x !== "number" || typeof value.y !== "number" || !Number.isFinite(value.x) || !Number.isFinite(value.y) || typeof value.width !== "number" || typeof value.height !== "number") return {};
+	const width = normalizeWorkAreaDimension(value.width);
+	const height = normalizeWorkAreaDimension(value.height);
+	if (width === null || height === null) return {};
+	return { workArea: { x: Math.round(value.x), y: Math.round(value.y), width, height } };
 }

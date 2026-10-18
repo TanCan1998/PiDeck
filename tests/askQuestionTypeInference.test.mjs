@@ -62,12 +62,13 @@ function runBatch(tool, params) {
 	return { promise: result, envelope: () => envelope };
 }
 
-/** 断言 schema 层面已放行：items 的 required 不再包含 type。 */
-test("QuestionSchema：type 不在批量 items 的 required 里（校验层不再硬失败）", () => {
+/** 断言 schema 层面已放行：items 的 required 只保留 question（id/type 均可省略）。 */
+test("QuestionSchema：required 只含 question；id/type 省略不触发校验失败", () => {
 	const tool = registerTool();
 	const itemsRequired = JSON.parse(JSON.stringify(tool.parameters.properties.questions.items.required));
 	assert.ok(!itemsRequired.includes("type"), `required 不应包含 type，实际: ${itemsRequired}`);
-	assert.ok(itemsRequired.includes("id") && itemsRequired.includes("question"));
+	assert.ok(!itemsRequired.includes("id"), `required 不应包含 id（toQuestions 会按序号兑底），实际: ${itemsRequired}`);
+	assert.ok(itemsRequired.includes("question"));
 	// 顶层单问题模式的 type 同样不强制（根级属性全部 Optional，required 键可能被省略）
 	const topRequired = JSON.parse(JSON.stringify(tool.parameters.required ?? []));
 	assert.ok(!topRequired.includes("type"));
@@ -123,34 +124,33 @@ test("显式 type 不被推断覆盖：confirm / multi_select / editor 原样生
 	assert.deepEqual(JSON.parse(JSON.stringify(types)), ["confirm", "multi_select", "editor"]);
 });
 
-test("单问题模式缺 type：带 options 走 select（ui.select 收到选项），不带走 input（ui.input）", async () => {
+test("单问题模式也走批量信封：带 options 推断 select、无 options 推断 input，形态与批量一致", async () => {
 	const tool = registerTool();
-
-	// 带 options → select：select 返回合法选项，得到答案
-	const selectCtx = {
-		hasUI: true,
-		ui: { select: async () => "A", confirm: async () => true, input: async () => "", editor: async () => "" },
-	};
-	const selectResult = await tool.execute("call_1", { question: "选一个", options: ["A", "B"] }, undefined, undefined, selectCtx);
-	assert.equal(selectResult.details.type, "select");
-	assert.equal(selectResult.details.answer, "A");
-
+	// 带 options → select：与批量同样的 envelope 载荷（1 题卡）
+	{
+		const { promise, envelope } = runBatch(tool, { question: "选一个", options: ["A", "B"] });
+		await promise;
+		const questions = envelope().questions;
+		assert.equal(questions.length, 1);
+		assert.equal(questions[0].type, "select");
+		// 自定义输入恒定显示：不再依赖模型传 allowOther
+		assert.equal(questions[0].allowOther, true);
+	}
 	// 无 options → input
-	let inputQuestion;
-	const inputCtx = {
-		hasUI: true,
-		ui: {
-			select: async () => "",
-			confirm: async () => true,
-			input: async (question) => {
-				inputQuestion = question;
-				return "hello";
-			},
-			editor: async () => "",
-		},
-	};
-	const inputResult = await tool.execute("call_1", { question: "填个名字" }, undefined, undefined, inputCtx);
-	assert.equal(inputResult.details.type, "input");
-	assert.equal(inputQuestion, "填个名字");
-	assert.equal(inputResult.details.answer, "hello");
+	{
+		const { promise, envelope } = runBatch(tool, { question: "填个名字" });
+		await promise;
+		const questions = envelope().questions;
+		assert.equal(questions[0].type, "input");
+		assert.equal(questions[0].allowOther, undefined);
+	}
+});
+
+test("allowOther:false 传值被接受但不再隐藏自定义输入（恒定显示）", async () => {
+	const tool = registerTool();
+	const { promise, envelope } = runBatch(tool, {
+		questions: [{ id: "q1", question: "选一个", options: ["A", "B"], allowOther: false }],
+	});
+	await promise;
+	assert.equal(envelope().questions[0].allowOther, true);
 });

@@ -248,6 +248,43 @@ test("tintinweb flat subagent shape is not a fork and still resolves its parent 
 	}
 });
 
+test("tintinweb flat subagent with cwd-relative parentSession in project sessionDir still resolves its parent", async () => {
+	const home = mkdtempSync(join(tmpdir(), "pideck-scanner-forked-tintinweb-cwdrel-"));
+	try {
+		// 项目级 sessionDir（.pi/settings.json sessionDir = .pi/sessions）：子代理与父会话
+		// 同目录平铺。@tintinweb/pi-subagents（≤0.19）把 getSessionFile() 的 cwd 相对路径
+		// 写进 parentSession（反斜杠），按会话文件所在目录解析必然落空，只能按会话 cwd 解析。
+		const projectDir = join(home, "proj");
+		const sessionsRoot = join(projectDir, ".pi", "sessions");
+		const parentFile = join(sessionsRoot, "2026-10-02T02-49-23-241Z_01a0fa84-3428-719a-b206-5542d4278256.jsonl");
+		const childFile = join(sessionsRoot, "2026-10-02T02-51-25-563Z_01a0fa86-11fb-719a-b206-5547d93824c3.jsonl");
+		writeSession(parentFile, [
+			{ type: "session", id: "01a0fa84-3428", cwd: projectDir },
+			{ type: "session_info", name: "Parent", cwd: projectDir },
+		]);
+		writeSession(childFile, [
+			{
+				type: "session",
+				version: 3,
+				id: "01a0fa86-11fb",
+				cwd: projectDir,
+				parentSession: join(".pi", "sessions", "2026-10-02T02-49-23-241Z_01a0fa84-3428-719a-b206-5542d4278256.jsonl"),
+			},
+			{ type: "session_info", name: "Explore#ee136937", cwd: projectDir },
+		]);
+
+		const { SessionScanner } = loadSessionScanner(home);
+		const scanner = new SessionScanner();
+		// 项目级 sessionDir 在生产中由 resolveScanRoots 注入；单测直接指向该扫描根。
+		scanner.activeScanRoots = [sessionsRoot];
+		const result = await scanner.inferSessionNameAndValidity(childFile);
+		assert.equal(result.forked, undefined);
+		assert.equal(result.parentSessionPath, parentFile);
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
 test("plain sessions without a parentSession header are never forks", async () => {
 	const home = mkdtempSync(join(tmpdir(), "pideck-scanner-forked-plain-"));
 	try {

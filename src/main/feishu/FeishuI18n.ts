@@ -1,4 +1,7 @@
-export type FeishuLocale = "zh-CN" | "en-US";
+import { isTraditionalChineseLanguageTag } from "../../shared/types/settings";
+import { feishuZhTW } from "./FeishuI18n.zh-TW";
+
+export type FeishuLocale = "zh-CN" | "zh-TW" | "en-US";
 
 type TranslationParams = Record<string, string | number>;
 
@@ -15,6 +18,7 @@ const zhCN = {
 	"attachment.imageDownloadFailed": "⚠️ 图片下载失败，请重试。",
 	"attachment.fileDownloadFailed": "⚠️ 文件下载失败，请重试。",
 	"attachment.fileTooLarge50": "文件过大（超过 50MB），暂不支持处理。",
+	"attachment.pendingFull": "⚠ 暂存附件过多（超过 20 个或 20MB），请先发送文字指令处理已暂存的文件。",
 	"attachment.filesReceived": "已收到文件: {names}，请告诉我需要做什么",
 	"attachment.imageReceived": "已收到图片，请告诉我需要做什么",
 	"command.sendFileUsage": "用法: `/sendfile <文件路径>`",
@@ -28,6 +32,7 @@ const zhCN = {
 	"session.askDisabled": "ℹ️ 本会话已连接飞书：交互式提问（ask）已禁用。Agent 需要确认/选择时会直接把问题写进消息，请直接回复消息回答。",
 	"session.createFailed": "❌ 创建会话失败，请重试。",
 	"session.recovered": "🔄 会话已恢复，新 ID: {id}",
+	"session.backendSwitched": "🔄 会话后端已切换为 {backend}，本对话已换用新会话（{id}）；原对话历史保留在旧会话里（可在 PiDeck 侧栏继续）。",
 	"session.mirrorWelcome": "🤖 Pi Agent 会话已创建\n会话 ID: {id}\n\n直接发消息即可与 Agent 对话。",
 	"session.notBound": "当前没有绑定的会话。",
 	"session.notBoundCreateFirst": "当前没有绑定的会话，请先发消息创建会话。",
@@ -54,7 +59,7 @@ const zhCN = {
 	"model.switched": "✅ 已切换模型为: {model}",
 	"model.switchFailed": "❌ 切换模型失败，请重试。",
 	"model.usage": "格式: provider/modelId，例如 anthropic/claude-sonnet-4",
-	"model.current": "当前模型：`{model}`",
+	"model.current": "当前模型: `{model}`",
 	"model.hiddenNote": "已显示前 {shown} 个模型；其余 {hidden} 个仍可手动发送 /model provider/modelId 切换。",
 	"model.readyNote": "点击按钮即可切换当前会话模型。",
 	"model.title": "切换模型",
@@ -88,7 +93,7 @@ const zhCN = {
 	"run.toolDone": "工具完成: {name}",
 	"card.interrupted": "⏹ 已被中断",
 	"card.failed": "❌ Agent 运行失败，请重试。",
-	"card.waiting": "_等待 Agent 启动..._",
+	"card.waiting": "_等待 Agent 启动…_",
 	"card.noActivity": "_无记录_",
 	"card.hiddenTrail": "_…前面 {count} 条_",
 	"card.truncated": "…（已截断）",
@@ -115,8 +120,8 @@ const zhCN = {
 	"ask.batchHint": "**直接回复消息回答以上问题**，或点击下方取消。",
 	"ask.confirmed": "✅ 已确认",
 	"ask.rejected": "已拒绝",
-	"ask.answered": "✅ 已选择：{answer}",
-	"ask.answeredInput": "✅ 已收到回答：{answer}",
+	"ask.answered": "✅ 已选择: {answer}",
+	"ask.answeredInput": "✅ 已收到回答: {answer}",
 	"ask.cancelled": "已取消该提问",
 	"ask.expired": "⚠️ 该提问已超时或已被处理，无需再操作。",
 	"ask.confirmHint": "⚠️ 当前有待确认的问题，请点击上方卡片中的按钮完成确认。",
@@ -138,6 +143,7 @@ const enUS: Record<FeishuTranslationKey, string> = {
 	"attachment.imageDownloadFailed": "⚠️ Failed to download the image. Try again.",
 	"attachment.fileDownloadFailed": "⚠️ Failed to download the file. Try again.",
 	"attachment.fileTooLarge50": "This file is larger than 50 MB and cannot be processed.",
+	"attachment.pendingFull": "⚠ Too many pending attachments (over 20 items or 20 MB). Send a text instruction first to process the held files.",
 	"attachment.filesReceived": "Received file(s): {names}. Tell me what you want to do with them.",
 	"attachment.imageReceived": "Received the image. Tell me what you want to do with it.",
 	"command.sendFileUsage": "Usage: `/sendfile <file path>`",
@@ -151,6 +157,7 @@ const enUS: Record<FeishuTranslationKey, string> = {
 	"session.askDisabled": "ℹ️ This session is linked to Feishu: interactive ask is disabled. When the Agent needs a confirmation or choice, it writes the question directly in the message — reply with a Feishu message.",
 	"session.createFailed": "❌ Failed to create the session. Try again.",
 	"session.recovered": "🔄 Session restored. New ID: {id}",
+	"session.backendSwitched": "🔄 Session backend switched to {backend}. This chat now uses a new session ({id}); the previous conversation stays in the old session (still in the PiDeck sidebar).",
 	"session.mirrorWelcome": "🤖 Pi Agent session created\nSession ID: {id}\n\nSend a message to start chatting with the Agent.",
 	"session.notBound": "No session is bound to this chat.",
 	"session.notBoundCreateFirst": "No session is bound to this chat. Send a message to create one first.",
@@ -211,7 +218,7 @@ const enUS: Record<FeishuTranslationKey, string> = {
 	"run.toolDone": "Tool completed: {name}",
 	"card.interrupted": "⏹ Interrupted",
 	"card.failed": "❌ The Agent run failed. Try again.",
-	"card.waiting": "_Waiting for the Agent to start..._",
+	"card.waiting": "_Waiting for the Agent to start…_",
 	"card.noActivity": "_No activity_",
 	"card.hiddenTrail": "_…{count} earlier entries_",
 	"card.truncated": "… (truncated)",
@@ -248,14 +255,22 @@ const enUS: Record<FeishuTranslationKey, string> = {
 
 export function normalizeFeishuLocale(locale: unknown): FeishuLocale {
 	if (typeof locale !== "string") return "zh-CN";
-	return locale.toLowerCase().startsWith("en") ? "en-US" : "zh-CN";
+	const normalized = locale.trim();
+	if (normalized.toLowerCase().startsWith("en")) return "en-US";
+	return isTraditionalChineseLanguageTag(normalized) ? "zh-TW" : "zh-CN";
 }
 
 export function feishuLanguage(locale: FeishuLocale): "zh" | "en" {
 	return locale === "en-US" ? "en" : "zh";
 }
 
+const feishuDictionaries: Record<FeishuLocale, Record<FeishuTranslationKey, string>> = {
+	"zh-CN": zhCN,
+	"zh-TW": feishuZhTW,
+	"en-US": enUS,
+};
+
 export function feishuT(locale: FeishuLocale, key: FeishuTranslationKey, params: TranslationParams = {}): string {
-	const template = (locale === "en-US" ? enUS : zhCN)[key];
+	const template = feishuDictionaries[locale][key];
 	return template.replace(/\{([A-Za-z0-9_]+)\}/g, (match, name: string) => (Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : match));
 }

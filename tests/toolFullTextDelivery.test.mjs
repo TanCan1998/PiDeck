@@ -75,3 +75,25 @@ test("ToolCard shows on-demand full-output entry with loading/error states", () 
 	assert.match(toolCard, /setFullError\(true\)/);
 	assert.match(toolCard, /fullOutputLoadFailed/);
 });
+
+test("pi-side truncation is surfaced as resultTruncation meta with copyable path", () => {
+	// pi 0.99 起 bash/powershell 结果 >1 MiB 由 pi 截断，details.fullOutputPath 是
+	// 完整输出所在文件；与展示层 truncated（读会话文件）是两回事，不能混用一个标记。
+	assert.match(formatToolDetail, /export function extractPiToolTruncation\(/);
+	// 运行期（live）与历史投影两条路径都写 meta.resultTruncation
+	assert.match(agentManager, /const piTruncation = extractPiToolTruncation\(result\);/);
+	assert.match(agentManager, /\? \{ resultTruncation: piTruncation \}/);
+	assert.match(projector, /const piTruncation = extractSharedPiTruncation\(result\);/);
+	assert.match(projector, /\? \{ resultTruncation: piTruncation \}/);
+	// 渲染层：单独一行展示路径 + 复制按钮（不代读 pi 的截断文件）
+	assert.match(toolCard, /resultTruncation as \{ fullOutputPath\?: string \} \| undefined/);
+	assert.match(toolCard, /piOutputTruncated/);
+	assert.match(toolCard, /copyTextWithCopiedNotice\(piTruncation\.fullOutputPath/);
+	// 中英文案同步（含参数占位）
+	const zh = readFileSync("src/renderer/src/i18n/rendererCopy.zh-CN.ts", "utf8");
+	const en = readFileSync("src/renderer/src/i18n/rendererCopy.en-US.ts", "utf8");
+	assert.match(zh, /"tool\.piOutputTruncated": ".*\{path\}"/);
+	assert.match(en, /"tool\.piOutputTruncated": ".*\{path\}"/);
+	assert.match(zh, /"tool\.copyPath": "/);
+	assert.match(en, /"tool\.copyPath": "/);
+});

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createRequire } from "node:module";
+import { createRequire, syncBuiltinESMExports } from "node:module";
+import * as esmChildProcess from "node:child_process";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
 // ESM `import * as` 命名空间只读，无法在上面做补丁/还原断言；
@@ -187,6 +188,79 @@ test("installHiddenConsolePatch：非 win32 不安装，win32 安装且可还原
 		restoreWin();
 	}
 	assert.equal(childProcess.spawn, originalSpawn, "还原后 spawn 应恢复原引用");
+});
+
+/** 在补丁安装前加载的 ESM 消费者也必须拿到 sidecar/preload，而非 Electron 原始 spawn。 */
+test("win32 控制台补丁同步提前加载的 ESM 导出，并在还原时同步撤销", () => {
+	const names = ["spawn", "spawnSync", "execFile", "execFileSync", "exec", "execSync"];
+	const originals = Object.fromEntries(names.map((name) => [name, childProcess[name]]));
+	const calls = [];
+	const sidecar = "C:\\app\\node.exe";
+	const preload = "C:\\app\\runnerConsolePreload.js";
+	let restore;
+	try {
+		for (const name of names)
+			childProcess[name] = (...args) => {
+				calls.push({ name, args });
+				return {};
+			};
+		syncBuiltinESMExports();
+		const before = Object.fromEntries(names.map((name) => [name, esmChildProcess[name]]));
+		configureDshRunnerNodeSidecar(sidecar);
+		restore = installHiddenConsolePatch("win32", preload);
+		for (const name of names) {
+			assert.equal(esmChildProcess[name], childProcess[name], `${name} 的 ESM 绑定必须同步补丁`);
+			assert.notEqual(esmChildProcess[name], before[name]);
+		}
+		esmChildProcess.spawn("C:\\app\\electron.exe", ["C:\\runtime\\runner.js", "--", "pwsh.exe"], { env: {}, stdio: ["ignore", "ignore", "ignore", "ipc", "pipe", "pipe", "pipe"] });
+		assert.equal(calls[0].args[0], sidecar);
+		assert.equal(calls[0].args[2].windowsHide, true);
+		assert.ok(calls[0].args[2].env.NODE_OPTIONS.includes("runnerConsolePreload.js"));
+		assert.equal(calls[0].args[2].stdio[3], "ipc", "Job runner 的 IPC 与 target carriers 不得改变");
+		restore();
+		restore = undefined;
+		for (const name of names) assert.equal(esmChildProcess[name], before[name], `${name} 的 ESM 绑定必须同步还原`);
+	} finally {
+		restore?.();
+		configureDshRunnerNodeSidecar(undefined);
+		for (const name of names) childProcess[name] = originals[name];
+		syncBuiltinESMExports();
+	}
+});
+
+/** runner preload 的补丁同样要覆盖 ESM，保证嵌套 runner 不丢失无窗口策略。 */
+test("runner preload 同步提前加载的 ESM spawn 和 spawnSync", () => {
+	const originalSpawn = childProcess.spawn;
+	const originalSpawnSync = childProcess.spawnSync;
+	const calls = [];
+	const sidecar = "C:\\app\\node.exe";
+	try {
+		childProcess.spawn = (...args) => {
+			calls.push(args);
+			return {};
+		};
+		childProcess.spawnSync = (...args) => {
+			calls.push(args);
+			return {};
+		};
+		syncBuiltinESMExports();
+		loadTsCommonJs("src/main/dsh/runnerConsolePreload.ts", {
+			globals: { process: { platform: "win32", execPath: sidecar, env: { PIDECK_DSH_RUNNER_NODE: sidecar } } },
+		});
+		assert.equal(esmChildProcess.spawn, childProcess.spawn, "preload 必须同步 ESM spawn");
+		assert.equal(esmChildProcess.spawnSync, childProcess.spawnSync, "preload 必须同步 ESM spawnSync");
+		for (const spawn of [esmChildProcess.spawn, esmChildProcess.spawnSync]) spawn("C:\\app\\electron.exe", ["C:\\runtime\\runner.js"], { windowsHide: false, env: { PATH: "test" } });
+		assert.equal(calls.length, 2);
+		for (const args of calls) {
+			assert.equal(args[0], sidecar);
+			assert.equal(args[2].windowsHide, true);
+			assert.equal(args[2].env.PATH, "test");
+		}
+	} finally {
+		childProcess.spawn = originalSpawn;
+		childProcess.spawnSync = originalSpawnSync;
+		syncBuiltinESMExports();
+	}
 });
 
 test("win32 普通 spawn：恒注入 windowsHide（CREATE_NO_WINDOW 无窗口可继承控制台）", () => {
@@ -382,33 +456,39 @@ test("runner spawn：强制注入 ELECTRON_RUN_AS_NODE=1（挂起根治：缺它
 	assert.equal(calls[2][2].env.ELECTRON_RUN_AS_NODE, "1", "env 已有值时保持 1（幂等）");
 });
 
-test("runner spawn：-- 尾部 pwsh -Command 追加 exit（沙箱内 pwsh 不退出止血），stdio 不动", () => {
-	// 2026-09-12 automation 实测：沙箱内 pwsh（runner 用 CreateProcessAsUserW 拉起，
-	// 补丁够不着子进程）输出完成后不退出，4/4 挂满 120s 工具超时——在 runner spawn
-	// 边界改写 -- 尾部的 -Command 参数追加 exit。stdio 不能动：runner 可能用 stdin
-	// pipe 向受限命令传数据。
+/** runner 负责超时和进程回收；追加 exit 会丢失 Get-Location 等命令的延迟格式化输出。 */
+test("runner spawn/spawnSync：保留 pwsh 原始命令与管道，不追加 exit 截断输出", () => {
 	installHostHiddenConsole("win32", makeFfi({ getResults: [0, 0xabc] }).koffi);
 	const originalSpawn = childProcess.spawn;
+	const originalSpawnSync = childProcess.spawnSync;
 	const calls = [];
 	childProcess.spawn = (...args) => {
 		calls.push(args);
 		return {};
 	};
+	childProcess.spawnSync = (...args) => {
+		calls.push(args);
+		return {};
+	};
 	const restore = installHiddenConsolePatch("win32", "C:\\app\\out\\main\\runnerConsolePreload.js");
+	const argv = ["C:\\app\\node_modules\\@deepseek-ai\\dsh-sandbox-windows-acl\\lib\\runner.js", "--workspace", "C:\\work", "--", "pwsh.exe", "-NoLogo", "-NonInteractive", "-Command", "Get-Location"];
+	const stdio = ["pipe", "pipe", "pipe", "ipc", "pipe", "pipe", "pipe"];
 	try {
-		childProcess.spawn("C:\\app\\electron.exe", ["C:\\app\\node_modules\\@deepseek-ai\\dsh-sandbox-windows-acl\\lib\\runner.js", "--workspace", "C:\\work", "--", "pwsh.exe", "-NoLogo", "-NonInteractive", "-Command", "Write-Output hi"], { env: { PATH: "x" }, stdio: ["ignore", "pipe", "pipe"] });
-		// 尾部非 pwsh -Command（git）：argv 原样透传
+		for (const spawn of [childProcess.spawn, childProcess.spawnSync]) spawn("C:\\app\\electron.exe", argv, { env: { PATH: "x" }, stdio });
 		childProcess.spawn("C:\\app\\electron.exe", ["C:\\app\\node_modules\\@deepseek-ai\\dsh-sandbox-windows-acl\\lib\\runner.js", "--workspace", "C:\\work", "--", "git.exe", "status"], { env: { PATH: "x" } });
 	} finally {
 		restore();
 		childProcess.spawn = originalSpawn;
+		childProcess.spawnSync = originalSpawnSync;
+		syncBuiltinESMExports();
 	}
-	assert.equal(calls[0][1][8], "Write-Output hi\nexit $LASTEXITCODE", "沙箱 pwsh 命令末尾追加 exit");
-	assert.equal(calls[0][2].stdio[0], "ignore", "runner spawn 的 stdio 不被 pwsh 守卫改动");
-	assert.equal(calls[0][2].stdio[1], "pipe");
-	assert.equal(calls[0][2].env.ELECTRON_RUN_AS_NODE, "1", "ELECTRON_RUN_AS_NODE 注入不受影响");
-	assert.equal(calls[0][2].env.NODE_OPTIONS, '--require="C:\\\\app\\\\out\\\\main\\\\runnerConsolePreload.js"');
-	assert.deepEqual(calls[1][1], ["C:\\app\\node_modules\\@deepseek-ai\\dsh-sandbox-windows-acl\\lib\\runner.js", "--workspace", "C:\\work", "--", "git.exe", "status"], "尾部非 pwsh -Command 时 argv 原样透传");
+	for (const call of calls.slice(0, 2)) {
+		assert.deepEqual(call[1], argv, "不改写 PowerShell 命令，保留原始退出码与格式化输出");
+		assert.deepEqual(call[2].stdio, stdio, "不改动 runner 的 stdin、IPC 与 target carriers");
+		assert.equal(call[2].env.ELECTRON_RUN_AS_NODE, "1");
+		assert.equal(call[2].env.NODE_OPTIONS, '--require="C:\\\\app\\\\out\\\\main\\\\runnerConsolePreload.js"');
+	}
+	assert.deepEqual(calls[2][1], ["C:\\app\\node_modules\\@deepseek-ai\\dsh-sandbox-windows-acl\\lib\\runner.js", "--workspace", "C:\\work", "--", "git.exe", "status"], "非 pwsh 命令也原样透传");
 });
 
 test("win32 补丁：execFile（带 callback）与 exec 恒注入 windowsHide", () => {

@@ -45,25 +45,63 @@ test("右键菜单四项齐备，主操作（默认方式打开）在首位", ()
 });
 
 test("默认方式打开走解析后的路径，失败复用统一错误提示", () => {
-	assert.match(linkSource, /const\s+openWithDefaultApp\s*=\s*\(\)\s*=>\s*\{[\s\S]{0,600}?desktopApi\.files\.open\(resolvedPath,\s*scope\)/);
+	// 项目内：解析后的 resolvedPath + 项目 scope；失败统一走 showOpenFailure（同一份 app.openFileFailed 文案）
+	assert.match(linkSource, /const\s+openWithDefaultApp\s*=\s*\(\)\s*=>\s*\{[\s\S]{0,700}?desktopApi\.files\.open\(resolvedPath,\s*scope\)\.catch\(showOpenFailure\)/);
+	assert.match(linkSource, /const\s+showOpenFailure\s*=[\s\S]{0,220}?app\.openFileFailed/);
 	// 菜单项必须绑到该处理函数，不能内联再复制一份逻辑
 	assert.match(menuBlock(), /<DropdownMenuItem\s+onSelect=\{openWithDefaultApp\}>\s*\{t\("menu\.defaultOpen"\)\}/);
-	assert.match(linkSource, /desktopApi\.files\.open\(resolvedPath,\s*scope\)\.catch\(\(error\)[\s\S]{0,400}?app\.openFileFailed/);
 });
 
-test("系统打开一律使用解析后的 resolvedPath，不透传原始 href", () => {
+test("系统打开一律使用解析后的路径，不透传原始 href", () => {
+	// 项目内走 (resolvedPath, scope)；项目外走 (externalPath)（无项目边界）；分流函数内部用入参 (targetPath, targetScope)
 	const calls = [...linkSource.matchAll(/desktopApi\.files\.open\(([^)]*)\)/g)].map((match) => match[1].replace(/\s+/g, " ").trim());
-	assert.ok(calls.length >= 2, `expected the explorer route and the default-open item, got ${calls.length} call(s)`);
+	assert.ok(calls.length >= 3, `expected explorer route, default-open item and external gate, got ${calls.length} call(s)`);
 	for (const args of calls) {
-		assert.equal(args, "resolvedPath, scope", `unexpected files.open arguments: ${args}`);
+		assert.match(args, /^(resolvedPath, scope|externalPath|targetPath, targetScope)$/, `unexpected files.open arguments: ${args}`);
 	}
+	// 原始 href / 未解码路径绝不能进主进程
+	assert.doesNotMatch(linkSource, /desktopApi\.files\.open\(\s*(fileLinkPath|props\.href|fileLinkRawPath)/);
 });
 
-test("菜单只挂文件链接，且解析失败时不弹", () => {
+test("菜单只挂文件链接，且无可解析路径时不弹", () => {
 	assert.match(linkSource, /onContextMenu=\{(?:isFileLink \|\| isLocalRef) \? handleContextMenu : undefined\}/);
-	assert.match(linkSource, /const\s+handleContextMenu\s*=[\s\S]{0,160}?if\s*\(!resolvedPath\)\s*return;/);
-	// 菜单渲染整体以 resolvedPath 为守卫，避免打开一个空菜单
-	assert.match(linkSource, /\{menu\s*&&\s*resolvedPath\s*&&\s*\(/);
+	assert.match(linkSource, /const\s+handleContextMenu\s*=[\s\S]{0,200}?if\s*\(!menuPath\)\s*return;/);
+	// 菜单渲染整体以 menuPath 为守卫，避免打开一个空菜单
+	assert.match(linkSource, /\{menu\s*&&\s*menuPath\s*&&\s*\(/);
+});
+
+// 项目外引用（issue：AI 生成/操作在项目外的文件点不开）：左键由 App 侧的安全等级门
+// （useExternalPathOpenGate）决定直开 / 二次确认 / 拒绝；右键菜单里的系统动作（默认方式打开 /
+// 在资源管理器中打开）走同一道门，项目内仍按项目边界直连主进程。
+test("项目外路径：菜单系统动作也过安全等级门，项目内仍带项目 scope", () => {
+	assert.match(linkSource, /const\s+externalPath\s*=[\s\S]{0,200}?resolveFileLinkPath\(fileLinkPath,\s*baseDir\)/);
+	assert.match(linkSource, /const\s+menuPath\s*=\s*resolvedPath\s*\?\?\s*externalPath;/);
+	// 门实例挂在链接自己身上（右键菜单本来就是本组件的局部状态），与 App 侧共用同一套判定函数
+	assert.match(linkSource, /const\s*\{\s*requestExternalPathOpen,\s*dialog:\s*externalPathOpenDialog\s*\}\s*=\s*useExternalPathOpenGate\(\)/);
+	// 项目外：两个系统动作都带 kind，且 proceed 里不带 scope（主进程无项目边界）
+	const reveal = /void\s+requestExternalPathOpen\(\{\s*\n\s*kind:\s*"reveal"[\s\S]*?\n\t+\}\);/.exec(linkSource)?.[0];
+	assert.ok(reveal, "「在资源管理器中打开」必须把项目外路径送进安全等级门");
+	assert.doesNotMatch(reveal, /scope/);
+	const defaultApp = /void\s+requestExternalPathOpen\(\{\s*\n\s*kind:\s*"default-app"[\s\S]*?\n\t+\}\);/.exec(linkSource)?.[0];
+	assert.ok(defaultApp, "「默认方式打开」必须把项目外路径送进安全等级门");
+	assert.doesNotMatch(defaultApp, /scope/);
+	// 项目内继续直连主进程（带 scope），不能因为「项目外可开」就绕开项目边界
+	assert.match(linkSource, /if\s*\(resolvedPath\)\s*\{[\s\S]{0,140}?desktopApi\.files\.open\(resolvedPath,\s*scope\)/);
+	assert.match(linkSource, /revealInExplorer\(resolvedPath,\s*scope\)/);
+	// 「复制绝对路径」不带条件，项目外也能拿到路径
+	assert.match(menuBlock(), /<DropdownMenuItem\s+onSelect=\{copyAbsolutePath\}>/);
+	assert.match(linkSource, /const\s+copyAbsolutePath\s*=[\s\S]{0,200}?writeClipboard\(menuPath\)/);
+	// 确认弹框必须挂在链接上，否则菜单触发的确认框无处渲染
+	assert.match(linkSource, /\{externalPathOpenDialog\}/);
+});
+
+test("可执行/脚本后缀对项目外不提供「默认方式打开」", () => {
+	// canOpenWithDefaultApp：项目内始终给；项目外由 isExecutableLikePath 把关（shell.openPath 等于执行）
+	assert.match(linkSource, /const\s+canOpenWithDefaultApp\s*=\s*resolvedPath\s*!==\s*null\s*\|\|\s*\(externalPath\s*!==\s*null\s*&&\s*!isExecutableLikePath\(externalPath\)\)/);
+	assert.match(menuBlock(), /\{canOpenWithDefaultApp\s*&&\s*\(/);
+	assert.match(linkSource, /import\s*\{\s*isExecutableLikePath\s*\}\s*from\s*"\.\.\/\.\.\/utils\/externalPathAccessPolicy"/);
+	// 「在资源管理器中打开」无条件渲染（menuPath 保证菜单有目标），只唤起文件管理器、不读内容
+	assert.match(menuBlock(), /<DropdownMenuItem\s+onSelect=\{openInExplorer\}>/);
 });
 
 test("复制相对路径在项目外禁用", () => {

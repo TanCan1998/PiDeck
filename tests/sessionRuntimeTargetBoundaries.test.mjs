@@ -6,6 +6,7 @@ import { mainIpcSource } from "./helpers/mainIpcSources.mjs";
 const main = readFileSync("src/main/index.ts", "utf8");
 const preload = readFileSync("src/preload/index.ts", "utf8");
 const terminalDock = readFileSync("src/renderer/src/components/terminal/TerminalDock.tsx", "utf8");
+const terminalDockTabs = readFileSync("src/renderer/src/hooks/useTerminalDockTabs.ts", "utf8");
 const pet = readFileSync("src/main/pet/index.ts", "utf8");
 const app = readFileSync("src/renderer/src/App.tsx", "utf8");
 const previewApi = readFileSync("src/renderer/src/previewApi.ts", "utf8");
@@ -22,11 +23,14 @@ test("terminal creation and listing cross IPC with an owner-validated target", (
 	assert.match(preload, /ensure: \(target: TerminalTarget\)/);
 	assert.match(preload, /create: \(target: TerminalTarget, shell\?: TerminalShell\)/);
 	assert.match(terminalDock, /target: TerminalTarget/);
-	assert.match(terminalDock, /props\.terminal\.ensure\(props\.target\)/);
-	assert.match(terminalDock, /props\.terminal\.create\(props\.target, shell\)/);
+	// 终端 facade 迁入 useTerminalDockTabs（dev 结构），IPC 仍统一校验 target（远端 feature 的 unknown 入参收窄）。
+	assert.match(terminalDock, /useTerminalDockTabs\(\s*\{\s*target:\s*props\.target,\s*terminal:\s*props\.terminal,/);
+	assert.match(terminalDockTabs, /terminal\.ensure\(scope\.target\)/);
+	assert.match(terminalDockTabs, /scope\.terminal\.create\(scope\.target,\s*shell\)/);
 	assert.match(mainIpcSource, /const requireTerminalTarget = \(value: unknown\)[\s\S]*target\.kind === "project"[\s\S]*projectStore\.get\(target\.projectId\)[\s\S]*sessionRuntimeCoordinator\.validateTarget\(target\)/);
 	assert.match(mainIpcSource, /terminalList[\s\S]*requireTerminalTarget\(rawTarget\)[\s\S]*terminalManager\.list\(target\)/);
-	assert.match(mainIpcSource, /terminalCreate[\s\S]*requireTerminalTarget\(rawTarget\)[\s\S]*terminalManager\.create\(target, parseTerminalShell\(rawShell\)\)/);
+	// shell 在边界解析一次，本地/远端分支共用（远端 manager 尚未实现时也不改变本地语义）。
+	assert.match(mainIpcSource, /terminalCreate[\s\S]*requireTerminalTarget\(rawTarget\)[\s\S]*const shell = parseTerminalShell\(rawShell\)[\s\S]*terminalManager\.create\(target, shell\)/);
 	assert.doesNotMatch(main, /ipcMain\.handle\(ipcChannels\.terminal/);
 });
 

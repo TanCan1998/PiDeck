@@ -150,7 +150,9 @@ test("drawer host renders an injected activity rail while open", () => {
 	assert.match(shell, /drawerRail\?: ReactNode/);
 	assert.match(shell, /rail=\{drawerRail\}/);
 	// App：右侧栏开关只做开/关（不再半折叠）；rail 切换语义仍由 handleToolDrawerAction 承载
-	assert.match(app, /handleToolDrawerAction\s*=\s*useCallback\(\s*\(panel: WorkspaceDrawerPanel\)\s*=>/);
+	//（#9 拆分后收口在 useSessionFileLinks；App 只接线）
+	const fileLinks = readFileSync("src/renderer/src/hooks/workspace/useSessionFileLinks.ts", "utf8");
+	assert.match(fileLinks, /handleToolDrawerAction\s*=\s*useCallback\(\s*\(panel: WorkspaceDrawerPanel\)\s*=>/);
 	assert.match(app, /const toggleRightDrawer = useCallback\(\(\) => \{\n\s*if \(workspace\.drawer\) \{\n\s*workspace\.closeDrawer\(\);/);
 });
 
@@ -165,7 +167,7 @@ test("project hydration does not clobber a user-opened drawer", () => {
 test("drawer defaults closed on project load; pin restores per project", () => {
 	// 换项目 / 水合默认关闭；钉住面板按项目持久化恢复（合并对方抽屉重构）
 	assert.match(hook, /setDrawer\(null\)/);
-	assert.match(hook, /saved\?\.pinned/);
+	assert.match(hook, /saved\?\.drawerPinned === true/);
 	assert.match(hook, /toggleDrawerPinned/);
 	const tabs = readFileSync("src/renderer/src/components/session/SessionTabsBar.tsx", "utf8");
 	assert.match(tabs, /header-drawer-toggle/);
@@ -176,6 +178,36 @@ test("drawer defaults closed on project load; pin restores per project", () => {
 	const surface = readFileSync("src/renderer/src/components/session/WorkspaceSurface.tsx", "utf8");
 	assert.doesNotMatch(surface, /drawer\.pin/);
 	assert.doesNotMatch(surface, /onTogglePin/);
+});
+
+// 回归（2026-10 用户反馈「抽屉开关按钮点击无反应、文件/Git tab 切换无反应」）：
+// 水合绝不能从「保存的面板 ∈ pinnedPanels」推断工作区钉住——files/git 恒在默认
+// pinnedPanels 里，推断会让每个打开过抽屉的项目在启动/切换时自动钉死抽屉，
+// closeDrawer/collapseDrawer/openDrawer(其他面板) 全部静默 no-op。
+// 钉住只能恢复显式持久化的 drawerPinned 标志（toggleDrawerPinned 写入）。
+test("hydration never infers the workspace pin from panel membership", () => {
+	assert.match(hook, /restoredPinned = saved\?\.drawerPinned === true && saved\.panel && nextPinnedPanels\.includes\(saved\.panel\)/);
+	assert.doesNotMatch(hook, /restoredPinned = saved\?\.panel && /);
+	// 显式钉住要落盘，否则重启后钉住态丢失
+	assert.match(hook, /saveDrawerState\(id, currentDrawer, nextPanels, willPin\)/);
+	// 读旧存档（无 drawerPinned 字段）必须得到 false，天然向后兼容
+	assert.match(hook, /const drawerPinned = value\.drawerPinned === true/);
+});
+
+// 回归（2026-10 用户反馈「新加 tab 的 remove 错位在加号后面」）：X 按钮必须与
+// 所属 tab 同 Fragment 成组渲染，加号下拉收尾；不得把所有 X 堆在加号后面。
+test("drawer rail renders each remove button right after its tab", () => {
+	const rail = readFileSync("src/renderer/src/components/workspace/WorkspaceDrawerRail.tsx", "utf8");
+	assert.match(rail, /<Fragment key=\{action\.id\}>/);
+	// X 在 tab 按钮之后、同一个 Fragment 内
+	const fragmentStart = rail.indexOf("<Fragment key={action.id}>");
+	const fragmentEnd = rail.indexOf("</Fragment>", fragmentStart);
+	assert.ok(fragmentStart > -1 && fragmentEnd > fragmentStart, "rail 应以 Fragment 按 tab 分组渲染");
+	assert.match(rail.slice(fragmentStart, fragmentEnd), /drawer-rail-remove/);
+	// 加号下拉在所有 tab 分组之后收尾（remove 不再出现在加号之后）
+	assert.ok(rail.indexOf("drawer-rail-remove") < rail.indexOf("<Plus size={16} />"), "remove 按钮应紧跟各自 tab，位于加号之前");
+	// 常驻 tab（files/git，canRemove=false）不渲染 X
+	assert.match(rail, /action\.canRemove && action\.pinned && action\.onTogglePinned \?/);
 });
 
 // 回归（点叉无法关闭 tab / 最后 tab 不收起侧边栏）：

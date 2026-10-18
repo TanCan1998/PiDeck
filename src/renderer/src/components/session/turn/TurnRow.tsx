@@ -3,13 +3,13 @@ import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type
 import { ChevronUp, Clock, Share, SquarePen, Trash } from "lucide-react";
 import { atom, useAtomValue, useSetAtom } from "jotai";
 import { selectAtom } from "jotai/utils";
-import type { AgentBackend, ImageContent } from "../../../../../shared/types";
+import type { AgentBackend, ChatMessage, ImageContent } from "../../../../../shared/types";
 import { liveTextActiveBySessionAtom, newTurnCollapseTickBySessionIdAtomFamily, runStepsVisibleMemoryBySessionIdAtomFamily, type RunStepsVisibleMemoryEntry } from "../../../atoms/session-atoms";
 import { turnFlowSettingsAtom } from "../../../atoms/app-ui-atoms";
 import { t } from "../../../i18n";
 import { Button } from "../../ui-shadcn/button";
 import { Collapsible, CollapsibleContent } from "../../ui-shadcn/collapsible";
-import { formatDuration, stripAnsi, stripThinkingTags } from "../TimelineFormat";
+import { formatDuration } from "../TimelineFormat";
 import { LiveDuration } from "../LiveDuration";
 import { CopyMenu, stripMarkdown } from "../SurfaceComponents";
 import { buildTurnDisplay, hasFoldableContent } from "../timeline/buildTurnDisplay";
@@ -17,6 +17,7 @@ import { groupTurnProcess, lastProcessGroup } from "../timeline/groupTurnProcess
 import { boundMountedSteps, TIMELINE_MOUNTED_STEP_LIMIT } from "../timeline/turnMountBudget";
 import { resolveLiveInterimId } from "../timeline/liveMount";
 import { buildProcessSummary } from "../timeline/segmentSummary";
+import { pickEditableAssistantMessage, visibleAssistantText } from "../timeline/editableAnswerTarget";
 import type { AgentRunItem, MessageItem } from "../timeline/types";
 import { sameAgentRunForRender } from "../../app/AppUtils";
 import { FinalAnswer } from "./FinalAnswer";
@@ -29,7 +30,9 @@ import { ThinkingStep } from "./ThinkingStep";
 import { RetryStep } from "./RetryStep";
 import { ErrorStep } from "./ErrorStep";
 import { ToolStep } from "./ToolStep";
+import { ExtensionEntryStep } from "./ExtensionEntryStep";
 import { useTurnExecution } from "./useTurnExecution";
+import { BridgeGuiSlot, useBridgeThinkingLabel } from "../../bridge/BridgeSlot";
 import type { DiffFileHandler } from "../ToolCallComponents";
 
 /** sessionId 为空时的占位 atom：恒 false（无会话不挂 live）。 */
@@ -57,6 +60,8 @@ export type TurnRowProps = {
 	sessionId?: string;
 	/** 运行时后端（pi/dsh）：决定行头回复者署名；缺省 "pi"（旧调用方兼容） */
 	backend?: AgentBackend;
+	/** ACP 工具 id（会话记录绑定）：行头按它显示对应 CLI 的品牌 logo，缺省回退通用终端图标。 */
+	acpToolId?: string;
 	/** 新消息入场动画：仅发送后尾部新增的消息播放一次 */
 	fresh?: boolean;
 	/** 上滚窗口扩展时顶部新增的轮次：播放「从顶部淡入」过渡（2026-12 体验优化） */
@@ -70,7 +75,7 @@ export type TurnRowProps = {
 	onOpenFile?: (path: string, line?: number) => void;
 	onDiffFile?: DiffFileHandler;
 	onResendUserMessage?: (message: never) => void;
-	onEditMessage?: (messageId: string, newText: string, entryId?: string) => void;
+	onEditMessage?: (message: ChatMessage, newText: string) => void;
 	onDeleteMessage?: (messageId: string, entryId?: string) => void;
 	/** 当前模型回合活跃时为 true，驱动正文/过程的 live 渲染与完成判定。 */
 	agentRunning?: boolean;
@@ -182,6 +187,9 @@ export const TurnRow = memo(function TurnRow(props: TurnRowProps) {
 	// 流式对话行为设置（App 同步写入）+ 新一轮信号（composer 发送成功后 bump）。
 	// 设置变化低频；tick 经 atomFamily selectAtom 隔离，跨会话 bump 不触发本行重渲染。
 	const flowSettings = useAtomValue(turnFlowSettingsAtom);
+	// GUI 扩展桥：扩展设的折叠思考块标签（ctx.ui.setHiddenThinkingLabel）。
+	// 无贡献时为 undefined，ThinkingBlock 保持原生耗时小字（§7.4 只追加）。
+	const bridgeThinkingLabel = useBridgeThinkingLabel(props.sessionId);
 	const newTurnCollapseTick = useAtomValue(props.sessionId ? newTurnCollapseTickBySessionIdAtomFamily(props.sessionId) : NO_TURN_TICK_ATOM);
 	// 执行过程展开状态跨挂载记忆（run 级）：切会话再切回时恢复手动/流式展开的
 	// 轮次；selectAtom 按 run.id 取值，同会话其它 run 变化不重渲染本行。
@@ -208,7 +216,6 @@ export const TurnRow = memo(function TurnRow(props: TurnRowProps) {
 		hasFinalAnswer,
 		isLatestRun: props.isLatestRun,
 		expandInterimDuringStream: flowSettings.expandInterimDuringStream,
-		collapsePrevRunsOnNewTurn: flowSettings.collapsePrevRunsOnNewTurn,
 		newTurnCollapseTick,
 		autoCollapseTick: props.autoCollapseTick,
 		onAutoCollapsed: props.onAutoCollapsed,
@@ -228,7 +235,7 @@ export const TurnRow = memo(function TurnRow(props: TurnRowProps) {
 	const stepsFullyExpanded = expandedStepsRunId === run.id;
 	const mountedSteps = useMemo(() => boundMountedSteps(foldableItems, TIMELINE_MOUNTED_STEP_LIMIT, stepsFullyExpanded), [foldableItems, stepsFullyExpanded]);
 
-	/* ── 过程组模式（实验开关 processGroupDisplay；关闭时走下面原有的扁平渲染） ──
+	/* ── 过程组模式（processGroupDisplay；关闭时走下面原有的扁平渲染） ──
 	 * 纯函数把扁平序列切成「中间回复 / 过程组 / 一级行」交替序列（见 timeline/groupTurnProcess.ts）。
 	 * 手风琴语义（与用户确认）：
 	 * - 大折叠栏展开时，自动槽指向**最新**的那个过程组；
@@ -254,25 +261,38 @@ export const TurnRow = memo(function TurnRow(props: TurnRowProps) {
 	for (const item of assistantMessages) {
 		if (item.message.images) allImages.push(...item.message.images);
 	}
-	// 合并后的完整文本仅用于编辑/复制/删除等操作栏，不用于展示
+	// 合并后的完整文本仅用于复制等操作栏（复制整轮输出），不得作为编辑初值（issue #310）
 	const mergedText = assistantMessages
-		.map((item) => stripThinkingTags(stripAnsi(item.message.text)).trim())
+		.map((item) => visibleAssistantText(item.message.text))
 		.filter(Boolean)
 		.join("\n\n");
 	const containsImageGen = assistantMessages.some((item) => Boolean(item.message.meta?.imageGen));
+	// 编辑目标与编辑初值同源：最后一条有可见正文的 assistant 消息，加载/保存/按钮显隐都指向它
+	const editableMessage = pickEditableAssistantMessage(assistantMessages);
+	// 本轮回答用的模型（逐轮展示）：取本轮最后一条带模型信息的 assistant 消息。
+	// 同一会话内用户会频繁换模型，只有逐轮记录才能看出哪段是谁答的；
+	// 旧数据/ACP 会话没有该字段时留空，行头不占位。
+	// 本轮模型名：取最后一条带 model 的 assistant 消息（同轮内一般同源），显示在底部耗时行。
+	let turnModel: ChatMessage["model"];
+	for (let index = assistantMessages.length - 1; index >= 0 && !turnModel; index -= 1) {
+		turnModel = assistantMessages[index]?.message.model;
+	}
+	// 只在本轮结束后显示：流式期间模型名跟着正文一起长出来，既干扰阅读也像「已经定稿」的断言；
+	// 回看历史轮用的是哪个模型只关心定论，故与固定耗时（showDuration 的非 live 分支）同一时机出现。
+	const showTurnModel = !isRunLive && Boolean(turnModel);
 
 	// 本轮没有任何可渲染内容时不输出空容器
 	if (displayItems.length === 0 && allImages.length === 0) return null;
 
 	const startEditing = () => {
-		setEditText(mergedText);
+		// 只加载编辑目标自身的正文；mergedText 聚合了中间回复，当初值会在原样保存时把
+		// 中间回复重复写进末条 entry（issue #310），禁止回退到聚合初值
+		setEditText(visibleAssistantText(editableMessage?.message.text ?? ""));
 		setEditing(true);
 	};
 	const saveEdit = () => {
-		const targetId = assistantMessages.at(-1)?.message.id;
-		// entryId：流式期间消息 id 是 live randomUUID，文件定位必须用投影携带的 entryId
-		if (targetId && props.onEditMessage) {
-			props.onEditMessage(targetId, editText, messageEntryId(assistantMessages.at(-1)?.message));
+		if (editableMessage && props.onEditMessage) {
+			props.onEditMessage(editableMessage.message, editText);
 			setEditing(false);
 		}
 	};
@@ -284,9 +304,9 @@ export const TurnRow = memo(function TurnRow(props: TurnRowProps) {
 	return (
 		<article ref={rowRef} className={`turn-row mb-6 w-full min-w-0 max-w-full ${props.agentRunning && !isComplete ? "turn-row--running" : isComplete ? "turn-row--complete" : "turn-row--pending"} ${props.fresh ? "turn-row--fresh" : ""} ${props.topFresh ? "turn-row--top-fresh" : ""}`} data-message-id={run.id}>
 			<div className="flex min-w-0 flex-col gap-3">
-				{/* 行头：头像 + Pi/DSH 署名 + 时间。耗时不放行头——回复生成时用户视线在底部，
-				    统一显示在 turn 尾部（见底部耗时行），不用翻回开头看跑了多久。 */}
-				<TurnAuthorHeader backend={props.backend} endedAt={run.endedAt} />
+				{/* 行头：头像 + Pi/DSH 署名 + 时间。耗时与本轮模型名都不放行头——回复生成时用户视线在底部，
+				    统一显示在 turn 尾部（见底部耗时行），不用翻回开头看跑了多久、用的是哪个模型。 */}
+				<TurnAuthorHeader backend={props.backend} acpToolId={props.acpToolId} endedAt={run.endedAt} />
 
 				{/* 执行过程折叠栏：中间内容（思考/工具/中间回答）统一收进容器，
 				    由 stepsVisible 整体控制显隐；最终回答在容器外常驻。
@@ -329,7 +349,7 @@ export const TurnRow = memo(function TurnRow(props: TurnRowProps) {
 										// 用 Tailwind utility 对齐旧 CSS 的 token（不新增手写 class）。
 										<button
 											type="button"
-											className="mt-1 inline-flex h-[26px] items-center gap-2 self-start rounded-[var(--radius-md)] border border-border-subtle bg-[var(--color-chat-card-bg)] px-3 text-[length:var(--font-size-caption)] font-medium text-text-secondary transition-colors hover:border-border-strong hover:bg-bg-hover hover:text-text-primary"
+											className="mt-1 inline-flex h-[26px] items-center gap-2 self-start rounded-[var(--radius-md)] border border-border-subtle bg-[var(--color-chat-card-bg)] px-3 text-chat-detail font-medium text-text-secondary transition-colors hover:border-border-strong hover:bg-bg-hover hover:text-text-primary"
 											onClick={() => setExpandedStepsRunId(run.id)}
 											title={t("timeline.showEarlierSteps", { count: mountedSteps.hiddenCount })}
 										>
@@ -344,13 +364,16 @@ export const TurnRow = memo(function TurnRow(props: TurnRowProps) {
 											if (item.kind === "process-entry") {
 												itemKey = item.entry.id;
 												if (item.entry.kind === "thinking-entry") {
-													content = <ThinkingStep group={item.entry.group} hidden={!stepsVisible} showThinking={props.showThinking} onOpenExternal={props.onOpenExternal} onOpenFile={props.onOpenFile} />;
+													content = <ThinkingStep group={item.entry.group} hidden={!stepsVisible} showThinking={props.showThinking} onOpenExternal={props.onOpenExternal} onOpenFile={props.onOpenFile} sessionId={props.sessionId} hiddenLabel={bridgeThinkingLabel} />;
 												} else if (item.entry.kind === "retry-entry") {
 													// 自动重试过程行：与工具/思考同层，失败红、运行中旋转（见 RetryStep 注释）
 													content = <RetryStep group={{ kind: "retry-group", id: item.entry.id, message: item.entry.message }} hidden={!stepsVisible} />;
 												} else if (item.entry.kind === "error-entry") {
 													// 错误诊断过程行：429 等错误并入工具调用，可点开看具体错误（见 ErrorStep 注释）
 													content = <ErrorStep group={{ kind: "error-group", id: item.entry.id, message: item.entry.message }} hidden={!stepsVisible} />;
+												} else if (item.entry.kind === "extension-entry") {
+													// 扩展输出行（平铺路径）：无流式状态，隐藏时直接卸载即可
+													content = stepsVisible ? <ExtensionEntryStep messages={item.entry.messages} /> : null;
 												} else {
 													content = <ToolStep group={item.entry.group} hidden={!stepsVisible} stopped={props.agentRunning !== true} sessionId={props.sessionId} onOpenFile={props.onOpenFile} />;
 												}
@@ -368,6 +391,8 @@ export const TurnRow = memo(function TurnRow(props: TurnRowProps) {
 														// 折叠区内一律 process：正文已与最终回答同尺寸，process 只负责 my-3 间距。
 														// 无最终回答的末段也要这段间距，否则会贴着上方工具行。
 														variant="process"
+														// 中间回复引用锚点：settled 正文根节点带 data-message-id，划选可解析来源消息。
+														messageId={item.id}
 														onOpenExternal={props.onOpenExternal}
 														onOpenFile={props.onOpenFile}
 													/>
@@ -416,14 +441,15 @@ export const TurnRow = memo(function TurnRow(props: TurnRowProps) {
 					</div>
 				))}
 
-				{/* 操作栏 + 尾部耗时：合并为同一行，耗时排在行末（少占一行高度）。
+				{/* 操作栏 + 尾部耗时/模型：合并为同一行，耗时与模型排在行末（少占一行高度）。
 				    耗时：回复生成中由 LiveDuration 实时计时（100ms 连续跳动，用户视线在底部），
 				    回复结束后固定为总耗时。全轮只有一个耗时显示点（行头只留时间戳），
 				    避免开头结尾重复；无最终回答的轮（纯工具/思考）只有耗时、无按钮，同样可见。
-				    透明度：半透明降噪（hover/focus-within 恢复）必须盖住整行——按钮图标与行末耗时同一层，
+				    本轮模型名跟在耗时之后（同一行同一层）：回看历史轮用的是哪个模型时视线不用翻回行头。
+				    透明度：半透明降噪（hover/focus-within 恢复）必须盖住整行——按钮图标与行末耗时/模型同一层，
 				    否则出现「图标偏淡、数字偏深」的割裂观感；无按钮时不降噪（没有需要弱化的交互件）。
 				    ask_question 等待回答期间不增长：冻结在提问弹起时刻，等待不计入处理耗时。 */}
-				{((mergedText && !editing) || showDuration) && (
+				{((mergedText && !editing) || showDuration || showTurnModel) && (
 					<div className={`flex min-h-6 items-center gap-1${mergedText && !editing ? " opacity-55 transition-opacity hover:opacity-100 focus-within:opacity-100" : ""}`}>
 						{mergedText && !editing && (
 							<>
@@ -431,7 +457,7 @@ export const TurnRow = memo(function TurnRow(props: TurnRowProps) {
 								<Button type="button" variant="ghost" size="icon-sm" className="turn-row-action-btn size-7 rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground" onClick={props.onEnterMultiSelect} title={t("app.multiSelectEnter")}>
 									<Share size={14} />
 								</Button>
-								{!props.isStreaming && !props.isRuntimeBusy && assistantMessages.at(-1)?.message.id && (
+								{!props.isStreaming && !props.isRuntimeBusy && editableMessage?.message.id && (
 									<>
 										{props.onEditMessage && (
 											<Button type="button" variant="ghost" size="icon-sm" className="turn-row-action-btn size-7 rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground" onClick={startEditing} title={t("common.edit")}>
@@ -457,9 +483,24 @@ export const TurnRow = memo(function TurnRow(props: TurnRowProps) {
 								<span className="text-body leading-none tabular-nums">{isRunLive && run.askPending ? formatDuration(Math.max(0, (run.askPendingAt ?? effectiveStart) - effectiveStart)) : isRunLive ? <LiveDuration startedAt={effectiveStart} isStreaming /> : formatDuration(duration)}</span>
 							</div>
 						)}
+						{showTurnModel && turnModel && (
+							/* 本轮实际使用的模型（provider + modelId）跟在耗时后面：同一会话内用户会频繁换模型，
+							   只在输入框显示当前模型不足以回看历史轮；流式中不显示，回复结束才落定。
+							   做成小标签而不是同号纯文本：左边耗时是读数（text-body + 等宽数字），
+							   模型名是名字，同色同号时两段会连成一句「2m18s global:xxx」读不断。
+							   模型名长短不一（如 global:deepseek-v4.1-flash），限宽截断 + title 给全量 provider/model，
+							   不让长名字把行末撑开或换行。 */
+							<span className="ml-1 min-w-0 max-w-[16rem] truncate rounded-sm bg-muted/60 px-1.5 py-0.5 text-chat-detail font-medium leading-none text-muted-foreground" title={`${turnModel.provider}/${turnModel.modelId}`} data-turn-model={turnModel.modelId}>
+								{turnModel.modelId}
+							</span>
+						)}
 					</div>
 				)}
 			</div>
+			{/* GUI 扩展桥：消息气泡附加落点（ctx.gui.setMessageExtra，key = role）。
+			    TurnRow 渲染的是助手回合，故按 role="assistant" 匹配。
+			    **追加在默认内容下方**，不顶替气泡（§7.1-B / §7.4）。无贡献时不占位。 */}
+			<BridgeGuiSlot sessionId={props.sessionId} slot="message.extra" matchKey="assistant" className="mt-1 flex flex-col gap-1" />
 		</article>
 	);
 }, turnRowPropsEqual);

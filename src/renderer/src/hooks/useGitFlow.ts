@@ -1,3 +1,4 @@
+import { t as i18nT } from "../i18n";
 import { useCallback, useState } from "react";
 import type { AgentTab, GitBranchInfo, Project } from "../../../shared/types";
 
@@ -31,7 +32,7 @@ export interface UseGitFlowInput {
 	/** Projects list API */
 	projectsList: () => Promise<Project[]>;
 	/** Translation function */
-	t: (...args: any[]) => string;
+	t: typeof i18nT;
 }
 
 export interface UseGitFlowOutput {

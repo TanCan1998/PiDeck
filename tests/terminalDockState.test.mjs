@@ -383,3 +383,19 @@ test("pane terminal resolves agent target from its own runtime and project fallb
 	// 既无 agent 也无 project → undefined
 	assert.equal(resolvePaneTerminal({ sessionId: "session-5", runtime: undefined }), undefined);
 });
+
+test("appendTerminalReplayBuffer 追加并按 200K 上界截尾", () => {
+	const { appendTerminalReplayBuffer, TERMINAL_REPLAY_MAX_CHARS } = loadTerminalDockStateModule();
+	assert.equal(TERMINAL_REPLAY_MAX_CHARS, 200_000);
+	assert.equal(appendTerminalReplayBuffer("", "abc"), "abc");
+	assert.equal(appendTerminalReplayBuffer("ab", "cd"), "abcd");
+
+	// 超限：只保留最近 200K 字符，且尾部完整（exit 文案不能被截掉）
+	const capped = appendTerminalReplayBuffer("x".repeat(250_000), "tail");
+	assert.equal(capped.length, 200_000);
+	assert.ok(capped.endsWith("tail"));
+
+	// 精确等于上界时不截尾（避免无谓的 slice）
+	const exact = appendTerminalReplayBuffer("y".repeat(200_000), "");
+	assert.equal(exact.length, 200_000);
+});

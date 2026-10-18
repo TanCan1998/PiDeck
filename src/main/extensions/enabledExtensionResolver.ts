@@ -2,7 +2,7 @@ import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, relative, sep } from "node:path";
 import type { DisabledExtensionEntry } from "../../shared/types";
-import { listActiveBuiltInExtensionPaths, type BuiltInExtensionPathRoots } from "./builtInExtensions";
+import { INTERNAL_BUILT_IN_EXTENSIONS, listActiveBuiltInExtensionPaths, type BuiltInExtensionPathRoots } from "./builtInExtensions";
 import { applyPatterns, readSettingsObject, readStringArray, resolveFromBase, splitResourceEntries } from "../resourceWhitelist";
 import { readProjectResourceOverrides } from "../projects/projectResourceOverrides";
 import { resolveConfiguredPackageResources } from "../packageResourceResolver";
@@ -21,21 +21,26 @@ export type EnabledExtensionResolverOptions = {
 	disabled: DisabledExtensionEntry[];
 	/** 已移除的内置扩展（独立机制，不参与 disabled 列表）。 */
 	removedBuiltInExtensions: readonly string[];
+	/** 用户显式开启的「默认关闭」内置扩展（opt-in 集合，见 DEFAULT_DISABLED_BUILT_IN_EXTENSIONS）。 */
+	enabledBuiltInExtensions?: readonly string[];
 	/** 内置扩展资源根（dev / packaged）。 */
 	builtInRoots: BuiltInExtensionPathRoots;
 };
 
 /**
- * Resolve the exact extension whitelist used with `--no-extensions`. Sources and filters mirror
- * pi 0.85, while PiDeck's scope-qualified disabled identities remain isolated from each other.
+ * 列出「本次会话会加载的扩展入口路径」。
+ *
+ * 语义（供压缩归属启发式等只读查询使用，不再用于 argv 白名单注入）：
+ * 按 pi 的发现规则枚举 user/project 的 packages、本地扩展目录与 settings 显式路径，
+ * 叠加原生 `!`/`+`/`-` 过滤与 PiDeck 旧禁用记录（迁移未完成时仍存在），返回最终会加载的路径。
+ * **始终返回数组**（没有禁用项时就是全部），避免调用方再用 null 表达「无白名单」。
  */
-export function resolveEnabledExtensionPaths(options: EnabledExtensionResolverOptions): string[] | null {
+export function resolveLoadableExtensionPaths(options: EnabledExtensionResolverOptions): string[] {
 	const { disabled, cwd } = options;
 	const includeProjectResources = options.includeProjectResources !== false;
 	const projectBaseDir = join(cwd, CONFIG_DIR_NAME);
 	const inheritedDisabled = includeProjectResources ? readProjectResourceOverrides(cwd).disabledGlobalExtensions : [];
 	const projectDisabled = includeProjectResources ? readProjectDisabledExtensionSources(projectBaseDir) : [];
-	if (includeProjectResources && disabled.length === 0 && inheritedDisabled.length === 0 && projectDisabled.length === 0) return null;
 
 	const agentDir = join(options.agentHomeDir?.trim() || homedir(), CONFIG_DIR_NAME, "agent");
 	const effectiveDisabled: DisabledExtensionEntry[] = [...disabled, ...inheritedDisabled.map<DisabledExtensionEntry>((source) => ({ scope: "user", source })), ...projectDisabled.map<DisabledExtensionEntry>((source) => ({ scope: "project", source }))];
@@ -91,8 +96,12 @@ export function resolveEnabledExtensionPaths(options: EnabledExtensionResolverOp
 		if (resource.enabled && isEnabled(resource.scope, resource.source)) addPath(resource.path);
 	}
 
-	for (const path of listActiveBuiltInExtensionPaths(options.builtInRoots, options.removedBuiltInExtensions)) {
-		if (!inheritedDisabled.includes(basename(path)) && isEnabled("user", basename(path))) addPath(path);
+	for (const path of listActiveBuiltInExtensionPaths(options.builtInRoots, options.removedBuiltInExtensions, options.enabledBuiltInExtensions ?? [])) {
+		const name = basename(path);
+		const isInternal = (INTERNAL_BUILT_IN_EXTENSIONS as readonly string[]).includes(name);
+		// 内部适配器不是用户可见扩展，必须始终跟随 RPC 加载；否则用户手动写入
+		// disabledExtensions / 项目覆盖时会悄悄关闭代理隔离保护。
+		if (isInternal || (!inheritedDisabled.includes(name) && isEnabled("user", name))) addPath(path);
 	}
 	return paths;
 }

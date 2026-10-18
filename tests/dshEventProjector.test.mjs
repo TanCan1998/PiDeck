@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
-const { projectDshEvent } = loadTsCommonJs("src/main/dsh/dshEventProjector.ts");
+const { projectDshEvent, parseDshInboxProjection } = loadTsCommonJs("src/main/dsh/dshEventProjector.ts");
 
 const AGENT = "dsh:session-test";
 
@@ -508,6 +508,25 @@ test("tool/call 与 tool/result 投影工具消息（结果拼到工具行）", 
 	assert.match(p.messages[0].meta?.detailText ?? "", /C:\\work/);
 });
 
+test("V4 扁平工具结果保留顶层 isError 并按 toolCallId 匹配", () => {
+	let p = projectDshEvent(undefined, event("tool/call", 1, { toolName: "pwsh", callId: "failed" }), AGENT);
+	p = projectDshEvent(p, event("tool/call", 2, { toolName: "read", callId: "success" }), AGENT);
+	p = projectDshEvent(p, event("tool/result", 3, { message: { role: "tool", toolCallId: "failed", isError: true, content: [{ type: "text", text: "permission denied" }] } }), AGENT);
+	assert.equal(p.messages[0].meta.status, "error");
+	assert.match(p.messages[0].meta.detailText, /permission denied/);
+	assert.equal(p.messages[1].meta.status, "running");
+	p = projectDshEvent(p, event("tool/result", 4, { message: { role: "tool", toolCallId: "success", isError: false, content: [{ type: "text", text: "ok" }] } }), AGENT);
+	assert.equal(p.messages[1].meta.status, "done");
+	assert.equal(p.executingTool, undefined);
+});
+
+test("已知但未加载的工具 callId 不能错误覆盖最后一张卡", () => {
+	let p = projectDshEvent(undefined, event("tool/call", 1, { toolName: "read", callId: "visible" }), AGENT);
+	p = projectDshEvent(p, event("tool/result", 2, { message: { role: "tool", toolCallId: "off-page", isError: true, content: [{ type: "text", text: "not visible" }] } }), AGENT);
+	assert.equal(p.messages[0].meta.status, "running");
+	assert.equal(p.executingTool, "read");
+});
+
 test("并行工具结果按 callId 精确收口（乱序到达不串卡）", () => {
 	let p = projectDshEvent(
 		undefined,
@@ -931,6 +950,80 @@ test("assistant/message usage 缺失/全零：不写 meta.usage、不覆盖已�
 	assert.equal(p.usage?.inputTokens, 50);
 });
 
+test("V4 冷读恢复 reasoning.text 和事件顶层 usage，兼容旧版内层 usage", () => {
+	const p = projectDshEvent(
+		undefined,
+		event("assistant/message", 5, {
+			turn: 1,
+			step: 1,
+			stream: [],
+			message: {
+				role: "assistant",
+				content: [
+					{ type: "reasoning", text: "V4 thought" },
+					{ type: "text", text: "answer" },
+				],
+				usage: { inputTokens: 1, outputTokens: 1 },
+			},
+			usage: { inputTokens: 120, outputTokens: 45, cacheReadTokens: 30 },
+		}),
+		AGENT,
+	);
+	assert.equal(p.messages[0].thinking, "V4 thought");
+	assert.equal(p.messages[0].text, "answer");
+	assert.equal(p.usage.inputTokens, 120);
+	assert.equal(p.messages[0].meta.usage.outputTokens, 45);
+	assert.equal(p.messages[0].meta.usage.cacheReadTokens, 30);
+});
+
+test("V4 顶层 usage 更新流式骨架，终态思考覆盖增量兜底", () => {
+	let p = projectDshEvent(undefined, event("assistant/chunk", 1, { chunk: { type: "reasoning-delta", text: "partial" } }), AGENT);
+	p = projectDshEvent(
+		p,
+		event("assistant/message", 2, {
+			message: {
+				content: [
+					{ type: "reasoning", text: "complete" },
+					{ type: "text", text: "done" },
+				],
+			},
+			usage: { inputTokens: 9, outputTokens: 4 },
+		}),
+		AGENT,
+	);
+	assert.equal(p.messages.length, 1);
+	assert.equal(p.messages[0].id, "dsh:1");
+	assert.equal(p.messages[0].thinking, "complete");
+	assert.equal(p.messages[0].meta.usage.inputTokens, 9);
+});
+
+test("V4 system/message 恢复、更新并显式清空系统提示，不进入聊天时间线", () => {
+	let p = projectDshEvent(
+		undefined,
+		event("system/message", 0, {
+			message: {
+				role: "system",
+				content: [
+					{ type: "text", text: "system" },
+					{ type: "text", text: " prompt" },
+				],
+			},
+		}),
+		AGENT,
+	);
+	assert.equal(p.systemPrompt, "system prompt");
+	assert.equal(p.stateChanged, true);
+	p = projectDshEvent(p, event("request/header", 1, { header: { config: { provider: "p", model: "m" } } }), AGENT);
+	assert.equal(p.systemPrompt, "system prompt");
+	p = projectDshEvent(p, event("system/message", 2, { message: { role: "system", content: [] } }), AGENT);
+	assert.equal(p.systemPrompt, "");
+	assert.equal(p.messages.length, 0);
+	assert.equal(p.messagesChanged, false);
+	p = projectDshEvent(p, event("system/message", 3, { message: {} }), AGENT);
+	assert.equal(p.systemPrompt, "", "malformed content does not replace the known value");
+	assert.equal(p.stateChanged, false);
+});
+
 test("request/header 折叠系统提示（EpochHeader.system，last wins）", () => {
 	// DSH 系统提示由 harness 在请求时组装（persona + sections），request/header 事件
 	// 携带完整文本（dsh-web 轨迹同源）；同一会话多次请求头取最后一次。
@@ -1182,4 +1275,44 @@ test("assistant/live-chunk：非 delta 块（工具调用等）不产生骨架",
 	);
 	assert.equal(p.pendingAssistantId, undefined);
 	assert.equal(p.isStreaming, false);
+});
+
+test("parseDshInboxProjection：合法投影归一化为排队项（next-turn 在前，文本拼接）", () => {
+	const parsed = parseDshInboxProjection({
+		"next-turn": [
+			{ id: "q1", content: [{ type: "text", text: "接着做" }] },
+			{
+				id: "q2",
+				content: [
+					{ type: "text", text: "带图" },
+					{ type: "image", mediaType: "image/png", data: "x" },
+				],
+			},
+		],
+		"next-step": [{ id: "q3", content: [{ type: "text", text: "中途插入" }] }],
+	});
+	// vm 跨 realm 数组不做 deepEqual（对象原型不同 realm），逐字段断言。
+	assert.equal(parsed.length, 3);
+	assert.deepEqual({ ...parsed[0] }, { id: "q1", target: "next-turn", text: "接着做" });
+	assert.deepEqual({ ...parsed[1] }, { id: "q2", target: "next-turn", text: "带图 [+1]" });
+	assert.deepEqual({ ...parsed[2] }, { id: "q3", target: "next-step", text: "中途插入" });
+});
+
+test("parseDshInboxProjection：空数组是合法值（排队被消费/清空）", () => {
+	assert.equal(parseDshInboxProjection({ "next-turn": [], "next-step": [] }).length, 0);
+});
+
+test("parseDshInboxProjection：缺任一必填键返回 undefined（脏帧不得清空已有排队）", () => {
+	assert.equal(parseDshInboxProjection({ "next-turn": [] }), undefined);
+	assert.equal(parseDshInboxProjection(null), undefined);
+	assert.equal(parseDshInboxProjection("x"), undefined);
+});
+
+test("parseDshInboxProjection：单项非法只跳过该项（id 非字符串无法操作）", () => {
+	const parsed = parseDshInboxProjection({
+		"next-turn": [{ id: "q1", content: [{ type: "text", text: "ok" }] }, { content: [] }, null, { id: "", content: [] }],
+		"next-step": [],
+	});
+	assert.equal(parsed.length, 1);
+	assert.deepEqual({ ...parsed[0] }, { id: "q1", target: "next-turn", text: "ok" });
 });

@@ -1,7 +1,7 @@
 /**
  * pideck-session-bridge：PiDeck ↔ DSH host 的会话冷读元数据桥。
  *
- * 背景（0.1.5 Typert Remote 契约，见 docs/dsh-0.1.5-typert-migration.md）：
+ * 背景（Typert Remote 契约，见 docs/dsh-remote-contract.md）：
  * `session/page` 的 `throughSeq` 是「包含式日志切点」，必须 ≤ 该会话当前
  * cursor，超出直接 `gateway/bad-request`；官方约定这个值来自 `session/follow`
  * 的开帧快照（官方 client 的 SessionEventStream 就是「先 open follow、再拿快照

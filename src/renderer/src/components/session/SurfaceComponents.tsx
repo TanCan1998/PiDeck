@@ -1,13 +1,16 @@
 import { Fragment, isValidElement, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject, type WheelEvent as ReactWheelEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { messageEntryId } from "../../utils/sessionCommands";
 import { toBlob } from "html-to-image";
-import { writeClipboardImage } from "../../utils/clipboard";
+import { writeClipboard, writeClipboardImage } from "../../utils/clipboard";
 import { MarkdownStream } from "./MarkdownStream";
 import { PreviewRail, type PreviewRailItem } from "../motion/preview-rail";
 import { planRailTicks } from "./timeline/outlineRailTicks";
 import { areOutlineRailItemsEqual, createOutlineItemIndex, resolveVisibleRailActiveId } from "./timeline/outlineRailActive";
 import { useTimelineOutlineActiveId } from "./timeline/useTimelineOutlineActiveId";
 import { useAtomValue } from "jotai";
+import type { TpsDisplayMode } from "../../../../shared/types/settings";
+import { tpsDisplayModeAtom } from "../../atoms/tps-atoms";
+import { buildTpsDisplay } from "../../utils/tpsDisplay";
 import "katex/dist/katex.min.css";
 
 /**
@@ -100,6 +103,8 @@ import { normalizeSessionPathForCompare } from "../../agentListDisplay";
 import { t } from "../../i18n";
 import { cn } from "../../lib/utils";
 import { showNotice } from "../../utils/notice";
+import { desktopApi } from "../../desktopApi";
+import { ImageActionButtons } from "./imageActions";
 import { Button } from "../ui-shadcn/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../ui-shadcn/dropdown-menu";
 import type {
@@ -174,7 +179,7 @@ type SessionModifiedFile = {
  */
 export const USD_TO_CNY_RATE = 7.2;
 
-export type SessionDetailRow = { label: string; value: string; emphasis?: boolean };
+export type SessionDetailRow = { label: string; value: string; emphasis?: boolean /** 悬停说明：解释这行指标怎么算的（用户可自行核对口径） */; hint?: string };
 
 export type SessionStatusDetail = {
 	detailRows: SessionDetailRow[];
@@ -190,9 +195,10 @@ export type SessionStatusDetail = {
  * 纯函数：label/value 已本地化，调用方只负责布局。
  */
 export function buildSessionStatusDetail(
-	state: Pick<AgentRuntimeState, "contextPercent" | "contextTokens" | "contextWindow" | "inputTokens" | "outputTokens" | "cacheRead" | "cacheWrite" | "cacheTotal" | "cacheHitPercent" | "ttftMs" | "totalMs" | "tps" | "cost" | "dshSessionStats"> | undefined,
+	state: Pick<AgentRuntimeState, "contextPercent" | "contextTokens" | "contextWindow" | "inputTokens" | "outputTokens" | "cacheRead" | "cacheWrite" | "cacheTotal" | "cacheHitPercent" | "ttftMs" | "totalMs" | "tps" | "endToEndTps" | "sessionTps" | "sessionEndToEndTps" | "cost" | "dshSessionStats"> | undefined,
 	averageCacheHit: number | undefined,
 	averageCacheHitSampleCount: number,
+	tpsMode: TpsDisplayMode = "streaming",
 ): SessionStatusDetail {
 	const detailRows: SessionDetailRow[] = [];
 	const replyPerfRows: SessionDetailRow[] = [];
@@ -206,6 +212,7 @@ export function buildSessionStatusDetail(
 		detailRows.push({
 			label: t("ctx.detail.context"),
 			value: `${state.contextPercent != null ? `${formatPercent(state.contextPercent)}%` : "-"} / ${formatCompact(state.contextTokens)} / ${formatCompact(state.contextWindow)}`,
+			hint: t("ctx.detail.contextHint"),
 		});
 	}
 	if (state.inputTokens != null || state.outputTokens != null) {
@@ -213,46 +220,52 @@ export function buildSessionStatusDetail(
 		detailRows.push({
 			label: t("ctx.detail.tokens"),
 			value: `${formatCompact(state.inputTokens)} / ${formatCompact(state.outputTokens)}`,
+			hint: t("ctx.detail.tokensHint"),
 		});
 	}
 	if (state.cacheRead != null || state.cacheWrite != null) {
 		detailRows.push({
 			label: t("ctx.detail.cacheIO"),
 			value: `${t("ctx.detail.cacheRead")} ${formatCompact(state.cacheRead)} / ${t("ctx.detail.cacheWrite")} ${formatCompact(state.cacheWrite)}`,
+			hint: t("ctx.detail.cacheIOHint"),
 		});
 	}
 	if (state.cacheTotal != null) {
 		detailRows.push({
 			label: t("ctx.detail.cacheTotal"),
 			value: formatCompact(state.cacheTotal),
+			hint: t("ctx.detail.cacheTotalHint"),
 		});
 	}
 	if (state.cacheHitPercent != null) {
 		detailRows.push({
 			label: t("ctx.detail.hitLatest"),
 			value: `${state.cacheHitPercent.toFixed(1)}%`,
+			hint: t("ctx.detail.hitLatestHint"),
 		});
 	}
 	if (averageCacheHit != null) {
 		detailRows.push({
 			label: t("ctx.detail.hitAverage"),
 			value: `${averageCacheHit.toFixed(1)}% (${averageCacheHitSampleCount} ${t("ctx.detail.snapshots")})`,
+			hint: t("ctx.detail.hitAverageHint"),
 		});
 	}
 	// 这些值来自 AgentManager 的 lastPerfByAgent，只代表最近一条 assistant 回复，
 	// 不能和上下文累计量混在同一组，否则用户会误以为是整段会话的平均性能。
 	if (state.ttftMs != null) {
-		replyPerfRows.push({ label: t("ctx.detail.ttft"), value: formatDuration(state.ttftMs) });
+		replyPerfRows.push({ label: t("ctx.detail.ttft"), value: formatDuration(state.ttftMs), hint: t("ctx.detail.ttftHint") });
 	}
 	if (state.totalMs != null) {
-		replyPerfRows.push({ label: t("ctx.detail.total"), value: formatDuration(state.totalMs) });
+		replyPerfRows.push({ label: t("ctx.detail.total"), value: formatDuration(state.totalMs), hint: t("ctx.detail.totalHint") });
 	}
-	if (state.tps != null) {
-		replyPerfRows.push({ label: t("ctx.detail.tps"), value: `${state.tps.toFixed(0)} tok/s` });
+	if (state.tps != null || state.endToEndTps != null || state.totalMs != null) {
+		const throughput = buildTpsDisplay(tpsMode, state.tps, state.endToEndTps, "reply");
+		replyPerfRows.push({ label: throughput.label, value: throughput.value, hint: throughput.hint });
 	}
 	if (state.cost != null) {
-		detailRows.push({ label: t("ctx.detail.cost"), value: `$${state.cost.toFixed(3)}`, emphasis: true });
-		detailRows.push({ label: t("ctx.detail.costCny"), value: cnyAmount ?? "-", emphasis: true });
+		detailRows.push({ label: t("ctx.detail.cost"), value: `$${state.cost.toFixed(3)}`, emphasis: true, hint: t("ctx.detail.costHint") });
+		detailRows.push({ label: t("ctx.detail.costCny"), value: cnyAmount ?? "-", emphasis: true, hint: t("ctx.detail.costCnyHint") });
 	}
 	// DSH 会话统计（host sessionStats 投影，dsh-web StatsLine 同源）：整段日志的
 	// 回合/步骤计数与墙钟汇总。与 pi 的「上次回复」性能组语义不同，独立成组展示。
@@ -261,19 +274,22 @@ export function buildSessionStatusDetail(
 		sessionStatRows.push({
 			label: t("ctx.detail.turnsSteps"),
 			value: `${sessionStats.turns} / ${sessionStats.steps}`,
+			hint: t("ctx.detail.turnsStepsHint"),
 		});
 		if (sessionStats.llmMs > 0) {
-			sessionStatRows.push({ label: t("ctx.detail.llmDuration"), value: formatDuration(sessionStats.llmMs) });
+			sessionStatRows.push({ label: t("ctx.detail.llmDuration"), value: formatDuration(sessionStats.llmMs), hint: t("ctx.detail.llmDurationHint") });
 		}
 		if (sessionStats.toolMs > 0) {
-			sessionStatRows.push({ label: t("ctx.detail.toolDuration"), value: formatDuration(sessionStats.toolMs) });
+			sessionStatRows.push({ label: t("ctx.detail.toolDuration"), value: formatDuration(sessionStats.toolMs), hint: t("ctx.detail.toolDurationHint") });
 		}
 		if (sessionStats.ttftAvgMs != null) {
-			sessionStatRows.push({ label: t("ctx.detail.ttftAverage"), value: formatDuration(sessionStats.ttftAvgMs) });
+			sessionStatRows.push({ label: t("ctx.detail.ttftAverage"), value: formatDuration(sessionStats.ttftAvgMs), hint: t("ctx.detail.ttftAverageHint") });
 		}
-		if (sessionStats.tokensPerSecond != null) {
-			sessionStatRows.push({ label: t("ctx.detail.tps"), value: `${sessionStats.tokensPerSecond.toFixed(0)} tok/s` });
-		}
+		const throughput = buildTpsDisplay(tpsMode, sessionStats.tokensPerSecond, sessionStats.endToEndTokensPerSecond, "session");
+		sessionStatRows.push({ label: throughput.label, value: throughput.value, hint: throughput.hint });
+	} else if (state.sessionTps != null || state.sessionEndToEndTps != null) {
+		const sessionThroughput = buildTpsDisplay(tpsMode, state.sessionTps, state.sessionEndToEndTps, "sessionAverage");
+		sessionStatRows.push({ label: sessionThroughput.label, value: sessionThroughput.value, hint: sessionThroughput.hint });
 	}
 	return {
 		detailRows,
@@ -289,6 +305,7 @@ export function SessionStatus(props: {
 	/** 本会话历史缓存命中率快照，用于展示会话平均命中率 */
 	cacheHitHistory?: number[];
 }) {
+	const tpsMode = useAtomValue(tpsDisplayModeAtom);
 	const state = props.state;
 	if (!state) return null;
 	// 会话平均缓存命中率：主进程基于会话文件全部 assistant 消息 usage 算出的
@@ -296,7 +313,7 @@ export function SessionStatus(props: {
 	const history = props.cacheHitHistory ?? [];
 	const averageCacheHit = state.cacheHitAveragePercent ?? (history.length > 0 ? history.reduce((sum, value) => sum + value, 0) / history.length : undefined);
 	const averageCacheHitSampleCount = state.cacheHitSampleCount ?? history.length;
-	const { detailRows, replyPerfRows, sessionStatRows, hasDetail } = buildSessionStatusDetail(state, averageCacheHit, averageCacheHitSampleCount);
+	const { detailRows, replyPerfRows, sessionStatRows, hasDetail } = buildSessionStatusDetail(state, averageCacheHit, averageCacheHitSampleCount, tpsMode);
 	// cost-chip 悬浮提示里的人民币估算（与明细行共用同一汇率常量）
 	const cnyAmount = state.cost != null ? `¥${(state.cost * USD_TO_CNY_RATE).toFixed(2)}` : undefined;
 
@@ -340,7 +357,7 @@ export function SessionStatus(props: {
 					</div>
 					<div className="grid gap-1">
 						{detailRows.map((row) => (
-							<div key={row.label} className={`flex items-baseline justify-between gap-4 px-1 py-0.5 text-caption leading-5${row.emphasis ? " mt-1 border-t border-border/70 pt-1.5" : ""}`}>
+							<div key={row.label} title={row.hint} className={`flex items-baseline justify-between gap-4 px-1 py-0.5 text-caption leading-5${row.emphasis ? " mt-1 border-t border-border/70 pt-1.5" : ""}`}>
 								<span className="shrink-0 text-muted-foreground">{row.label}</span>
 								<span className="min-w-0 whitespace-nowrap text-right font-mono font-semibold tabular-nums text-popover-foreground">{row.value}</span>
 							</div>
@@ -350,7 +367,7 @@ export function SessionStatus(props: {
 						<div className="mt-2.5 grid gap-1 border-t border-border/70 pt-2">
 							<div className="px-1 text-micro font-semibold uppercase tracking-wide text-muted-foreground">{t("ctx.detail.lastReply")}</div>
 							{replyPerfRows.map((row) => (
-								<div key={row.label} className="flex items-baseline justify-between gap-4 px-1 py-0.5 text-caption leading-5">
+								<div key={row.label} title={row.hint} className="flex items-baseline justify-between gap-4 px-1 py-0.5 text-caption leading-5">
 									<span className="shrink-0 text-muted-foreground">{row.label}</span>
 									<span className="min-w-0 whitespace-nowrap text-right font-mono font-semibold tabular-nums text-popover-foreground">{row.value}</span>
 								</div>
@@ -361,7 +378,7 @@ export function SessionStatus(props: {
 						<div className="mt-2.5 grid gap-1 border-t border-border/70 pt-2">
 							<div className="px-1 text-micro font-semibold uppercase tracking-wide text-muted-foreground">{t("ctx.detail.sessionStats")}</div>
 							{sessionStatRows.map((row) => (
-								<div key={row.label} className="flex items-baseline justify-between gap-4 px-1 py-0.5 text-caption leading-5">
+								<div key={row.label} title={row.hint} className="flex items-baseline justify-between gap-4 px-1 py-0.5 text-caption leading-5">
 									<span className="shrink-0 text-muted-foreground">{row.label}</span>
 									<span className="min-w-0 whitespace-nowrap text-right font-mono font-semibold tabular-nums text-popover-foreground">{row.value}</span>
 								</div>
@@ -420,7 +437,7 @@ export function EmptyState(props: {
 		<div className="empty-state relative h-full min-h-0 overflow-hidden bg-transparent px-6 text-left" data-empty-state={props.hasProject ? "project" : "no-project"}>
 			<div className="mx-auto flex h-full w-full max-w-2xl animate-in flex-col justify-center pt-[10vh] duration-500 fade-in">
 				{/* 章节页眉：发丝线 + 项目上下文，建立编辑排版的节奏起点 */}
-				<div className="flex items-center gap-4 text-[13px] text-text-secondary">
+				<div className="flex items-center gap-4 text-control text-text-secondary">
 					<span className="h-px flex-1 bg-border-subtle" aria-hidden="true"></span>
 					{props.eyebrow}
 				</div>
@@ -437,7 +454,7 @@ export function EmptyState(props: {
 						t("app.emptyNoProjectTitle")
 					)}
 				</h2>
-				<p className="mt-6 max-w-md animate-in text-[15px] leading-7 delay-100 duration-500 fade-in fill-mode-backwards text-text-secondary">{description}</p>
+				<p className="mt-6 max-w-md animate-in text-title leading-7 delay-100 duration-500 fade-in fill-mode-backwards text-text-secondary">{description}</p>
 				{/* actions 是左对齐的主从按钮区，跟随阅读动线而不是居中悬浮 */}
 				<div className="mt-10 animate-in delay-200 duration-500 fade-in fill-mode-backwards slide-in-from-bottom-2">
 					{props.actions ??
@@ -596,14 +613,14 @@ export const AssistantText = memo(
  * 事件数据来自扩展写的 pi-deck-vision-events.jsonl（经 IPC 拉取），与消息文本里的图片 #N 序号同源。 */
 function VisionBridgeDetail(props: { events: VisionEventsInfo | null; loading: boolean }) {
 	if (props.loading) {
-		return <p className="mt-2 text-[11px] text-muted-foreground">…</p>;
+		return <p className="mt-2 text-micro text-muted-foreground">…</p>;
 	}
 	const batch = props.events?.events.filter((e) => e.kind === "input").at(-1);
 	if (!batch) {
-		return <p className="mt-2 text-[11px] text-muted-foreground">{t("app.visionNoEvents")}</p>;
+		return <p className="mt-2 text-micro text-muted-foreground">{t("app.visionNoEvents")}</p>;
 	}
 	return (
-		<div className="mt-2 max-h-56 overflow-y-auto border-t border-border/60 pt-2 text-[11px] leading-relaxed text-muted-foreground">
+		<div className="mt-2 max-h-56 overflow-y-auto border-t border-border/60 pt-2 text-micro leading-relaxed text-muted-foreground">
 			<div className="flex flex-wrap items-center gap-x-3 gap-y-1">
 				<span className="font-mono text-foreground/80">{batch.model}</span>
 				<span>{formatDuration(batch.totalDurationMs)}</span>
@@ -640,8 +657,9 @@ export const UserBubble = memo(function UserBubble(props: {
 	onPreviewImage: (image: ImageContent) => void;
 	onOpenFile?: (path: string) => void;
 	onResendUserMessage?: (message: ChatMessage) => void;
-	onEditMessage?: (messageId: string, newText: string, entryId?: string) => void;
+	onEditMessage?: (message: ChatMessage, newText: string) => void;
 	onDeleteMessage?: (messageId: string, entryId?: string) => void;
+	onRemoveMessageImage?: (message: ChatMessage, index: number) => void;
 	/** 从该用户消息 fork 新会话；忙碌时不展示入口 */
 	onForkMessage?: (message: ChatMessage) => void;
 	/** 回退工作区文件到该消息时刻前最近的检查点；仅 pi 后端注入（rewind 能力） */
@@ -677,6 +695,11 @@ export const UserBubble = memo(function UserBubble(props: {
 	// 溢出检测用 ResizeObserver 对比 scrollHeight/clientHeight，折叠态下才测量（展开态保持按钮可见）。
 	const [messageExpanded, setMessageExpanded] = useState(false);
 	const [messageOverflowing, setMessageOverflowing] = useState(false);
+	// 文件 chip 右键菜单：记录光标坐标（Radix 受控 dropdown 按不可见 Trigger 矩形定位）
+	const [fileChipMenu, setFileChipMenu] = useState<{ path: string; x: number; y: number } | null>(null);
+	const openFileChipMenu = useCallback((path: string, x: number, y: number) => {
+		setFileChipMenu({ path, x, y });
+	}, []);
 	const userTextRef = useRef<HTMLDivElement | null>(null);
 	// 视觉桥「请求详情」展开态：事件数据懒加载（用户点击才拉取，避免每条消息都读事件文件）
 	const [visionDetailOpen, setVisionDetailOpen] = useState(false);
@@ -731,11 +754,12 @@ export const UserBubble = memo(function UserBubble(props: {
 			if (messageExpanded) return; // 展开态无需测量，保持按钮可见
 			setMessageOverflowing(el.scrollHeight > el.clientHeight + 1);
 		};
-		check();
+		// ResizeObserver 挂载后会先回调一次；直接check会在逐条挂载历史消息时
+		// 强制同步布局，重复测量整条时间线。统一在浏览器布局完成后读取。
 		const observer = new ResizeObserver(check);
 		observer.observe(el);
 		return () => observer.disconnect();
-	}, [messageExpanded]);
+	}, [messageExpanded, editing, message.text]);
 	// 视觉桥块：pi-deck-vision 扩展把用户消息里的图片换成描述文本时，会在消息里
 	// 留下「[图片 #N（视觉桥已查看...）]」/失败标记。先剥出块，渲染成可视化卡片，
 	// 用户才能直观看到「走了视觉桥」以及转换结果/失败原因，而不是一段方括号文本。
@@ -815,15 +839,19 @@ export const UserBubble = memo(function UserBubble(props: {
 	const bubbleSegments = buildBubbleRefSegments(cleanText);
 	/** 原地编辑不影响输入框；先提交给确认弹窗。 */
 	const handleSaveEdit = () => {
-		if (props.onEditMessage && editText.trim()) {
-			props.onEditMessage(message.id, editText, messageEntryId(message));
+		if (!props.onEditMessage) return;
+		// 空文本 = 放弃编辑（退出编辑态、保留原文），不让按钮无响应。
+		if (!editText.trim()) {
 			setEditing(false);
+			return;
 		}
+		props.onEditMessage(message, editText);
+		setEditing(false);
 	};
 	/** 编辑后重发：放回 composer 输入框，由用户自行修改后发送。 */
 	const handleEditAndResend = () => {
 		document.querySelector<HTMLElement>(".composer-box .rich-input, .composer-box textarea")?.focus();
-		window.dispatchEvent(new CustomEvent("user-message-edit", { detail: { text: message.text } }));
+		window.dispatchEvent(new CustomEvent("user-message-edit", { detail: { text: message.text, images: message.images } }));
 	};
 	return (
 		<article /* user-turn 为 e2e 选择器锚点 */
@@ -837,7 +865,15 @@ export const UserBubble = memo(function UserBubble(props: {
 						// 参考图在历史里同样是 ref 引用（新图是内联 base64），统一走解析器
 						const src = imageContentSrc(img);
 						if (!src) return null;
-						return <MessageImage key={index} src={src} alt={t("app.imageAlt", { index: index + 1 })} className="size-16 max-h-40 cursor-pointer rounded-md border border-border object-cover transition-colors duration-150 hover:border-border-strong" onClick={() => props.onPreviewImage(img)} />;
+						return (
+							<div key={index} className="group/img relative">
+								<MessageImage src={src} alt={t("app.imageAlt", { index: index + 1 })} className="size-16 max-h-40 cursor-pointer rounded-md border border-border object-cover transition-colors duration-fast hover:border-border-strong" onClick={() => props.onPreviewImage(img)} />
+								{/* 上传图片此前只有点击预览、无复制/保存入口（2026-10 用户反馈）；hover 动作条与生图卡片同规格 */}
+								<div className="absolute -top-2.5 right-0 z-10 opacity-0 transition-opacity duration-fast group-hover/img:opacity-100 focus-within:opacity-100" onClick={(event) => event.stopPropagation()}>
+									<ImageActionButtons image={img} onRemove={props.onRemoveMessageImage && img.data ? () => props.onRemoveMessageImage?.(message, index) : undefined} />
+								</div>
+							</div>
+						);
 					})}
 				</div>
 			)}
@@ -848,7 +884,7 @@ export const UserBubble = memo(function UserBubble(props: {
 							// 成功：徽章行（图标 + 视觉桥已查看 + 图片序号）+ 描述正文
 							<div key={bi} className="vision-bridge-card w-full min-w-0 rounded-lg border border-border bg-background/70 p-2.5" title={t("app.visionBridgeSeenDesc")}>
 								<div className="flex items-center justify-between gap-2">
-									<div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+									<div className="flex items-center gap-1.5 text-micro font-medium text-muted-foreground">
 										<Eye size={12} className="shrink-0 text-[var(--color-accent)]" />
 										<span>{t("app.visionBridgeSeen")}</span>
 										<span className="text-muted-foreground/60">·</span>
@@ -856,7 +892,7 @@ export const UserBubble = memo(function UserBubble(props: {
 									</div>
 									<button
 										type="button"
-										className="inline-flex shrink-0 items-center gap-0.5 rounded-sm px-1 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+										className="inline-flex shrink-0 items-center gap-0.5 rounded-sm px-1 py-0.5 text-micro text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
 										onClick={() => {
 											setVisionDetailOpen((open) => !open);
 											if (!visionDetailOpen) void loadVisionEvents();
@@ -866,7 +902,7 @@ export const UserBubble = memo(function UserBubble(props: {
 										{t("app.visionDetail")}
 									</button>
 								</div>
-								{block.description && <p className="mt-1.5 text-[13px] leading-[1.6] break-words whitespace-pre-wrap text-text-primary">{block.description}</p>}
+								{block.description && <p className="mt-1.5 text-control leading-[1.6] break-words whitespace-pre-wrap text-text-primary">{block.description}</p>}
 								{visionDetailOpen && <VisionBridgeDetail events={visionEvents} loading={visionLoading} />}
 							</div>
 						) : block.kind === "skipped" ? (
@@ -874,24 +910,24 @@ export const UserBubble = memo(function UserBubble(props: {
 							// 用 warning 而非 danger：红色意味着「出错了」，会把用户引去检查 Key/接口地址，
 							// 而真正要做的只是开视觉桥或给模型勾上图片输入（2026-09 反馈）。
 							<div key={bi} className="w-full min-w-0 rounded-lg border border-warning/40 bg-warning/10 p-2.5" title={t("app.visionBridgeNotSentDesc")}>
-								<div className="flex items-center gap-1.5 text-[11px] font-medium text-warning">
+								<div className="flex items-center gap-1.5 text-micro font-medium text-warning">
 									<EyeOff size={12} className="shrink-0" />
 									<span>{t("app.visionBridgeNotSent")}</span>
 									<span className="text-warning/60">·</span>
 									<span>{t("app.visionBridgeImageLabel", { index: block.index })}</span>
 								</div>
-								{block.reason && <p className="mt-1.5 text-[13px] leading-[1.6] break-words whitespace-pre-wrap text-text-primary">{block.reason}</p>}
+								{block.reason && <p className="mt-1.5 text-control leading-[1.6] break-words whitespace-pre-wrap text-text-primary">{block.reason}</p>}
 							</div>
 						) : (
 							// 失败：红色卡片，原因直出，用户不用去设置页翻日志
 							<div key={bi} className="w-full min-w-0 rounded-lg border border-danger/40 bg-danger-soft/40 p-2.5" title={t("app.visionBridgeFailedDesc")}>
-								<div className="flex items-center gap-1.5 text-[11px] font-medium text-danger">
+								<div className="flex items-center gap-1.5 text-micro font-medium text-danger">
 									<AlertTriangle size={12} className="shrink-0" />
 									<span>{t("app.visionBridgeFailed")}</span>
 									<span className="text-danger/60">·</span>
 									<span>{t("app.visionBridgeImageLabel", { index: block.index })}</span>
 								</div>
-								{block.reason && <p className="mt-1.5 text-[13px] leading-[1.6] break-words text-danger/90">{block.reason}</p>}
+								{block.reason && <p className="mt-1.5 text-control leading-[1.6] break-words text-danger/90">{block.reason}</p>}
 							</div>
 						),
 					)}
@@ -900,7 +936,7 @@ export const UserBubble = memo(function UserBubble(props: {
 			{/* 实时消息：文本里没有标记块（转换结果只写会话文件），用事件文件匹配渲染卡片 */}
 			{visionBlocks.length === 0 && visionPolling && !visionMatch && (
 				<div className="mb-2 flex w-full max-w-[min(82%,64ch)] flex-col items-end">
-					<div className="flex items-center gap-1.5 rounded-lg border border-border bg-background/70 px-2.5 py-1.5 text-[11px] text-muted-foreground">
+					<div className="flex items-center gap-1.5 rounded-lg border border-border bg-background/70 px-2.5 py-1.5 text-micro text-muted-foreground">
 						<Loader2 size={11} className="animate-pideck-spin" />
 						<span>{t("app.visionConverting")}</span>
 					</div>
@@ -913,7 +949,7 @@ export const UserBubble = memo(function UserBubble(props: {
 							// 成功：徽章行（图标 + 视觉桥已查看 + 图片序号）+ 描述正文（与历史标记卡片同款）
 							<div key={item.index} className="vision-bridge-card w-full min-w-0 rounded-lg border border-border bg-background/70 p-2.5" title={t("app.visionBridgeSeenDesc")}>
 								<div className="flex items-center justify-between gap-2">
-									<div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+									<div className="flex items-center gap-1.5 text-micro font-medium text-muted-foreground">
 										<Eye size={12} className="shrink-0 text-[var(--color-accent)]" />
 										<span>{t("app.visionBridgeSeen")}</span>
 										<span className="text-muted-foreground/60">·</span>
@@ -921,7 +957,7 @@ export const UserBubble = memo(function UserBubble(props: {
 									</div>
 									<button
 										type="button"
-										className="inline-flex shrink-0 items-center gap-0.5 rounded-sm px-1 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+										className="inline-flex shrink-0 items-center gap-0.5 rounded-sm px-1 py-0.5 text-micro text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
 										onClick={() => {
 											setVisionDetailOpen((open) => !open);
 											if (!visionDetailOpen) void loadVisionEvents();
@@ -931,26 +967,26 @@ export const UserBubble = memo(function UserBubble(props: {
 										{t("app.visionDetail")}
 									</button>
 								</div>
-								{item.description && <p className="mt-1.5 text-[13px] leading-[1.6] break-words whitespace-pre-wrap text-text-primary">{item.description}</p>}
+								{item.description && <p className="mt-1.5 text-control leading-[1.6] break-words whitespace-pre-wrap text-text-primary">{item.description}</p>}
 								{visionDetailOpen && <VisionBridgeDetail events={visionEvents} loading={visionLoading} />}
 							</div>
 						) : (
 							// 失败：红色卡片，原因直出（与历史标记卡片同款）
 							<div key={item.index} className="w-full min-w-0 rounded-lg border border-danger/40 bg-danger-soft/40 p-2.5" title={t("app.visionBridgeFailedDesc")}>
-								<div className="flex items-center gap-1.5 text-[11px] font-medium text-danger">
+								<div className="flex items-center gap-1.5 text-micro font-medium text-danger">
 									<AlertTriangle size={12} className="shrink-0" />
 									<span>{t("app.visionBridgeFailed")}</span>
 									<span className="text-danger/60">·</span>
 									<span>{t("app.visionBridgeImageLabel", { index: item.index })}</span>
 								</div>
-								{item.error && <p className="mt-1.5 text-[13px] leading-[1.6] break-words text-danger/90">{item.error}</p>}
+								{item.error && <p className="mt-1.5 text-control leading-[1.6] break-words text-danger/90">{item.error}</p>}
 							</div>
 						),
 					)}
 				</div>
 			)}
 			{cleanText && !editing && (
-				<div className="user-turn-bubble w-fit min-w-0 max-w-[min(82%,64ch)] rounded-[14px] border border-border bg-muted/60 px-3 py-2 text-sm text-foreground [overflow-wrap:anywhere] break-words">
+				<div className="user-turn-bubble w-fit min-w-0 max-w-[min(82%,64ch)] rounded-[14px] border px-3 py-2 text-sm text-foreground [overflow-wrap:anywhere] break-words">
 					<div
 						ref={userTextRef}
 						// user-turn-text 是气泡 chip 样式的唯一作用域锚点：timeline.css 的
@@ -958,7 +994,7 @@ export const UserBubble = memo(function UserBubble(props: {
 						// 且 lucide 图标会被 preflight 的 svg{display:block} 撑成单独一行）。
 						className={`user-turn-text text-chat text-text-primary whitespace-pre-wrap break-words ${messageExpanded ? "" : "line-clamp-8"}`}
 					>
-						{renderBubbleSegments(bubbleSegments, props)}
+						{renderBubbleSegments(bubbleSegments, { ...props, onFileContextMenu: openFileChipMenu })}
 					</div>
 					{messageOverflowing && (
 						<div className="relative mt-1 flex justify-end">
@@ -966,7 +1002,7 @@ export const UserBubble = memo(function UserBubble(props: {
 							{!messageExpanded && <div className="pointer-events-none absolute inset-x-0 -top-6 h-6 bg-gradient-to-t from-muted/70 to-transparent" aria-hidden="true" />}
 							<button
 								type="button"
-								className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-micro text-text-tertiary transition-colors duration-150 hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-[var(--focus-ring)]"
+								className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-micro text-text-tertiary transition-colors duration-fast hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-[var(--focus-ring)]"
 								onClick={() => setMessageExpanded((v) => !v)}
 								aria-expanded={messageExpanded}
 							>
@@ -1003,7 +1039,7 @@ export const UserBubble = memo(function UserBubble(props: {
 					</div>
 				</div>
 			)}
-			<div className="mt-1 inline-flex items-center gap-2 text-[11px] tabular-nums text-text-tertiary">
+			<div className="mt-1 inline-flex items-center gap-2 text-micro tabular-nums text-text-tertiary">
 				<time>{formatTime(message.timestamp)}</time>
 			</div>
 			<div className="user-turn-actions flex min-h-6 items-center gap-0.5 opacity-0 transition-opacity group-hover/user:opacity-100 focus-within:opacity-100">
@@ -1074,11 +1110,58 @@ export const UserBubble = memo(function UserBubble(props: {
 					</>
 				)}
 			</div>
+			{/* 文件 chip 右键菜单：默认方式打开 / 在文件夹中显示 / 复制路径。粘贴转文件落
+			    在 userData、项目外路径无 scope，主进程不设边界直接交给系统；菜单形态与
+			    文件抽屉右键菜单（ComposerOverlayContextMenu）保持一致。 */}
+			{fileChipMenu && (
+				<DropdownMenu
+					open
+					onOpenChange={(open) => {
+						if (!open) setFileChipMenu(null);
+					}}
+				>
+					{/* 不可见 Trigger 钉在右键坐标上：Radix 受控 open 仍按 Trigger 矩形定位（见 ComposerOverlayContextMenu） */}
+					<DropdownMenuTrigger aria-hidden tabIndex={-1} style={{ position: "fixed", left: fileChipMenu.x, top: fileChipMenu.y, width: 0, height: 0, padding: 0, border: 0, background: "transparent", pointerEvents: "none" }} />
+					<DropdownMenuContent align="start" side="bottom" className="min-w-40">
+						<DropdownMenuItem
+							onSelect={() => {
+								void desktopApi.files.open(fileChipMenu.path).catch((error) => showNotice(t("app.openFileFailed", { error: error instanceof Error ? error.message : String(error) })));
+							}}
+						>
+							{t("menu.defaultOpen")}
+						</DropdownMenuItem>
+						<DropdownMenuItem
+							onSelect={() => {
+								void desktopApi.files.showInFolder(fileChipMenu.path).catch((error) => showNotice(t("app.openFileFailed", { error: error instanceof Error ? error.message : String(error) })));
+							}}
+						>
+							{t("menu.revealFile")}
+						</DropdownMenuItem>
+						<DropdownMenuItem
+							onSelect={() => {
+								void writeClipboard(fileChipMenu.path).then((ok) => {
+									if (ok) showNotice(t("copy.success"), 1200);
+								});
+							}}
+						>
+							{t("menu.copyPath")}
+						</DropdownMenuItem>
+					</DropdownMenuContent>
+				</DropdownMenu>
+			)}
 		</article>
 	);
 });
 
 export function ImagePreviewModal(props: { image: ImageContent; onClose: () => void }) {
+	// 模态惯例：Escape 可关（右上角关闭钮可聚焦，但键盘用户不应被迫 Tab 寻找）
+	useEffect(() => {
+		const onKeyDown = (event: KeyboardEvent) => {
+			if (event.key === "Escape") props.onClose();
+		};
+		window.addEventListener("keydown", onKeyDown);
+		return () => window.removeEventListener("keydown", onKeyDown);
+	}, [props.onClose]);
 	const src = imageContentSrc(props.image);
 	if (!src) return null;
 	return (
@@ -1087,6 +1170,10 @@ export function ImagePreviewModal(props: { image: ImageContent; onClose: () => v
 				<X size={20} strokeWidth={2.4} />
 			</button>
 			<img src={src} alt={t("app.imagePreviewAlt")} onClick={(event) => event.stopPropagation()} />
+			{/* 预览态动作条：全尺寸查看时直接复制/保存（缩略图 hover 之外的第二个入口，两条路共用同一组件） */}
+			<div className="absolute bottom-6 left-1/2 z-10 -translate-x-1/2" onClick={(event) => event.stopPropagation()}>
+				<ImageActionButtons image={props.image} />
+			</div>
 		</div>
 	);
 }
@@ -1132,6 +1219,8 @@ function renderBubbleSegments(
 		onOpenFile?: (path: string) => void;
 		validCommandNames?: Set<string>;
 		validFilePaths?: Set<string>;
+		/** 文件 chip 右键：弹坐标菜单（默认打开/在文件夹中显示/复制路径） */
+		onFileContextMenu?: (path: string, x: number, y: number) => void;
 	},
 ): ReactNode[] {
 	const nodes: ReactNode[] = [];
@@ -1140,7 +1229,7 @@ function renderBubbleSegments(
 		// 否则每个 chip 独占一行（用户实测截图：「不像行内 chip」）。
 		if (index > 0) nodes.push(" ");
 		if (segment.kind === "text") {
-			nodes.push(...renderChipText(segment.value, props.onOpenFile, props.validCommandNames, props.validFilePaths, `text-${index}-`));
+			nodes.push(...renderChipText(segment.value, props.onOpenFile, props.validCommandNames, props.validFilePaths, props.onFileContextMenu, `text-${index}-`));
 			return;
 		}
 		const { block } = segment;
@@ -1164,7 +1253,7 @@ function renderBubbleSegments(
 
 /** 将原始 @path / /command 渲染为行内 chip（聊天区展示用，与输入框视觉一致）。
  * 自包含 XML 块由 renderUserBubbleChipText 先折叠；file chip 保留点击打开能力。 */
-function renderChipText(text: string, onOpenFile?: (path: string) => void, validCommandNames?: Set<string>, validFilePaths?: Set<string>, keyPrefix = ""): ReactNode[] {
+function renderChipText(text: string, onOpenFile?: (path: string) => void, validCommandNames?: Set<string>, validFilePaths?: Set<string>, onFileContextMenu?: (path: string, x: number, y: number) => void, keyPrefix = ""): ReactNode[] {
 	const chips = parseRichInputChips(text, validCommandNames, validFilePaths);
 	if (chips.length === 0) return [text];
 	const nodes: ReactNode[] = [];
@@ -1179,7 +1268,23 @@ function renderChipText(text: string, onOpenFile?: (path: string) => void, valid
 		const Icon = isDirectory ? Folder : (CHIP_ICONS[chip.kind] ?? FileText);
 		const title = chip.kind === "file" ? unwrapFileChipPath(chip.raw) : chip.raw;
 		nodes.push(
-			<span key={`${keyPrefix}chip-${chip.start}`} className={`input-chip input-chip--${chip.kind}${clickable ? " clickable" : ""}`} data-type={chip.kind} data-raw={chip.raw} title={title} onClick={clickable ? () => onOpenFile(unwrapFileChipPath(chip.raw)) : undefined}>
+			<span
+				key={`${keyPrefix}chip-${chip.start}`}
+				className={`input-chip input-chip--${chip.kind}${clickable ? " clickable" : ""}`}
+				data-type={chip.kind}
+				data-raw={chip.raw}
+				title={title}
+				onClick={clickable ? () => onOpenFile(unwrapFileChipPath(chip.raw)) : undefined}
+				onContextMenu={
+					chip.kind === "file"
+						? (event) => {
+								// 右键出坐标菜单：左键打开之外的入口（系统默认打开/在文件夹中显示/复制路径）
+								event.preventDefault();
+								onFileContextMenu?.(unwrapFileChipPath(chip.raw), event.clientX, event.clientY);
+							}
+						: undefined
+				}
+			>
 				<Icon className="input-chip__icon inline-block shrink-0" width="12" height="12" aria-hidden="true" />
 				{/* 展示文本与输入框一致（formatChipDisplayLabel），构成区分信号之一 */}
 				<span className="input-chip__label">{formatChipDisplayLabel(chip.kind, chip.label)}</span>

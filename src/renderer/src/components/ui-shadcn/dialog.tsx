@@ -3,6 +3,7 @@ import { XIcon } from "lucide-react";
 import { Dialog as DialogPrimitive } from "radix-ui";
 
 import { cn } from "@/lib/utils";
+import { t } from "@/i18n";
 import { Button } from "@/components/ui-shadcn/button";
 import { POPOVER_DISMISS_EXEMPT_ATTR } from "@/components/motion/popover-morph";
 import { isOutsideInteractionFromToast } from "./toastOutsideGuard";
@@ -31,7 +32,9 @@ function DialogOverlay({ className, ...props }: React.ComponentProps<typeof Dial
 				// 打开：200ms ease-out-quint 淡入 + 从下 8px 浮起（slide-in-from-bottom-2），
 				// 形成“展开”感而非硬切；关闭：ease-in 快速下坠淡出。
 				// stagger 开启时对直接子元素做轻量级联入场（见 dialog-stagger 样式）。
-				"fixed inset-0 z-(--z-dialog) bg-black/50 duration-base data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0",
+				// 遮罩统一走 --overlay-backdrop token（亮/暗各一档）+ 2px 背景模糊，
+				// 与旧轨 modal-backdrop / prompts-editor-backdrop 同配方，避免同应用遮罩浓淡不一
+				"fixed inset-0 z-(--z-dialog) bg-[var(--overlay-backdrop)] backdrop-blur-[2px] duration-base data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0",
 				className,
 			)}
 			{...props}
@@ -84,7 +87,8 @@ function DialogContent({
 					onInteractOutside?.(event);
 				}}
 				className={cn(
-					"fixed top-[50%] left-[50%] z-(--z-dialog) grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border bg-background p-6 shadow-lg outline-none duration-base ease-out-quint data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=closed]:slide-out-to-bottom-2 data-[state=closed]:ease-in data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=open]:slide-in-from-bottom-2 sm:max-w-lg",
+					// 阴影走语义 token（暗色主题自动加深）；Tailwind 默认 shadow-lg 暗色偏浅、层级感塌陷
+					"fixed top-[50%] left-[50%] z-(--z-dialog) grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border bg-background p-6 shadow-[var(--shadow-modal)] outline-none duration-base ease-out-quint data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=closed]:slide-out-to-bottom-2 data-[state=closed]:ease-in data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=open]:slide-in-from-bottom-2 sm:max-w-lg",
 					stagger && "dialog-stagger",
 					size === "xl" && "sm:max-w-[min(1300px,calc(100vw-48px))] h-[min(850px,calc(100vh-48px))]",
 					className,
@@ -95,10 +99,11 @@ function DialogContent({
 				{showCloseButton && (
 					<DialogPrimitive.Close
 						data-slot="dialog-close"
-						className="absolute top-4 right-4 rounded-xs opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
+						// 焦点环与 button.tsx v4 写法对齐（ring-[3px] ring-ring/50），弃用旧版 ring-2+offset 双环
+						className="absolute top-4 right-4 rounded-xs opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-hidden disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
 					>
 						<XIcon />
-						<span className="sr-only">Close</span>
+						<span className="sr-only">{t("common.close")}</span>
 					</DialogPrimitive.Close>
 				)}
 			</DialogPrimitive.Content>
@@ -110,22 +115,10 @@ function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
 	return <div data-slot="dialog-header" className={cn("flex flex-col gap-2 text-center sm:text-left", className)} {...props} />;
 }
 
-function DialogFooter({
-	className,
-	showCloseButton = false,
-	children,
-	...props
-}: React.ComponentProps<"div"> & {
-	showCloseButton?: boolean;
-}) {
+function DialogFooter({ className, children, ...props }: React.ComponentProps<"div">) {
 	return (
 		<div data-slot="dialog-footer" className={cn("flex flex-col-reverse gap-2 sm:flex-row sm:justify-end", className)} {...props}>
 			{children}
-			{showCloseButton && (
-				<DialogPrimitive.Close asChild>
-					<Button variant="outline">Close</Button>
-				</DialogPrimitive.Close>
-			)}
 		</div>
 	);
 }

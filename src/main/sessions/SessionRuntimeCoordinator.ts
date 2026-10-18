@@ -19,6 +19,7 @@ import type {
 	SendSessionPromptResult,
 	SessionCommandErrorCode,
 	SessionCommandResult,
+	SessionMessageImageTarget,
 	SessionRecord,
 	SessionLocator,
 	ProjectLocator,
@@ -35,8 +36,10 @@ import type {
 import { buildSessionOriginKey } from "../../shared/sessionIdentity";
 // ssh locator 的窄类型只从 shared 取（与 catalog/项目域/引用审计同一份定义，不再抄一遍结构）。
 import type { SshSessionLocator } from "../../shared/projectLocation";
+import { descriptorFromThrownError } from "../../shared/errorI18n";
 import { createSessionModelPreference } from "../../shared/modelDisplayName";
 import { isRewindCheckpointId, isRewindRestoreScope } from "../../shared/types";
+import type { BridgeEvent } from "../../shared/types/bridge";
 import { REMOTE_SESSION_HISTORY_WRITER_CODES, remoteSessionHistoryWriteFailure, type RemoteSessionMessageMutationPort } from "../remote/RemoteSessionHistoryWriter";
 import type { SessionCatalogEntry } from "./SessionCatalog";
 import { StoppedMessageIdentityCache } from "../pi/stoppedMessageIdentity";
@@ -47,6 +50,11 @@ export interface SessionCatalogGateway {
 	getRecord(sessionId: string): SessionRecord | undefined;
 	getLocator(sessionId: string): SessionLocator | undefined;
 	getLocalFilePath(sessionId: string): string | undefined;
+	/**
+	 * #354：把已被身份归并掉的**历史**会话 ID 归一化为现存 ID。
+	 * 可选：测试里的极简网关可以缺它，缺失时按原 ID 处理。
+	 */
+	resolveSessionId?(sessionId: string): string;
 	update(
 		sessionId: string,
 		patch: {
@@ -63,6 +71,7 @@ export interface SessionCatalogGateway {
 		filePath?: string;
 		piSessionId?: string;
 		dshSessionId?: string;
+		acpSessionId?: string;
 		agentPreset?: string;
 		promoteToActive?: boolean;
 		/** 远端会话身份（ssh locator）：远端路径只以这个形状回写，绝不进本机 `filePath`（见 buildAttachPatch）。 */
@@ -101,8 +110,21 @@ export interface SessionAgentGateway {
 	sendPrompt(input: SendPromptInput): Promise<SendPromptResult>;
 	getMessages(agentId: string): ChatMessage[];
 	create(input: CreateAgentInput): Promise<AgentTab>;
+	/** 可选能力：standby 池认领（pi 提供；dsh 无进程池概念不实现）。命中返回已握手 idle tab。 */
+	claimStandbyAgent?(input: { projectId: string; sessionId: string; noSession?: boolean }): Promise<AgentTab | null>;
+	/** 可选能力：standby 池补热（fire-and-forget，幂等）。 */
+	ensureStandbyAgent?(projectId: string): void;
+	/** 可选能力：草稿斜杠命令预览（只读查询 pi standby 进程的 get_commands；不可用返回 null，调用方回退本地发现）。 */
+	draftCommands?(projectId: string): Promise<PiCommand[] | null>;
 	restart(agentId: string): Promise<AgentTab>;
 	stop(agentId: string): Promise<void>;
+	/**
+	 * 可选能力：停止并等待进程退出（返回是否在超时内退出）。
+	 *
+	 * 删除会话必须先等 pi 释放会话文件句柄，否则 Windows 上 shell.trashItem 只会报通用的
+	 * 「Failed to perform delete operation」（issue #364）；未实现该能力的老网关退回只发 stop。
+	 */
+	stopAndWaitForExit?(agentId: string, timeoutMs?: number): Promise<boolean>;
 	rename(agentId: string, name: string): Promise<AgentTab>;
 	abort(agentId: string): Promise<void>;
 	compact(agentId: string, prompt?: string): Promise<AgentRuntimeState>;
@@ -138,13 +160,14 @@ export interface SessionAgentGateway {
 	mutatePersistedSessionMessage?(
 		sessionPath: string,
 		messageId: string,
-		operation: "edit" | "delete" | "resend",
+		operation: "edit" | "delete" | "resend" | "remove-image",
 		options?: {
 			newText?: string;
 			environment?: SessionRecord["environment"];
 			wslDistro?: string;
 			/** 渲染层消息的文件条目 id（meta.entryId），live randomUUID 的文件定位锚点。 */
 			entryId?: string;
+			imageTarget?: SessionMessageImageTarget;
 		},
 	): Promise<{ text: string; images?: ImageContent[] } | undefined>;
 	prepareResendFromMessage(agentId: string, messageId: string): Promise<{ text: string; images?: ImageContent[] }>;
@@ -163,6 +186,16 @@ export interface SessionAgentGateway {
 	getForkMessages(agentId: string): Promise<Array<{ entryId: string; text: string }>>;
 	forkSession(agentId: string, entryId: string): Promise<unknown>;
 	sendUIResponse(agentId: string, requestId: string, response: SessionUiResponseInput["response"]): Promise<unknown> | unknown;
+	/**
+	 * GUI 扩展桥：把渲染层回灌的交互事件排入该 agent 的桥队列（可选能力）。
+	 * 未实现（如 DSH 后端）时返回 false，渲染层静默丢弃。
+	 */
+	pushBridgeEvent?(agentId: string, event: BridgeEvent): boolean;
+	/**
+	 * GUI 扩展桥：请求桥下一次轮询时全量重推一次（§9.4，可选能力）。
+	 * 未实现（如 DSH 后端）时返回 false，渲染层静默忽略。
+	 */
+	requestBridgeResync?(agentId: string): boolean;
 	/** 会话收到 Ask 类 UI 请求时触发桌面通知（由 AgentManager 实现，不再区分会话是否聚焦）
 	 * 参数：agentId（去重/日志）、sessionId（点击跳转目标）、sessionTitle、question（提问内容，可空） */
 	notifyAskPending(agentId: string, sessionId: string, sessionTitle: string, question: string): void;
@@ -210,6 +243,13 @@ export type SessionRuntimeBinding = {
 	runtimeGeneration: number;
 };
 
+/**
+ * coordinator 自己发起的解绑必须让渲染层知道（主进程注入 `emitSessionRuntimeDetach`）。
+ * 只服务「终态惰性解绑」：stop/restart/删除/fork 换绑的解绑由调用方推送 detach，
+ * 这里重复推会打乱渲染层的代际判定（`SessionRuntimeEvent` 的 detach 分支）。
+ */
+export type SessionRuntimeDetachNotifier = (binding: SessionRuntimeBinding) => void;
+
 type RuntimeReplacement = SessionRuntimeBinding & {
 	replacementId: number;
 };
@@ -233,6 +273,8 @@ class SessionRuntimeCommandError extends Error {
 const DELIVERY_CACHE_TTL_MS = 10 * 60_000;
 const DELIVERY_CACHE_MAX_ENTRIES = 500;
 const AGENT_READY_TIMEOUT_MS = 60_000;
+/** 删除前等 agent 进程退出的上限：超时也放行删除，由扫描层重试与结构化错误兜底。 */
+const DELETE_STOP_TIMEOUT_MS = 3000;
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -311,6 +353,7 @@ export class SessionRuntimeCoordinator {
 	/** Serializes model/effort changes so a slower earlier get_state cannot overwrite a newer choice. */
 	private readonly preferenceMutationTails = new Map<string, Promise<void>>();
 	private readonly lastRequestedThinkingBySession = new Map<string, { agentId: string; level: string }>();
+	private detachedNotifier: SessionRuntimeDetachNotifier | undefined;
 
 	constructor(
 		private readonly catalog: SessionCatalogGateway,
@@ -346,7 +389,11 @@ export class SessionRuntimeCoordinator {
 		}
 
 		this.pruneDeliveryCache();
-		const cacheKey = `${sessionId}\u0000${requestId}`;
+		// #354：渲染层可能还抱着已被身份归并的历史会话 ID。投递去重与后续整个状态机
+		// （activation gate / dispatch lease / catalog attach）必须统一用现存 ID，否则同一
+		// requestId 经别名与现存 ID 各投递一次，且 acquireDispatchLease 会在旧 ID 上失败。
+		const canonicalSessionId = this.canonicalSessionId(sessionId);
+		const cacheKey = `${canonicalSessionId}\u0000${requestId}`;
 		const existing = this.deliveryByRequest.get(cacheKey);
 		if (existing) return existing.promise;
 
@@ -355,21 +402,40 @@ export class SessionRuntimeCoordinator {
 			settled: false,
 			promise: Promise.resolve(this.rejected(input, "Request was not started")),
 		};
-		cacheEntry.promise = this.sendOnce({ ...input, sessionId, requestId }).finally(() => {
+		cacheEntry.promise = this.sendOnce({ ...input, sessionId: canonicalSessionId, requestId }).finally(() => {
 			cacheEntry.settled = true;
 		});
 		this.deliveryByRequest.set(cacheKey, cacheEntry);
 		return cacheEntry.promise;
 	}
 
+	/**
+	 * catalog 外部删除清理的活性探针（纯查询，无 getAgentId 的终态解绑副作用）：
+	 * 绑定存在且 agent 未到终态即视为活会话——pi 在首条消息前可能尚未创建 session
+	 * 文件（预热激活后空闲进程甚至长期不写盘），「运行时还在、文件暂时不在」不能
+	 * 当成外部删除（2026-10-05：预热 attach 同秒扫描剔掉记录 → 闪回引导页、
+	 * 输入草稿丢失、发送另起新进程）。
+	 */
+	hasLiveRuntime(sessionId: string): boolean {
+		const canonicalSessionId = this.canonicalSessionId(sessionId);
+		const agentId = this.agentIdBySession.get(canonicalSessionId);
+		if (!agentId) return false;
+		const tab = this.agents.list().find((candidate) => candidate.id === agentId);
+		if (!tab) return false;
+		if (!isTerminalAgent(tab)) return true;
+		// 与 getAgentId 同口径：回复级错误（Issue #218）的进程仍活着、待用户答问时同样保护。
+		return tab.status === "error" && this.hasPendingUiRequest(canonicalSessionId, agentId);
+	}
+
 	getAgentId(sessionId: string): string | undefined {
-		const agentId = this.agentIdBySession.get(sessionId);
+		const canonicalSessionId = this.canonicalSessionId(sessionId);
+		const agentId = this.agentIdBySession.get(canonicalSessionId);
 		if (!agentId) return undefined;
 		const tab = this.agents.list().find((candidate) => candidate.id === agentId);
 		if (tab && !isTerminalAgent(tab)) return agentId;
 		// pi may emit an interactive recovery request immediately before reporting
 		// an error. Keep that runtime addressable until the user answers the request.
-		if (tab?.status === "error" && this.hasPendingUiRequest(sessionId, agentId)) return agentId;
+		if (tab?.status === "error" && this.hasPendingUiRequest(canonicalSessionId, agentId)) return agentId;
 		// Issue #218：回复级错误（API 400/模型报错/投递未知）不会杀进程。error 终态
 		// 但进程仍存活时先复活（error → idle），让激活/发送复用原进程，而不是在此
 		// 解绑后走 stop+create 重建——重建在扩展有问题时还会触发无插件回退。
@@ -377,8 +443,35 @@ export class SessionRuntimeCoordinator {
 		// A terminal process cannot safely receive a delayed prompt result. Remove
 		// the binding even if its dispatch lease has not unwound yet, which makes
 		// that result fail closed instead of reviving a dead runtime association.
+		//
+		// 这条解绑发生在查询路径里（读历史/翻页、空闲释放器的聚焦探针都会走到），
+		// 必须把解绑推送出去：之前静默丢绑定，渲染层快照就永远停在 error——红点常亮、
+		// 「关闭 Agent」对着一个已不存在的运行实例反复失败（2026-10 实测日志的根因）。
+		const binding = this.getRuntimeBinding(agentId);
 		this.unbindTerminalAgent(agentId);
+		// getRuntimeBinding 只回 sessionId/generation（不包含 agentId），解绑通知要把身份补全。
+		if (binding) this.notifyRuntimeDetached({ ...binding, agentId });
 		return undefined;
+	}
+
+	/**
+	 * 注入 detach 通知（主进程 `emitSessionRuntimeDetach`）。见 `SessionRuntimeDetachNotifier`。
+	 */
+	setDetachedNotifier(notifier: SessionRuntimeDetachNotifier | undefined): void {
+		this.detachedNotifier = notifier;
+	}
+
+	/**
+	 * 推送解绑通知。这里吞异常并留 warn：解绑发生在查询路径中（历史读取等 IPC 会走到），
+	 * 推送失败不能连带让用户的读盘请求失败——渲染层下次激活时仍会用新绑定自然收敛。
+	 */
+	private notifyRuntimeDetached(binding: SessionRuntimeBinding): void {
+		if (!this.detachedNotifier) return;
+		try {
+			this.detachedNotifier(binding);
+		} catch (error) {
+			void this.logger?.warn("session-runtime", "Runtime detach notification failed", { ...binding, error: errorMessage(error) });
+		}
 	}
 
 	getSessionId(agentId: string): string | undefined {
@@ -431,16 +524,17 @@ export class SessionRuntimeCoordinator {
 	 * `AgentManager.assertLocalRuntimeOperation` 逐操作拒绝），不需要在这里按 locator 一刀切。
 	 */
 	getTarget(sessionId: string): SessionRuntimeTarget | undefined {
-		const agentId = this.getAgentId(sessionId);
+		const canonicalSessionId = this.canonicalSessionId(sessionId);
+		const agentId = this.getAgentId(canonicalSessionId);
 		if (!agentId) return undefined;
 		const binding = this.getRuntimeBinding(agentId);
-		if (!binding || binding.sessionId !== sessionId) return undefined;
-		return { sessionId, agentId, runtimeGeneration: binding.runtimeGeneration };
+		if (!binding || binding.sessionId !== canonicalSessionId) return undefined;
+		return { sessionId: canonicalSessionId, agentId, runtimeGeneration: binding.runtimeGeneration };
 	}
 
 	/** A pending activation owns the Session even before AgentManager binding completes. */
 	isActivating(sessionId: string): boolean {
-		return this.activationBySession.has(sessionId);
+		return this.activationBySession.has(this.canonicalSessionId(sessionId));
 	}
 
 	/**
@@ -452,7 +546,7 @@ export class SessionRuntimeCoordinator {
 	 * the already-created process instead of creating a second one.
 	 */
 	registerPendingRuntime(sessionId: string, activation: Promise<AgentTab>): void {
-		const normalizedSessionId = sessionId.trim();
+		const normalizedSessionId = this.canonicalSessionId(sessionId.trim());
 		if (!normalizedSessionId) throw new Error("Session ID is required");
 		if (this.activationBySession.has(normalizedSessionId)) return;
 
@@ -473,34 +567,58 @@ export class SessionRuntimeCoordinator {
 	}
 
 	/**
-	 * 删除前强制释放运行时：先解绑让侧栏立刻可删，agent 停在后台。
-	 * 运行中会话也允许删——用户不必先点停止。stop 失败也不挡 catalog 删除。
+	 * 删除前强制释放运行时：先解绑让侧栏立刻可删，再停进程并等它真的退出。
+	 * 运行中会话也允许删——用户不必先点停止。停进程失败/超时也不挡 catalog 删除。
 	 */
 	async releaseRuntimeForDelete(sessionId: string): Promise<void> {
-		this.deletingSessions.add(sessionId);
-		const activating = this.activationBySession.get(sessionId);
+		const requestedSessionId = this.canonicalSessionId(sessionId);
+		this.deletingSessions.add(requestedSessionId);
+		const activating = this.activationBySession.get(requestedSessionId);
 		if (activating) await activating.catch(() => undefined);
 		// 先读原始映射：getTarget 会把 error/closed 当终态解绑，
 		// 失败一次卡在 error 的会话也必须先解绑再杀进程。
-		const mappedAgentId = this.agentIdBySession.get(sessionId);
+		const mappedAgentId = this.agentIdBySession.get(requestedSessionId);
 		const mappedGeneration = mappedAgentId ? (this.getRuntimeBinding(mappedAgentId)?.runtimeGeneration ?? 0) : 0;
-		const liveTarget = this.getTarget(sessionId);
-		const target = liveTarget ?? (mappedAgentId ? { sessionId, agentId: mappedAgentId, runtimeGeneration: mappedGeneration } : undefined);
+		const liveTarget = this.getTarget(requestedSessionId);
+		const target = liveTarget ?? (mappedAgentId ? { sessionId: requestedSessionId, agentId: mappedAgentId, runtimeGeneration: mappedGeneration } : undefined);
 		// 会话删除 = 代数作废：generationBySession 按 sessionId 累积且仅随删除回收，
 		// 否则反复创建/删除会话会让键集无界增长（2026 内存排查：慢泄漏）。
 		// 注意不能放到 unbindAgentUnchecked：restart 流程 unbind 旧 agent 后要
 		// bind 新 agent 并代数 +1，提前删会导致旧 runtime 的迟到结果被误接受。
-		this.generationBySession.delete(sessionId);
+		this.generationBySession.delete(requestedSessionId);
 		if (!target) {
-			this.deletingSessions.delete(sessionId);
+			this.deletingSessions.delete(requestedSessionId);
 			return;
 		}
 		this.unbindAgentUnchecked(target.agentId);
-		// 先解绑再停：删除 IPC 不必等 pi/DSH 进程退出。stop 完成前禁止重新 activate/bind。
-		void this.agents
-			.stop(target.agentId)
-			.catch(() => undefined)
-			.finally(() => this.deletingSessions.delete(sessionId));
+		// 先解绑（侧栏立刻可删），但停进程必须等到真的退出：pi 还握着会话文件句柄时，
+		// 后续 shell.trashItem 会失败（issue #364）。等待有上限，超时放行。
+		try {
+			await this.stopForDelete(target.agentId);
+		} finally {
+			this.deletingSessions.delete(requestedSessionId);
+		}
+	}
+
+	/**
+	 * 删除路径的停进程收尾：有等待能力的网关必须等进程真正退出再返回。
+	 * 老网关（或 DSH 这类无进程池实现）退回只发 stop，超时也不挡删除。
+	 */
+	private async stopForDelete(agentId: string): Promise<void> {
+		const stopAndWait = this.agents.stopAndWaitForExit;
+		if (typeof stopAndWait !== "function") {
+			await this.agents.stop(agentId).catch(() => undefined);
+			return;
+		}
+		let exited = false;
+		try {
+			exited = await stopAndWait.call(this.agents, agentId, DELETE_STOP_TIMEOUT_MS);
+		} catch {
+			exited = false;
+		}
+		if (!exited) {
+			void this.logger?.warn("session-runtime", "Agent exit timed out before session delete", { agentId, timeoutMs: DELETE_STOP_TIMEOUT_MS });
+		}
 	}
 
 	getRuntimeMessages(sessionId: string): SessionTargetedValue<ChatMessage[]> | undefined {
@@ -514,14 +632,17 @@ export class SessionRuntimeCoordinator {
 	}
 
 	async activateRuntime(sessionId: string): Promise<SessionCommandResult<SessionRuntimeInfo>> {
+		// #354：别名归一化必须覆盖返回值构造——ensureRuntime 内部归一化只保证 runtime 建在
+		// 现存 ID 上，runtimeInfo 仍拿旧 ID 查询就会误报 SESSION_RUNTIME_CHANGED。
+		const canonicalSessionId = this.canonicalSessionId(sessionId);
 		try {
-			const tab = await this.ensureRuntime(sessionId);
+			const tab = await this.ensureRuntime(canonicalSessionId);
 			void this.logger?.info("session-runtime", "Runtime activated", {
-				sessionId,
+				sessionId: canonicalSessionId,
 				agentId: tab.id,
 				status: tab.status,
 			});
-			return { ok: true, value: this.runtimeInfo(sessionId, tab) };
+			return { ok: true, value: this.runtimeInfo(canonicalSessionId, tab) };
 		} catch (error) {
 			return this.commandFailure(error);
 		}
@@ -533,26 +654,28 @@ export class SessionRuntimeCoordinator {
 	 * would otherwise create a second runtime and a persisted pi session.
 	 */
 	bindAnonymousRuntime(sessionId: string, agentId: string): SessionRuntimeInfo {
-		const entry = this.catalog.get(sessionId);
-		if (!entry?.noSession) throw new Error(`Anonymous session not found: ${sessionId}`);
+		const canonicalSessionId = this.canonicalSessionId(sessionId);
+		const entry = this.catalog.get(canonicalSessionId);
+		if (!entry?.noSession) throw new Error(`Anonymous session not found: ${canonicalSessionId}`);
 		const tab = this.agents.list().find((candidate) => candidate.id === agentId);
 		if (!tab?.noSession || isTerminalAgent(tab)) {
 			throw new Error(`Anonymous runtime is not available: ${agentId}`);
 		}
-		const runtimeGeneration = this.bind(sessionId, agentId);
+		const runtimeGeneration = this.bind(canonicalSessionId, agentId);
 		tab.runtimeGeneration = runtimeGeneration;
 		void this.logger?.info("session-runtime", "Anonymous runtime bound", {
-			sessionId,
+			sessionId: canonicalSessionId,
 			agentId,
 			runtimeGeneration,
 		});
-		return this.runtimeInfo(sessionId, tab);
+		return this.runtimeInfo(canonicalSessionId, tab);
 	}
 
 	validateTarget(target: SessionRuntimeTarget): SessionCommandResult<SessionRuntimeTarget> {
 		try {
-			this.requireTarget(target);
-			return { ok: true, value: target };
+			const canonical = this.canonicalTarget(target);
+			this.requireTarget(canonical);
+			return { ok: true, value: canonical };
 		} catch (error) {
 			return this.commandFailure(error);
 		}
@@ -595,6 +718,20 @@ export class SessionRuntimeCoordinator {
 
 	listRuntimeModels(target: SessionRuntimeTarget): Promise<SessionCommandResult<SessionTargetedValue<AvailableModel[]>>> {
 		return this.runTargetCommand(target, (agentId) => this.agents.getAvailableModels(agentId));
+	}
+
+	/**
+	 * 草稿会话（尚无 runtime）的斜杠命令预览：只读借用 pi standby 进程的命令表。
+	 * 可选能力缺失/查询失败一律返回 null——这是“提示增强”而非命令执行链路，
+	 * 不能让预览失败影响草稿会话本身。
+	 */
+	async draftCommands(projectId: string): Promise<PiCommand[] | null> {
+		if (typeof this.agents.draftCommands !== "function") return null;
+		try {
+			return await this.agents.draftCommands(projectId);
+		} catch {
+			return null;
+		}
 	}
 
 	listRuntimeThinkingLevels(target: SessionRuntimeTarget): Promise<SessionCommandResult<SessionTargetedValue<string[] | undefined>>> {
@@ -692,6 +829,14 @@ export class SessionRuntimeCoordinator {
 		});
 	}
 
+	/** 单图原地移除：沿用 catalog 文件事务，不 fork、不截断后续对话。 */
+	removeCatalogMessageImage(sessionId: string, messageId: string, imageTarget: SessionMessageImageTarget, entryId?: string): Promise<SessionCommandResult<void>> {
+		return this.mutateCatalogMessage(sessionId, messageId, "remove-image", undefined, entryId, imageTarget).then((result) => {
+			if (!result.ok) return result;
+			return { ok: true as const, value: undefined };
+		});
+	}
+
 	/** catalog 级删除：墓碑写入 JSONL，要求 Agent 已停。 */
 	deleteCatalogMessage(
 		sessionId: string,
@@ -774,6 +919,10 @@ export class SessionRuntimeCoordinator {
 					modelName: appliedModel.modelName,
 					thinkingLevel: effectiveThinkingLevel,
 				});
+				// 模型名称写回 catalog 不会更新圆环使用的 runtime 用量快照；切换确认后
+				// 立即推送新窗口与占用率。刷新失败不撤销已生效的选择，迟到快照由网关丢弃。
+				this.requireBoundTarget(target);
+				await this.agents.publishRuntimeState(agentId).catch(() => undefined);
 				return result;
 			}),
 		);
@@ -844,7 +993,12 @@ export class SessionRuntimeCoordinator {
 			// 仍持有旧 sessionId/generation。只要 agentId 仍有 live 绑定，就用 live 绑定
 			// 规范化目标，别让陈旧身份挡住停止（此前用户只能靠重启停掉后台 Agent）。
 			const stopTarget = this.resolveStopTarget(target);
-			reservation = this.reserveBoundRuntime(stopTarget.sessionId, stopTarget.agentId);
+			// 停止必须永远可行：在途 prompt 回合的 dispatch lease 覆盖整个回合（ACP 长任务或
+			// 卡死的 agent 会让 lease 挂到超时甚至永不释放），不该挡住杀进程——那正是用户唯一
+			// 的恢复出口。跳过 lease 等待与断言，直接占 replacement 槽（新 dispatch 会被
+			// acquireDispatchLease 的 replacement 检查拒绝），dispatch 侧对「stop 期间回合死亡」
+			// 已有 unknownDelivery 收尾路径。
+			reservation = this.reserveBoundRuntime(stopTarget.sessionId, stopTarget.agentId, { ignoreDispatchLease: true });
 			const locator = this.catalog.getLocator(stopTarget.sessionId);
 			if (locator?.kind === "ssh") {
 				// stop 会销毁 gateway 消息缓存；必须在它之前捕获，且不能把远端路径交给本机 fs。
@@ -898,22 +1052,23 @@ export class SessionRuntimeCoordinator {
 
 	async restartRuntime(target: SessionRuntimeTarget): Promise<SessionCommandResult<SessionRuntimeReplacement>> {
 		try {
-			this.requireTarget(target);
-			const tab = await this.restartSession(target.sessionId, target.agentId);
-			const session = this.catalog.getRecord(target.sessionId);
+			const canonical = this.canonicalTarget(target);
+			this.requireTarget(canonical);
+			const tab = await this.restartSession(canonical.sessionId, canonical.agentId);
+			const session = this.catalog.getRecord(canonical.sessionId);
 			if (!session) {
 				throw new SessionRuntimeCommandError("SESSION_NOT_FOUND", "Session no longer exists");
 			}
 			void this.logger?.info("session-runtime", "Runtime restarted", {
-				sessionId: target.sessionId,
-				agentId: target.agentId,
-				runtimeGeneration: target.runtimeGeneration,
+				sessionId: canonical.sessionId,
+				agentId: canonical.agentId,
+				runtimeGeneration: canonical.runtimeGeneration,
 			});
 			return {
 				ok: true,
 				value: {
-					previousTarget: target,
-					runtime: this.runtimeInfo(target.sessionId, tab),
+					previousTarget: canonical,
+					runtime: this.runtimeInfo(canonical.sessionId, tab),
 					session: { ...session },
 				},
 			};
@@ -1046,6 +1201,35 @@ export class SessionRuntimeCoordinator {
 		}
 	}
 
+	/**
+	 * GUI 扩展桥：把渲染层回灌的交互事件排入该 agent 的桥队列。
+	 *
+	 * 与 `respondToUi` 不同，这里**不要求**存在 pending UI 请求 ——
+	 * 桥的交互（点列表项、按按钮）不是 pi 的 ask 请求，而是扩展自己组件的回调。
+	 * 后端未实现该能力（如 DSH）时返回 false。
+	 */
+	pushBridgeEvent(agentId: string, event: BridgeEvent): boolean {
+		return this.agents.pushBridgeEvent?.(agentId, event) ?? false;
+	}
+
+	/**
+	 * GUI 扩展桥：请求桥下一次轮询时全量重推一次（§9.4）。
+	 *
+	 * 渲染层丢过桥状态时调用（换绑定 / 切会话 / 开设置弹窗 / 应用启动）。
+	 * 后端未实现该能力（如 DSH）时返回 false。
+	 */
+	requestBridgeResync(agentId: string): boolean {
+		return this.agents.requestBridgeResync?.(agentId) ?? false;
+	}
+
+	/**
+	 * 激活前合成事件用的当前代数（bind 递增前的值）：IPC 层在激活窗口发 session 级
+	 * starting 事件时，需要与渲染层已存的代数对齐才能压住旧 runtime 的迟到事件。
+	 */
+	currentRuntimeGeneration(sessionId: string): number {
+		return this.generationBySession.get(sessionId) ?? 0;
+	}
+
 	getRuntimeBinding(agentId: string):
 		| {
 				sessionId: string;
@@ -1081,6 +1265,10 @@ export class SessionRuntimeCoordinator {
 				return result;
 			}
 			const targetSessionId = await input.resolveTargetSessionId(result);
+			// /fork 会从旧分支 model_change 恢复模型；同一 agentId 并不代表偏好仍已生效。
+			// 换绑前重放目标 catalog 偏好，失败保持解绑，不能公布旧模型再允许重发。
+			this.lastAppliedBySession.delete(targetSessionId);
+			await this.applyLatestPreferences(targetSessionId, input.agentId);
 			const attached = this.completeRuntimeReplacement(replacement, targetSessionId);
 			// The target binding is committed before observers run. Snapshot failures
 			// must not roll the agent back onto the detached origin Session.
@@ -1175,6 +1363,9 @@ export class SessionRuntimeCoordinator {
 			throw new Error("Session runtime changed before restart");
 		}
 
+		// 与在途 prompt dispatch 并发时先等 lease 释放，避免重启/停止撞上毫秒级发送窗口
+		// 直接报「prompt dispatch is in progress」（web 端头部菜单触发 restart 的常见竞态）。
+		await this.waitForNoDispatchLease(sessionId, agentId);
 		const reservation = this.reserveBoundRuntime(sessionId, agentId);
 		try {
 			let tab = await this.agents.restart(agentId);
@@ -1233,7 +1424,9 @@ export class SessionRuntimeCoordinator {
 				activationMs: Date.now() - pipelineStartedAt,
 			});
 		} catch (error) {
-			return this.rejected(input, errorMessage(error));
+			// 网关可给 thrown error 挂 I18nDescriptor（如 ACP AUTH_REQUIRED 登录引导）：
+			// 透传给渲染层 toast；未挂载时回落通用「发送失败 + 原文」描述符。
+			return this.rejected(input, errorMessage(error), descriptorFromThrownError(error));
 		}
 
 		let lease: DispatchLease;
@@ -1318,13 +1511,28 @@ export class SessionRuntimeCoordinator {
 	}
 
 	private ensureRuntime(sessionId: string): Promise<AgentTab> {
-		const existing = this.activationBySession.get(sessionId);
+		// #354：渲染层可能还抱着已被身份归并的历史会话 ID（持久化置顶/Tab 引用迁移到位前的
+		// 迟到请求）。先进原有激活/绑定状态机前统一归一化，否则同一会话会在旧 ID 上另起一个
+		// runtime（两个进程、两份历史，且旧 ID 在 catalog 里已经不存在）。
+		const canonicalSessionId = this.canonicalSessionId(sessionId);
+		const existing = this.activationBySession.get(canonicalSessionId);
 		if (existing) return existing;
-		const activation = this.activate(sessionId).finally(() => {
-			this.activationBySession.delete(sessionId);
+		const activation = this.activate(canonicalSessionId).finally(() => {
+			this.activationBySession.delete(canonicalSessionId);
 		});
-		this.activationBySession.set(sessionId, activation);
+		this.activationBySession.set(canonicalSessionId, activation);
 		return activation;
+	}
+
+	/** 归并别名的归一化入口（网关未提供时按原 ID）。 */
+	private canonicalSessionId(sessionId: string): string {
+		return this.catalog.resolveSessionId?.(sessionId) ?? sessionId;
+	}
+
+	/** 目标里的会话 ID 同样要归一化：target 命令的路由、绑定校验与返回的 target 都用同一个 ID。 */
+	private canonicalTarget(target: SessionRuntimeTarget): SessionRuntimeTarget {
+		const sessionId = this.canonicalSessionId(target.sessionId);
+		return sessionId === target.sessionId ? target : { ...target, sessionId };
 	}
 
 	private async activate(sessionId: string): Promise<AgentTab> {
@@ -1384,6 +1592,16 @@ export class SessionRuntimeCoordinator {
 
 		const created = !tab;
 		if (!tab) {
+			// standby 池认领（仅 pi 网关实现，其余返回 null）：只服务「无既有会话文件」的新会话——
+			// 历史会话必须 --session 恢复，dsh 会话与 pi 进程形态不同，都回退正常创建。
+			// 认领到的进程模型/扩展是 spawn 时快照：模型/思考档由下面的 applyLatestPreferences
+			// 按 catalog 最新值热补；扩展/代理等 spawn-only 输入靠 AgentManager 的指纹比对，
+			// 不一致根本不会被认领。created 保持 true：认领的进程归本次激活所有，失败清理必须能停掉它。
+			if (entry.backend !== "dsh" && entry.backend !== "acp" && !entry.filePath) {
+				tab = (await this.agents.claimStandbyAgent?.({ projectId: entry.projectId, sessionId, noSession: entry.noSession }).catch(() => null)) ?? undefined;
+			}
+		}
+		if (!tab) {
 			// deckSessionId = catalog 会话身份（SessionRecord.id），与 UI 保存安全等级覆盖用的 key 同源，
 			// 确保扩展按 PIDECK_SESSION_ID 能命中 sessionLevels（历史扫描会话为文件路径，新会话为 UUID）。
 			tab = await this.agents.create({
@@ -1401,6 +1619,10 @@ export class SessionRuntimeCoordinator {
 				// DSH agent 预设（会话「模式」）：草稿期预选，新建 host 会话时随 sessions.create
 				// 应用；attach 已有会话时由 DshAgentManager 从 host list 行读回（本字段被忽略）。
 				agentPreset: entry.backend === "dsh" ? entry.agentPreset : undefined,
+				// ACP：acpSessionId 存在则 session/load 恢复旧会话；工具选择复用 agentPreset
+				// 字段（AcpToolConfig.id），草稿预选优先 acpToolId。
+				acpSessionId: entry.backend === "acp" ? entry.acpSessionId : undefined,
+				...(entry.backend === "acp" ? { agentPreset: entry.acpToolId ?? entry.agentPreset } : {}),
 				wslDistro: entry.wslDistro,
 				wslUser: entry.wslUser,
 				importedSourceId: entry.importedSourceId,
@@ -1424,6 +1646,10 @@ export class SessionRuntimeCoordinator {
 				if (tab.backend === "dsh" && tab.sessionId) {
 					await this.catalog.attachRuntime({ sessionId, dshSessionId: tab.sessionId }).catch(() => undefined);
 				}
+				// ACP 同理：agent 侧会话可能已创建，先落 acpSessionId 再停，避免重试新建孤儿。
+				if (tab.backend === "acp" && tab.sessionId) {
+					await this.catalog.attachRuntime({ sessionId, acpSessionId: tab.sessionId }).catch(() => undefined);
+				}
 				await this.agents.stop(tab.id).catch(() => undefined);
 			}
 			throw new Error(`Failed to apply session preferences: ${errorMessage(error)}`);
@@ -1440,6 +1666,9 @@ export class SessionRuntimeCoordinator {
 		// 绑定完成后主动推送完整 runtime state：emitSessionRuntimeEvent 依赖 binding 才转发，
 		// 且在偏好应用（setModel/setThinking）之后执行，渲染层底栏拿到的是真实模型而不是旧残留。
 		await this.agents.publishRuntimeState(tab.id).catch(() => undefined);
+		// standby 补热：本次激活可能消耗了池化进程（或用户正连续开新会话），后台补一个待命。
+		// 仅 pi 后端补（dsh 无进程池概念）；ensure 自身幂等，且受 standbyRuntimeEnabled 设置闸。
+		if (entry.backend !== "dsh" && entry.backend !== "acp") this.agents.ensureStandbyAgent?.(entry.projectId);
 		return tab;
 	}
 
@@ -1457,7 +1686,7 @@ export class SessionRuntimeCoordinator {
 		sessionId: string,
 		tab: Pick<AgentTab, "sessionPath" | "sessionId" | "backend" | "agentPreset">,
 		entry: Pick<SessionCatalogEntry, "noSession" | "backend" | "projectId">,
-	): { sessionId: string; filePath?: string; piSessionId?: string; dshSessionId?: string; agentPreset?: string; promoteToActive?: boolean; remoteLocator?: SshSessionLocator } | null {
+	): { sessionId: string; filePath?: string; piSessionId?: string; dshSessionId?: string; acpSessionId?: string; agentPreset?: string; promoteToActive?: boolean; remoteLocator?: SshSessionLocator } | null {
 		if (entry.backend === "dsh") {
 			return tab.sessionId && !entry.noSession
 				? {
@@ -1468,6 +1697,11 @@ export class SessionRuntimeCoordinator {
 						...(tab.agentPreset ? { agentPreset: tab.agentPreset } : {}),
 					}
 				: null;
+		}
+		// ACP：只回写 acpSessionId（历史在 agent 侧，无本地文件）；agentPreset（工具 id）
+		// 回写作展示镜像。
+		if (entry.backend === "acp") {
+			return tab.sessionId && !entry.noSession ? { sessionId, acpSessionId: tab.sessionId, ...(tab.agentPreset ? { agentPreset: tab.agentPreset } : {}) } : null;
 		}
 		// 远端路径只以 ssh 身份回写：`tab.sessionPath` 是 pi 上报的**远端**会话文件（本地规则不得改写它），
 		// 由 catalog 把这条条目收敛成 ssh locator 并吸收同身份的重复条目。
@@ -1788,12 +2022,14 @@ export class SessionRuntimeCoordinator {
 		}
 	}
 
-	private reserveBoundRuntime(sessionId: string, agentId: string): RuntimeReplacement {
+	private reserveBoundRuntime(sessionId: string, agentId: string, opts: { ignoreDispatchLease?: boolean } = {}): RuntimeReplacement {
 		const binding = this.getRuntimeBinding(agentId);
 		if (!binding || binding.sessionId !== sessionId || this.agentIdBySession.get(sessionId) !== agentId) {
 			throw new Error("Session runtime changed before reservation");
 		}
-		this.assertNoDispatchLease(sessionId, agentId);
+		// stop 路径传 ignoreDispatchLease：停止杀进程是卡死回合的唯一恢复出口，必须越过
+		// 在途 dispatch lease（其余 replacement 路径保持原断言，避免重配与 dispatch 竞态）。
+		if (!opts.ignoreDispatchLease) this.assertNoDispatchLease(sessionId, agentId);
 		if (this.replacementByAgent.has(agentId)) {
 			throw new Error(`Session runtime replacement already in progress: ${agentId}`);
 		}
@@ -1837,6 +2073,8 @@ export class SessionRuntimeCoordinator {
 			// 远端 trust 现状随 runtime 快照一起给：渲染层重载/首次渲染就能显示提示，不用等下一条
 			// `agents:state`（那条推送只在该会话发生状态变化时才来）。本机会话不带该字段。
 			...(tab.remoteTrustUnhandled === true ? { remoteTrustUnhandled: true } : {}),
+			// PiDeck 会话身份透传：渲染层侧栏 ACP「agent↔会话」配对依赖它（见 SessionRuntimeInfo.deckSessionId）。
+			deckSessionId: tab.deckSessionId,
 		};
 	}
 
@@ -1899,9 +2137,11 @@ export class SessionRuntimeCoordinator {
 	private async runTargetCommand<T>(target: SessionRuntimeTarget, operation: (agentId: string) => Promise<T>): Promise<SessionCommandResult<SessionTargetedValue<T>>> {
 		let lease: DispatchLease | undefined;
 		try {
-			this.requireTarget(target);
-			lease = this.acquireDispatchLease(target.sessionId, target.agentId);
-			if (lease.runtimeGeneration !== target.runtimeGeneration) {
+			// #354：所有 target 命令的唯一入口——先把历史会话 ID 归一化，再走原有绑定/租约状态机。
+			const canonical = this.canonicalTarget(target);
+			this.requireTarget(canonical);
+			lease = this.acquireDispatchLease(canonical.sessionId, canonical.agentId);
+			if (lease.runtimeGeneration !== canonical.runtimeGeneration) {
 				throw new SessionRuntimeCommandError("SESSION_RUNTIME_CHANGED", "Session runtime generation changed before command dispatch");
 			}
 			const value = await operation(lease.agentId);
@@ -1931,25 +2171,32 @@ export class SessionRuntimeCoordinator {
 	 * 运行中改文件再 switch_session 会和用户「先停再改、下次发送才激活」的产品规则冲突。
 	 */
 	private async mutateCatalogMessage(
-		sessionId: string,
+		requestedSessionId: string,
 		messageId: string,
-		operation: "edit" | "delete" | "resend",
+		operation: "edit" | "delete" | "resend" | "remove-image",
 		newText?: string,
 		/** 渲染层消息的文件条目 id（meta.entryId），见 readMessageByMessageId 的锚点语义。 */
 		entryId?: string,
+		imageTarget?: SessionMessageImageTarget,
 	): Promise<SessionCommandResult<{ text: string; images?: ImageContent[] } | undefined>> {
 		try {
+			// #354：历史（已被身份归并的）会话 ID 先归一化——requireStoppedForFileMutation 是
+			// 「pi 活着禁改会话文件」的硬闸，拿旧 ID 查绑定会漏过闸门把文件写坏。
+			const sessionId = this.canonicalSessionId(requestedSessionId);
 			const entry = this.catalog.get(sessionId);
 			if (!entry) {
 				throw new SessionRuntimeCommandError("SESSION_NOT_FOUND", `Session not found: ${sessionId}`);
 			}
-			if (entry.backend === "dsh" || entry.backend === "imagegen") {
+			if (entry.backend === "dsh" || entry.backend === "imagegen" || entry.backend === "acp") {
 				throw new SessionRuntimeCommandError("SESSION_COMMAND_FAILED", `backend "${entry.backend}" does not support persisted session message mutation`);
 			}
 			// ssh 记录：改写的是**远端** JSONL（P4.5c）。这条分支必须插在 `getLocalFilePath` **之前** ——
 			// 那个入口对 ssh locator 抛稳定码，放在它后面就是死代码（P4.5b 归档分支记过同一条账）。
 			const locator = this.catalog.getLocator(sessionId);
 			if (locator?.kind === "ssh") {
+				// remove-image 是 dev 新增的**本机会话文件**操作（SessionFileEditor 支持），远端写面只冻结了
+				// edit/delete/resend。这里显式 fail-closed：不把未实现的写操作透传给远端写面，也不偷偷降级成 delete。
+				if (operation === "remove-image") throw new SessionRuntimeCommandError("SESSION_COMMAND_FAILED", REMOTE_SESSION_HISTORY_WRITER_CODES.operationInvalid);
 				const value = await this.mutateRemoteCatalogMessage(sessionId, locator, messageId, operation, newText, entryId);
 				// 只记身份与操作：远端路径、消息正文、命令行都不进日志（读写/归档同一条脱敏纪律）。
 				void this.logger?.info("session-runtime", "Remote catalog session message mutated", { sessionId, hostId: locator.hostId, operation });
@@ -1970,9 +2217,20 @@ export class SessionRuntimeCoordinator {
 				environment: entry.environment,
 				wslDistro: entry.wslDistro,
 				entryId,
+				imageTarget,
 			});
-			// 写文件期间若被重新激活，磁盘已改但内存是旧树——拒绝让调用方感知竞态。
-			this.requireStoppedForFileMutation(sessionId);
+			// 写文件期间若被重新激活：磁盘已改且后续激活的 pi 读的就是改后文件（编辑
+			// 实际已生效），此时报 BUSY 会让用户重试造成二次编辑。改为记录竞态日志并
+			// 按成功返回（文件状态是唯一事实源）。
+			try {
+				this.requireStoppedForFileMutation(sessionId);
+			} catch (busyError) {
+				void this.logger?.warn("session-runtime", "Session file mutated while runtime re-activated; mutation already persisted", {
+					sessionId,
+					messageId,
+					operation,
+				});
+			}
 			void this.logger?.info("session-runtime", "Catalog session message mutated", {
 				sessionId,
 				messageId,
@@ -2195,6 +2453,21 @@ export class SessionRuntimeCoordinator {
 
 	private hasDispatchLease(sessionId?: string, agentId?: string): boolean {
 		return Boolean((sessionId && this.dispatchLeasesBySession.get(sessionId)?.size) || (agentId && this.dispatchLeasesByAgent.get(agentId)?.size));
+	}
+
+	/**
+	 * 瞬态 dispatch lease 宽限：stop/restart/activate 与在途发送并发时，prompt dispatch
+	 * 只覆盖 sendAgentPrompt 的 RPC 窗口（毫秒到秒级，pi 忙时排队会更久），此时硬抛
+	 * 「prompt dispatch is in progress」对用户只是一次无意义的失败——等 lease 释放后
+	 * 重试同一操作即可成功。在 deadline 内轮询等待，超时则返回让调用方走原有
+	 * assert 硬失败路径（保留既有错误语义，避免无限挂起）。
+	 */
+	private async waitForNoDispatchLease(sessionId: string, agentId: string, timeoutMs = 2000): Promise<void> {
+		const deadline = Date.now() + timeoutMs;
+		while (this.hasDispatchLease(sessionId, agentId)) {
+			if (Date.now() >= deadline) return;
+			await new Promise<void>((resolve) => setTimeout(resolve, 50));
+		}
 	}
 
 	private assertNoDispatchLease(sessionId?: string, agentId?: string): void {

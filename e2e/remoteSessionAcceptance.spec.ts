@@ -130,7 +130,7 @@ async function openTabsActionMenu(window: Page): Promise<void> {
 
 /** 会话管理入口锚定项目标题行，不右键整个含会话正文的项目组。 */
 async function openRemoteSessionManager(window: Page, projectName: string): Promise<Locator> {
-	await projectRow(window, projectName).locator(".project-draggable").click({ button: "right" });
+	await projectRow(window, projectName).locator(".conversation-title").first().click({ button: "right" });
 	await window.getByRole("menuitem", { name: "会话管理", exact: true }).click();
 	const dialog = window.getByRole("dialog").filter({ hasText: "会话管理" });
 	await expect(dialog).toBeVisible();
@@ -526,6 +526,7 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 				// 消息动作按钮平时只在 hover 时可点（与本地同一组件），先 hover 再点。
 				const preForkSessionId = await window.locator(".composer[data-session-id]").first().getAttribute("data-session-id");
 				expect(preForkSessionId, "Fork 前必须能读到当前会话 id").toBeTruthy();
+
 				const userMessage = window.locator(".message-timeline article").filter({ hasText: PROMPT }).first();
 				await userMessage.hover();
 				await userMessage.getByRole("button", { name: "Fork", exact: true }).click();
@@ -1036,12 +1037,11 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 				testInfo,
 				activateAgent: async () => {
 					await createRemoteSessionAndReadId(remoteWindow, paths.projectName, timeouts);
-					// First input activates the lazy runtime; a draft Tab alone is not a live Agent.
-					const composer = remoteWindow.locator(".composer .rich-input");
-					await composer.click();
-					await expect(composer).toBeFocused();
-					await composer.pressSequentially("terminal lifecycle probe");
-					await expect(composer).toContainText("terminal lifecycle probe");
+					// dev 的空白草稿不再在首键预热 runtime（standby 池在首次发送时才认领），所以「输入首键」
+					// 不再是活 Agent 的信号。这里显式走 Tab 菜单「启动 Agent」：既保持「有 live runtime」的验收语义，
+					// 也不发 prompt（终端隔离测试不该依赖模型调用）。trust 提示只搭 runtime tab 快照，激活后应可见。
+					await openTabsActionMenu(remoteWindow);
+					await remoteWindow.getByRole("menuitem", { name: "启动 Agent", exact: true }).click();
 					await expect(remoteWindow.getByTestId("remote-session-trust-notice")).toBeVisible({ timeout: timeouts.helperMs });
 				},
 				stopAgent: async () => {
@@ -1082,12 +1082,14 @@ test.describe("远端会话功能级验收（真机 · Phase 4 P4.2）", () => {
 				await enrollRemoteProjectInSidebar(window, paths.projectPath, timeouts);
 				sessionId = await createRemoteSessionAndReadId(window, paths.projectName, timeouts);
 			});
-			await test.step("输入首键预热远端 runtime → 远端 trust 提示可见", async () => {
+			await test.step("草稿输入 + 显式启动 Agent → 远端 trust 提示可见", async () => {
 				const composer = window.locator(".composer .rich-input");
 				await composer.click();
 				await window.keyboard.type(PROMPT);
-				// 输入是「发送意图」的第一个信号：ComposerArea 首键即 activateRuntime，远端 runtime 起来
-				// 之后主进程才发得出 `remoteTrustUnhandled`（见 RemoteSessionTrustNotice 的注释）。
+				// dev 的空白草稿不在首键预热 runtime（standby 池在首次发送时认领），而 trust 标记只搭 runtime
+				// tab 快照。显式从 Tab 菜单启动 Agent（不发送），保持「runtime 起来后才提示」的原验收语义。
+				await openTabsActionMenu(window);
+				await window.getByRole("menuitem", { name: "启动 Agent", exact: true }).click();
 				const notice = window.getByTestId("remote-session-trust-notice");
 				await expect(notice, "远端会话必须如实提示「远端项目资源未加载」").toBeVisible({ timeout: timeouts.helperMs });
 				await expect(notice).toContainText(TRUST_TITLE);

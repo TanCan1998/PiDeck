@@ -47,7 +47,7 @@ export async function verifyRemoteTerminals(input: { window: Page; app: Electron
 	const { window, app, credentials, projectPath, neighborPath, timeoutMs, testInfo } = input;
 	const projectName = projectPath.split("/").pop() ?? "";
 	const neighborName = neighborPath.split("/").pop() ?? "";
-	const select = async (name: string) => remoteProjectRow(window, name).locator(".project-draggable").click();
+	const select = async (name: string) => remoteProjectRow(window, name).locator(".conversation-title").first().click();
 	const rows = window.locator(".terminal-dock .xterm-rows");
 	// Remote shells are reaped by the host after the PTY closes; under a loaded host that can take longer than the
 	// close IPC returns, so wait for the eventual fact (still a hard assertion: the process must be gone).
@@ -119,7 +119,15 @@ export async function verifyRemoteTerminals(input: { window: Page; app: Electron
 	await gone(reopened);
 	await gone(two);
 	await window.locator(".terminal-dock").getByTitle("新建终端").click();
-	await expect(window.getByText("远端终端已断开。命令不会自动重放；请先明确连接主机，再新建终端。", { exact: true }).first()).toBeVisible();
+	// 断开后新建终端必须明确失败并说明原因（不静默重连、不重放）：产品走全局 notice，文案可能带稳定码
+	// （SSH_HOST_DISCONNECTED）或翻译后的远端断开文案；两者都算「用户被告知」，但不能完全无反馈。
+	await expect(
+		window
+			.locator("[data-sonner-toast]")
+			.filter({ hasText: /SSH_HOST_DISCONNECTED|SSH_HOST_NOT_READY|远端终端已断开/ })
+			.first(),
+		"断开后新建终端必须给出明确失败提示",
+	).toBeVisible();
 	await expect(window.locator(".terminal-tab-label")).toHaveCount(1);
 	await window.getByRole("button", { name: /^设置/ }).click();
 	await modal.getByRole("tab", { name: "连接", exact: true }).click();

@@ -46,6 +46,11 @@ const timeline = compile("src/renderer/src/hooks/useSessionTimelineController.ts
 	// 回落到 nodeRequire 解析 .ts 失败。其自身依赖 ./turnRenderWindow，用同名 mock 即可。
 	"../components/session/timeline/jumpWindowPolicy": compile("src/renderer/src/components/session/timeline/jumpWindowPolicy.ts", { "./turnRenderWindow": { TIMELINE_WINDOW_EXPAND_STEP: 3 } }),
 	"./timeline/browsePin": compile("src/renderer/src/hooks/timeline/browsePin.ts"),
+	// SendScrollPositioner（612bb51c1 从 controller 迁出）：真实模块自身只依赖
+	// ../../lib/pinTurnScroll，与 ../lib/pinTurnScroll 同名 mock 共享即可。
+	"./timeline/sendScroll": compile("src/renderer/src/hooks/timeline/sendScroll.ts", {
+		"../../lib/pinTurnScroll": { animateScrollTop: () => () => undefined, pinScrollDurationMs: () => 320 },
+	}),
 });
 
 const composerController = readFileSync("src/renderer/src/hooks/useSessionComposerController.ts", "utf8");

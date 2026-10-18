@@ -4,6 +4,7 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { armStartupOverlayDismissal } from "./startupOverlays";
+import { ensureWindowsProfileSkeleton } from "./win-profile";
 
 /**
  * Electron 应用 fixture：默认启动构建产物（out/main/index.js）；设置
@@ -27,6 +28,11 @@ export type SeedProject = { id: string; name: string; path: string; pinned?: boo
 export type SeedSettings = Record<string, unknown>;
 
 const repoRoot = resolve(__dirname, "..");
+
+/**
+ * Windows 下 `USERPROFILE` 被重定向到临时目录时，必须先把「用户配置目录骨架」建出来 ——
+ * 实现与原因见 `./win-profile.ts`（本文件与 `./mock-pi-fixture.ts` 共用同一份）。
+ */
 
 export const test = base.extend<AppFixture & { seedProjects: SeedProject[] | undefined; seedSettings: SeedSettings | undefined }>({
 	seedProjects: [undefined, { option: true }],
@@ -57,10 +63,15 @@ export const test = base.extend<AppFixture & { seedProjects: SeedProject[] | und
 		}
 		// 预置桌面设置（如 dshHomeDir）：必须在启动前写入，DSH 目录解析与自动导入
 		// 都发生在启动期/懒解析，运行后再 update 存在被缓存覆盖的时序风险。
-		if (seedSettings && Object.keys(seedSettings).length > 0) {
-			mkdirSync(join(userDataRoot, "profile"), { recursive: true });
-			writeFileSync(join(userDataRoot, "profile", "settings.json"), JSON.stringify(seedSettings));
-		}
+		// piEnvironmentChecked 默认 true：开发机普遍有多份 pi 安装，全新 profile 首启会弹出
+		// 「Pi 环境检测」模态，Radix 会把主界面 aria-hidden → 所有 getByRole/toBeVisible 集体
+		// 失效（伪装成点击超时等业务失败，见 tab-context-menu.spec.ts 注释）。
+		// 要验证该弹窗自身的用例显式传 piEnvironmentChecked: false 覆盖。
+		mkdirSync(join(userDataRoot, "profile"), { recursive: true });
+		writeFileSync(join(userDataRoot, "profile", "settings.json"), JSON.stringify({ piEnvironmentChecked: true, ...seedSettings }));
+		// 重定向 USERPROFILE 后，shell 文件夹解析要求配置目录骨架存在（见函数注释）；
+		// 骨架缺失会让主进程在 win32 上启动即崩，先补目录再 spawn。
+		if (process.platform === "win32") ensureWindowsProfileSkeleton(userDataRoot);
 		const profileDir = join(userDataRoot, "profile");
 		const env = {
 			...process.env,
@@ -89,7 +100,7 @@ export const test = base.extend<AppFixture & { seedProjects: SeedProject[] | und
 			// 未打包运行时应用名解析为 "Electron"，userData 默认落到真实
 			// %APPDATA%/Electron-dev（跨 E2E 运行共享、污染本机）。必须显式
 			// --user-data-dir 指向临时目录（Electron 尊重该 Chromium 开关）。
-			args: packagedExecutablePath ? [`--user-data-dir=${profileDir}`] : [join(repoRoot, "out", "main", "index.js"), `--user-data-dir=${profileDir}`],
+			args: packagedExecutablePath ? [`--user-data-dir=${profileDir}`] : [repoRoot, `--user-data-dir=${profileDir}`],
 			env,
 		});
 		await use(app);

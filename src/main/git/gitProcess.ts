@@ -19,10 +19,12 @@ export const DEFAULT_GIT_TIMEOUT_MS = 30_000;
 export function killProcessTree(childPid: number, platform: NodeJS.Platform = process.platform): void {
 	if (platform === "win32") {
 		// /T 递归杀树，/F 强制；忽略 taskkill 自身退出码（目标进程可能已退出）。
-		spawn("taskkill", ["/pid", String(childPid), "/T", "/F"], {
+		const killer = spawn("taskkill", ["/pid", String(childPid), "/T", "/F"], {
 			windowsHide: true,
 			stdio: "ignore",
 		});
+		// fire-and-forget 也必须有 error 兜底（精简环境可能没有 taskkill），否则未处理 error 事件炸主进程。
+		killer.once("error", () => undefined);
 	} else {
 		try {
 			process.kill(-childPid, "SIGKILL");
@@ -73,6 +75,10 @@ export function runGit(args: string[], options: RunGitOptions, command = "git"):
 		});
 
 		if (input !== undefined && child.stdin) {
+			// 断管兜底：git 在读完 stdin 前退出（非法 ref/hooks 拒绝/index 损坏）时，超出管道
+			// 缓冲的排队写会触发 stdin 的 error 事件（Windows 报 EOF、POSIX 报 EPIPE），
+			// 无监听的 stream error 会炸掉主进程；结局已由 close/error 通道结算，这里只吞掉写端异常。
+			child.stdin.on("error", () => {});
 			child.stdin.write(input);
 			child.stdin.end();
 		}

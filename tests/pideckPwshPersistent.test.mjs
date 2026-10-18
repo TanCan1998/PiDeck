@@ -133,6 +133,36 @@ test("parsePwshCommandOutput：命令回显行（含 start 文本）被 lastInde
 	assert.equal(parsed?.text, "real output", "取最后一个 start marker 之后的内容，回显被排除");
 });
 
+test("parsePwshCommandOutput：退出码直接拼接提示符时完成，不等待五分钟超时", () => {
+	const marker = { start: "__S__", end: "__E__:" };
+	const parsed = parsePwshCommandOutput(`__S__\r\nhello\r\n__E__:\r\n0__DSH_PERSISTENT_PWSH_PROMPT__`, marker);
+	assert.equal(parsed?.text, "hello");
+	assert.equal(parsed?.exitCode, 0);
+});
+
+test("parsePwshCommandOutput：ConPTY 的控制序列插入 marker 和退出码也能解析", () => {
+	const marker = { start: "__S__", end: "__E__:" };
+	const parsed = parsePwshCommandOutput(`__S__\r\n\x1b[32mhello\x1b[m\r\n__E\x1b[?25l__:\r\n\x1b[7m7\x1b[m__DSH_PERSISTENT_PWSH_PROMPT__\x1b[1C`, marker);
+	assert.equal(parsed?.text, "hello");
+	assert.equal(parsed?.exitCode, 7);
+});
+
+test("parsePwshCommandOutput：分块到达的退出码必须有完整终止符，不能提前报告成功", () => {
+	const marker = { start: "__S__", end: "__E__:" };
+	const prefix = `__S__\r\nhello\r\n__E__:\r\n`;
+	for (const tail of ["", "1", "12", "12\r", "12__DSH_PERSISTENT_PWSH_"]) {
+		assert.equal(parsePwshCommandOutput(prefix + tail, marker), undefined);
+	}
+	assert.equal(parsePwshCommandOutput(`${prefix}12__DSH_PERSISTENT_PWSH_PROMPT__`, marker)?.exitCode, 12);
+	assert.equal(parsePwshCommandOutput(`${prefix}12\r\n`, marker)?.exitCode, 12);
+});
+
+test("parsePwshCommandOutput：只有命令回显或未完成 ANSI 序列时不算结束", () => {
+	const marker = { start: "__S__", end: "__E__:" };
+	assert.equal(parsePwshCommandOutput(wrapPwshCommand("Write-Output hi", marker), marker), undefined);
+	assert.equal(parsePwshCommandOutput(`__S__\r\nhello\r\n__E__:\r\n0\x1b[`, marker), undefined);
+});
+
 test("stripPwshControl：剥离 CSI/OSC/模式切换序列（pwsh PTY 提示符输出）", () => {
 	const raw = "\x1b[?9001h\x1b[?25l\x1b[2J\x1b[m\x1b[H__DSH_PERSISTENT_PWSH_PROMPT__\x1b[1C\x1b]0;title\x07\x1b[?25h";
 	const clean = stripPwshControl(raw);

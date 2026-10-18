@@ -1,18 +1,20 @@
 import { Button } from "../components/ui-shadcn/button";
+import { Separator } from "../components/ui-shadcn/separator";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, ChevronRight, Copy, Eye, EyeOff, ExternalLink, GripVertical, SquarePen, Trash2, X } from "lucide-react";
+import { ArrowUpDown, ChevronDown, ChevronRight, Copy, Eye, EyeOff, ExternalLink, GripVertical, SquarePen, Trash2, X } from "lucide-react";
 import { t } from "../i18n";
 import { desktopApi } from "../desktopApi";
 import type { ModelItem, ModelsFile, ProviderConfig } from "./configTypes";
 import { openDocsInSystemBrowser } from "./ConfigShared";
-import { getHeaderValue, setHeaderValue } from "./providerHeaders";
+import { getHeaderValue, readModelOverrides, setHeaderValue } from "./providerHeaders";
 import { buildModelsFromFetchedSelection } from "./modelsUtils";
 // 排序键收敛到 shared：与模型下拉列表 / 主进程写入保持同一顺序。
 import { compareModelRows } from "../../../shared/modelOrder";
-import { countSelectedModelIndexes, toggleAllModelIndexes, toggleModelIndex } from "./modelBatchSelection";
+import { countSelectedModelIndexes, invertModelIndexes, selectAllModelIndexes, toggleAllModelIndexes, toggleModelIndex } from "./modelBatchSelection";
 import { FetchedModelCombobox } from "./FetchedModelCombobox";
 import { Checkbox } from "../components/ui-shadcn/checkbox";
 import { Label } from "../components/ui-shadcn/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui-shadcn/select";
 import { showNotice } from "../utils/notice";
 import { applyModelPatches, computeModelSpecPatches, looksDeepSeekBacked } from "../utils/modelSpecAutoFill";
 import type { FetchedModel, ConfigProxyMode } from "../../../shared/types/fetchedModel";
@@ -27,6 +29,11 @@ import { splitVisibleAndHiddenProviders } from "./providerVisibility";
 import { applyProviderOrder } from "../utils/providerOrder";
 import { useProviderReorder } from "../hooks/useProviderReorder";
 import { ModelsTable } from "./ModelsTable";
+import { ModelsExportPanel } from "./ModelsExportPanel";
+import { ModelsImportPanel } from "./ModelsImportPanel";
+import { useAvailableThinkingLevels } from "./useAvailableThinkingLevels";
+import { modelThinkingLevelsKey } from "../../../shared/modelThinkingLevels";
+import type { ModelThinkingLevel } from "../../../shared/modelThinkingLevels";
 import type { MutableRefObject } from "react";
 
 /** 把现有 provider 配置转成编辑弹窗的预填值（名字/字段/模型列表）。 */
@@ -40,6 +47,8 @@ function providerDialogInitial(provider: ProviderConfig | undefined, name: strin
 		userAgent: getHeaderValue(provider.headers, "User-Agent"),
 		compat: provider.compat,
 		models: provider.models,
+		// 逐模型 UA 覆盖随 provider 配置走（弹窗内可编辑，确认时由 mergeProviderDraft 合并）
+		modelOverrides: readModelOverrides(provider.modelOverrides),
 	};
 }
 
@@ -66,7 +75,7 @@ export function ModelsTab(props: {
 	providerOrder?: string[];
 	/** 排序作用域：与认证页共享的并集顺序（由父级用 models.json + auth.json 算出）。 */
 	providerOrderScope?: string[];
-	/** 卡片重排回调：拖拽/上移下移算出新的完整顺序后交给父级持久化。 */
+	/** 卡片重排回调：拖拽/手柄方向键算出新的完整顺序后交给父级持久化。 */
 	onReorderProviders?: (nextOrder: string[]) => void;
 	/** 清空自定义顺序（列表上方的「恢复默认顺序」）。 */
 	onResetProviders?: () => void;
@@ -107,11 +116,15 @@ export function ModelsTab(props: {
 	onDeleteProviders: (names: string[]) => void;
 	onAddModel: (providerName: string) => void;
 	onUpdateModel: (providerName: string, index: number, field: string, value: unknown) => void;
-	onUpdateModelThinkingLevel: (providerName: string, index: number, key: "xhigh" | "max", value: "" | "xhigh" | "max") => void;
-	/** 逐模型 User-Agent 覆盖（落到 provider.modelOverrides），可选。 */
-	onUpdateModelUserAgent?: (providerName: string, index: number, value: string) => void;
-	/** 读取某模型当前的 UA 覆盖值（可选；与上一个回调成对出现才渲染操作列的 UA 按钮）。 */
-	getModelUserAgentOverride?: (providerName: string, index: number) => string;
+	onUpdateModelThinkingLevel: (providerName: string, index: number, level: ModelThinkingLevel, enabled: boolean) => void;
+	/** 逐模型 User-Agent 覆盖（落到 provider.modelOverrides，可选；按 modelId 建键）。 */
+	onUpdateModelUserAgent?: (providerName: string, modelId: string, value: string) => void;
+	/** 读取某模型的 UA 覆盖值（可选；与上一个回调成对出现才渲染操作列的 UA 按钮）。 */
+	getModelUserAgentOverride?: (providerName: string, modelId: string) => string;
+	/** 每模型默认思考档位（settings.json 的 modelThinkingLevels），可选：成对出现才渲染编辑入口。 */
+	onUpdateModelThinkingLevelDefault?: (providerName: string, modelId: string, level: string) => void;
+	/** 读取某模型当前的默认思考档位（空串 = 跟随全局设置）。 */
+	getModelThinkingLevelDefault?: (providerName: string, modelId: string) => string;
 	onDeleteModel: (providerName: string, index: number) => void;
 	onDeleteModels: (providerName: string, indexes: number[]) => void;
 	/** 重置为自适应：显式刷新 endpoint /models 后按模板清空并重填能力字段。 */
@@ -123,13 +136,18 @@ export function ModelsTab(props: {
 	onChangeTestModelId: (providerName: string, modelId: string) => void;
 	onChangeTestProxyMode: (providerName: string, mode: ConfigProxyMode) => void;
 	onClearTestResult: () => void;
+	/** 导入面板把合并结果写回未保存草稿（父级 ConfigModal 处理，不直接落盘）。 */
+	onApplyModelsTransfer: (next: ModelsFile) => void;
 	onSave: () => void;
 	onChangeProvider: (name: string, field: string, value: unknown) => void;
 }) {
 	const { data, expandedProvider, saving } = props;
+	// Pi 已确认的可用思考档位目录（只读事实）：每模型默认档位的编辑入口据此给选项/禁用，
+	// 与欢迎页/会话内选择器同源（capability snapshot）。
+	const availableThinkingLevels = useAvailableThinkingLevels();
 	const providerNames = Object.keys(data.providers);
 	// 隐藏开关：主列表只显示未隐藏项，隐藏项进页面底部「已隐藏」折叠区（设置页隐藏开关）
-	// 自定义排序只作用于展示：先按用户拖拽/上移下移结果重排完整列表，再切分可见/隐藏。
+	// 自定义排序只作用于展示：先按用户拖拽/方向键结果重排完整列表，再切分可见/隐藏。
 	// 用完整列表而非仅可见列表：隐藏区也遵循同一顺序，恢复显示时不会突然跳到列表最前。
 	const orderedProviderNames = applyProviderOrder(providerNames, props.providerOrder);
 	const { visible: visibleProviderNames, hidden: hiddenProviderNames } = splitVisibleAndHiddenProviders(orderedProviderNames, props.hiddenProviders ?? []);
@@ -154,12 +172,8 @@ export function ModelsTab(props: {
 			props.onUpdateModel(providerName, index, field, value);
 		}
 		if (updates.length > 0) {
-			showNotice(
-				t("config.modelSpecAutoFilled", {
-					model: spec?.matchedId ?? trimmed,
-				}),
-				3000,
-			);
+			// 命中目录才报「已按目录填充」；未命中时只补了默认思考档位，据实说明而不是谎报名录值。
+			showNotice(spec?.matchedId ? t("config.modelSpecAutoFilled", { model: spec.matchedId }) : t("config.modelSpecUnmatched", { model: trimmed }), 3000);
 		}
 	};
 
@@ -167,6 +181,25 @@ export function ModelsTab(props: {
 	const [showGuide, setShowGuide] = useState(false);
 	const [batchMode, setBatchMode] = useState(false);
 	const [selectedProviders, setSelectedProviders] = useState<Set<string>>(() => new Set());
+	// 批量模式当前动作；null = 未选择（进入批量管理时不预选，强制用户显式选择）
+	const [batchAction, setBatchAction] = useState<"delete" | "export" | null>(null);
+	// 批量导出：非空时列表区被面板独占（与 AddProviderDialog 同一模式）。
+	const [transferView, setTransferView] = useState<{ kind: "export"; ids: string[] } | { kind: "import" } | null>(null);
+	const exitBatchMode = () => {
+		setBatchMode(false);
+		setSelectedProviders(new Set());
+		setBatchAction(null);
+	};
+	const handleBatchExecute = () => {
+		if (!batchAction || selectedProviders.size === 0) return;
+		if (batchAction === "delete") {
+			// 确认弹窗由 ConfigModal.handleDeleteProviders 承载（common.deleteBatchConfirm），此处只发起
+			props.onDeleteProviders([...selectedProviders]);
+		} else {
+			setTransferView({ kind: "export", ids: [...selectedProviders] });
+		}
+		exitBatchMode();
+	};
 	// 模型批量删除只作用于当前展开的 provider，避免不同 provider 的同一行索引互相污染。
 	const [modelBatchProvider, setModelBatchProvider] = useState<string | null>(null);
 	const [selectedModelIndexes, setSelectedModelIndexes] = useState<Set<number>>(() => new Set());
@@ -203,7 +236,7 @@ export function ModelsTab(props: {
 	const providerCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
 	/**
-	 * 拖拽/上移下移的统一出口：算出新的完整顺序交给父级持久化。
+	 * 拖拽/手柄方向键的统一出口：算出新的完整顺序交给父级持久化。
 	 * 顺序无变化时（拖回原位）也照常上报，由主进程 SettingsStore 的「值未变则剔除」拦下写盘，
 	 * 避免这里再维护一份比较逻辑。
 	 */
@@ -214,7 +247,7 @@ export function ModelsTab(props: {
 		[props.onReorderProviders],
 	);
 
-	// 拖动与上移/下移的状态机（落点判定、拖动中半透明、插入指示线、边界禁用）内聚在共享 hook，
+	// 拖动排序的状态机（落点判定、拖动中视觉、插入指示线、FLIP 落位动画、手柄方向键）内聚在共享 hook，
 	// DSH 模型页的供应商卡片复用同一份，避免两页规则漂移。
 	// 拖拽的作用域是「模型 + 认证」两页的并集（providerOrderScope）：认证页独有的供应商也要参与
 	// 同一份顺序，否则在认证页排一次会在并集里丢掉它们，模型页的顺序跟着回到默认。
@@ -249,47 +282,52 @@ export function ModelsTab(props: {
 	return (
 		<div>
 			{/* 列表态：顶部按钮 + 指南 + 卡片列表；新增/编辑时整区切换为配置表单页（非弹窗） */}
-			{!props.addingProvider && !props.editingProvider && (
+			{!props.addingProvider && !props.editingProvider && !transferView && (
 				<>
 					<div className="mb-3 flex items-center justify-between gap-3">
-						<span className="font-mono text-xs tabular-nums text-text-tertiary">{t("config.count.providers", { count: visibleProviderNames.length })}</span>
+						<span className="font-mono text-xs tabular-nums text-muted-foreground">{t("config.count.providers", { count: visibleProviderNames.length })}</span>
 						<div className="flex min-w-0 items-center gap-1.5">
-							<Button size="sm" variant="outline" onClick={props.onStartAddProvider} disabled={saving}>
-								{t("config.addProvider")}
-							</Button>
-							<Button size="sm" variant="outline" onClick={() => setShowGuide(!showGuide)} disabled={saving}>
-								{t("config.providerGuide")}
-							</Button>
-							<Button
-								size="sm"
-								variant="destructive"
-								onClick={() => {
-									if (batchMode) {
-										setBatchMode(false);
-										setSelectedProviders(new Set());
-									} else {
-										setBatchMode(true);
-									}
-								}}
-								disabled={saving || visibleProviderNames.length === 0}
-							>
-								{batchMode ? t("common.cancel") : t("common.deleteBatch")}
+							{!batchMode && (
+								<>
+									<Button size="sm" variant="outline" onClick={props.onStartAddProvider} disabled={saving}>
+										{t("config.addProvider")}
+									</Button>
+									<Button size="sm" variant="outline" onClick={() => setTransferView({ kind: "import" })} disabled={saving}>
+										{t("config.models.transfer.importButton")}
+									</Button>
+									<Button size="sm" variant="outline" onClick={() => setShowGuide(!showGuide)} disabled={saving}>
+										{t("config.providerGuide")}
+									</Button>
+								</>
+							)}
+							<Button size="sm" variant="outline" onClick={() => (batchMode ? exitBatchMode() : setBatchMode(true))} disabled={saving || visibleProviderNames.length === 0}>
+								{batchMode ? t("common.cancel") : t("common.batchManage")}
 							</Button>
 							{batchMode && (
-								<Button
-									size="sm"
-									variant="destructive"
-									onClick={() => {
-										if (selectedProviders.size > 0) {
-											props.onDeleteProviders([...selectedProviders]);
-											setSelectedProviders(new Set());
-											setBatchMode(false);
-										}
-									}}
-									disabled={selectedProviders.size === 0}
-								>
-									{t("common.deleteSelected")} ({selectedProviders.size})
-								</Button>
+								<>
+									<Button size="sm" variant="ghost" disabled={visibleProviderNames.length === 0} onClick={() => setSelectedProviders(new Set(visibleProviderNames))}>
+										{t("common.selectAll")}
+									</Button>
+									<Button size="sm" variant="ghost" disabled={visibleProviderNames.length === 0} onClick={() => setSelectedProviders(new Set(visibleProviderNames.filter((name) => !selectedProviders.has(name))))}>
+										{t("common.invertSelection")}
+									</Button>
+									{/* 清除选择只清空勾选，留在批量模式（不动 batchAction） */}
+									<Button size="sm" variant="ghost" disabled={visibleProviderNames.length === 0} onClick={() => setSelectedProviders(new Set())}>
+										{t("common.clearSelection")}
+									</Button>
+									<Select value={batchAction ?? undefined} onValueChange={(next) => setBatchAction(next === "delete" || next === "export" ? next : null)}>
+										<SelectTrigger size="sm" aria-label={t("config.models.batchActionLabel")} className="w-32">
+											<SelectValue placeholder={t("config.models.batchActionLabel")} />
+										</SelectTrigger>
+										<SelectContent position="popper">
+											<SelectItem value="delete">{t("config.models.batchAction.delete")}</SelectItem>
+											<SelectItem value="export">{t("config.models.batchAction.export")}</SelectItem>
+										</SelectContent>
+									</Select>
+									<Button size="sm" variant="outline" disabled={!batchAction || selectedProviders.size === 0} onClick={handleBatchExecute}>
+										{t("config.models.batchExecute")}
+									</Button>
+								</>
 							)}
 						</div>
 					</div>
@@ -297,11 +335,11 @@ export function ModelsTab(props: {
 					{/* 排序说明：顺序是跨页共用的偏好（AppSettings.providerOrder），
 					    不写在这里用户只能靠试——拖了之后模型选择器也跟着变会让人困惑。 */}
 					{visibleProviderNames.length > 1 && (
-						<div className="mb-2.5 flex items-start gap-2 text-[11px] leading-relaxed text-text-tertiary">
+						<div className="mb-2.5 flex items-start gap-2 text-micro leading-relaxed text-text-tertiary">
 							<ArrowUpDown size={12} className="mt-0.5 shrink-0" aria-hidden="true" />
 							<span className="min-w-0 flex-1">{t("config.providerOrderHint")}</span>
 							{(props.providerOrder?.length ?? 0) > 0 && props.onResetProviders && (
-								<Button variant="ghost" size="sm" className="h-5 shrink-0 px-1.5 text-[11px] font-normal text-text-tertiary hover:text-text-primary" onClick={props.onResetProviders} disabled={saving}>
+								<Button variant="ghost" size="sm" className="h-5 shrink-0 px-1.5 text-micro font-normal text-text-tertiary hover:text-text-primary" onClick={props.onResetProviders} disabled={saving}>
 									{t("config.providerOrderReset")}
 								</Button>
 							)}
@@ -323,28 +361,28 @@ export function ModelsTab(props: {
 								<strong className="mt-3.5 mb-1.5 block text-sm text-text-primary">{t("config.providerGuideApis")}</strong>
 								<div className="grid grid-cols-3 gap-1.5">
 									<div className="flex flex-col gap-0.5 rounded-sm bg-bg-hover px-2.5 py-2">
-										<code className="font-mono text-[11px] font-semibold text-[color:var(--color-accent)]">openai-completions</code>
-										<span className="text-[11px] text-text-tertiary">{t("config.providerGuideApiDesc1")}</span>
+										<code className="font-mono text-micro font-semibold text-[color:var(--color-accent)]">openai-completions</code>
+										<span className="text-micro text-text-tertiary">{t("config.providerGuideApiDesc1")}</span>
 									</div>
 									<div className="flex flex-col gap-0.5 rounded-sm bg-bg-hover px-2.5 py-2">
-										<code className="font-mono text-[11px] font-semibold text-[color:var(--color-accent)]">anthropic-messages</code>
-										<span className="text-[11px] text-text-tertiary">{t("config.providerGuideApiDesc2")}</span>
+										<code className="font-mono text-micro font-semibold text-[color:var(--color-accent)]">anthropic-messages</code>
+										<span className="text-micro text-text-tertiary">{t("config.providerGuideApiDesc2")}</span>
 									</div>
 									<div className="flex flex-col gap-0.5 rounded-sm bg-bg-hover px-2.5 py-2">
-										<code className="font-mono text-[11px] font-semibold text-[color:var(--color-accent)]">openai-responses</code>
-										<span className="text-[11px] text-text-tertiary">{t("config.providerGuideApiDesc3")}</span>
+										<code className="font-mono text-micro font-semibold text-[color:var(--color-accent)]">openai-responses</code>
+										<span className="text-micro text-text-tertiary">{t("config.providerGuideApiDesc3")}</span>
 									</div>
 									<div className="flex flex-col gap-0.5 rounded-sm bg-bg-hover px-2.5 py-2">
-										<code className="font-mono text-[11px] font-semibold text-[color:var(--color-accent)]">openai-codex-responses</code>
-										<span className="text-[11px] text-text-tertiary">{t("config.providerGuideApiDesc5")}</span>
+										<code className="font-mono text-micro font-semibold text-[color:var(--color-accent)]">openai-codex-responses</code>
+										<span className="text-micro text-text-tertiary">{t("config.providerGuideApiDesc5")}</span>
 									</div>
 									<div className="flex flex-col gap-0.5 rounded-sm bg-bg-hover px-2.5 py-2">
-										<code className="font-mono text-[11px] font-semibold text-[color:var(--color-accent)]">google-generative-ai</code>
-										<span className="text-[11px] text-text-tertiary">{t("config.providerGuideApiDesc4")}</span>
+										<code className="font-mono text-micro font-semibold text-[color:var(--color-accent)]">google-generative-ai</code>
+										<span className="text-micro text-text-tertiary">{t("config.providerGuideApiDesc4")}</span>
 									</div>
 									<div className="flex flex-col gap-0.5 rounded-sm bg-bg-hover px-2.5 py-2">
-										<code className="font-mono text-[11px] font-semibold text-[color:var(--color-accent)]">mistral-conversations</code>
-										<span className="text-[11px] text-text-tertiary">{t("config.providerGuideApiDesc6")}</span>
+										<code className="font-mono text-micro font-semibold text-[color:var(--color-accent)]">mistral-conversations</code>
+										<span className="text-micro text-text-tertiary">{t("config.providerGuideApiDesc6")}</span>
 									</div>
 								</div>
 
@@ -353,19 +391,19 @@ export function ModelsTab(props: {
 									<tbody>
 										<tr>
 											<td className="w-[180px] border-b border-border-subtle px-2.5 py-1.5 align-top">
-												<code className="rounded-[4px] bg-[color:color-mix(in_srgb,var(--color-accent)_5%,transparent)] px-1.5 py-px font-mono text-[11px] text-[color:var(--color-accent)]">supportsDeveloperRole</code>
+												<code className="rounded-xs bg-[color:color-mix(in_srgb,var(--color-accent)_5%,transparent)] px-1.5 py-px font-mono text-micro text-[color:var(--color-accent)]">supportsDeveloperRole</code>
 											</td>
 											<td className="border-b border-border-subtle px-2.5 py-1.5 align-top">{t("config.providerGuideCompatDevRole")}</td>
 										</tr>
 										<tr>
 											<td className="w-[180px] border-b border-border-subtle px-2.5 py-1.5 align-top">
-												<code className="rounded-[4px] bg-[color:color-mix(in_srgb,var(--color-accent)_5%,transparent)] px-1.5 py-px font-mono text-[11px] text-[color:var(--color-accent)]">supportsReasoningEffort</code>
+												<code className="rounded-xs bg-[color:color-mix(in_srgb,var(--color-accent)_5%,transparent)] px-1.5 py-px font-mono text-micro text-[color:var(--color-accent)]">supportsReasoningEffort</code>
 											</td>
 											<td className="border-b border-border-subtle px-2.5 py-1.5 align-top">{t("config.providerGuideCompatReasoning")}</td>
 										</tr>
 										<tr>
 											<td className="w-[180px] border-b border-border-subtle px-2.5 py-1.5 align-top">
-												<code className="break-all rounded-[4px] bg-[color:color-mix(in_srgb,var(--color-accent)_5%,transparent)] px-1.5 py-px font-mono text-[11px] text-[color:var(--color-accent)]">requiresReasoningContentOnAssistantMessages</code>
+												<code className="break-all rounded-xs bg-[color:color-mix(in_srgb,var(--color-accent)_5%,transparent)] px-1.5 py-px font-mono text-micro text-[color:var(--color-accent)]">requiresReasoningContentOnAssistantMessages</code>
 											</td>
 											<td className="border-b border-border-subtle px-2.5 py-1.5 align-top">{t("config.providerGuideCompatReasoningContent")}</td>
 										</tr>
@@ -410,13 +448,13 @@ export function ModelsTab(props: {
 										providerCardRefs.current[name] = element;
 										providerReorder.registerCard(name, element);
 									}}
-									className={`config-provider-card relative overflow-hidden rounded-lg border border-border-subtle bg-bg-panel transition-[border-color,box-shadow,background-color,opacity] duration-150${providerReorder.draggingName === name ? " opacity-50" : ""}${isExpanded ? " border-[color-mix(in_srgb,var(--color-accent)_32%,var(--color-border-subtle))] shadow-[var(--shadow-border)] overflow-visible" : ""}${highlightProvider === name ? " ring-2 ring-[color:var(--color-accent)]" : ""}`}
+									className={`config-provider-card relative overflow-hidden rounded-lg border border-border-subtle bg-bg-panel transition-[border-color,box-shadow,background-color,opacity] duration-150${providerReorder.draggingName === name ? " opacity-40 border-dashed" : ""}${isExpanded ? " border-[color-mix(in_srgb,var(--color-accent)_32%,var(--color-border-subtle))] shadow-[var(--shadow-border)] overflow-visible" : ""}${highlightProvider === name ? " ring-2 ring-[color:var(--color-accent)]" : ""}`}
 									{...providerReorder.cardProps(name)}
 								>
-									{/* 拖拽插入指示线：贴卡片内缘（卡片是 overflow-hidden，放到卡片外会被剪掉） */}
-									{providerReorder.dropTarget?.name === name && <span className={`absolute ${providerReorder.dropTarget.position === "before" ? "top-0" : "bottom-0"} right-0 left-0 z-10 h-0.5 bg-[color:var(--color-accent)]`} />}
+									{/* 拖拽插入指示线：贴卡片内缘（卡片是 overflow-hidden，放到卡片外会被剪掉）；加粗 + 发光，落点一眼可见 */}
+									{providerReorder.dropTarget?.name === name && <span className={`absolute ${providerReorder.dropTarget.position === "before" ? "top-0" : "bottom-0"} right-0 left-0 z-10 h-[3px] rounded-full bg-[color:var(--color-accent)] shadow-[0_0_8px_color-mix(in_srgb,var(--color-accent)_55%,transparent)]`} />}
 									{/* 整行点击展开/收起；右侧操作区 stopPropagation，避免点复制/删除/用量配置时误折叠。 */}
-									<div data-provider-head="" className="group flex cursor-pointer items-center justify-between px-3.5 py-2 transition-colors duration-150 hover:bg-bg-hover" onClick={() => props.onToggleProvider(name)}>
+									<div data-provider-head="" className="flex cursor-pointer items-center justify-between px-3.5 py-2 transition-colors duration-150 hover:bg-bg-hover" onClick={() => props.onToggleProvider(name)}>
 										{batchMode && (
 											<Label className="mr-2.5 inline-flex size-4 shrink-0 items-center justify-center" onClick={(e) => e.stopPropagation()}>
 												<Checkbox
@@ -434,39 +472,11 @@ export function ModelsTab(props: {
 											</Label>
 										)}
 										<div className="flex min-w-0 flex-1 items-center gap-2.5">
-											{/* 拖拽手柄：draggable 落在按钮上（Button 直接透传原生属性），只有按住手柄才能拖动，避免整行点击展开被拖拽抢掉 */}
+											{/* 拖拽手柄：draggable 落在按钮上（Button 直接透传原生属性），只有按住手柄才能拖动，避免整行点击展开被拖拽抢掉；
+											    聚焦手柄后 ↑/↓ 也可微调（上移/下移按钮的无障碍替代，键盘接线在 hook 的 gripProps 里） */}
 											<Button variant="ghost" size="icon-sm" className="size-6 shrink-0 cursor-grab text-muted-foreground active:cursor-grabbing" title={t("config.dragProvider")} {...providerReorder.gripProps(name)} onClick={(event) => event.stopPropagation()}>
 												<GripVertical size={14} />
 											</Button>
-											{/* 上移/下移：悬停浮现（键盘聚焦也可见），到顶/到底禁用；disabled 带 pointer-events-none，不会抢整行点击 */}
-											<div className="flex shrink-0 items-center">
-												<Button
-													variant="ghost"
-													size="icon-sm"
-													className="size-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-													disabled={!providerReorder.canMove(name, -1)}
-													title={t("config.moveProviderUp")}
-													onClick={(event) => {
-														event.stopPropagation();
-														providerReorder.moveBy(name, -1);
-													}}
-												>
-													<ArrowUp size={13} />
-												</Button>
-												<Button
-													variant="ghost"
-													size="icon-sm"
-													className="size-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-													disabled={!providerReorder.canMove(name, 1)}
-													title={t("config.moveProviderDown")}
-													onClick={(event) => {
-														event.stopPropagation();
-														providerReorder.moveBy(name, 1);
-													}}
-												>
-													<ArrowDown size={13} />
-												</Button>
-											</div>
 											<span className="min-w-0 truncate text-control font-semibold text-text-primary">{name}</span>
 											{/* 折叠态把「N 模型」和用量收进标题行，避免底部再占一条 h-9 空行。用量拦截点击，避免点刷新时误折叠卡片。 */}
 											<span className="shrink-0 rounded-full border border-border-subtle px-1.5 py-px font-mono text-micro tabular-nums text-muted-foreground">{t("config.count.models", { count: provider.models.length })}</span>
@@ -516,6 +526,8 @@ export function ModelsTab(props: {
 											>
 												<Copy size={14} />
 											</Button>
+											{/* 删除供应商会连带删掉整组模型与凭据，和「隐藏/复制」用竖线隔开（同认证页） */}
+											<Separator orientation="vertical" className="mx-0.5 h-4" />
 											<Button
 												variant="ghost"
 												size="icon-sm"
@@ -545,7 +557,7 @@ export function ModelsTab(props: {
 									</div>
 
 									{isExpanded && (
-										<div className="config-provider-body border-t border-border-subtle bg-bg-muted pt-3">
+										<div className="config-provider-body border-t border-border-subtle bg-bg-muted pt-3 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-fast">
 											<div className="config-provider-form mx-4 my-3.5 grid gap-2.5 rounded-lg border border-border-subtle bg-bg-panel p-3.5">
 												<ProviderConnectionForm
 													baseUrl={provider.baseUrl ?? ""}
@@ -571,7 +583,7 @@ export function ModelsTab(props: {
 													advancedHint={
 														(providerComplexFields.length > 0 || providerAdvancedFields.length > 0) && (
 															<div className="mt-1.5 mb-2.5 flex items-start gap-2.5 rounded-md border border-border-subtle bg-bg-muted px-3 py-2 text-text-secondary">
-																<strong className="min-w-[100px] shrink-0 whitespace-nowrap text-[11px] font-semibold text-text-primary">{t("config.advancedPreservedTitle")}</strong>
+																<strong className="min-w-[100px] shrink-0 whitespace-nowrap text-micro font-semibold text-text-primary">{t("config.advancedPreservedTitle")}</strong>
 																<span>
 																	{t("config.advancedPreservedProvider", {
 																		fields: [...providerComplexFields, ...providerAdvancedFields].join(", "),
@@ -595,7 +607,7 @@ export function ModelsTab(props: {
 													<div className="flex min-w-0 flex-wrap items-center gap-2">
 														<span>{t("config.modelList")}</span>
 														{isModelBatchMode && (
-															<span className="rounded-full bg-[color:var(--color-accent-soft)] px-2 py-0.5 text-[11px] font-medium tabular-nums text-[color:var(--color-accent)]">
+															<span className="rounded-full bg-[color:var(--color-accent-soft)] px-2 py-0.5 text-micro font-medium tabular-nums text-[color:var(--color-accent)]">
 																{t("config.modelBatchSelected", {
 																	selected: selectedModelCount,
 																	total: provider.models.length,
@@ -622,19 +634,31 @@ export function ModelsTab(props: {
 															{isModelBatchMode ? t("common.cancel") : t("common.deleteBatch")}
 														</Button>
 														{isModelBatchMode && (
-															<Button
-																variant="destructive"
-																size="sm"
-																onClick={() => {
-																	if (selectedModelCount === 0) return;
-																	props.onDeleteModels(name, [...selectedModelIndexes]);
-																	clearModelBatch();
-																}}
-																disabled={selectedModelCount === 0}
-															>
-																<Trash2 className="size-3.5" aria-hidden="true" />
-																{t("common.deleteSelected")} ({selectedModelCount})
-															</Button>
+															<>
+																<Button size="sm" variant="ghost" disabled={provider.models.length === 0} onClick={() => setSelectedModelIndexes(selectAllModelIndexes(provider.models.length))}>
+																	{t("common.selectAll")}
+																</Button>
+																<Button size="sm" variant="ghost" disabled={provider.models.length === 0} onClick={() => setSelectedModelIndexes(invertModelIndexes(selectedModelIndexes, provider.models.length))}>
+																	{t("common.invertSelection")}
+																</Button>
+																{/* 清除选择只清空勾选，留在批量模式（不动 modelBatchProvider） */}
+																<Button size="sm" variant="ghost" disabled={provider.models.length === 0} onClick={() => setSelectedModelIndexes(new Set())}>
+																	{t("common.clearSelection")}
+																</Button>
+																<Button
+																	variant="destructive"
+																	size="sm"
+																	onClick={() => {
+																		if (selectedModelCount === 0) return;
+																		props.onDeleteModels(name, [...selectedModelIndexes]);
+																		clearModelBatch();
+																	}}
+																	disabled={selectedModelCount === 0}
+																>
+																	<Trash2 className="size-3.5" aria-hidden="true" />
+																	{t("common.deleteSelected")} ({selectedModelCount})
+																</Button>
+															</>
 														)}
 													</div>
 												</div>
@@ -683,9 +707,17 @@ export function ModelsTab(props: {
 												<ModelsTable
 													models={provider.models}
 													onUpdateModel={(i, field, value) => props.onUpdateModel(name, i, field, value)}
-													onUpdateModelThinkingLevel={(i, key, value) => props.onUpdateModelThinkingLevel(name, i, key, value)}
-													onUpdateModelUserAgent={props.onUpdateModelUserAgent && props.getModelUserAgentOverride ? (i, value) => props.onUpdateModelUserAgent!(name, i, value) : undefined}
-													getModelUserAgentOverride={props.onUpdateModelUserAgent && props.getModelUserAgentOverride ? (i) => props.getModelUserAgentOverride!(name, i) : undefined}
+													onUpdateModelThinkingLevel={(i, level, enabled) => props.onUpdateModelThinkingLevel(name, i, level, enabled)}
+													onUpdateModelUserAgent={props.onUpdateModelUserAgent && props.getModelUserAgentOverride ? (i, value) => props.onUpdateModelUserAgent!(name, provider.models[i]?.id ?? "", value) : undefined}
+													getModelUserAgentOverride={props.onUpdateModelUserAgent && props.getModelUserAgentOverride ? (i) => props.getModelUserAgentOverride!(name, provider.models[i]?.id ?? "") : undefined}
+													onUpdateModelThinkingLevelDefault={props.onUpdateModelThinkingLevelDefault && props.getModelThinkingLevelDefault ? (i, value) => props.onUpdateModelThinkingLevelDefault!(name, provider.models[i]?.id ?? "", value) : undefined}
+													getModelThinkingLevelDefault={props.onUpdateModelThinkingLevelDefault && props.getModelThinkingLevelDefault ? (i) => props.getModelThinkingLevelDefault!(name, provider.models[i]?.id ?? "") : undefined}
+													getModelAvailableThinkingLevels={(i) => {
+														// 键为空（未填 id 的新行）时查不到 → 未知，与「未识别模型」同一展示。
+														const model = provider.models[i];
+														if (!model?.id) return undefined;
+														return availableThinkingLevels.get(modelThinkingLevelsKey(name, model.id));
+													}}
 													onDeleteModel={(i) => {
 														clearModelBatch();
 														props.onDeleteModel(name, i);
@@ -706,6 +738,7 @@ export function ModelsTab(props: {
 																}
 															: undefined
 													}
+													getModelHidden={props.onToggleHiddenModel ? (i) => (props.hiddenModels ?? []).includes(`${name}/${provider.models[i]?.id ?? ""}`) : undefined}
 													onResetModel={(i) => props.onResetModel(name, i)}
 													resettingModelKey={props.resettingModelKey}
 													getRowKey={(i) => getModelInputKey(name, i)}
@@ -714,10 +747,6 @@ export function ModelsTab(props: {
 													selectedIndexes={selectedModelIndexes}
 													onToggleSelectIndex={(i) => setSelectedModelIndexes((current) => toggleModelIndex(current, i))}
 													onToggleAll={(total) => toggleAllModels(total)}
-													onDeleteSelected={(indexes) => {
-														props.onDeleteModels(name, indexes);
-														clearModelBatch();
-													}}
 													focusModelKey={pendingModelFocusKey}
 													onFocusHandled={() => setPendingModelFocusKey(null)}
 												/>
@@ -760,7 +789,7 @@ export function ModelsTab(props: {
 								</button>
 								{hiddenSectionOpen && (
 									<div className="border-t border-border-subtle px-3.5 py-2">
-										<p className="mb-2 text-[11px] leading-relaxed text-text-tertiary">{t("config.hiddenProvidersHint")}</p>
+										<p className="mb-2 text-micro leading-relaxed text-text-tertiary">{t("config.hiddenProvidersHint")}</p>
 										<div className="flex flex-col gap-1">
 											{hiddenProviderNames.map((hiddenName) => (
 												<div key={hiddenName} className="flex items-center justify-between gap-2 rounded-sm bg-bg-muted px-2.5 py-1.5">
@@ -792,8 +821,17 @@ export function ModelsTab(props: {
 					onRequestSave={(save) => {
 						props.providerPageSaveRef.current = save;
 					}}
+					// 模型表对齐（供应商页 = 卡片同款操作）：页面里的隐藏 / 默认档位 / 逐模型 UA 都先记在页内，
+					// 点保存时由 ConfigModal 按最终名字替换式落盘（见 AddProviderDialog 的 props 注释）；
+					// 宿主只提供「读当前状态」的入口（entries 存在才渲染对应行内操作）。
+					hiddenModels={props.hiddenModels}
+					getModelThinkingLevelDefault={props.getModelThinkingLevelDefault}
+					getModelAvailableThinkingLevels={(providerName, modelId) => availableThinkingLevels.get(modelThinkingLevelsKey(providerName, modelId))}
 				/>
 			)}
+
+			{transferView?.kind === "export" && <ModelsExportPanel providerIds={transferView.ids} providers={props.data.providers} onBack={() => setTransferView(null)} />}
+			{transferView?.kind === "import" && <ModelsImportPanel data={props.data} onApply={props.onApplyModelsTransfer} onBack={() => setTransferView(null)} />}
 		</div>
 	);
 }

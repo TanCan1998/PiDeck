@@ -1,27 +1,27 @@
 /**
  * pi ↔ DSH 单供应商迁移服务。
  *
- * 读：pi 走 ConfigManager；DSH 只读 $DSH_HOME/settings.yaml + .credentials.yaml，
+ * 读：pi 走 ConfigManager；DSH 只读 PiDeck profile（兼容 settings.yaml）+ .credentials.yaml，
  * 不启动 host（避免和 dsh-web 抢同一 DSH_HOME）。
  *
  * 写：
  * - 到 pi：合并 models.json / auth.json。
  * - 到 DSH：host 已就绪则走官方 settings.update + credentials.set；
- *   否则磁盘合并 settings.yaml / .credentials.yaml（不为此拉起 host）。
+ *   否则磁盘合并 PiDeck profile / .credentials.yaml（不为此拉起 host）。
  */
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { getAppLogger } from "../logging/sharedLogger";
 import type { ConfigManager, PiAuthFile, PiModelsFile, PiProviderConfig } from "./ConfigManager";
 import type { DshHost } from "../dsh/DshHost";
 import { credentialValueFromDocument, isValidCredentialRef } from "../dsh/dshCredentials";
+import { isRecord, readDshSettingsSnapshot, writeDshProfileSettings } from "../dsh/dshProfileSettings";
 import { getPiAiCatalogIndex } from "../pi/piAiBuiltinCatalog";
 import {
 	asProviderCompatFlags,
 	credentialRefFor,
 	dshToPiSnapshot,
-	dumpYamlObject,
 	isSafeProviderName,
-	loadYamlObject,
 	looksLikeOfficialDeepseek,
 	mergeCredentialDocument,
 	mergeDshProviderIntoSettings,
@@ -74,8 +74,7 @@ async function readText(path: string): Promise<string> {
 }
 
 async function readDshSettings(homeDir: string): Promise<{ rawText: string; parsed: unknown }> {
-	const rawText = await readText(join(homeDir, "settings.yaml"));
-	return { rawText, parsed: loadYamlObject(rawText) };
+	return { rawText: "", parsed: readDshSettingsSnapshot(homeDir) };
 }
 
 /**
@@ -267,16 +266,20 @@ export async function writeDshSnapshot(deps: ProviderMigrationDeps, snapshot: Ds
 			const ref = credentialRefFor(snapshot.profile, snapshot.namespace === "llm-deepseek" ? "deepseek" : snapshot.name);
 			if (!isValidCredentialRef(ref)) throw new Error(`invalid credential ref: ${ref}`);
 			await deps.dshHost.setCredential(ref, snapshot.apiKey);
+			// 凭据迁移只记 ref 与去向，绝不落 key 值
+			getAppLogger()?.info("config", "DSH credential set via host", { ref, provider: snapshot.name });
 		}
 		return true;
 	}
 
 	const home = deps.dshHost.getHomeDir();
 	if (needsSettingsWrite) {
-		const settingsPath = join(home, "settings.yaml");
 		const { parsed } = await readDshSettings(home);
 		const next = mergeDshProviderIntoSettings(parsed, snapshot);
-		await writeFile(settingsPath, dumpYamlObject(next), "utf8");
+		const config = next[snapshot.namespace];
+		if (!isRecord(config)) throw new Error(`Invalid DSH provider settings: ${snapshot.namespace}`);
+		writeDshProfileSettings(home, snapshot.namespace, config);
+		getAppLogger()?.info("config", "DSH profile settings written", { provider: snapshot.name, namespace: snapshot.namespace });
 	}
 	if (snapshot.apiKey) {
 		const ref = credentialRefFor(snapshot.profile, snapshot.namespace === "llm-deepseek" ? "deepseek" : snapshot.name);
@@ -284,6 +287,7 @@ export async function writeDshSnapshot(deps: ProviderMigrationDeps, snapshot: Ds
 		const credPath = join(home, ".credentials.yaml");
 		const existing = await readText(credPath);
 		await writeFile(credPath, mergeCredentialDocument(existing, ref, snapshot.apiKey), "utf8");
+		getAppLogger()?.info("config", "DSH credentials file written", { file: credPath, ref });
 	}
 	return false;
 }

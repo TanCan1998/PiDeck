@@ -18,7 +18,8 @@ export type ResourceImportTargetOption = {
 type UseResourceImportDialogOptions = {
 	kind: ResourceImportKind;
 	sourceProjectId?: string;
-	projects: ResourceImportProject[];
+	/** 技能导入的项目目标数据源；MCP 导入只写全局层，不需要项目列表。 */
+	projects?: ResourceImportProject[];
 	fixedProjectId?: string;
 	open?: boolean;
 	onImported?: () => void;
@@ -55,7 +56,8 @@ export function useResourceImportDialog(options: UseResourceImportDialogOptions)
 		onImportedRef.current = options.onImported;
 	}, [options.onImported]);
 
-	const availableProjects = useMemo(() => options.projects.filter((project) => project.kind !== "chat" && (!options.fixedProjectId || project.id === options.fixedProjectId)), [options.fixedProjectId, options.projects]);
+	// MCP 导入只写全局层：配置页已收敛为全局作用域，写进项目 .pi/mcp.json 的内容在页面里看不到。
+	const availableProjects = useMemo(() => (options.kind === "skill" ? (options.projects ?? []).filter((project) => project.kind !== "chat" && (!options.fixedProjectId || project.id === options.fixedProjectId)) : []), [options.fixedProjectId, options.kind, options.projects]);
 	const targetOptionEntries = useMemo(() => {
 		const entries: ResourceImportTargetOption[] =
 			options.kind === "mcp"
@@ -81,14 +83,6 @@ export function useResourceImportDialog(options: UseResourceImportDialogOptions)
 							},
 						];
 		for (const project of availableProjects) {
-			if (options.kind === "mcp") {
-				entries.push({
-					value: `project:${project.id}:project-pi`,
-					label: `${project.name} · ${t("config.import.targetProjectMcp")}`,
-					target: { scope: "project", projectId: project.id, locationId: "project-pi" },
-				});
-				continue;
-			}
 			entries.push(
 				{
 					value: `project:${project.id}:project-pi`,
