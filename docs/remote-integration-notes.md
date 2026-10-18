@@ -141,3 +141,23 @@ activate 的异常发生在 xterm 事件派发里，逃出 catch 变成未捕获
 应让 runner 对 `-1`/`255` 抛专用错误码，再由调用方映射成 `*_UNCONFIRMED`——现在两者混在同一个码里，
 这也是 「创建结果未确认」 文案偶尔与事实（目录没建成）不符的原因。
 
+### 10.2 第二轮收口结论
+
+- **提交**：`728366f70`（merge）+ `5595294ae`（着色查表契约/文档）+ `d2e64d93e`（终端 WebGL 修复）
+  + `43701995c`（底栏守卫结构容忍）+ `570eb5ca8`（文档）。已推 `origin/integration/dev-sync`。
+- **门禁**：`typecheck` 0、`check:format` 0、`build:fast` 0。
+- **单测（分块串行，规避已知 flaky hang）**：12,882 例 / 12,581 通过 / 26 失败；
+  失败**全部**落在 §7 既有红灯清单（`feishuSessionRuntimeBinding`、`fileIcons`、`piRuntimeLauncher`、
+  `piResourceConfigService`（**上游 origin/dev 即红，已在独立 worktree 复现**）、`rewindCheckpointCore`、
+  `sessionCatalogCommand`、`spinnerUtility`、`sshClientRuntime`、以及远端历史红灯
+  `remoteBootstrapSessionIntegration`/`remoteBrowseRoot`/`remoteGitRecovery`/`remoteHelperSearchNames`/
+  `remoteProjectFileService`/`remoteRunnerEntry`/`remoteSessionRootIsolation`/`remoteSoakOwnership`）。
+  **本轮修复的两条合并专属失败**：`fileTreeGitStatus` 着色查表契约、`quickMessages` 底栏守卫容器。
+- **真机 e2e**：G1 ✓、G3a/G3b/G4a/G4b/G5a/G5b/G5c/G5d/G5e ✓、终端项目隔离 ✓、文件管理 v1 ✓（单跑与同批均过）、
+  G2a/G2b ✓（单跑 1.4m）。全部门禁用例单独或组合运行均为绿；失败仅出现在长串跑中的 SSH 抖动（见 10.1(b)）。
+- **便携版**：`release\PiDeck-0.9.1-portable.exe`（84,743,374 字节，
+  SHA256 `6CC42D05F07FAC14A285DE52882B48F10FE51A52D1DD9A1641F666D3A287EE9B`），
+  评估构建（临时把远端开关置 true 打包，源码已还原），干净启动 4 进程 / 窗口标题 PiDeck 正常。
+  **此 exe 仅供本地试用，不要分发**。
+- **仍未合入 dev**：等用户试用验收后再决定合入或开 PR。
+
