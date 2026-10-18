@@ -27,10 +27,10 @@ function PresetChip(props: { preset: AcpToolPreset; status?: AcpToolStatus; runn
 	// missing 是「需要处理」，不能和 unknown 同灰；primary 是主题强调色，不是状态色。
 	const badgeVariant = !status || status.state === "unknown" ? "neutral" : status.state === "missing" ? "warning" : "success";
 	return (
-		<div className="border-border bg-background flex flex-wrap items-center gap-2 rounded-md border px-2.5 py-1.5">
+		<div className="flex flex-wrap items-center gap-2 rounded-md border border-border-subtle bg-bg-panel px-2.5 py-1.5">
 			<button type="button" className="hover:bg-accent flex items-center gap-1.5 rounded px-1 py-0.5 text-left" title={t(PRESET_DESC_KEYS[preset.id])} onClick={() => onAdd(preset)}>
 				<Plus size={12} aria-hidden="true" />
-				<span className="text-xs">{preset.name}</span>
+				<span className="text-control">{preset.name}</span>
 			</button>
 			<Badge variant={badgeVariant} size="sm">
 				{badgeText}
