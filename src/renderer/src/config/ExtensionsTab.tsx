@@ -10,6 +10,7 @@ import { writeClipboard } from "../utils/clipboard";
 import { extensionShortName, filterExtensionsByQuery } from "../utils/extensionFilter";
 import { ExtensionStoreTab } from "./ExtensionStoreTab";
 import { ContentTabs } from "./ContentTabs";
+import { SectionHeading } from "../components/ui-shadcn/section-heading";
 import { isProjectDiscoverySource, projectInstalledExtensionSources, type ResourceScope } from "./resourceScopeModel";
 import { buildProjectOverrideKeyIndex, matchesProjectOverride, type ProjectOverrideKeyIndex } from "./projectOverrideKeys";
 import { useResourceTogglePending } from "../hooks/useResourceTogglePending";
@@ -343,14 +344,15 @@ export function ExtensionsTab(props: {
 
 					{/* 已安装扩展列表 */}
 					<div className="config-section">
-						<h3 className="extensions-installed-title mb-2 text-sm font-semibold tracking-tight text-foreground">{t("config.installedExtensions")}</h3>
+						{/* 标题走共享 SectionHeading：与系统设置各页同一套字重/字号，不再靠 legacy 类名锚定 */}
+						<SectionHeading className="mb-2" title={t("config.installedExtensions")} />
 						<div className="mb-3 mt-2 flex flex-wrap items-center justify-between gap-3">
 							<div className="flex min-w-0 flex-1 flex-col gap-1">
 								<div className="flex min-w-0 items-center gap-2">
 									{/* 搜索框：写法对齐 DshPluginSection / ProxyTab 的「左图标 + Input」组合 */}
 									<div className="relative min-w-0 flex-1 basis-52">
 										<Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/70" aria-hidden="true" />
-										<Input type="search" value={extensionQuery} onChange={(event) => setExtensionQuery(event.currentTarget.value)} placeholder={t("config.extensionListSearchPlaceholder")} aria-label={t("config.extensionListSearchPlaceholder")} className="h-8 pl-8 text-control" />
+										<Input type="search" value={extensionQuery} onChange={(event) => setExtensionQuery(event.currentTarget.value)} placeholder={t("config.extensionListSearchPlaceholder")} aria-label={t("config.extensionListSearchPlaceholder")} size="sm" className="pl-8" />
 									</div>
 									{/* 有查询词时显示「匹配数 / 总数」，否则维持原有总数计数 */}
 									<span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">{extensionQuery.trim().length > 0 ? t("config.extensionListResultCount", { matched: filteredExtensions.length, count: visibleExtensions.length }) : t("config.count.extensions", { count: visibleExtensions.length })}</span>

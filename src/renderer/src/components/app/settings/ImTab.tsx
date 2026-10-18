@@ -387,7 +387,7 @@ function FeishuPane(_props: Props) {
 			{/* ── Bot 配置管理 ── */}
 			<div className="config-section">
 				<div className="mb-3 flex items-center justify-between gap-3">
-					<span className="font-mono text-xs tabular-nums text-text-tertiary">{t("config.im.botConfig", { count: bots.length })}</span>
+					<span className="font-mono text-xs tabular-nums text-muted-foreground">{t("config.im.botConfig", { count: bots.length })}</span>
 					<div className="flex min-w-0 items-center gap-1.5">
 						<Button size="sm" variant="outline" onClick={() => setGuideOpen(true)}>
 							{t("config.im.guide")}

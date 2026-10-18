@@ -158,7 +158,7 @@ export function SkillsTab(props: {
 					/>
 					<div className="mb-3 flex items-center justify-between gap-3">
 						<div>
-							<span className="font-mono text-xs tabular-nums text-text-tertiary">{t("config.count.skills", { count: visibleSkills.length })}</span>
+							<span className="font-mono text-xs tabular-nums text-muted-foreground">{t("config.count.skills", { count: visibleSkills.length })}</span>
 							<small className="skills-restart-hint">{t("config.restartHint")}</small>
 						</div>
 						<div className="skills-toolbar-actions flex items-center gap-1.5">

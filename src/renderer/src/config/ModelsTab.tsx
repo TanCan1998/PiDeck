@@ -284,7 +284,7 @@ export function ModelsTab(props: {
 			{!props.addingProvider && !props.editingProvider && !transferView && (
 				<>
 					<div className="mb-3 flex items-center justify-between gap-3">
-						<span className="font-mono text-xs tabular-nums text-text-tertiary">{t("config.count.providers", { count: visibleProviderNames.length })}</span>
+						<span className="font-mono text-xs tabular-nums text-muted-foreground">{t("config.count.providers", { count: visibleProviderNames.length })}</span>
 						<div className="flex min-w-0 items-center gap-1.5">
 							{!batchMode && (
 								<>

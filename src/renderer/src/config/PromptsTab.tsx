@@ -315,7 +315,7 @@ export function PromptsTab(props: {
 				<>
 					<div className="mb-3 flex items-center justify-between gap-3">
 						<div>
-							<span className="font-mono text-xs tabular-nums text-text-tertiary">{t("config.count.prompts", { count: visibleTemplateCount })}</span>
+							<span className="font-mono text-xs tabular-nums text-muted-foreground">{t("config.count.prompts", { count: visibleTemplateCount })}</span>
 							<small className="prompts-restart-hint">{t("config.restartHint")}</small>
 						</div>
 						<div className="prompts-toolbar-actions flex items-center gap-1.5">

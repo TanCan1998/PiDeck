@@ -126,7 +126,7 @@ export function AuthTab(props: {
 	return (
 		<div className="config-auth-tab">
 			<div className="mb-3 flex items-center justify-between gap-3">
-				<span className="font-mono text-xs tabular-nums text-text-tertiary">{t("config.count.auth", { count: allProviders.length })}</span>
+				<span className="font-mono text-xs tabular-nums text-muted-foreground">{t("config.count.auth", { count: allProviders.length })}</span>
 				<div className="flex min-w-0 items-center gap-1.5">
 					<Button
 						size="sm"
