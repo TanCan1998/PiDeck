@@ -69,6 +69,8 @@ export interface DrawerFilesPort {
 	sessionsProject: Project | undefined;
 	sessionsProjectId: string | undefined;
 	files: FileTreeNode[];
+	/** 文件树内容代次：树内容真的变了才 +1（owner 在 useProjectSync），驱动文件树着色的防抖重拉 */
+	fileTreeContentRevision: number;
 	sessions: SessionSummary[];
 	sessionSourceFilter: Record<string, Set<SessionFilterPill> | null>;
 	sessionHistoryLoading: boolean;
@@ -199,6 +201,7 @@ export function DrawerSurface(props: DrawerSurfaceProps) {
 						project={drawer === "sessions" ? files.sessionsProject : undefined}
 						projectId={git.activeProjectId}
 						files={files.files}
+						fileTreeContentRevision={files.fileTreeContentRevision}
 						sessions={
 							files.sessionsProjectId && files.sessionSourceFilter[files.sessionsProjectId as string]
 								? files.sessions.filter((s) => !s.parentSessionPath && files.sessionSourceFilter[files.sessionsProjectId as string]!!.has(sessionPillOf(s))).concat(files.sessions.filter((s) => s.parentSessionPath && files.sessionSourceFilter[files.sessionsProjectId as string]!!.has(sessionPillOf(s))))

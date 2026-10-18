@@ -6,8 +6,10 @@
  *    （含未跟踪文件时红优先，呼应「没进 git 管理」的核心诉求）、祖先只标到项目根；
  * 4. 颜色映射——状态 → Tailwind 语义 token utility（不写死色值，暗色/皮肤自动适配）；
  * 5. 多仓合并——根仓与嵌套仓的状态合并后走同一套优先级规则；
- * 6. 接线契约——文件行与目录行都叠着色类、查表函数顶层传入 + 递归透传、两处刷新调用点都在；
+ * 6. 接线契约——文件行与目录行都叠着色类、查表函数顶层传入 + 递归透传、着色重拉只由内容代次驱动；
  *    这些断言按「出现次数」钉住，删掉任一处都会红（此前的 presence 正则对行为级删除全部假绿）。
+ * 7. 档位（strong / muted）两档都要可证伪：只有更深后代变化的祖先必须返回 muted；
+ *    行组件必须把查表命中原样交给 fileTreeGitStatusClass（解构只剩 status 会让洗淡档变死代码）。
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -281,7 +283,46 @@ test("着色类映射：两档各自的 utility，未命中不染色", () => {
 	assert.equal(fileTreeGitStatusClass(undefined), undefined, "未命中（干净文件/非仓库）不加类");
 });
 
-test("接线契约：文件行与目录行都叠着色类、查表函数接进树、两处刷新调用点都在", () => {
+test("查表档位：四种状态都必须区分「直接含变更」与「只有更深后代变化」", () => {
+	// muted 恒 false 时下面每个 :muted 断言都会红——洗淡档（Have changed descendants）只靠
+	// 这些断言活着，缺了就是死代码级风险。
+	const cases = [
+		{ status: "modified", file: "/proj/pkg/deep/own.ts", group: groups({ workingTree: [resource("/proj/pkg/deep/own.ts", GitStatus.MODIFIED)] }) },
+		{ status: "added", file: "/proj/pkg/deep/new.ts", group: groups({ index: [resource("/proj/pkg/deep/new.ts", GitStatus.INDEX_ADDED)] }) },
+		{ status: "untracked", file: "/proj/pkg/deep/draft.md", group: groups({ untracked: [resource("/proj/pkg/deep/draft.md", GitStatus.UNTRACKED)] }) },
+		{ status: "conflict", file: "/proj/pkg/deep/both.ts", group: groups({ merge: [resource("/proj/pkg/deep/both.ts", GitStatus.BOTH_MODIFIED)] }) },
+	];
+	for (const { status, file, group } of cases) {
+		const lookup = lookupOf(group, "/proj");
+		assert.equal(hitOf(lookup, file), `${status}:strong`, `${status}：文件本身实色`);
+		assert.equal(hitOf(lookup, "/proj/pkg/deep"), `${status}:strong`, `${status}：直接含变更子项 —— 实色档`);
+		assert.equal(hitOf(lookup, "/proj/pkg"), `${status}:muted`, `${status}：只有更深后代变化 —— 必须洗淡`);
+	}
+});
+
+test("着色类映射：洗淡档与实色档必须是不同的类名，洗淡档保留色相只降不透明度", () => {
+	for (const status of ["modified", "added", "untracked", "conflict"]) {
+		const strong = fileTreeGitStatusClass({ status, muted: false });
+		const muted = fileTreeGitStatusClass({ status, muted: true });
+		assert.notEqual(muted, strong, `${status}：忽略 muted 会让两档完全同色（洗淡档失效）`);
+		assert.match(muted, /^text-(info|success|warning|danger)\/65$/, `${status}：洗淡档是同色 token 的 65% 档，不换色相`);
+		assert.match(strong, /^text-(info|success|warning|danger)$/, `${status}：实色档是整串 token utility，不带透明度后缀`);
+	}
+});
+
+test("接线契约：行组件把查表命中原样交给着色映射，目录递归透传查表函数", () => {
+	const surface = readSource("src/renderer/src/components/session/WorkspaceSurface.tsx");
+	// 命中对象必须整体传入：中间解构只剩 status 会把 muted 丢掉，洗淡档变成死代码（评审 P1-b）
+	const classCalls = surface.match(/fileTreeGitStatusClass\(\s*gitStatus\s*\)/g) ?? [];
+	assert.equal(classCalls.length, 2, "文件行与目录行都必须用完整命中（含 muted）取类");
+	const lookups = surface.match(/props\.gitStatusOf\?\.\(\s*node\.path\s*\)/g) ?? [];
+	assert.equal(lookups.length, 2, "两种行都按节点路径查表");
+	assert.doesNotMatch(surface, /fileTreeGitStatusClass\(\s*\{/, "不得手工拼命中对象（会写死档位）");
+	assert.doesNotMatch(surface, /muted\s*:\s*(?:true|false)/, "档位只能来自查表结果，行组件不得写死");
+	assert.match(surface, /gitStatusOf=\{\s*props\.gitStatusOf\s*\}/, "目录递归必须透传查表函数（缺了深层节点全失色）");
+});
+
+test("接线契约：文件行与目录行都叠着色类、查表函数接进树、着色重拉只由内容代次驱动", () => {
 	const surface = readSource("src/renderer/src/components/session/WorkspaceSurface.tsx");
 	// 行组件与面板在同一个文件里（行拆分在上游「分批渲染」重构中被合并回去），断言照旧按出现次数钉住
 	const row = surface;
@@ -292,15 +333,24 @@ test("接线契约：文件行与目录行都叠着色类、查表函数接进�
 	assert.match(surface, /gitStatusOf=\{\s*gitStatus\.statusOf\s*\}/, "面板把查表函数传给树根");
 	assert.match(row, /gitStatusOf=\{\s*props\.gitStatusOf\s*\}/, "目录节点把查表函数透传给子节点");
 	assert.match(row, /isActiveFile\s*\?\s*undefined\s*:\s*fileTreeGitStatusClass/, "活跃编辑器行的选中高亮优先于 Git 着色");
-	// 两个调用点：文件树变化后的防抖重拉 + 刷新按钮，删掉任一处都会红
+	// 着色重拉的触发权：刷新按钮一处显式调用 + 内容代次交给防抖 hook（两处，删任一处都红）
 	const refreshCalls = surface.match(/void\s+gitStatus\.refresh\(\)/g) ?? [];
-	assert.equal(refreshCalls.length, 2, "防抖重拉与刷新按钮都必须触发重拉");
-	assert.match(surface, /window\.setTimeout\(\s*\(\)\s*=>\s*void\s+gitStatus\.refresh\(\s*\)\s*,\s*400\s*\)/, "防抖重拉必须挂在定时器上（不是每帧都拉）");
-	assert.match(surface, /\[\s*props\.files\s*,\s*props\.expandedDirs\s*,\s*gitStatus\.refresh\s*\]/, "防抖重拉由文件树内容变化触发");
-	// 触发时机守卫：开抽屉不付第二轮，展开/收起不触发（只改视图、不改 git 状态）
-	assert.match(surface, /firstTreeChangeRef/, "挂载首帧必须跳过（hook 自己的 effect 已经拉过）");
-	assert.match(surface, /const\s+expandedDirsChanged\s*=\s*prevExpandedDirsRef\.current\s*!==\s*props\.expandedDirs/, "必须能分辨「展开/收起」与「内容变化」");
-	assert.match(surface, /if\s*\(\s*expandedDirsChanged\s*\)\s*return;/, "展开/收起直接返回，不重拉");
+	assert.equal(refreshCalls.length, 1, "只有刷新按钮显式重拉（内容变化走防抖 hook）");
+	assert.match(surface, /useFileTreeGitStatusRefresh\(\s*props\.fileTreeContentRevision\s*,\s*gitStatus\.refresh\s*\)/, "防抖重拉由内容代次驱动");
+	// 旧启发式（props.files 引用 + expandedDirs + 两个 ref）必须消失：展开已加载目录也会换引用，
+	// 那会让每次展开都白付一轮 listRepos + 每仓 git status -uall（评审 P1-a 缺陷 1）。
+	assert.doesNotMatch(surface, /firstTreeChangeRef|prevExpandedDirsRef/, "「首帧 + 展开」启发式必须删掉");
+	assert.doesNotMatch(surface, /useFileTreeGitStatusRefresh\([^)]*expandedDirs/, "展开/收起不得参与着色触发");
+	// 防抖规则本体在 hook 里：只以代次为键，定时器回调走 ref（回调重建不打断待执行刷新）
+	const refreshHook = readSource("src/renderer/src/hooks/files/useFileTreeGitStatusRefresh.ts");
+	assert.match(refreshHook, /FILE_TREE_GIT_STATUS_REFRESH_DEBOUNCE_MS\s*=\s*400\s*;/, "防抖窗口 400ms");
+	assert.match(refreshHook, /window\.setTimeout\(\s*\(\)\s*=>\s*void\s+refreshRef\.current\(\)\s*,\s*FILE_TREE_GIT_STATUS_REFRESH_DEBOUNCE_MS\s*\)/, "防抖重拉必须挂在定时器上（不是每次内容变化都拉）");
+	assert.match(refreshHook, /\}\s*,\s*\[\s*contentRevision\s*\]\s*\)/, "effect 只以内容代次为键（引用/展开变化不得取消待执行的刷新）");
+	// 代次 owner 是文件树 state hook：代次与 nodes 同源，只有内容真的换了才 +1
+	const projectSync = readSource("src/renderer/src/hooks/useProjectSync.ts");
+	assert.match(projectSync, /const\s*\{\s*files\s*,\s*fileTreeContentRevision\s*,\s*setFiles\s*\}\s*=\s*useFileTreeContentState\(\)/, "内容代次由 useFileTreeContentState 拥有");
+	const drawerSurface = readSource("src/renderer/src/components/workspace/DrawerSurface.tsx");
+	assert.match(drawerSurface, /fileTreeContentRevision=\{\s*files\.fileTreeContentRevision\s*\}/, "port 把内容代次透传给抽屉面板");
 	// 按下底色显式收口到 hover 同档：themeContrast 契约的 bg-muted 面才覆盖得住按下态
 	assert.match(row, /active:bg-muted/, "行按下底必须与 hover 同档（legacy :active 规则已删）");
 	assert.match(row, /active:bg-accent/, "选中行按下时保持强调底，不被按下色抢走");

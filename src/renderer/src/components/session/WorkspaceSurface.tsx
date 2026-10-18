@@ -26,6 +26,7 @@ import { useFileSearch } from "../../hooks/useFileSearch";
 import { useFileTreeStickyAppearance } from "../../hooks/files/useFileTreeStickyAppearance";
 import { useLazyListWindow } from "../../hooks/useLazyListWindow";
 import { useFileTreeGitStatus } from "../../hooks/files/useFileTreeGitStatus";
+import { useFileTreeGitStatusRefresh } from "../../hooks/files/useFileTreeGitStatusRefresh";
 import { fileTreeGitStatusClass, fileTreeGitStatusLabelKey, type FileTreeGitStatusHit } from "../../utils/fileTreeGitStatus";
 import { FileSearchResults } from "./FileSearchResults";
 import { isEditableTarget, isFileSearchShortcut, isTypeToSearchKey } from "../../utils/fileSearchTrigger";
@@ -52,6 +53,8 @@ export function DrawerContent(props: {
 	/** 文件面板所属项目 id：会话历史面板用不到，但文件树与按名称搜索必须靠它（缺了搜索入口不渲染） */
 	projectId?: string;
 	files: FileTreeNode[];
+	/** 文件树内容代次（owner 在 useProjectSync 的 useFileTreeContentState）：树内容真的变了才 +1，驱动着色防抖重拉 */
+	fileTreeContentRevision: number;
 	sessions: SessionSummary[];
 	sessionsLoading?: boolean;
 	expandedDirs: Set<string>;
@@ -97,6 +100,7 @@ export function DrawerContent(props: {
 				<FilesPanel
 					projectId={props.projectId ?? props.project?.id}
 					files={props.files}
+					fileTreeContentRevision={props.fileTreeContentRevision}
 					expandedDirs={props.expandedDirs}
 					onToggleDirectory={props.onToggleDirectory}
 					onCollapseAll={props.onCollapseAllDirectories}
@@ -120,6 +124,8 @@ function FilesPanel(props: {
 	/** 搜索用项目 id（由抽屉按当前文件树项目传入）：缺省时不渲染搜索入口、快捷键也不响应 */
 	projectId?: string;
 	files: FileTreeNode[];
+	/** 文件树内容代次：树内容真的变了才 +1（owner 在 useProjectSync），驱动着色防抖重拉 */
+	fileTreeContentRevision: number;
 	expandedDirs: Set<string>;
 	onToggleDirectory: (path: string) => void;
 	onFileContextMenu: (node: FileTreeNode, x: number, y: number) => void;
@@ -166,21 +172,10 @@ function FilesPanel(props: {
 	// Git 状态着色（IDEA 风格：untracked 琥珀棕 / modified 蓝 / added 绿 / conflict 红）：
 	// 面板挂载（抽屉打开）与切换项目由 hook 拉取；手动刷新按钮见下方 onClick。
 	const gitStatus = useFileTreeGitStatus({ projectId: props.projectId, projectRoot: props.projectRoot });
-	// 文件树内容真的变了（复制/粘贴/移动、工具触发的重载、refs 触发的重载）才重拉着色：
-	// 挂载首帧跳过（hook 自己的 effect 已经拉过一次）。
-	const firstTreeChangeRef = useRef(true);
-	const prevExpandedDirsRef = useRef(props.expandedDirs);
-	useEffect(() => {
-		const expandedDirsChanged = prevExpandedDirsRef.current !== props.expandedDirs;
-		prevExpandedDirsRef.current = props.expandedDirs;
-		if (firstTreeChangeRef.current) {
-			firstTreeChangeRef.current = false;
-			return;
-		}
-		if (expandedDirsChanged) return;
-		const timer = window.setTimeout(() => void gitStatus.refresh(), 400);
-		return () => window.clearTimeout(timer);
-	}, [props.files, props.expandedDirs, gitStatus.refresh]);
+	// 文件树内容真的变了（复制/粘贴/移动、工具触发的重载、refs 触发的重载）才防抖重拉着色：
+	// 触发键是 owner 维护的内容代次，不是 props.files 的引用——展开/收起与纯展示变换都不参与，
+	// 也不会把待执行的刷新清掉；挂载首帧由 useFileTreeGitStatus 自己拉过，不重复。
+	useFileTreeGitStatusRefresh(props.fileTreeContentRevision, gitStatus.refresh);
 	const [searchOpen, setSearchOpen] = useState(false);
 	// 面板容器：退出搜索后把焦点收回来，否则焦点落到 body，之后的 Ctrl+F / 输入即搜索都收不到键
 	const panelRef = useRef<HTMLDivElement | null>(null);
