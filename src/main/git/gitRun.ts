@@ -58,6 +58,24 @@ export function runGitCommand(args: string[], options: RunGitOptions): Promise<{
 const GIT_TOPLEVEL_TIMEOUT_MS = 5000;
 
 /**
+ * 从 `git rev-parse --show-toplevel` 的 stdout 里取出 toplevel 路径（纯函数，可单测）。
+ *
+ * 取**最后一个非空行**：git 的真实值总是最后一行，前面可能被包装层（git alias 的 echo、
+ * wrapper 告警、中文 Windows 的代码页提示）插入额外行。取首行会把前缀当成路径——
+ * 路径非法 → 签名恒 null → 着色/角标重新退化成只靠 5 秒轮询（就是本层要修的原缺陷）。
+ *
+ * @returns 空输出或只有空白时返回 null（调用方静默降级，不起轮询采样阶段就失败）
+ */
+export function parseToplevelOutput(stdout: string): string | null {
+	const lines = stdout.split(/\r?\n/);
+	for (let i = lines.length - 1; i >= 0; i -= 1) {
+		const line = lines[i].trim();
+		if (line) return line;
+	}
+	return null;
+}
+
+/**
  * 解析 cwd 所属仓库的 toplevel（宿主视角绝对路径）；不是仓库 / git 不可用 / 超时一律返回 null。
  *
  * 为什么需要它：GitRefsWatcher 只盯 <repo>/.git 下的 refs 文件，而订阅方给的是项目根——
@@ -76,8 +94,8 @@ const GIT_TOPLEVEL_TIMEOUT_MS = 5000;
 export async function resolveGitToplevel(cwd: string, timeoutMs: number = GIT_TOPLEVEL_TIMEOUT_MS): Promise<string | null> {
 	try {
 		const { stdout } = await execGit(["rev-parse", "--show-toplevel"], { cwd, timeoutMs });
-		// 只取首行：除结尾换行外，个别包装（git alias、告警前缀）还会带额外行
-		const toplevel = stdout.split(/\r?\n/)[0]?.trim() ?? "";
+		// 真实值在最后一行：包装层可能带回显/告警前缀（解析规则见 parseToplevelOutput）
+		const toplevel = parseToplevelOutput(stdout);
 		if (!toplevel) return null;
 		return toHostGitOutputPath(toplevel, resolveWslGitTarget(cwd));
 	} catch {

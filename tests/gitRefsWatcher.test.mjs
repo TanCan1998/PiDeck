@@ -19,6 +19,8 @@ import test from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
 const { GitRefsWatcher, readBranchUpstream, readRefsSignature, resolveGitDir } = loadTsCommonJs("src/main/git/GitRefsWatcher.ts");
+// 解析纯函数与 watcher 分居两个模块：gitRun 的 stdout 解析规则只在它那里（toplevel 解析复用收口）。
+const { parseToplevelOutput } = loadTsCommonJs("src/main/git/gitRun.ts");
 
 const temps = [];
 function makeTempDir() {
@@ -222,6 +224,8 @@ test("acquire 先取基线：未变化不通知，变化只通知一次", async 
 test("同一仓库复用 watchId，计数归零才停轮询", async () => {
 	const repo = createRepo();
 	const { watcher, timers } = createWatcher();
+	const seen = [];
+	watcher.on((watchId) => seen.push(watchId));
 	const first = watcher.acquire("p1", repo.root);
 	const second = watcher.acquire("p1", repo.root);
 	await flushResolution();
@@ -233,12 +237,48 @@ test("同一仓库复用 watchId，计数归零才停轮询", async () => {
 	assert.equal(watcher.activeRepoCount, 1);
 	assert.equal(timers.clearCalls(), 0, "还有订阅者时不得停轮询");
 
+	// 关键行为：同一 watchId 被 acquire 了两次、只退订一次时，它自己还有一次未退订。
+	// 线上四个订阅点（App 角标 / usePaneGitInfo / 文件树 controller / GitDrawerHost）共用同一个
+	// watchId，退回「按仓库聚合计数的 Set」实现会让退订一方彻底安静——这里正是那条断言。
+	// 分支名换成长度不同的，签名是 mtime + size，同长度同毫秒会看不出变化。
+	writeFileSync(join(repo.gitDir, "HEAD"), "ref: refs/heads/feature-long\n");
+	timers.tick();
+	assert.deepEqual([...seen], [first], "同一 watchId 还有一次未退订，必须继续通告");
+
 	watcher.release(second);
 	assert.equal(watcher.activeRepoCount, 0);
 	assert.equal(timers.clearCalls(), 1, "最后一个订阅者退出必须停掉定时器");
 
 	watcher.release("unknown::watch-id");
 	assert.equal(timers.clearCalls(), 1, "未知 id 退订必须安全且不产生副作用");
+});
+
+test("解析完成前重复 acquire 只解析一次，release 一次后仍继续通告", async () => {
+	const repo = createRepo();
+	const deferred = [];
+	const { watcher, timers } = createWatcher({ resolveRepoRoot: () => new Promise((done) => deferred.push(done)) });
+	const seen = [];
+	watcher.on((watchId) => seen.push(watchId));
+	const first = watcher.acquire("p1", repo.root);
+	const second = watcher.acquire("p1", repo.root);
+	assert.equal(first, second, "同一 (projectId, repoPath) 的 watchId 稳定");
+	assert.equal(deferred.length, 1, "pending 期间的重复订阅共用同一次解析（不得多起一个子进程）");
+	assert.equal(watcher.pendingRepoCount, 1, "同一个 watchId 的重复订阅落在同一条 pending 登记上");
+
+	deferred[0](repo.root);
+	await flushResolution();
+	assert.equal(watcher.pendingRepoCount, 0);
+	assert.equal(watcher.activeRepoCount, 1);
+
+	watcher.release(first);
+	assert.equal(watcher.activeRepoCount, 1, "还有一次未退订时不得停轮询");
+	writeFileSync(join(repo.gitDir, "HEAD"), "ref: refs/heads/feature-branch\n");
+	timers.tick();
+	assert.deepEqual([...seen], [first], "同一 watchId 还有一次未退订，必须继续通告");
+
+	watcher.release(second);
+	assert.equal(watcher.activeRepoCount, 0);
+	assert.equal(timers.clearCalls(), 1);
 });
 
 test("多仓库各自独立：只有发生变化的仓库被通知", async () => {
@@ -460,7 +500,9 @@ test("toplevel 解析失败静默降级：不抛、不误报，退订照常", as
 
 		assert.equal(typeof watchId, "string", `${variant.name}：必须照常返回 watchId，不许把异常抛给 IPC`);
 		assert.equal(watcher.activeRepoCount, 1, `${variant.name}：退回订阅路径继续盯着（签名 null 只是不通知）`);
-		assert.ok(warnings.length >= 2, `${variant.name}：解析失败与非仓库签名各记一条 warn`);
+		// 只记一条：fallback warn 已写明真实原因（root === null），再补一条 "not a git repository"
+		// 会把「其实在仓库里、只是解析失败/超时」诊断成非仓库。
+		assert.equal(warnings.length, 1, `${variant.name}：解析失败只记一条 warn（说明真实原因）`);
 		assert.ok(
 			warnings.every((entry) => entry.scope === "git"),
 			`${variant.name}：降级日志必须走 git scope`,
@@ -476,6 +518,45 @@ test("toplevel 解析失败静默降级：不抛、不误报，退订照常", as
 	}
 });
 
+test("toplevel 解析超时立即回落并起轮询（WSL 下不能等 execGit 的 60s 下限）", async () => {
+	const repo = createRepo();
+	const { watcher, timers, warnings } = createWatcher({
+		// 永不返回：模拟 wsl.exe 卡在握手上（WSL 分支的 execGit 自己的超时下限是 60s）
+		resolveRepoRoot: () => new Promise(() => {}),
+		resolveTimeoutMs: 10,
+	});
+	const seen = [];
+	watcher.on((watchId) => seen.push(watchId));
+	const watchId = watcher.acquire("p1", repo.root);
+
+	// 盲窗证据：解析未结算前既没有轮询也收不到通告
+	assert.equal(watcher.pendingRepoCount, 1);
+	assert.equal(timers.live().length, 0);
+
+	await new Promise((done) => setTimeout(done, 60));
+	await flushResolution();
+	assert.equal(watcher.pendingRepoCount, 0, "超时必须结算掉登记，否则是孤儿 pending");
+	assert.equal(watcher.activeRepoCount, 1, "超时后必须进入 fallback 登记（退回订阅路径）");
+	assert.equal(timers.live().length, 1, "fallback 必须立刻起轮询，不能把订阅留在无通告盲窗里");
+	assert.equal(warnings.length, 1, "超时只记一条 warn，且说明真实原因是超时");
+	assert.match(String(warnings[0].detail.error), /toplevel resolve timeout/);
+
+	// 迟到的解析结果不得再产生第二份登记/第二份轮询（靠 pending entry 身份自灭）
+	writeFileSync(join(repo.gitDir, "HEAD"), "ref: refs/heads/after-timeout\n");
+	timers.tick();
+	assert.deepEqual([...seen], [watchId], "fallback 登记照常通告变化");
+	assert.equal(watcher.activeRepoCount, 1);
+	assert.equal(timers.live().length, 1, "迟到解析不得另起一份轮询");
+});
+
+test("parseToplevelOutput 取最后一个非空行（包装层前缀不得当成路径）", () => {
+	assert.equal(parseToplevelOutput("C:/a/b\n"), "C:/a/b");
+	assert.equal(parseToplevelOutput("C:/a/b\r\n"), "C:/a/b", "CRLF 换行同样要去掉");
+	assert.equal(parseToplevelOutput("warning: x\nC:/a/b\n\n"), "C:/a/b", "真实值在最后一行：取首行会拿到告警前缀");
+	assert.equal(parseToplevelOutput(""), null, "空输出表示解析失败（调用方降级）");
+	assert.equal(parseToplevelOutput("  \n"), null, "只有空白同样算解析失败");
+});
+
 test("toplevel 解析复用收口：execGit + toHostGitOutputPath（WSL 路径不另写一套转换）", () => {
 	const source = readFileSync("src/main/git/gitRun.ts", "utf8");
 	const start = source.indexOf("export async function resolveGitToplevel");
@@ -485,9 +566,14 @@ test("toplevel 解析复用收口：execGit + toHostGitOutputPath（WSL 路径�
 	// 空白容忍：格式化改缩进不能让契约测试误红
 	assert.match(fn, /execGit\(\s*\["rev-parse", "--show-toplevel"\]\s*,\s*\{\s*cwd,\s*timeoutMs\s*\}/, "必须经 execGit（WSL 仓库由它分流到发行版内 git）");
 	assert.match(fn, /toHostGitOutputPath\(\s*toplevel\s*,\s*resolveWslGitTarget\(\s*cwd\s*\)\s*\)/, "WSL 分支输出的是 Linux 路径，必须复用 gitWsl 的回译函数");
+	assert.match(fn, /const\s+toplevel\s*=\s*parseToplevelOutput\(\s*stdout\s*\)/, "stdout 必须经纯函数解析（取最后一个非空行）");
+	assert.doesNotMatch(fn, /split\([^)]*\)\s*\[\s*0\s*\]/, "不得取首行：包装层前缀会被当成路径，签名恒 null 就是原来的缺陷");
 	assert.match(fn, /\} catch \{\s*return null;/, "失败一律返回 null（静默降级），不能把异常抛给订阅方");
 
 	const watcherSource = readFileSync("src/main/git/GitRefsWatcher.ts", "utf8");
 	assert.match(watcherSource, /import\s*\{\s*resolveGitToplevel\s*\}\s*from\s*"\.\/gitRun"/, "默认 resolver 必须是 gitRun 的收口实现");
 	assert.match(watcherSource, /this\.resolveRepoRootFn = deps\.resolveRepoRoot \?\? resolveGitToplevel;/, "注入点默认值不能漏接");
+	// WSL 分支的 execGit 超时下限是 60s：解析必须有自己不随它抬高的 watchdog，否则订阅在解析期无轮询无通告。
+	assert.match(watcherSource, /const\s+DEFAULT_RESOLVE_TIMEOUT_MS\s*=\s*8000\s*;/, "默认 watchdog 8s（远小于 WSL 60s 下限）");
+	assert.match(watcherSource, /this\.resolveTimeoutMs = deps\.resolveTimeoutMs \?\? DEFAULT_RESOLVE_TIMEOUT_MS\s*;/, "watchdog 上限必须可由测试注入");
 });

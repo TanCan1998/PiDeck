@@ -35,10 +35,29 @@ import { resolveGitToplevel } from "./gitRun";
 /** 默认轮询间隔：用户抱怨的是「5 秒太久」，1.5 秒足够让角标跟平，成本可忽略。 */
 const DEFAULT_POLL_INTERVAL_MS = 1500;
 
+/**
+ * toplevel 解析的 watchdog（毫秒）。
+ *
+ * 为什么不能用 execGit 自己的 timeoutMs：WSL 分支把它抬到 60s 下限
+ * （gitWsl.resolveWslGitTimeout），解析期间本模块既没起轮询、也不会通告任何变化——
+ * UNC 项目每次订阅都会落进这个无轮询盲窗（正常 0.5–3s，wsl.exe 卡住时最坏 ~62s）。
+ * 所以解析必须另配一个不随 WSL 下限抬高的上限：超时就走既有的 fallback 分支
+ * （退回订阅路径继续盯，签名可能为 null，等价于「不解析 toplevel」的老行为）。
+ */
+const DEFAULT_RESOLVE_TIMEOUT_MS = 8000;
+
+/** 解析超时时写进 warn 的原因串（与「非仓库 / 未装 git」区分开，便于线上定位）。 */
+const RESOLVE_TIMEOUT_REASON = "toplevel resolve timeout";
+
 export type GitRefsWatcherDeps = {
 	logger?: Pick<AppLogger, "warn">;
 	/** 轮询间隔（毫秒），测试可调小。 */
 	intervalMs?: number;
+	/**
+	 * toplevel 解析的 watchdog 上限（毫秒，默认 8000），测试可调小。
+	 * 与 execGit 的 timeoutMs 无关：WSL 分支会在 execGit 内部把它抬到 60s 下限。
+	 */
+	resolveTimeoutMs?: number;
 	/** 签名读取实现（测试注入点）；默认读真实文件。返回 null 表示该路径不是仓库。 */
 	readSignature?: (repoPath: string) => string | null;
 	/**
@@ -250,6 +269,7 @@ function describeError(caught: unknown): string {
 export class GitRefsWatcher {
 	private readonly logger: Pick<AppLogger, "warn"> | undefined;
 	private readonly intervalMs: number;
+	private readonly resolveTimeoutMs: number;
 	private readonly readSignatureFn: (repoPath: string) => string | null;
 	private readonly resolveRepoRootFn: (cwd: string) => Promise<string | null>;
 	private readonly setTimer: (handler: () => void, intervalMs: number) => unknown;
@@ -267,6 +287,7 @@ export class GitRefsWatcher {
 	constructor(deps: GitRefsWatcherDeps = {}) {
 		this.logger = deps.logger;
 		this.intervalMs = deps.intervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+		this.resolveTimeoutMs = deps.resolveTimeoutMs ?? DEFAULT_RESOLVE_TIMEOUT_MS;
 		this.readSignatureFn = deps.readSignature ?? readRefsSignature;
 		this.resolveRepoRootFn = deps.resolveRepoRoot ?? resolveGitToplevel;
 		this.setTimer = deps.setTimer ?? ((handler, intervalMs) => setInterval(handler, intervalMs));
@@ -320,12 +341,36 @@ export class GitRefsWatcher {
 		const entry: PendingWatch = { cwd: repoPath, refs: 1 };
 		this.pending.set(watchId, entry);
 		// entry 本身就是代际令牌：退订会用同一个 watchId 重新登记，旧解析回调靠对象身份自我作废。
-		// 包一层 promise：解析实现（注入点）同步抛错时也走同一个结算入口，acquire 永不把异常抛给 IPC。
-		void new Promise<string | null>((settle) => settle(this.resolveRepoRootFn(repoPath))).then(
-			(root) => this.commit(watchId, entry, root, null),
-			(caught: unknown) => this.commit(watchId, entry, null, describeError(caught)),
-		);
+		void this.resolveWithWatchdog(repoPath).then(({ root, error }) => this.commit(watchId, entry, root, error));
 		return watchId;
+	}
+
+	/**
+	 * 解析 toplevel，并加一个不随 WSL 下限抬高的 watchdog。
+	 *
+	 * 解析实现（注入点）同步抛错也走同一个结算入口，acquire 永不把异常抛给 IPC；
+	 * 超时以 root=null + 超时原因结算，交给 commit 走既有 fallback（退回订阅路径 + 起轮询），
+	 * 迟到的解析结果靠 pending entry 的对象身份自灭，不会产生第二份登记或第二份轮询。
+	 */
+	private resolveWithWatchdog(repoPath: string): Promise<{ root: string | null; error: string | null }> {
+		return new Promise((done) => {
+			let settled = false;
+			let watchdog: ReturnType<typeof setTimeout> | null = null;
+			const finish = (root: string | null, error: string | null) => {
+				if (settled) return;
+				settled = true;
+				// 解析先回来时必须撤掉 watchdog，否则每订阅一次就留一个空转定时器
+				if (watchdog) clearTimeout(watchdog);
+				done({ root, error });
+			};
+			watchdog = setTimeout(() => finish(null, RESOLVE_TIMEOUT_REASON), this.resolveTimeoutMs);
+			// 不把进程钉住：解析慢不该阻止应用退出
+			watchdog.unref?.();
+			void new Promise<string | null>((settle) => settle(this.resolveRepoRootFn(repoPath))).then(
+				(root) => finish(root, null),
+				(caught: unknown) => finish(null, describeError(caught)),
+			);
+		});
 	}
 
 	/** 退订一次；计数归零才停掉该仓库。未知 id 静默忽略（重复退订必须安全）。 */
@@ -381,6 +426,10 @@ export class GitRefsWatcher {
 		if (this.pending.get(watchId) !== entry) return;
 		this.pending.delete(watchId);
 		const repoPath = root ?? entry.cwd;
+		// 读边界说明（刻意例外）：refs 元数据读写允许越出项目根，落在所属仓库的 toplevel
+		// （项目根是 monorepo 子包/子目录时必然发生）。这里只读 HEAD / refs\*\* / packed-refs /
+		// config 的 mtime 与 size，以及 config 里 branch.*.remote|merge 两个上游名——不回传任何
+		// 文件内容、不落 token。除这几处 stat 与上面那段 config 解析外，不访问仓库内其它路径。
 		if (root === null) {
 			// 解析失败（非仓库 / 没装 git / 超时）不是错误，只是退回「盯着订阅路径」的老行为
 			this.warn("git refs watch: repo toplevel unresolved, falling back to the subscribed path", { repoPath, error: resolveError ?? "not a git work tree" });
@@ -392,7 +441,9 @@ export class GitRefsWatcher {
 			existing.watchIds.set(watchId, (existing.watchIds.get(watchId) ?? 0) + entry.refs);
 		} else {
 			const signature = this.sample(repoPath);
-			if (signature === null) this.warn("git refs watch skipped: not a git repository", { repoPath });
+			// root === null 时上一条 warn 已经给出真实原因（非仓库 / git 不可用 / 解析超时）；
+			// 再补一条 "not a git repository" 会把「其实在仓库里、只是解析失败」诊断成非仓库，误导排查。
+			if (signature === null && root !== null) this.warn("git refs watch skipped: not a git repository", { repoPath });
 			this.repos.set(repoKey, { repoPath, refs: entry.refs, signature, watchIds: new Map([[watchId, entry.refs]]) });
 			this.startPolling();
 		}
