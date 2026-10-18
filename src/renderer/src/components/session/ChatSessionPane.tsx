@@ -91,6 +91,9 @@ export function ChatSessionPane(props: ChatSessionPaneProps) {
 		<>
 			{findSupported && (
 				<SessionFindOverlay
+					// 会话切换必须重挂：单栏模式下 pane 实例跨会话复用（App.tsx 的 solo 分支没有 key），
+					// 不重挂会把上一个会话的搜索框+关键词带过来，一切会话就自己搜起来。
+					key={sessionId}
 					sessionId={record?.filePath ?? sessionId}
 					// 锚点是本栏消息区（时间线视口）而不是整栏聊天区：分屏时两栏各贴自己的右上角，
 					// 单栏时也不会落到窗口控件那一行（理由见 sessionFindAnchor）。

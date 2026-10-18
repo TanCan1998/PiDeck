@@ -67,9 +67,12 @@ export function SessionFindOverlay(props: SessionFindOverlayProps) {
 		};
 	}, [measureAnchor, open, props.anchorRef]);
 
-	// 外部快捷键：每次 openSignal 变化即展开并聚焦（同一会话重复按也能重新聚焦）
+	// 外部快捷键：openSignal 是「每按一次就自增」的计数器，只响应**变化**，不响应挂载时已有的值。
+	// 否则重挂载（切会话换 pane、findSupported 从 false 变 true）会把上一次按键重放成自动弹出。
+	const lastOpenSignalRef = useRef(props.openSignal);
 	useEffect(() => {
-		if (props.openSignal === 0) return;
+		if (props.openSignal === lastOpenSignalRef.current) return;
+		lastOpenSignalRef.current = props.openSignal;
 		setOpen(true);
 	}, [props.openSignal]);
 
