@@ -411,6 +411,9 @@ export function AuthTab(props: {
 											<EyeOff size={14} className="text-muted-foreground" />
 										</Button>
 									)}
+									{/* 删除是不可撤销动作，和上面的「隐藏/Migration/用量」用竖线隔开：
+									    图标按钮只有 4px gap 时，误点一次就删掉一组凭据。 */}
+									<Separator orientation="vertical" className="mx-0.5 h-4" />
 									<Button
 										variant="ghost"
 										size="icon-sm"
