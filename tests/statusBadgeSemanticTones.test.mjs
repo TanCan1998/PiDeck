@@ -9,10 +9,12 @@ import test from "node:test";
 const BADGE = "src/renderer/src/components/ui-shadcn/badge.tsx";
 const ANIMATED_BADGE = "src/renderer/src/components/motion/animated-badge.tsx";
 const AUTOMATION_HISTORY = "src/renderer/src/components/automation/AutomationHistoryList.tsx";
+const AUTOMATION_TASKS = "src/renderer/src/components/automation/AutomationTaskList.tsx";
 
 const badge = readFileSync(BADGE, "utf8");
 const animatedBadge = readFileSync(ANIMATED_BADGE, "utf8");
 const automationHistory = readFileSync(AUTOMATION_HISTORY, "utf8");
+const automationTasks = readFileSync(AUTOMATION_TASKS, "utf8");
 
 /** 字面色：emerald/amber/rose/blue 等带具体阶数，或用 dark: 变体手工补偿状态色。 */
 const LITERAL_STATUS_COLOR = /(?:text|bg|border)-(?:emerald|amber|rose|sky|blue|green|red)-\d{2,3}/;
@@ -60,4 +62,13 @@ test("自动化历史的状态列使用 badge 语义档而不是裸染色", () =
 	}
 	assert.doesNotMatch(automationHistory, LITERAL_STATUS_COLOR, "状态列不得使用 Tailwind 字面色");
 	assert.doesNotMatch(automationHistory, /text-micro font-normal/, "字号/字重由 size 档承担，不在调用点重复");
+});
+
+test("任务列表的运行状态只做角色映射，色值不重复实现第二份", () => {
+	assert.match(automationTasks, /function runStatusVariant\(status: AutomationRun\["status"\]\)/);
+	assert.doesNotMatch(automationTasks, LITERAL_STATUS_COLOR, "状态不得使用 Tailwind 字面色");
+	// 语义档已经带 border/bg/text/尺寸，调用点再写就是第二份实现。
+	assert.doesNotMatch(automationTasks, /<Badge[^>]*className=\{`h-5/);
+	assert.doesNotMatch(automationTasks, /text-\[10px\]/);
+	assert.match(automationTasks, /<Badge variant=\{isRunning \? "info" : task\.enabled \? "success" : "neutral"\} size="sm"/);
 });
