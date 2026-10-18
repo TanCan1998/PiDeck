@@ -40,7 +40,8 @@ export function FetchedModelCombobox(props: { models: FetchedModel[]; value: str
 					value={filter}
 					onChange={(e) => setFilter(e.target.value)}
 					placeholder={t("config.modelSearchPlaceholder")}
-					className="h-7 min-w-0 flex-1 rounded-sm border border-border-subtle bg-bg-popover px-2.5 text-control text-text-primary outline-none transition-[border-color,box-shadow,background-color] duration-150 focus:border-[var(--color-accent)] focus:shadow-[var(--focus-ring)]"
+					size="sm"
+					className="min-w-0 flex-1 rounded-sm border border-border-subtle bg-bg-popover px-2.5 text-control text-text-primary outline-none transition-[border-color,box-shadow,background-color] duration-150 focus:border-[var(--color-accent)] focus:shadow-[var(--focus-ring)]"
 				/>
 				<Button
 					type="button"

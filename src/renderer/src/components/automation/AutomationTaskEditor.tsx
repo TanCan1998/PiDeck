@@ -423,19 +423,19 @@ export function AutomationTaskEditor({ task, defaultProjectId, lockProject = fal
 				<div className="grid grid-cols-2 gap-3 md:grid-cols-4">
 					<div className="flex flex-col gap-1">
 						<span className="text-micro text-muted-foreground">{t("automation.timeoutMinutes")}</span>
-						<Input type="number" min="1" value={timeoutMinutes} onChange={(e) => setTimeoutMinutes(e.target.value)} placeholder="30" className="h-7 font-mono text-xs" />
+						<Input type="number" min="1" value={timeoutMinutes} onChange={(e) => setTimeoutMinutes(e.target.value)} placeholder="30" size="sm" className="font-mono text-xs" />
 					</div>
 					<div className="flex flex-col gap-1">
 						<span className="text-micro text-muted-foreground">{t("automation.maxTokens")}</span>
-						<Input type="number" min="1000" value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} placeholder="e.g. 500000" className="h-7 font-mono text-xs" />
+						<Input type="number" min="1000" value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} placeholder="e.g. 500000" size="sm" className="font-mono text-xs" />
 					</div>
 					<div className="flex flex-col gap-1">
 						<span className="text-micro text-muted-foreground">{t("automation.maxCostUsd")}</span>
-						<Input type="number" step="0.01" min="0.01" value={maxCostUsd} onChange={(e) => setMaxCostUsd(e.target.value)} placeholder="e.g. 1.00" className="h-7 font-mono text-xs" />
+						<Input type="number" step="0.01" min="0.01" value={maxCostUsd} onChange={(e) => setMaxCostUsd(e.target.value)} placeholder="e.g. 1.00" size="sm" className="font-mono text-xs" />
 					</div>
 					<div className="flex flex-col gap-1">
 						<span className="text-micro text-muted-foreground">{t("automation.maxSteps")}</span>
-						<Input type="number" min="1" value={maxSteps} onChange={(e) => setMaxSteps(e.target.value)} placeholder="e.g. 50" className="h-7 font-mono text-xs" />
+						<Input type="number" min="1" value={maxSteps} onChange={(e) => setMaxSteps(e.target.value)} placeholder="e.g. 50" size="sm" className="font-mono text-xs" />
 					</div>
 				</div>
 			</div>

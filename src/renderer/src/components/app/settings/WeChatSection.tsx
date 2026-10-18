@@ -348,7 +348,7 @@ export function WeChatSection() {
 						<div className="flex items-center gap-2">
 							{renaming ? (
 								<>
-									<Input value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} className="h-7 text-xs" />
+									<Input value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} size="sm" className="text-xs" />
 									<Button size="sm" variant="secondary" disabled={busy} onClick={() => void handleRenameSave()}>
 										{t("common.save")}
 									</Button>
@@ -407,7 +407,7 @@ export function WeChatSection() {
 						{loginState.error ? <span className="text-muted-foreground text-xs">{t(LOGIN_ERROR_LABEL[loginState.error] ?? "config.wechat.phase.error")}</span> : null}
 						{loginState.phase === "need-verify-code" ? (
 							<div className="flex w-full items-center gap-2">
-								<Input value={verifyCode} onChange={(event) => setVerifyCode(event.target.value)} placeholder={t("config.wechat.verifyCodePlaceholder")} className="h-7 text-xs" />
+								<Input value={verifyCode} onChange={(event) => setVerifyCode(event.target.value)} placeholder={t("config.wechat.verifyCodePlaceholder")} size="sm" className="text-xs" />
 								<Button size="sm" disabled={busy || !verifyCode.trim()} onClick={() => void handleSubmitVerifyCode()}>
 									{t("common.submit")}
 								</Button>

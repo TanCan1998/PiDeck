@@ -39,9 +39,11 @@ test("设置/配置/自动化页面不再直接写控件高度", () => {
 		for (const file of globSync(`${dir}/**/*.tsx`, { cwd: process.cwd() })) {
 			if (ALLOWED_CUSTOM_HEIGHT.some((pattern) => pattern.test(file))) continue;
 			const source = readFileSync(file, "utf8");
-			const matcher = /<(Input|SelectTrigger|Textarea)\b[^>]*?className="[^"]*\bh-(?:7|10)\b/g;
-			for (const hit of source.matchAll(matcher)) {
-				offenders.push(`${file}: ${hit[0].slice(0, 80)}`);
+			// 按「自闭合标签」切分而不是 [^>]*：属性里带箭头函数（onChange={() => …}）时，
+			// 那个 `>` 会让 [^>]* 提前截断，整类多行 JSX 会静默漏检（2027-10 实测漏 9 处）。
+			for (const hit of source.matchAll(/<(Input|SelectTrigger|Textarea)\b[\s\S]{0,800}?\/>/g)) {
+				const className = hit[0].match(/className="([^"]*)"/);
+				if (className && /\bh-(?:7|10)\b/.test(className[1])) offenders.push(`${file}: ${hit[0].replace(/\s+/g, " ").slice(0, 110)}`);
 			}
 		}
 	}
