@@ -1,10 +1,12 @@
 import { touchRecentSessionAtom, forgetRecentSessionAtom } from "./recent-session-atoms";
+import { advanceSessionActivityAnchorAtom, forgetSessionActivityAnchorAtom } from "./sessionActivityAtoms";
 import { sessionSendStateByIdAtom, setSessionSendStateAtom } from "./composer-atoms";
 import { atom } from "jotai";
 import type { Getter, Setter } from "jotai";
 import { atomFamily, selectAtom } from "jotai/utils";
 import type { AgentBackend, AgentRuntimeState, AgentStatus, AgentUiBatchQuestion, AgentUiRequest, ChatMessage, SessionHistoryUnavailableReason, SessionMessagePage, SessionRecord, SessionRuntimeEvent, SessionRuntimeInfo } from "../../../shared/types";
 import { mergeAgentRuntimeState } from "../utils/agentRuntimeState";
+import { isSessionTurnRunning } from "../utils/sessionActivityClock";
 import { findLastUserMessageIndex, shouldRefreshOutlineForRuntimeUpsert } from "./outlineRevision";
 import { releaseSessionOutlineProjection } from "./outlineProjectionCache";
 import { sameProjectSessionList } from "../utils/sessionRecordIdentity";
@@ -52,6 +54,8 @@ export type SessionRuntimeViewState = {
 	title?: string;
 	piSessionId?: string;
 	sessionPath?: string;
+	/** PiDeck 会话身份（agents:state / sessions:runtime 事件与 listRuntimes 透传）：侧栏 ACP「agent↔会话」配对用，缺它会把同一会话画成两行。 */
+	deckSessionId?: string;
 	createdAt?: number;
 	compactionCount?: number;
 	noSession?: boolean;
@@ -483,6 +487,8 @@ export const replaceSessionRuntimesAtom = atom(null, (get, set, runtimes: Sessio
 			createdAt: runtime.createdAt,
 			compactionCount: runtime.compactionCount,
 			noSession: runtime.noSession,
+			// listRuntimes 快照可能落后于事件流（或旧主进程未带此字段）：不冲掉已知身份。
+			deckSessionId: runtime.deckSessionId ?? existing?.deckSessionId,
 		};
 	}
 	set(sessionRuntimeByIdAtom, next);
@@ -1295,6 +1301,7 @@ export const applySessionRuntimeEventAtom = atom(null, (get, set, event: Session
 				title: typeof payload.title === "string" ? payload.title : nextRuntime.title,
 				piSessionId: typeof payload.sessionId === "string" ? payload.sessionId : nextRuntime.piSessionId,
 				sessionPath: typeof payload.sessionPath === "string" ? payload.sessionPath : nextRuntime.sessionPath,
+				deckSessionId: typeof payload.deckSessionId === "string" ? payload.deckSessionId : nextRuntime.deckSessionId,
 				createdAt: typeof payload.createdAt === "number" ? payload.createdAt : nextRuntime.createdAt,
 				compactionCount: typeof payload.compactionCount === "number" ? payload.compactionCount : nextRuntime.compactionCount,
 				noSession: payload.noSession === true || nextRuntime.noSession,
@@ -1519,6 +1526,16 @@ export const applySessionRuntimeEventAtom = atom(null, (get, set, event: Session
 		}
 	}
 
+	// 侧栏计时点：只认「本轮开始（用户输入落地）/ 本轮结束（turn 结束）」两个边沿。
+	// 流式 token、工具调用、标题回写、catalog 刷新都不推进——否则计时器会被无限重置
+	// （文件 mtime 版就是这样，永远显示「刚刚」）。规则见 utils/sessionActivityClock.ts。
+	set(advanceSessionActivityAnchorAtom, {
+		sessionId: event.sessionId,
+		// 换绑（新 agent 接管旧会话）时上一代的运行态不代表本轮，按「未知=空闲」处理：
+		// 新绑定若已在跑，会在下一跳改成 true 并推进计时点。
+		previousRunning: bindingChanged ? false : isSessionTurnRunning(currentRuntime.state, currentRuntime.status),
+		running: isSessionTurnRunning(nextRuntime.state, nextRuntime.status),
+	});
 	const terminalEnvelope = !bindingChanged && currentRuntime.status === "closed";
 	const nextUi = payload && !(terminalEnvelope && event.sourceChannel === "agents:ui-request") ? applySessionRuntimeUiEvent(get(sessionRuntimeUiByIdAtom)[event.sessionId], event, payload, bindingChanged) : undefined;
 	if (nextUi) {
@@ -1548,7 +1565,9 @@ export const applySessionRuntimeEventAtom = atom(null, (get, set, event: Session
 		currentRuntime.sessionPath === nextRuntime.sessionPath &&
 		currentRuntime.createdAt === nextRuntime.createdAt &&
 		currentRuntime.compactionCount === nextRuntime.compactionCount &&
-		currentRuntime.noSession === nextRuntime.noSession;
+		currentRuntime.noSession === nextRuntime.noSession &&
+		currentRuntime.backend === nextRuntime.backend &&
+		currentRuntime.deckSessionId === nextRuntime.deckSessionId;
 	if (!runtimeUnchanged) {
 		set(sessionRuntimeByIdAtom, {
 			...get(sessionRuntimeByIdAtom),
@@ -1666,6 +1685,7 @@ export const bindSessionRuntimeAtom = atom(
 
 export const removeSessionStateAtom = atom(null, (get, set, sessionId: string) => {
 	set(forgetRecentSessionAtom, sessionId);
+	set(forgetSessionActivityAnchorAtom, sessionId);
 	const records = { ...get(sessionRecordsAtom) };
 	const session = records[sessionId];
 	delete records[sessionId];
@@ -1723,3 +1743,10 @@ export const removeSessionStateAtom = atom(null, (get, set, sessionId: string) =
 	set(sessionMessageLoadStateAtom, loadState);
 	if (get(currentSessionIdAtom) === sessionId) set(currentSessionIdAtom, undefined);
 });
+
+/**
+ * 待消费的消息跳转（跨会话正文搜索点击后）：侧栏搜索结果点击时写入
+ * {sessionId, messageId}，目标会话 pane 聚焦挂载 jumpToMessageRef 后消费并清空。
+ * 生命周期短暂（点击→pane 挂载），切走即由消费方/写入方覆盖。
+ */
+export const pendingMessageJumpAtom = atom<{ sessionId: string; messageId: string } | null>(null);

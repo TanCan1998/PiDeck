@@ -36,7 +36,7 @@ function BridgeCodeBlock({ code }: { code: string }): ReactNode {
 			</pre>
 			<button
 				type="button"
-				className="absolute right-1.5 top-1.5 rounded border border-border/60 bg-background/90 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+				className="absolute right-1.5 top-1.5 rounded border border-border/60 bg-background/90 px-1.5 py-0.5 text-micro text-muted-foreground hover:text-foreground"
 				onClick={() => {
 					void navigator.clipboard?.writeText(code).then(
 						() => {
@@ -385,7 +385,7 @@ function BridgeCollapse({ node, onEvent }: { node: BridgeUINode; onEvent: Bridge
 				}}
 				className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left hover:bg-muted/60"
 			>
-				<span aria-hidden="true" className="w-3 shrink-0 text-[10px] text-muted-foreground">
+				<span aria-hidden="true" className="w-3 shrink-0 text-micro text-muted-foreground">
 					{collapsed ? "▸" : "▾"}
 				</span>
 				<span className="flex-1 truncate text-xs font-medium">{node.label ?? ""}</span>

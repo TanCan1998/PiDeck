@@ -14,13 +14,13 @@ import { join } from "node:path";
  *   .drawer-content-frame 不滚、不参与。
  * - CollapsibleContent 不能用 overflow-hidden：它会变成「不滚动的 scrollport」，
  *   把子目录行的 sticky 全部截住（子目录不再挂顶）。改用 overflow-clip 只裁剪、
- *   不建滚动容器（见 WorkspaceSurface 的注释）。
+ *   不建滚动容器（见 FileTreeRows.tsx 的注释）。
  * - 没有正 z 值时挂顶行会被自己的子行盖住（兄弟层 .file-children 按绘制顺序在后）。
  */
 const seedProject = makeSeedProject("FileTreeSticky");
 test.use({ seedProjects: [seedProject] });
 
-/** 挂顶栈：最外层三层（与 WorkspaceSurface 的 FILE_STICKY_MAX_LEVELS 一致） */
+/** 挂顶栈：最外层三层（与 FileTreeRows.tsx 的 FILE_STICKY_MAX_LEVELS 一致） */
 const STACK = [
 	{ dir: "docs", filePrefix: "doc" },
 	{ dir: "examples", filePrefix: "ex" },

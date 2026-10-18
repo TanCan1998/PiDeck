@@ -1207,7 +1207,7 @@ function SecurityTab(props: { namespace?: DshNamespaceView; writable: boolean; o
 				</div>
 				<div className="grid gap-3 p-4">
 					<Select value={selected ?? ""} disabled={!props.writable} onValueChange={(next) => setDraft(next === currentDefault ? null : next)}>
-						<SelectTrigger size="sm" className="h-8 w-72">
+						<SelectTrigger size="sm" className="w-72">
 							<SelectValue placeholder={t("config.dsh.selectPlaceholder")} />
 						</SelectTrigger>
 						<SelectContent>
@@ -1321,7 +1321,7 @@ function RawTab(props: { homeDir: string; sectionApi?: DshSectionApi; instanceKe
 		<div className="flex min-h-0 flex-1 flex-col gap-3">
 			<div className="flex shrink-0 items-center gap-2">
 				<Select value={fileName} onValueChange={setFileName}>
-					<SelectTrigger size="sm" className="h-8 w-48 font-mono">
+					<SelectTrigger size="sm" className="w-48 font-mono">
 						<SelectValue />
 					</SelectTrigger>
 					<SelectContent>

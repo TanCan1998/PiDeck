@@ -1,5 +1,6 @@
 import { Button } from "../components/ui-shadcn/button";
 import { Switch } from "../components/ui-shadcn/switch";
+import { Badge } from "../components/ui-shadcn/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui-shadcn/table";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "../components/ui-shadcn/select";
 import { useEffect, useState, type ReactNode } from "react";
@@ -158,16 +159,16 @@ export function SkillsTab(props: {
 					/>
 					<div className="mb-3 flex items-center justify-between gap-3">
 						<div>
-							<span className="font-mono text-xs tabular-nums text-text-tertiary">{t("config.count.skills", { count: visibleSkills.length })}</span>
-							<small className="skills-restart-hint">{t("config.restartHint")}</small>
+							<span className="font-mono text-xs tabular-nums text-muted-foreground">{t("config.count.skills", { count: visibleSkills.length })}</span>
+							<small className="text-caption text-text-tertiary">{t("config.restartHint")}</small>
 						</div>
-						<div className="skills-toolbar-actions flex items-center gap-1.5">
+						<div className="flex items-center gap-1.5">
 							{/* 与扩展页/设置页统一为 sm 控件高度 */}
 							<Button variant="outline" size="sm" onClick={props.onRefresh} disabled={props.loading}>
 								{t("common.refresh")}
 							</Button>
 							<ResourceImportDialog kind="skill" sourceProjectId={props.sourceProjectId ?? props.projectId} projects={projects} fixedProjectId={props.fixedProjectId} triggerLabel={t("config.import.button")} onImported={props.onRefresh} />
-							<Button variant="secondary" size="sm" onClick={props.onOpenRoot}>
+							<Button variant="outline" size="sm" onClick={props.onOpenRoot}>
 								{t("config.openFolder")}
 							</Button>
 						</div>
@@ -181,36 +182,36 @@ export function SkillsTab(props: {
 							</Button>
 						}
 					>
-						{/* 名称与位置同行：位置是新建时的落点，同属元信息；窄窗口（<820px）降为单列，避免 Select 被压成细条。 */}
-						<div className="grid grid-cols-[minmax(0,1fr)_minmax(180px,260px)] gap-2.5 max-[820px]:grid-cols-1">
-							<CreateResourceField label={t("config.name")}>
-								<Input value={props.newName} placeholder={t("config.skillNamePlaceholder")} onChange={(event) => props.onChangeNewName(event.target.value)} />
-							</CreateResourceField>
-							<CreateResourceField label={t("config.location")}>
-								<Select
-									value={props.newLocationId}
-									onValueChange={(v) => {
-										// 只接受已知位置 id，避免外部字符串注入；仅改变保存目标，不立即创建文件。
-										if (v === "pi-global" || v === "agents-global" || v === "project-pi" || v === "project-agents") {
-											props.onChangeNewLocation(v);
-										}
-									}}
-								>
-									{/* 只显示相对路径（label 形如 ~/.pi/agent/skills）：绝对路径长且无增益，
+						{/* 字段一律单列堆叠，与提示词模板页完全一致：
+						    名称/位置同行时输入框先按 1fr 再被 260px 挤压，两个控件宽度不相等，
+						    视线横向扫描时左缘会「跳一下」；单列后位置选择器铺满同一列宽。 */}
+						<CreateResourceField label={t("config.name")}>
+							<Input value={props.newName} placeholder={t("config.skillNamePlaceholder")} onChange={(event) => props.onChangeNewName(event.target.value)} />
+						</CreateResourceField>
+						<CreateResourceField label={t("config.location")}>
+							<Select
+								value={props.newLocationId}
+								onValueChange={(v) => {
+									// 只接受已知位置 id，避免外部字符串注入；仅改变保存目标，不立即创建文件。
+									if (v === "pi-global" || v === "agents-global" || v === "project-pi" || v === "project-agents") {
+										props.onChangeNewLocation(v);
+									}
+								}}
+							>
+								{/* 只显示相对路径（label 形如 ~/.pi/agent/skills）：绝对路径长且无增益，
 									    窄列会溢出框边界；单行 + truncate 超长省略。 */}
-									<SelectTrigger className="w-full">
-										<span className="min-w-0 flex-1 truncate text-left">{selectedLocation?.label ?? t("config.chooseFolder")}</span>
-									</SelectTrigger>
-									<SelectContent>
-										{availableLocations.map((location) => (
-											<SelectItem key={location.id} value={location.id}>
-												<span className="min-w-0 flex-1 truncate text-left">{location.label}</span>
-											</SelectItem>
-										))}
-									</SelectContent>
-								</Select>
-							</CreateResourceField>
-						</div>
+								<SelectTrigger className="w-full">
+									<span className="min-w-0 flex-1 truncate text-left">{selectedLocation?.label ?? t("config.chooseFolder")}</span>
+								</SelectTrigger>
+								<SelectContent>
+									{availableLocations.map((location) => (
+										<SelectItem key={location.id} value={location.id}>
+											<span className="min-w-0 flex-1 truncate text-left">{location.label}</span>
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+						</CreateResourceField>
 						<CreateResourceField label={t("config.description")}>
 							<Textarea value={props.newDescription} placeholder={t("config.skillUseWhenPlaceholder")} onChange={(event) => props.onChangeNewDescription(event.target.value)} className="min-h-[72px] resize-y" />
 						</CreateResourceField>
@@ -284,10 +285,12 @@ function DiscoveredSkillRow(props: {
 					<div className="flex min-w-0 items-center gap-2">
 						<Sparkles size={14} strokeWidth={1.8} className="shrink-0 text-text-tertiary" />
 						<strong className="truncate text-control font-medium text-foreground">{item.name}</strong>
-						<span className="skill-state" title={t("config.resourceManagedHint")}>
+						<Badge variant="outline" size="sm" title={t("config.resourceManagedHint")}>
 							{t("config.source.global")}
-						</span>
-						<span className={`skill-state ${item.enabled ? "enabled" : "disabled"}`}>{item.enabled ? t("common.enabled") : t("common.disabled")}</span>
+						</Badge>
+						<Badge variant={item.enabled ? "success" : "neutral"} size="sm">
+							{item.enabled ? t("common.enabled") : t("common.disabled")}
+						</Badge>
 					</div>
 					<span className="truncate font-mono text-caption text-muted-foreground">{item.sourceLabel}</span>
 				</div>
@@ -374,8 +377,14 @@ function SkillTableRow(props: {
 							<Sparkles size={14} strokeWidth={1.8} className="shrink-0 text-text-tertiary" />
 							<strong className="truncate text-control font-medium text-foreground">{skill.name}</strong>
 							<div className="skill-badges">
-								<span className={`skill-state ${effectiveEnabled ? "enabled" : "disabled"}`}>{effectiveEnabled ? t("common.enabled") : t("common.disabled")}</span>
-								{!skill.valid && <span className="skill-state invalid">{t("config.needsFix")}</span>}
+								<Badge variant={effectiveEnabled ? "success" : "neutral"} size="sm">
+									{effectiveEnabled ? t("common.enabled") : t("common.disabled")}
+								</Badge>
+								{!skill.valid && (
+									<Badge variant="danger" size="sm">
+										{t("config.needsFix")}
+									</Badge>
+								)}
 							</div>
 						</div>
 						<span className="truncate font-mono text-caption text-muted-foreground">{skill.sourceLabel}</span>

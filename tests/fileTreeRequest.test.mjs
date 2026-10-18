@@ -51,13 +51,31 @@ test("project file tree refresh and expand drop stale listings", () => {
 	assert.match(app, /isFileTreeRequestCurrent\(generation, projectId\)/);
 });
 
+test("展开目录的 IPC 不在 setFiles updater 里（StrictMode 双跑不得发两次 files:list）", () => {
+	const app = readFileSync("src/renderer/src/hooks/files/useProjectFileTreeController.ts", "utf8");
+	const start = app.indexOf("function toggleDirectory(");
+	const end = app.indexOf("function collapseAllDirectories(");
+	assert.ok(start > 0 && end > start, "toggleDirectory 必须可定位");
+	const body = app.slice(start, end);
+	// updater 必须是纯函数：React StrictMode 会跑两遍，副作用写进 updater 就发两次 IPC。
+	// 旧实现是 setFiles((current) => { if (已加载) return; void api.files.list(...); return current; })。
+	assert.doesNotMatch(body, /setFiles\(\s*\([^)]*\)\s*=>\s*\{[^}]*api\.files/, "setFiles updater 里不得发 IPC");
+	assert.doesNotMatch(body, /setFiles\(\s*\([^)]*\)\s*=>\s*\{[^}]*console\./, "setFiles updater 里不得写日志");
+	// 「已加载就跳过」的判据直接在作用域里读当前树（而不是在 updater 里读 current）。
+	assert.match(body, /if\s*\(findLoadedDirectory\(files, path\)\) return;/, "跳过判据必须在 updater 之外");
+	// 拉回来的 merge 本身幂等，重复点击不会把树重建一遍。
+	assert.match(body, /setFiles\(\(tree\) => mergeFileTreeChildren\(tree, path, children\)\)/);
+});
+
 test("missing project directories clear stale files and refresh project presence", () => {
 	const sync = readFileSync("src/renderer/src/hooks/useProjectSync.ts", "utf8");
 	const app = readFileSync("src/renderer/src/hooks/files/useProjectFileTreeController.ts", "utf8");
 	const i18n = [readFileSync("src/renderer/src/i18n/rendererCopy.zh-CN.ts", "utf8"), readFileSync("src/renderer/src/i18n/rendererCopy.en-US.ts", "utf8")].join("\n");
 
 	assert.match(sync, /message\.includes\("PROJECT_DIRECTORY_MISSING"\)/);
-	assert.match(sync, /setFiles\(\[\]\);/);
+	// 目录被外部删除时必须清掉陈旧文件树，且这一清空要落在 PROJECT_DIRECTORY_MISSING 分支里；
+	// 已经是空树时复用原数组（内容没变就不推进文件树内容代次，避免白跑一轮 Git 着色重拉）。
+	assert.match(sync, /if\s*\(projectDirectoryMissing\)\s*\{[\s\S]*?setFiles\(\s*\(current\)\s*=>\s*\(current\.length === 0 \? current : \[\]\)\s*\)/);
 	assert.match(sync, /void refreshProjects\(\)\.catch\(\(\) => undefined\);/);
 	assert.match(app, /projectDirectoryMissing[\s\S]*?refreshProjects\(\)\.catch/);
 	// PROJECT_DIRECTORY_MISSING 的项目自愈/提示文案在文件树控制器里。

@@ -1,9 +1,11 @@
-import React, { useEffect, useMemo, useRef } from "react";
-import { useAtomValue } from "jotai";
-import { sessionRecordByIdAtomFamily } from "../../atoms";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useAtomValue, useSetAtom } from "jotai";
+import { pendingMessageJumpAtom, sessionRecordByIdAtomFamily } from "../../atoms";
 import { useSessionTimelineController } from "../../hooks/useSessionTimelineController";
 import { SessionRuntimeInjector } from "./SessionRuntimeInjector";
 import { useSessionPaneServices } from "./SessionPaneServices";
+import { SessionFindOverlay } from "./SessionFindOverlay";
+import { desktopApi } from "../../desktopApi";
 import { t } from "../../i18n";
 
 export type ChatSessionPaneProps = {
@@ -21,11 +23,24 @@ export type ChatSessionPaneProps = {
 export function ChatSessionPane(props: ChatSessionPaneProps) {
 	const { sessionId, focused, onFocusPane, splitPane = false } = props;
 	const services = useSessionPaneServices();
+	const setPendingMessageJump = useSetAtom(pendingMessageJumpAtom);
+	const pendingJump = useAtomValue(pendingMessageJumpAtom);
 
 	const record = useAtomValue(sessionRecordByIdAtomFamily(sessionId));
 	const sessionTitle = record?.title?.trim() || t("app.chatProject");
 
 	const sessionTimeline = useSessionTimelineController({ sessionId });
+
+	// 会话内查找（Ctrl/Cmd+Shift+F）：openSignal 自增即请求浮层展开并聚焦输入框。
+	// 只有聚焦栏响应快捷键——分屏时按键作用于用户正在看的那一栏。
+	const [findSignal, setFindSignal] = useState(0);
+	useEffect(() => {
+		if (!focused) return;
+		return desktopApi.app.onShortcutTriggered((id) => {
+			if (id !== "findInSession") return;
+			setFindSignal((value) => value + 1);
+		});
+	}, [focused]);
 
 	const localHeaderRef = useRef<HTMLDivElement | null>(null);
 	const localComposerRef = useRef<HTMLElement | null>(null);
@@ -34,6 +49,10 @@ export function ChatSessionPane(props: ChatSessionPaneProps) {
 	const layoutRefs = services.layoutRefs;
 	const chatHeaderRef = focused ? layoutRefs.chatHeaderRef : localHeaderRef;
 	const composerRef = focused ? layoutRefs.composerRef : localComposerRef;
+
+	// 会话内查找依赖 pi 会话 JSONL 索引：DSH/ACP 后端不走 sidecar，直接不挂入口
+	// （避免出现一个永远「没有匹配」的搜索框）；草稿会话还没落盘文件，同样不挂入口（否则图标悬在欢迎页上）。
+	const findSupported = (!record?.backend || record.backend === "pi") && Boolean(record?.filePath);
 
 	const activeQueuedPrompts = services.queuedPromptsBySession[sessionId] ?? [];
 
@@ -47,6 +66,17 @@ export function ChatSessionPane(props: ChatSessionPaneProps) {
 		};
 	}, [focused, services.jumpToMessageRef, sessionTimeline.jumpToMessage]);
 
+	// 跨会话正文搜索的落地跳转：目标 pane 聚焦且 jump 挂好后消费一次。
+	// 消息尚未加载（messages 空且未确认空会话）时先不消费：加载完成后
+	// jumpToMessage 引用随 combinedMessages 更新，本 effect 重触发重试；
+	// jumpToMessage 内部另有补页/扩窗挂起策略处理「目标在未加载历史页」的情况。
+	useEffect(() => {
+		if (!focused || !pendingJump || pendingJump.sessionId !== sessionId) return;
+		if (sessionTimeline.messages.length === 0 && !sessionTimeline.knownEmpty) return;
+		sessionTimeline.jumpToMessage(pendingJump.messageId);
+		setPendingMessageJump(null);
+	}, [focused, pendingJump, sessionId, sessionTimeline.jumpToMessage, sessionTimeline.messages, sessionTimeline.knownEmpty, setPendingMessageJump]);
+
 	const layout = useMemo(
 		() => ({
 			chatHeaderRef,
@@ -58,19 +88,36 @@ export function ChatSessionPane(props: ChatSessionPaneProps) {
 	);
 
 	return (
-		<SessionRuntimeInjector
-			currentSessionId={sessionId}
-			sessionTitle={sessionTitle}
-			sessionTimeline={sessionTimeline}
-			splitPane={splitPane}
-			focused={focused}
-			onFocusPane={onFocusPane}
-			chatHeaderRef={layout.chatHeaderRef}
-			composerRef={layout.composerRef}
-			composerOffsetHeight={layout.composerOffsetHeight}
-			terminalRowHeight={layout.terminalRowHeight}
-			activeQueuedPrompts={activeQueuedPrompts}
-			queuedTrackRef={localQueuedTrackRef}
-		/>
+		<>
+			{findSupported && (
+				<SessionFindOverlay
+					// 会话切换必须重挂：单栏模式下 pane 实例跨会话复用（App.tsx 的 solo 分支没有 key），
+					// 不重挂会把上一个会话的搜索框+关键词带过来，一切会话就自己搜起来。
+					key={sessionId}
+					sessionId={record?.filePath ?? sessionId}
+					// 锚点是本栏消息区（时间线视口）而不是整栏聊天区：分屏时两栏各贴自己的右上角，
+					// 单栏时也不会落到窗口控件那一行（理由见 sessionFindAnchor）。
+					anchorRef={sessionTimeline.timelineRef}
+					openSignal={findSignal}
+					onJump={(messageId) => {
+						sessionTimeline.jumpToMessage(messageId);
+					}}
+				/>
+			)}
+			<SessionRuntimeInjector
+				currentSessionId={sessionId}
+				sessionTitle={sessionTitle}
+				sessionTimeline={sessionTimeline}
+				splitPane={splitPane}
+				focused={focused}
+				onFocusPane={onFocusPane}
+				chatHeaderRef={layout.chatHeaderRef}
+				composerRef={layout.composerRef}
+				composerOffsetHeight={layout.composerOffsetHeight}
+				terminalRowHeight={layout.terminalRowHeight}
+				activeQueuedPrompts={activeQueuedPrompts}
+				queuedTrackRef={localQueuedTrackRef}
+			/>
+		</>
 	);
 }

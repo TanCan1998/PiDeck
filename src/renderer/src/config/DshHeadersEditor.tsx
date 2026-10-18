@@ -56,8 +56,16 @@ export function DshHeadersEditor(props: { value: unknown; onChange: (next: Recor
 			{rows.length === 0 && <p className="text-micro text-muted-foreground">{t("config.dsh.customHeadersEmpty")}</p>}
 			{rows.map((row) => (
 				<div key={row.id} className="flex min-w-0 items-center gap-1.5">
-					<Input className="h-7 min-w-0 flex-1 font-mono text-micro" value={row.name} placeholder={t("config.dsh.headerNamePlaceholder")} disabled={!props.writable} onChange={(event) => commit(updateDshHeaderRow(rows, row.id, { name: event.target.value }))} aria-label={t("config.dsh.headerNamePlaceholder")} />
-					<Input className="h-7 min-w-0 flex-1 font-mono text-micro" value={row.value} placeholder={t("config.dsh.headerValuePlaceholder")} disabled={!props.writable} onChange={(event) => commit(updateDshHeaderRow(rows, row.id, { value: event.target.value }))} aria-label={t("config.dsh.headerValuePlaceholder")} />
+					<Input size="sm" className="min-w-0 flex-1 font-mono text-micro" value={row.name} placeholder={t("config.dsh.headerNamePlaceholder")} disabled={!props.writable} onChange={(event) => commit(updateDshHeaderRow(rows, row.id, { name: event.target.value }))} aria-label={t("config.dsh.headerNamePlaceholder")} />
+					<Input
+						size="sm"
+						className="min-w-0 flex-1 font-mono text-micro"
+						value={row.value}
+						placeholder={t("config.dsh.headerValuePlaceholder")}
+						disabled={!props.writable}
+						onChange={(event) => commit(updateDshHeaderRow(rows, row.id, { value: event.target.value }))}
+						aria-label={t("config.dsh.headerValuePlaceholder")}
+					/>
 					<Button type="button" variant="ghost" size="icon-sm" className="size-6 shrink-0 text-muted-foreground hover:text-danger" disabled={!props.writable} title={t("common.delete")} aria-label={t("common.delete")} onClick={() => commit(rows.filter((candidate) => candidate.id !== row.id))}>
 						<Trash2 className="size-3" aria-hidden="true" />
 					</Button>

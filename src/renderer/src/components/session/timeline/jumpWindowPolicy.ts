@@ -13,6 +13,9 @@ import { TIMELINE_WINDOW_EXPAND_STEP } from "./turnRenderWindow";
 export const JUMP_MAX_LOAD_ATTEMPTS = 40;
 /** 扩窗步长封顶倍数：指数步长 3 → 6 → 12 → 24 后不再增长。 */
 export const JUMP_EXPAND_MAX_MULTIPLIER = 8;
+/** 扩窗防呆：目标在数据里却始终没挂出节点（被 context_edit 移出展示、轮内节点未渲染）
+ *  时最多再扩 8 轮，然后放弃——否则 effect 每轮都在扩窗且窗口已够大，形成空转。 */
+export const JUMP_MAX_EXPAND_ATTEMPTS = 8;
 
 export type JumpPendingAction =
 	| { kind: "expand"; turns: number }
@@ -31,6 +34,7 @@ export function resolveJumpPendingAction(input: {
 	loadAttempts: number;
 }): JumpPendingAction {
 	if (input.targetInLoadedData) {
+		if (input.expandAttempts >= JUMP_MAX_EXPAND_ATTEMPTS) return { kind: "give-up" };
 		// 指数步长收敛：仅作「点击时一次到位估算不足」的兜底；窗口大于已加载数据时
 		// 等同全量挂载，无害
 		const multiplier = Math.min(2 ** input.expandAttempts, JUMP_EXPAND_MAX_MULTIPLIER);

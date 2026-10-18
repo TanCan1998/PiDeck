@@ -84,7 +84,7 @@ function dragEvent() {
 	};
 }
 
-test("管理弹框：宽度覆盖 sm 默认值，补充按钮与上下移入口保持可用", async () => {
+test("管理弹框：宽度覆盖 sm 默认值，补充按钮与手柄方向键保持可用", async () => {
 	const h = dialogHarness();
 	const view = h.render();
 	assert.ok(view.content.props.className.includes("w-[min(960px,calc(100vw-48px))]"));
@@ -94,9 +94,25 @@ test("管理弹框：宽度覆盖 sm 默认值，补充按钮与上下移入口�
 	assert.ok(merge, "必须能显式补充内置而不是恢复覆盖");
 	await merge.props.onClick();
 	assert.equal(h.mergeCalls.length, 1);
-	for (const label of ["settings.quickMessagesMoveUp", "settings.quickMessagesMoveDown"]) {
-		assert.equal(view.buttons.filter((button) => button.props["aria-label"] === label).length, 3);
-	}
+	// 上移/下移按钮已删（拖拽 + 手柄方向键单轨）：不再渲染移动按钮，删除按钮仍在
+	assert.equal(view.buttons.filter((button) => ["settings.quickMessagesMoveUp", "settings.quickMessagesMoveDown"].includes(button.props["aria-label"])).length, 0);
+	assert.equal(view.buttons.filter((button) => button.props["aria-label"] === "settings.quickMessagesRemove").length, 3);
+	// 键盘微调：聚焦手柄后 ↑/↓ 走 moveItem（上移/下移按钮的无障碍替代）
+	const keyEvent = (key) => ({
+		key,
+		defaultPrevented: false,
+		preventDefault() {
+			this.defaultPrevented = true;
+		},
+		stopPropagation() {},
+	});
+	assert.equal(typeof view.handles[0].props.onKeyDown, "function", "手柄必须接键盘事件（上移/下移按钮的无障碍替代）");
+	view.handles[0].props.onKeyDown(keyEvent("ArrowUp"));
+	view.handles[2].props.onKeyDown(keyEvent("ArrowDown"));
+	assert.deepEqual(h.moveCalls, [
+		[0, -1],
+		[2, 1],
+	]);
 });
 
 test("拖放：外部文本/文件不触发排序，也不能把载荷下标当内部来源", () => {

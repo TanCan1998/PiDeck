@@ -64,7 +64,8 @@ test("file rows animate their hover highlight like sidebar rows", () => {
 	// 2027-01 用户反馈：侧栏行 hover 有平滑过渡，文件列表 hover 高亮是瞬切，体验不一致。
 	// 文件行 class 必须带与侧栏行同款的 transition-[background-color,border-color,box-shadow]
 	// + duration-base；legacy .file-node-row:hover 的颜色变化由此过渡驱动。
-	const surface = readFileSync("src/renderer/src/components/session/WorkspaceSurface.tsx", "utf8");
+	// 行组件已迁到 FileTreeRows.tsx（WorkspaceSurface > 600 行红线）：行 class 断言读新宿主
+	const surface = readFileSync("src/renderer/src/components/session/FileTreeRows.tsx", "utf8");
 	// 行必须是块级 flex：inline-flex 会在 block 容器里多出 5px 行盒空隙（行距 33px），
 	// 相邻行的引导线会裂成一段一段，所以这里连 display 一起锁死。
 	assert.match(surface, /file-node-row flex h-\[28px\][\s\S]*?transition-\[background-color,border-color,box-shadow\] duration-base[\s\S]*?hover:bg-muted/);

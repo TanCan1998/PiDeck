@@ -28,6 +28,7 @@ import {
 	Play,
 	Plus,
 	Power,
+	PanelRight,
 	Radio,
 	RefreshCw,
 	RotateCw,
@@ -51,7 +52,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import type { SessionSummary, Project, AgentTab, ArchivedDshSession, ArchivedPiSession, SessionSortModeId } from "../../../../shared/types";
 import { SESSION_SORT_MODES, resolveSessionSortMode } from "../../sessionSortModes";
 import { worktreeSlugify } from "../../../../shared/worktreeSlug";
-import { SessionSourceBadge, SessionBackendMark, DshSourceBadge, ImageGenSourceBadge } from "../session/SessionSourceBadge";
+import { SessionSourceBadge, SessionBackendMark, SessionChannelMark, SideTaskMark, DshSourceBadge, ImageGenSourceBadge } from "../session/SessionSourceBadge";
 import { Checkbox } from "../ui-shadcn/checkbox";
 import { Input } from "../ui-shadcn/input";
 import { Label } from "../../components/ui-shadcn/label";
@@ -417,6 +418,9 @@ export function SessionManagerModal(props: {
 														) : (
 															session.source && session.source !== "pi" && <SessionSourceBadge source={session.source} />
 														)}
+														{/* 外部连接（微信/飞书）入口标志：这类会话 source 恒为 pi，用渠道徽标区分消息从哪来 */}
+														{session.channel && <SessionChannelMark channel={session.channel} />}
+														{session.sideTask && <SideTaskMark />}
 													</div>
 												</TableCell>
 												<TableCell className="w-40 text-right">
@@ -855,6 +859,8 @@ export function AgentContextMenu(props: {
 	runControl?: SidebarRunControl;
 	/** 打开当前 agent 对应会话的代理设置弹框（网络代理）；宿主在 App 层。 */
 	onOpenProxySetting?: () => void;
+	/** 在该 agent 对应会话所属项目新建一条侧边任务（右侧抽屉「侧边任务」面板承载）。 */
+	onCreateSideTask?: () => void;
 	onCloseAgent: () => void;
 	/** 运行中也可删：主进程先停后删，不必先关 Agent。 */
 	onDeleteSession?: () => void;
@@ -872,14 +878,24 @@ export function AgentContextMenu(props: {
 					{t(props.isPinned ? "menu.unpinSession" : "menu.pinSession")}
 				</DropdownMenuItem>
 			)}
+			{/* 侧边任务：与历史会话菜单同源入口，项目归属由宿主按 agent 对应会话算好。 */}
+			{props.onCreateSideTask && (
+				<DropdownMenuItem disabled={busy} onSelect={props.onCreateSideTask}>
+					<PanelRight className="size-3.5" aria-hidden="true" />
+					{t("menu.createSideTask")}
+				</DropdownMenuItem>
+			)}
 			{/* DSH 运行中会话的复制走 clone 分流（fork 无锚点完整副本），保留入口；
-			    导出 HTML 无 DSH 实现（G10 待决策），对 dsh agent 隐藏 */}
-			<DropdownMenuItem disabled={busy} onSelect={props.onCopySession}>
-				{props.actionLoading === "copy" && <span className="mini-loader animate-pideck-spin" />}
-				<Copy className="size-3.5" aria-hidden="true" />
-				{props.actionLoading === "copy" ? t("menu.copying") : t("menu.copySession")}
-			</DropdownMenuItem>
-			{props.menu.agent.backend !== "dsh" && (
+			    导出 HTML 无 DSH 实现（G10 待决策），对 dsh agent 隐藏；
+			    ACP 两者皆无实现（无 clone 协议、无宿主文件），同样隐藏（审计发现 H） */}
+			{props.menu.agent.backend !== "acp" && (
+				<DropdownMenuItem disabled={busy} onSelect={props.onCopySession}>
+					{props.actionLoading === "copy" && <span className="mini-loader animate-pideck-spin" />}
+					<Copy className="size-3.5" aria-hidden="true" />
+					{props.actionLoading === "copy" ? t("menu.copying") : t("menu.copySession")}
+				</DropdownMenuItem>
+			)}
+			{props.menu.agent.backend !== "dsh" && props.menu.agent.backend !== "acp" && (
 				<DropdownMenuItem disabled={busy} onSelect={props.onExport}>
 					{props.actionLoading === "export" && <span className="mini-loader animate-pideck-spin" />}
 					<FileDown className="size-3.5" aria-hidden="true" />
@@ -903,8 +919,9 @@ export function AgentContextMenu(props: {
 			)}
 			{/* 会话运行控制：全状态可用（启动/停止/重载三项按策略置灰） */}
 			{props.runControl && <SidebarRunControlItems runControl={props.runControl} />}
-			{/* 会话代理：与 Session 菜单同源（同一弹框宿主），agent 入口此前缺失导致「Chat 里找不到代理」 */}
-			{props.onOpenProxySetting && (
+			{/* 会话代理：与 Session 菜单同源（同一弹框宿主），agent 入口此前缺失导致「Chat 里找不到代理」；
+			    ACP 子进程不消费会话代理（仅 pi spawn 读取），隐藏（审计发现 H） */}
+			{props.onOpenProxySetting && props.menu.agent.backend !== "acp" && (
 				<DropdownMenuItem disabled={busy} onSelect={props.onOpenProxySetting}>
 					<Settings2 className="size-3.5" aria-hidden="true" />
 					{t("menu.sessionProxy")}
@@ -990,6 +1007,8 @@ export function SessionContextMenu(props: {
 	runControl?: SidebarRunControl;
 	/** 打开会话代理设置弹框（菜单项「会话代理」） */
 	onOpenProxySetting?: () => void;
+	/** 在该会话所属项目新建一条侧边任务（右侧抽屉「侧边任务」面板承载）；undefined 时隐藏入口 */
+	onCreateSideTask?: () => void;
 	/** 会话是否有文件路径（DSH 会话无 pi 会话文件：隐藏「复制路径/打开文件」） */
 	hasFilePath?: boolean;
 	/** RPC 日志菜单组（与 AgentContextMenu 同语义）：仅会话有 live runtime 时显示 */
@@ -1025,21 +1044,32 @@ export function SessionContextMenu(props: {
 					{t(props.isPinned ? "menu.unpinSession" : "menu.pinSession")}
 				</DropdownMenuItem>
 			)}
+			{/* 侧边任务：在该会话所属项目另开一条轻量会话，落在右侧抽屉「侧边任务」面板，不动主区 Tab。 */}
+			{props.onCreateSideTask && (
+				<DropdownMenuItem disabled={busy} onSelect={props.onCreateSideTask}>
+					<PanelRight className="size-3.5" aria-hidden="true" />
+					{t("menu.createSideTask")}
+				</DropdownMenuItem>
+			)}
 			{/* 运行控制：全状态可用（历史会话未启动时主控项即「启动 Agent」） */}
 			{props.runControl && <SidebarRunControlItems runControl={props.runControl} />}
-			{/* DSH 历史会话无宿主文件可复制/导出（主进程显式拒绝，A8/A9）：隐藏入口 */}
-			<DropdownMenuItem disabled={busy} onSelect={props.onOpenProxySetting}>
-				<Settings2 className="size-3.5" aria-hidden="true" />
-				{t("menu.sessionProxy")}
-			</DropdownMenuItem>
-			{props.menu.session.backend !== "dsh" && (
+			{/* DSH 历史会话无宿主文件可复制/导出（主进程显式拒绝，A8/A9）；ACP 无文件也无 clone 协议
+			    （live 走 pi clone 会报 unknown agent，审计发现 H）：同款隐藏入口 */}
+			{/* 会话代理：同 agent 菜单；ACP 子进程不消费会话代理，隐藏（审计发现 H） */}
+			{props.onOpenProxySetting && props.menu.session.backend !== "acp" && (
+				<DropdownMenuItem disabled={busy} onSelect={props.onOpenProxySetting}>
+					<Settings2 className="size-3.5" aria-hidden="true" />
+					{t("menu.sessionProxy")}
+				</DropdownMenuItem>
+			)}
+			{props.menu.session.backend !== "dsh" && props.menu.session.backend !== "acp" && (
 				<DropdownMenuItem disabled={busy} onSelect={props.onCopySession}>
 					{props.actionLoading === "copy" && <span className="mini-loader animate-pideck-spin" />}
 					<Copy className="size-3.5" aria-hidden="true" />
 					{props.actionLoading === "copy" ? t("menu.copying") : t("menu.copySession")}
 				</DropdownMenuItem>
 			)}
-			{props.menu.session.backend !== "dsh" && (
+			{props.menu.session.backend !== "dsh" && props.menu.session.backend !== "acp" && (
 				<DropdownMenuItem disabled={busy} onSelect={props.onExport}>
 					{props.actionLoading === "export" && <span className="mini-loader animate-pideck-spin" />}
 					<FileDown className="size-3.5" aria-hidden="true" />
@@ -1089,10 +1119,14 @@ export function SessionContextMenu(props: {
 					{t("menu.closeAgent")}
 				</DropdownMenuItem>
 			)}
-			<DropdownMenuItem disabled={busy} onSelect={props.onArchiveSession}>
-				<Archive className="size-3.5" aria-hidden="true" />
-				{t("menu.archiveSession")}
-			</DropdownMenuItem>
+			{/* ACP 无宿主文件可归档（主进程直接回 false，行会被刷新带回、toast 假成功）：
+			    隐藏入口（审计发现 J）。DSH 归档走 host 目录分支，保留 */}
+			{props.menu.session.backend !== "acp" && (
+				<DropdownMenuItem disabled={busy} onSelect={props.onArchiveSession}>
+					<Archive className="size-3.5" aria-hidden="true" />
+					{t("menu.archiveSession")}
+				</DropdownMenuItem>
+			)}
 			<DropdownMenuItem variant="destructive" disabled={busy} onSelect={props.onDeleteSession}>
 				<Trash2 className="size-3.5" aria-hidden="true" />
 				{t("common.delete")}

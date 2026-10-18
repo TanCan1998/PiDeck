@@ -37,10 +37,11 @@ test("rewriteWebHtmlAssetUrls: 已是绝对路径或其他属性不动，普通�
 	assert.match(out, /\.\/assets 也会出现在正文里/);
 });
 
-test("源码契约：WebServiceManager 服务 web.html 时走改写出口（loadWebEntryHtml）而非 sendFile", () => {
-	const src = readFileSync(resolve(import.meta.dirname, "../src/main/web/WebServiceManager.ts"), "utf8");
+test("源码契约：静态产物出口服务 web.html 时走改写出口（loadWebEntryHtml）而非 sendFile", () => {
+	// 出口已迁到 WebStaticAssets（Wave 2）。
+	const src = readFileSync(resolve(import.meta.dirname, "../src/main/web/WebStaticAssets.ts"), "utf8");
 	assert.match(src, /import \{ rewriteWebHtmlAssetUrls \} from "\.\/webHtmlAssetUrls"/);
 	assert.match(src, /loadWebEntryHtml\(webEntry\)/);
 	// sendHtml 带 no-store：发版后旧壳不能驻留（引用旧 bundle 名）
-	assert.match(src, /this\.sendHtml\(response, this\.loadWebEntryHtml\(webEntry\)\)/);
+	assert.match(src, /sendHtml\(response, this\.loadWebEntryHtml\(webEntry\)\)/);
 });

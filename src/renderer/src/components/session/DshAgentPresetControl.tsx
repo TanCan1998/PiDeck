@@ -82,7 +82,7 @@ export function DshAgentPresetControl(props: { sessionId: string; disabled?: boo
 	if (hasRuntime) {
 		if (!presetId) return null;
 		return (
-			<Badge variant="outline" aria-label={`${t("dshPreset.menuTitle")}: ${label}`} title={tooltip} data-agent-preset={presetId} className="h-5 shrink-0 gap-1 rounded-full px-2 text-[10px] font-semibold leading-none text-muted-foreground">
+			<Badge variant="outline" aria-label={`${t("dshPreset.menuTitle")}: ${label}`} title={tooltip} data-agent-preset={presetId} size="sm" className="shrink-0 gap-1 rounded-full font-semibold text-muted-foreground">
 				<AgentPresetLogo className="size-3 shrink-0" />
 				<span className="max-w-28 truncate">{label}</span>
 			</Badge>
@@ -126,7 +126,7 @@ export function DshAgentPresetControl(props: { sessionId: string; disabled?: boo
 				type="button"
 				variant="ghost"
 				size="sm"
-				className="h-5 shrink-0 gap-1 rounded-full border border-border/60 bg-muted/40 px-2 text-[10px] font-semibold leading-none text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+				className="h-5 shrink-0 gap-1 rounded-full border border-border/60 bg-muted/40 px-2 text-micro font-semibold leading-none text-muted-foreground hover:bg-muted/70 hover:text-foreground"
 				disabled={props.disabled || saving}
 				aria-label={t("dshPreset.menuTitle")}
 				title={`${t("dshPreset.menuTitle")}: ${label}`}

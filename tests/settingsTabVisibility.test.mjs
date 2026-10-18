@@ -15,11 +15,11 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 
 // ── shared/hiddenModules.ts ─────────────────────────────────────────────
 
-test("可隐藏 tab 都是真实存在的设置 tab；dsh 与 composerModes 是非 tab 模块", () => {
+test("可隐藏 tab 都是真实存在的设置 tab；dsh / respondingTips 是非 tab 模块（composerModes 已改归输入框功能清单）", () => {
 	for (const id of HIDEABLE_SETTINGS_TAB_IDS) {
 		assert.ok(SETTINGS_TAB_IDS.includes(id), `${id} 不是 SETTINGS_TAB_IDS 里的 tab`);
 	}
-	assert.deepEqual(plain(HIDEABLE_MODULE_IDS), [...plain(HIDEABLE_SETTINGS_TAB_IDS), "composerModes", "dsh"]);
+	assert.deepEqual(plain(HIDEABLE_MODULE_IDS), [...plain(HIDEABLE_SETTINGS_TAB_IDS), "dsh", "respondingTips"]);
 	// 应用基础项不可隐藏（外观放着开关本身，隐藏后无法找回）
 	for (const id of ["common", "appearance", "shortcuts", "notification", "proxy", "dev", "storage", "backup", "editors"]) {
 		assert.equal(HIDEABLE_SETTINGS_TAB_IDS.includes(id), false, `${id} 不应可隐藏`);
@@ -103,37 +103,20 @@ test("初始 tab：深链优先（即使指向隐藏 tab）；记忆值被隐藏
 	assert.equal(resolveInitialSettingsTab(undefined, "im", []), "im");
 });
 
-// ── unavailableTabs：stable 渠道硬隐藏（ACP） ──────────────────────────
+// ── ACP 全渠道可用：不存在按构建通道硬隐藏的那一层 ────────────────────
 
-/** stable 的硬隐藏集：模拟 acpChannelAvailable=false 时 SettingsModal 传入的集合。 */
-const STABLE_UNAVAILABLE = new Set(["acp"]);
-
-test("unavailableTabs 硬隐藏：acp 消失，revealedTabs/hiddenModules 都救不回来", () => {
-	// 即使 revealedTabs 含 acp、hiddenModules 为空，硬隐藏仍生效（与用户隐藏不同层）
-	const visible = resolveVisibleSettingsTabs([], new Set(["acp"]), SETTINGS_TAB_LAYOUT, STABLE_UNAVAILABLE);
-	assert.equal(
-		visible.some((e) => e.id === "acp"),
-		false,
+test("acp tab 只受用户隐藏影响：布局内存在、深链与记忆值照常生效", () => {
+	assert.ok(
+		SETTINGS_TAB_LAYOUT.some((entry) => entry.id === "acp"),
+		"ACP tab 必须在设置布局里",
 	);
-	// 不传 unavailableTabs 时不受影响（开发构建行为不变）
+	// 未隐藏时深链/记忆值都停在 acp（旧 stable 通道会把两者都回退掉）
+	assert.equal(resolveInitialSettingsTab("acp", "dev", []), "acp");
+	assert.equal(resolveInitialSettingsTab(undefined, "acp", []), "acp");
+	// 只有用户显式隐藏才回退 common
+	assert.equal(resolveInitialSettingsTab(undefined, "acp", ["acp"]), "common");
 	assert.equal(
-		resolveVisibleSettingsTabs([], new Set(), SETTINGS_TAB_LAYOUT, undefined).some((e) => e.id === "acp"),
+		resolveVisibleSettingsTabs([], new Set()).some((entry) => entry.id === "acp"),
 		true,
 	);
-});
-
-test("unavailableTabs 与用户隐藏叠加：分割线仍顺延不残留", () => {
-	// stable 下隐藏整簇（含 acp）+ 硬隐藏 acp：分割线只剩 web/dev 两处，不因双重过滤断档
-	const visible = resolveVisibleSettingsTabs(["im", "pet", "vision", "imagegen", "videogen", "acp", "hostplugins"], new Set(), SETTINGS_TAB_LAYOUT, STABLE_UNAVAILABLE);
-	assert.deepEqual(plain(visible.filter((e) => e.dividerBefore).map((e) => e.id)), ["web", "dev"]);
-});
-
-test("初始 tab：unavailableTabs 比深链更硬——指向不存在 tab 时按无深链处理", () => {
-	// 深链指向不可用 tab：等同无深链，回退记忆值（不吐给用户一个侧栏里不存在的页）
-	assert.equal(resolveInitialSettingsTab("acp", "dev", [], STABLE_UNAVAILABLE), "dev");
-	// 记忆值也不可用时回退 common
-	assert.equal(resolveInitialSettingsTab(undefined, "acp", [], STABLE_UNAVAILABLE), "common");
-	assert.equal(resolveInitialSettingsTab(undefined, "dev", [], STABLE_UNAVAILABLE), "dev");
-	// 开发构建（不传第四参）深链到 acp 照常生效
-	assert.equal(resolveInitialSettingsTab("acp", "dev", [], undefined), "acp");
 });

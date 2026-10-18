@@ -10,12 +10,13 @@ import type { SidebarController } from "../../hooks/useSidebarController";
 import type { SidebarActions } from "./SidebarContent";
 import { Button } from "../ui-shadcn/button";
 import { PendingAskBadge } from "./PendingAskBadge";
-import { AcpBackendMark, SessionBackendMark, SessionSourceBadge } from "../session/SessionSourceBadge";
+import { AcpBackendMark, SessionBackendMark, SessionChannelMark, SessionSourceBadge, SideTaskMark } from "../session/SessionSourceBadge";
 import { SessionActivityIndicator } from "../session/SessionActivityIndicator";
 import { SessionHoverCard } from "./SessionHoverCard";
 import { TitleScrollText } from "./TitleScrollText";
 import { SESSION_TAB_DRAG_MIME } from "../../utils/sessionSplitEdge";
 import { formatRelativeTime } from "../../utils/relativeTime";
+import { useSessionActivityAt } from "../../hooks/sidebar/useSessionActivityClock";
 import { RECENT_SESSIONS_INITIAL_VISIBLE, canCollapseRecent } from "./activitySessionsModel";
 import type { RecentSessionRow } from "./activitySessionsModel";
 
@@ -112,6 +113,8 @@ export function RecentSessionsSection(props: { controller: SidebarController; ac
 /** 单条最近会话行：点击打开（preview/permanent）、右键会话菜单、可拖拽分屏。 */
 function RecentSessionRowItem(props: { row: RecentSessionRow; projectName?: string; controller: SidebarController; actions: SidebarActions; currentSessionId?: string; sessionRuntimeUiById: Parameters<typeof hasPendingAskForSession>[1] }) {
 	const { row, controller } = props;
+	// 相对时间基准：live 计时点（本轮开始/上一轮结束）优先，否则回落最近访问时间。
+	const activityAt = useSessionActivityAt();
 	// 模型已按「可显示」判据过滤，这里只做类型收窄：无摘要身份的记录渲染出来会是空标题行。
 	const summary = sessionRecordToSummary(row.session);
 	const sessionId = row.session.id;
@@ -158,9 +161,12 @@ function RecentSessionRowItem(props: { row: RecentSessionRow; projectName?: stri
 							{row.session.backend === "acp" ? <AcpBackendMark acpToolId={row.session.acpToolId} /> : (row.session.backend === "dsh" || row.session.backend === "imagegen") && <SessionBackendMark backend={row.session.backend} />}
 							{pendingAsk && <PendingAskBadge count={1} />}
 							{row.session.source && row.session.source !== "pi" && <SessionSourceBadge source={row.session.source} />}
-							{/* 相对时间常显，hover 行时让位给右侧「⋯」按钮（与上方活动行一致）。 */}
-							<span className="shrink-0 text-caption tabular-nums text-muted-foreground group-hover/row:hidden group-focus-within/row:hidden" title={formatRelativeTime(row.sortAt)}>
-								{formatRelativeTime(row.sortAt)}
+							{row.session.channel && <SessionChannelMark channel={row.session.channel} />}
+							{row.session.sideTask && <SideTaskMark />}
+							{/* 相对时间常显，hover 行时让位给右侧「⋯」按钮（与上方活动行一致）。
+							   基准是计时点（用户输入 / turn 结束），不是每次写入都刷新的文件时间。 */}
+							<span className="shrink-0 text-micro tabular-nums text-muted-foreground group-hover/row:hidden group-focus-within/row:hidden" title={formatRelativeTime(activityAt(sessionId, row.sortAt))}>
+								{formatRelativeTime(activityAt(sessionId, row.sortAt))}
 							</span>
 						</div>
 					</div>

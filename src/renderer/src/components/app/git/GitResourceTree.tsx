@@ -1,4 +1,4 @@
-import { Fragment, useState, type ReactNode } from "react";
+import { Fragment, memo, useState, type ReactNode } from "react";
 import { ChevronDown, FileText, Loader2, Minus, Plus, RotateCcw, Trash2 } from "lucide-react";
 import { Button } from "../../ui-shadcn/button";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "../../ui-shadcn/context-menu";
@@ -57,8 +57,12 @@ export function getCollapsibleChangeDirs(resources: GitResource[], projectRoot?:
 	return dirs;
 }
 
-/** 按目录渲染文件列表：flat = 一级目录分组；tree = 嵌套目录树（紧凑链合并单子目录） */
-export function FileTree(props: {
+/**
+ * 按目录渲染文件列表：flat = 一级目录分组；tree = 嵌套目录树（紧凑链合并单子目录）。
+ * memo：commit composer 输入会让 GitPanel 每次按键重渲，resources/回调引用不变时
+ * 不应重建整棵变更树（行内 Radix ContextMenu + Seti SVG，代价随变更文件数线性增长）。
+ */
+export const FileTree = memo(function FileTree(props: {
 	resources: GitResource[];
 	groupType: GitResourceGroupType;
 	stageFile?: (path: string) => void;
@@ -251,7 +255,7 @@ export function FileTree(props: {
 			})}
 		</>
 	);
-}
+});
 
 export function statusTone(status: GitStatus | GitFileStatus, isCompareContext = false): string {
 	if (isCompareContext) {

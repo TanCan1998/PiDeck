@@ -19,8 +19,9 @@
  * - unknown update:忽略(前向兼容,规范允许新增 update 类型)。
  */
 import type { AcpContentBlock, AcpSessionUpdate, AcpStopReason, AcpToolCallUpdate } from "./acpProtocol";
+import { parseUsageUpdate, readAcpCommandsUpdate, readAcpSessionTitle, readAcpPlanEntries, toAcpCommands, type AcpSessionUsage } from "./acpWireTolerance";
 import { fallbackSessionTitle } from "../dsh/dshSessionTitleFold";
-import { defaultToolDetailTranslate, formatToolDetail } from "../../shared/formatToolDetail";
+import { defaultToolDetailTranslate, formatToolDetail, type ToolDetailStatus } from "../../shared/formatToolDetail";
 import type { TodoItem } from "../../shared/types/todo";
 import type { ChatMessage } from "../../shared/types/session";
 import type { PiCommand } from "../../shared/types/app";
@@ -73,37 +74,6 @@ let messageCounter = 0;
 function nextMessageId(): string {
 	messageCounter += 1;
 	return `acp-${Date.now().toString(36)}-${messageCounter.toString(36)}`;
-}
-
-/** usage_update 的宽容读取：字段位形在实现间不完全一致（顶层 or usage 子对象）。 */
-export type AcpSessionUsage = {
-	used?: number;
-	size?: number;
-	costAmount?: number;
-	costCurrency?: string;
-};
-
-function parseUsageUpdate(update: Record<string, unknown>): AcpSessionUsage | undefined {
-	const nested = typeof update.usage === "object" && update.usage !== null ? (update.usage as Record<string, unknown>) : undefined;
-	const pick = (key: string): unknown => update[key] ?? nested?.[key];
-	const used = pick("used");
-	const size = pick("size");
-	const costRaw = pick("cost");
-	let costAmount: number | undefined;
-	let costCurrency: string | undefined;
-	if (typeof costRaw === "object" && costRaw !== null) {
-		const cost = costRaw as Record<string, unknown>;
-		if (typeof cost.amount === "number" && Number.isFinite(cost.amount)) costAmount = cost.amount;
-		if (typeof cost.currency === "string" && cost.currency) costCurrency = cost.currency;
-	} else if (typeof costRaw === "number" && Number.isFinite(costRaw)) {
-		costAmount = costRaw;
-	}
-	const usage: AcpSessionUsage = {};
-	if (typeof used === "number" && Number.isFinite(used)) usage.used = used;
-	if (typeof size === "number" && Number.isFinite(size) && size > 0) usage.size = size;
-	if (costAmount !== undefined) usage.costAmount = costAmount;
-	if (costCurrency) usage.costCurrency = costCurrency;
-	return usage.used !== undefined || usage.size !== undefined || usage.costAmount !== undefined ? usage : undefined;
 }
 
 /** 工具正文解包标准 content；旧 CLI 的直接文本块也可读，不改变出站协议。 */
@@ -165,9 +135,23 @@ function patchToolCard(existing: ChatMessage | undefined, update: AcpToolCallUpd
 	const isError = meta.status === "error";
 	meta.isError = isError;
 	const result = typeof meta.fullText === "string" && meta.fullText ? meta.fullText : meta.result;
-	meta.detailText = formatToolDetail(title, meta.args, result, isError, defaultToolDetailTranslate);
+	// 状态段取真实运行态：tool_call（pending/in_progress）也会烘焙 detailText，
+	// 只按 isError 二分会把还在跑的工具印成「完成」（与 PI 侧同一修复）。
+	const detailStatus: ToolDetailStatus = meta.status === "error" ? "error" : meta.status === "running" ? "running" : "done";
+	meta.detailText = formatToolDetail(title, meta.args, result, detailStatus, defaultToolDetailTranslate);
 	const base = existing ?? { id: nextMessageId(), agentId, role: "tool" as const, timestamp: Date.now() };
 	return { ...base, ...(contentImages !== undefined ? { images: contentImages.length > 0 ? contentImages : undefined } : {}), text: title, meta };
+}
+
+/**
+ * 迟到 chunk 的归属判据：末尾仍是 assistant 消息时返回其下标。
+ * session/prompt 响应可能先于末尾 chunk 到达（opencode 实测），此时 settleAcpTurn 已清空
+ * activeAssistantIndex；若不管末尾直接开新消息，同一条回复会被拆成两个气泡。
+ * 新回合会先落本地 seed/回放的 user 消息，末尾不再是 assistant，判据自然失效。
+ */
+function trailingAssistantIndex(messages: ReadonlyArray<ChatMessage>): number | undefined {
+	const last = messages.length - 1;
+	return last >= 0 && messages[last]?.role === "assistant" ? last : undefined;
 }
 
 export function projectAcpSessionUpdate(state: AcpProjectionState, update: AcpSessionUpdate, agentId: string): AcpProjectionState {
@@ -198,6 +182,9 @@ export function projectAcpSessionUpdate(state: AcpProjectionState, update: AcpSe
 					const echoed = entry.echoed + chunkText.length;
 					// 回显完就出队；未回完保留进度，后续分片继续消费。
 					next.localUserEchoes = echoed >= entry.text.length ? [...pending.slice(0, echoIndex), ...pending.slice(echoIndex + 1)] : [...pending.slice(0, echoIndex), { text: entry.text, echoed }, ...pending.slice(echoIndex + 1)];
+					// 回显不是轮次边界：本分支上方已把流式指针清空，必须还原——
+					// 否则去重命中后到达的 chunk 会另起气泡（回复被拆成两处渲染）。
+					next.activeAssistantIndex = state.activeAssistantIndex;
 					return next;
 				}
 				// 与本地条目都不同文：是历史回放或 agent 自己的用户侧消息(如注入的上下文)，照常落条目；
@@ -227,12 +214,18 @@ export function projectAcpSessionUpdate(state: AcpProjectionState, update: AcpSe
 			// 按 text 为空就丢弃会让生成结果整条消失，所以「无文本但有图」也要建消息／并入。
 			const image = !isThought && content?.type === "image" && typeof content.data === "string" && typeof content.mimeType === "string" ? { type: "image" as const, mimeType: content.mimeType, data: content.data } : undefined;
 			if (!text && !image) return state;
-			const activeIndex = state.activeAssistantIndex;
+			// 指针已清但末尾仍是本回合的 assistant 消息：响应先于末尾 chunk 到达，并回它
+			const activeIndex = state.activeAssistantIndex ?? trailingAssistantIndex(state.messages);
 			const active = activeIndex !== undefined ? state.messages[activeIndex] : undefined;
 			if (active && active.role === "assistant" && activeIndex !== undefined) {
 				const merged: ChatMessage = isThought ? { ...active, thinking: (active.thinking ?? "") + text, thinkingStartedAt: active.thinkingStartedAt ?? active.timestamp } : { ...active, text: active.text + text, ...(image ? { images: [...(active.images ?? []), image] } : {}) };
+				// 并回「已 settle 的末尾消息」说明该回合其实还在续写：恢复流式态，等真正结束时再 settle；
+				// aborted/error 是终态，不因迟到 chunk 翻案。
+				const continued: ChatMessage = state.activeAssistantIndex === undefined && merged.stopReason !== "pending" && merged.stopReason !== "aborted" && merged.stopReason !== "error" ? { ...merged, stopReason: "pending" } : merged;
 				next.messages = [...state.messages];
-				next.messages[activeIndex] = merged;
+				next.messages[activeIndex] = continued;
+				// 迟到的尾部续写后指针回到该消息：后续 tool 卡后的正文沿用同一约定并入同一气泡。
+				next.activeAssistantIndex = activeIndex;
 				next.lastTouched = [activeIndex];
 			} else {
 				const created: ChatMessage = {
@@ -269,24 +262,15 @@ export function projectAcpSessionUpdate(state: AcpProjectionState, update: AcpSe
 			return next;
 		}
 		case "plan": {
-			const planUpdate = update as { entries?: Array<{ content?: unknown; status?: unknown }>; plan?: Array<{ content?: unknown; status?: unknown }> };
-			const entries = Array.isArray(planUpdate.entries) ? planUpdate.entries : Array.isArray(planUpdate.plan) ? planUpdate.plan : [];
-			next.todos = entries.map((entry) => ({
+			next.todos = readAcpPlanEntries(update as unknown as Record<string, unknown>).map((entry) => ({
 				content: typeof entry?.content === "string" ? entry.content : "",
 				status: entry?.status === "in_progress" ? "in_progress" : entry?.status === "completed" ? "completed" : "pending",
 			}));
 			return next;
 		}
 		case "available_commands_update": {
-			// 键名宽容读取:规范 SDK 是 commands,opencode 等实现实际发 availableCommands
-			//(2027-02 live smoke 实测;只读兼容不改出站协议);两者都缺则清空。
-			const commandsUpdate = update as { commands?: Array<{ name?: unknown; description?: unknown }>; availableCommands?: Array<{ name?: unknown; description?: unknown }> };
-			const raw = Array.isArray(commandsUpdate.commands) ? commandsUpdate.commands : Array.isArray(commandsUpdate.availableCommands) ? commandsUpdate.availableCommands : [];
-			next.commands = raw.map((command) => ({
-				name: typeof command?.name === "string" ? command.name : "",
-				...(typeof command?.description === "string" && command.description ? { description: command.description } : {}),
-				source: "acp",
-			}));
+			// 键名宽容读取（commands | availableCommands 双键）收拢在 acpWireTolerance；两者都缺则清空。
+			next.commands = toAcpCommands(readAcpCommandsUpdate(update as unknown as Record<string, unknown>));
 			return next;
 		}
 		case "usage_update": {
@@ -295,9 +279,8 @@ export function projectAcpSessionUpdate(state: AcpProjectionState, update: AcpSe
 			return next;
 		}
 		case "session_info_update": {
-			const infoUpdate = update as { title?: unknown; sessionTitle?: unknown };
-			const title = infoUpdate.title ?? infoUpdate.sessionTitle;
-			if (typeof title === "string" && title.trim()) next.title = title.trim();
+			const title = readAcpSessionTitle(update as unknown as Record<string, unknown>);
+			if (title) next.title = title;
 			return next;
 		}
 		case "current_mode_update":
@@ -380,6 +363,8 @@ export function appendAcpUserPrompt(state: AcpProjectionState, text: string, ima
 		localUserEchoes: [...(state.localUserEchoes ?? []).filter((entry) => entry.echoed > 0), { text, echoed: 0 }],
 		// seed 不是 user_message_chunk 落下的消息,后续 chunk 不得并回进它。
 		lastUserChunkIndex: undefined,
+		// 新回合开始：上一轮的流式指针作废，避免新回合 chunk 并回上一条 assistant 消息。
+		activeAssistantIndex: undefined,
 		...(title ? { title } : {}),
 		lastTouched: [state.messages.length],
 		replayed: true,

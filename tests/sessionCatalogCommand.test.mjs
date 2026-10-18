@@ -38,6 +38,11 @@ function createHookForRuntimeTest() {
 					useCallback: (fn) => fn,
 				};
 			}
+			if (request === "./files/useFileTreeContentState") {
+				// 文件树状态域（节点树 + 内容代次）：本测试只覆盖会话清单命令，
+				// fake react 的 useState 本就不推进状态，这里保持空白实现即可。
+				return { useFileTreeContentState: () => ({ files: [], fileTreeContentRevision: 0, setFiles: () => undefined }) };
+			}
 			if (request === "../utils/fileTreeLazy") {
 				return {
 					hydrateExpandedFileTree: async (_list, tree) => tree,

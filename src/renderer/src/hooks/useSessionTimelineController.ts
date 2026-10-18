@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { atom, useAtomValue, useSetAtom, useStore } from "jotai";
+import { toast } from "sonner";
 import { latestUserMessageId, SendScrollPositioner } from "./timeline/sendScroll";
 import { selectAtom } from "jotai/utils";
 import { desktopApi } from "../desktopApi";
@@ -19,6 +20,7 @@ import {
 	sessionScrollAnchorByIdAtom,
 	setSessionMessageLoadStateAtom,
 	touchSessionMessagesAtom,
+	type SessionLoadState,
 	type SessionScrollAnchor,
 } from "../atoms";
 import type { MessageScrollerScrollApi } from "../components/agents/message-scroller";
@@ -28,6 +30,7 @@ import { beginProgrammaticScroll, clearProgrammaticScroll, createProgrammaticScr
 import { browsePinScrollTop, followBrowsePinAfterUserScroll, shouldCompensateBrowsePin, type BrowsePin } from "./timeline/browsePin";
 import { countUserTurns, TIMELINE_MOUNTED_TURN_LIMIT, TIMELINE_SCROLLED_TURN_LIMIT, TIMELINE_WINDOW_EXPAND_STEP } from "../components/session/timeline/turnRenderWindow";
 import { estimateJumpExpandTurns, resolveJumpPendingAction } from "../components/session/timeline/jumpWindowPolicy";
+import { resolveJumpMessageIndex, resolveJumpScrollTarget } from "../components/session/timeline/jumpTarget";
 
 /** 滚动接近顶部自动加载历史的阈值（px，2026-11 轮次模型）：
  *  贴顶（≤8px）才触发翻页——「滑到底才翻」，避免在顶部附近任何滚动都连翻历史页。
@@ -261,6 +264,32 @@ export function shouldSkipInitialDiskLoad(cachedEntry: { source: "disk" | "runti
 	if (cachedEntry.messages.length > 0) return true;
 	// 空条目只有磁盘亲自返回的才算终态；runtime 空投影必须读盘核实。
 	return cachedEntry.source === "disk";
+}
+
+/**
+ * 挂载 effect 是否跳过初始磁盘读取（在 shouldSkipInitialDiskLoad 之上叠加「本次挂载已经
+ * 发起或拿到读盘结论」的去重条件）。
+ *
+ * 为什么需要去重：runtime 节流 flush 每次都重建缓存条目对象（cacheSessionMessagesAtom
+ * 整体重建 entry），effect 依赖 cachedEntry 会随之重跑；不去重就会对同一会话反复读盘。
+ *
+ * 但「会话挂载过一次」不等于「已经读过盘」，两者必须分开：
+ *   - loadState 仍是 undefined（本次挂载从未发起/拿到读盘结论）→ 不得跳过。缓存里的空
+ *     runtime 投影不是终态：重启换代把旧窗口替换成空数组后，只有读盘能把它推到
+ *     ready（历史/空会话）或 error（错误卡片），否则骨架屏永驻（Issue #350）。
+ *   - loadState 已 settled 且缓存条目被 8-LRU 整体淘汰（undefined）→ 不得跳过，重读自愈
+ *     （2026-12 回归修复）；条目仍在时以已有磁盘结论为准，不因 runtime 重写条目重读。
+ */
+export function shouldSkipInitialDiskRead(input: { previouslyLoaded: boolean; cachedEntry: { source: "disk" | "runtime"; messages: readonly unknown[] } | undefined; knownEmpty: boolean; loadStateStatus: SessionLoadState["status"] | undefined }): boolean {
+	if (shouldSkipInitialDiskLoad(input.cachedEntry, input.knownEmpty)) return true;
+	// 首次挂载到本会话：是否读盘完全由缓存权威性决定（与旧行为一致）。
+	if (!input.previouslyLoaded) return false;
+	// 从未读盘：空 runtime 投影必须核实（Issue #350 的核心）。
+	if (input.loadStateStatus === undefined) return false;
+	// 读盘在途：等结果，不重复发起（缓存条目可能已被 runtime flush 重建）。
+	if (input.loadStateStatus === "loading") return true;
+	// 已 settled：条目消失（LRU 淘汰）→ 重读自愈；条目仍在 → 以磁盘结论为准。
+	return input.cachedEntry !== undefined;
 }
 
 export function isLatestTimelineRunBusy(isAgentBusy: boolean, index: number, runCount: number): boolean {
@@ -502,16 +531,14 @@ export function useSessionTimelineController(options: { sessionId?: string; mess
 		// 切回时重读盘闪骨架（历史行为 155338e5 引入，缓存结构重建时丢失）。
 		if (cachedEntry) touchMessages(sessionId);
 		const previouslyLoaded = lastLoadedSessionRef.current === sessionId;
-		// 已加载且缓存条目仍在 → 跳过（正常运行路径）。
-		// 缓存条目被 8-LRU 淘汰（条目变 undefined）时重新走磁盘加载自愈——
-		// 否则已挂载会话永久卡骨架屏（2026-12 回归修复）。
-		if (previouslyLoaded && cachedEntry) return;
 		if (!previouslyLoaded) lastLoadedSessionRef.current = sessionId;
+		// 跳过初始读盘 = 缓存已是权威终态（草稿/非空内容/磁盘空应答），或本次挂载已经发起/
+		// 拿到读盘结论（runtime 节流 flush 会不断重建缓存条目，不能每次都重读）。
 		// 切会话复用同一 hook 实例（solo 栏无 sessionId key）：已有**真实内容**时不要把
-		// loadState 打成 loading。但空 runtime 投影（主进程读盘失败下发 0 条）不是内容——
-		// 必须继续读盘核实，否则 loadState 永远停在 undefined，骨架屏永驻
-		// （2026-10-08 fork/copy 现场）。
-		if (shouldSkipInitialDiskLoad(cachedEntry, knownEmpty)) return;
+		// loadState 打成 loading；但空 runtime 投影（主进程读盘失败/重启换代下发 0 条、
+		// 或历史加载被取消）覆盖旧窗口后必须读盘核实，否则骨架屏永驻
+		// （2026-10-08 fork/copy 现场、Issue #350）。
+		if (shouldSkipInitialDiskRead({ previouslyLoaded, cachedEntry, knownEmpty, loadStateStatus })) return;
 
 		const sequence = ++nextLoadSequence;
 		trackLatestLoad(sessionId, sequence);
@@ -548,7 +575,7 @@ export function useSessionTimelineController(options: { sessionId?: string; mess
 					},
 				});
 			});
-	}, [options.sessionId, cachedEntry, knownEmpty]);
+	}, [options.sessionId, cachedEntry, knownEmpty, loadStateStatus]);
 
 	const reloadFromDisk = useCallback(async () => {
 		const sessionId = options.sessionId;
@@ -1266,14 +1293,19 @@ export function useSessionTimelineController(options: { sessionId?: string; mess
 			skipBrowsePinRef.current = true;
 			browsePinRef.current = null;
 			browsePinFrozenRef.current = false;
-			const existing = timeline.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`) as HTMLElement | null;
+			// 命中 id 可能是**会话文件条目 id**（会话内查找的命中）而不是投影消息 id：
+			// 先归一到当前消息列表再查 DOM，否则永远查不到节点、点击无任何反应。
+			const index = resolveJumpMessageIndex(combinedMessages, messageId);
+			const targetNodeId = index >= 0 ? combinedMessages[index].id : messageId;
+			const existing = timeline.querySelector(`[data-message-id="${CSS.escape(targetNodeId)}"]`) as HTMLElement | null;
 			if (existing) {
 				skipBrowsePinRef.current = false;
-				scrollJumpTargetIntoView(timeline, existing);
-				highlightMessage(existing, requestOwnerKey);
+				// 轮内中间回答在折叠区里是 display:none（几何全 0），落位退到所属轮次行
+				const target = resolveJumpScrollTarget(existing);
+				scrollJumpTargetIntoView(timeline, target);
+				highlightMessage(target, requestOwnerKey);
 				return;
 			}
-			const index = combinedMessages.findIndex((message) => message.id === messageId);
 			const hasMorePages = diskPage ? diskPage.nextBefore !== null : historyHasMore;
 			if (index < 0 && !hasMorePages) return;
 			// 目标可能在贴底 turn 窗口外（先取消跟随以展开挂载），也可能在尚未加载的
@@ -1548,17 +1580,23 @@ export function useSessionTimelineController(options: { sessionId?: string; mess
 		// 分批扩窗在途（点击时一次到位排满的批次 / 补页增长）：等批次消费完再评估，
 		// 避免目标刚挂载就落位、随后被后续批次推移。
 		if (pendingExpandTurnsRef.current > 0) return;
-		const element = timeline.querySelector(`[data-message-id="${CSS.escape(pendingJump.value.messageId)}"]`) as HTMLElement | null;
+		// 挂起期间每轮重新归一：目标可能是文件条目 id（会话内查找命中），补页把它
+		// 载入 combinedMessages 之后投影 id 才确定。
+		const targetIndex = resolveJumpMessageIndex(combinedMessages, pendingJump.value.messageId);
+		const targetNodeId = targetIndex >= 0 ? combinedMessages[targetIndex].id : pendingJump.value.messageId;
+		const element = timeline.querySelector(`[data-message-id="${CSS.escape(targetNodeId)}"]`) as HTMLElement | null;
 		if (element) {
 			skipBrowsePinRef.current = false;
 			setPendingJump(undefined);
-			scrollJumpTargetIntoView(timeline, element);
-			highlightMessage(element, ownerKey);
+			// 折叠区里的命中节点不可见：落位退到所属轮次行（见 timeline/jumpTarget）
+			const target = resolveJumpScrollTarget(element);
+			scrollJumpTargetIntoView(timeline, target);
+			highlightMessage(target, ownerKey);
 			return;
 		}
 		// 目标未挂载：按策略兜底扩窗（指数步长）/ 跳转驱动补页 / 放弃（防呆上限）。
 		// give-up 保留旧行为兜底：目标已不在数据（压缩清理/删除）时不无限扩窗（2026-08 黑屏治理）。
-		const stillInData = combinedMessages.some((message) => message.id === pendingJump.value.messageId);
+		const stillInData = targetIndex >= 0;
 		const hasMorePages = diskPage ? diskPage.nextBefore !== null : historyHasMore;
 		const action = resolveJumpPendingAction({
 			targetInLoadedData: stillInData,
@@ -1570,6 +1608,9 @@ export function useSessionTimelineController(options: { sessionId?: string; mess
 		if (action.kind === "give-up") {
 			skipBrowsePinRef.current = false;
 			setPendingJump(undefined);
+			// 静默放弃会被当成「点了没反应」（本次 bug 的原始反馈）：补页/扩窗都到上限时
+			// 必须给一句反馈，要么历史太远加载不到，要么这条已被 context_edit 移出展示。
+			toast(t("sessionFind.jumpFailed"));
 			return;
 		}
 		if (action.kind === "wait") return;

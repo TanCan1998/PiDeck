@@ -357,6 +357,10 @@ async function main(): Promise<void> {
 	// 直接 ctx.createSharedFetchHandler 运行时必然 undefined（曾用
 	// `ctx as Context & HostConnectionHandle` 的交叉断言掩盖了这一点）。
 	const apiHandler = ctx.connection.createSharedFetchHandler("/api");
+	// 0.2.1：Connection fetch 与 Gateway stream 都要求显式 PeerScope（0.2.0 里传
+	// undefined 表示官方进程内 operator）。browserPeer 是 Connection 服务持有的本机
+	// owner Peer，生命周期跟 host 插件一致，最贴近原进程内 operator 语义。
+	const operatorPeer = ctx.connection.browserPeer;
 	// Gateway 流派发器：与官方 RemoteStreamMuxServer 使用的 open 等价——
 	// wireStream.open 处理普通 Remote 流端点与内部 $events 转发事件流（含瀑布）。
 	// typertGateway 由 dsh-base 补丁的 typert-gateway 行提供（Context 增广见
@@ -392,7 +396,7 @@ async function main(): Promise<void> {
 		}
 		// ConnectionFetchHandler.fetch 只收 Request（0.1.5 契约）；init 里的
 		// method/headers/body/signal 原样进构造器，abort 语义由 Request 继承。
-		return apiHandler.fetch(new Request(url, init));
+		return apiHandler.fetch(new Request(url, init), operatorPeer);
 	};
 	console.log(`[dsh-host-entry] boot OK in ${Date.now() - startedAt}ms`);
 	port.postMessage({ type: "host-ready" });
@@ -408,7 +412,7 @@ async function main(): Promise<void> {
 			const msg = parseDshFetchMessage(raw);
 			if (!msg) return;
 			if (msg.type === "stream-open") {
-				openGatewayStream(port, wireStream, openStreams, msg.id, msg.endpoint, msg.payload);
+				openGatewayStream(port, wireStream, operatorPeer, openStreams, msg.id, msg.endpoint, msg.payload);
 				return;
 			}
 			if (msg.type === "stream-cancel") {
@@ -494,15 +498,15 @@ main().catch((error) => {
  * 帧形状与官方 RemoteStreamMuxServer 的 WebSocket 协议一致，主进程侧
  * DshApiClient.openStream 按同一协议消费。
  */
-function openGatewayStream(port: ParentPort, wireStream: import("@deepseek-ai/dsh-api-gateway/types").TypertGatewayWireStream, openStreams: Map<string, AbortController>, id: string, endpoint: string, payload: unknown): void {
+function openGatewayStream(port: ParentPort, wireStream: import("@deepseek-ai/dsh-api-gateway/types").TypertGatewayWireStream, peer: import("@deepseek-ai/dsh-typert-protocol").PeerScope, openStreams: Map<string, AbortController>, id: string, endpoint: string, payload: unknown): void {
 	if (!id || !endpoint) return;
 	const controller = new AbortController();
 	openStreams.set(id, controller);
 	void (async () => {
 		try {
-			// 本载体尚无客户端 uplink；显式传空流，undefined peer 是官方进程内 operator。
+			// 本载体尚无客户端 uplink；显式传空流，peer 用 host 级 owner Peer。
 			const uplink: AsyncIterable<unknown> = { async *[Symbol.asyncIterator]() {} };
-			const items = await wireStream.open(endpoint, payload, uplink, undefined, controller.signal);
+			const items = await wireStream.open(endpoint, payload, uplink, peer, controller.signal);
 			for await (const value of items) {
 				if (controller.signal.aborted) return;
 				port.postMessage({ type: "stream-item", id, value });

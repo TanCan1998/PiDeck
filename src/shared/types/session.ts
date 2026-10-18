@@ -45,11 +45,12 @@ export type ChatMessage = {
 };
 
 /**
- * 历史暂时不可读的结构化原因（渲染层据此出专态 UI，而不是让 IPC 抛裸错误）。
- * 目前只有一种：DSH host 被用户手动停止——此时 host 不会自动拉起，历史读取
- * 必然失败且不会自愈，「启动 host」是唯一恢复路径。
+ * 历史不可读的结构化原因（渲染层据此出专态 UI，而不是让 IPC 抛裸错误）。
+ * - dsh-host-stopped：DSH host 被用户手动停止，host 不会自动拉起，「启动 host」是唯一恢复路径。
+ * - file-missing：pi 会话文件还不存在——新建会话（含微信/飞书桥建的会话）在收到第一条
+ *   消息前不落盘，此前打开会读到 ENOENT；这是「还没内容」而不是读取故障。
  */
-export type SessionHistoryUnavailableReason = "dsh-host-stopped";
+export type SessionHistoryUnavailableReason = "dsh-host-stopped" | "file-missing";
 
 /** A bounded historical timeline slice. `nextBefore` is the exclusive index for an older page. */
 export type SessionMessagePage = {
@@ -105,8 +106,37 @@ export type FileSearchResult = {
 	type: "file" | "directory";
 };
 
+/**
+ * 工作区文件内容检索命中（Go file-index sidecar）。
+ * `line` 为 1 起行号，`column` 为命中词在行内的 0 起字符位置，`snippet` 是窗口化后的可读片段。
+ */
+export type FileContentSearchHit = {
+	name: string;
+	path: string;
+	relativePath: string;
+	line: number;
+	column: number;
+	snippet: string;
+};
+
+/** 内容检索聚合结果：hits 已按相关度排序并截断，其余字段用于「扫了多少、是否截断」的提示。 */
+export type FileContentSearchResult = {
+	hits: FileContentSearchHit[];
+	matchedFiles: number;
+	scannedFiles: number;
+	scannedBytes: number;
+	truncated: boolean;
+};
+
 export type SessionSource = "pi" | "codex" | "claude" | "opencode" | "zcode" | "workbuddy" | "cursor" | "qoder" | "kimi" | "kimiwork" | "minimax";
 export type SessionEnvironment = "native" | "wsl";
+
+/**
+ * 外部连接渠道（会话来源标记）：外部 IM 桥（微信/飞书）在 PiDeck 里建的会话。
+ * 侧栏与标题栏据此显示渠道标志，让「手机发来的会话」在会话列表里可辨认；
+ * 缺省表示桌面端直接创建。旧 catalog 没有该字段，缺省即兼容，无需迁移。
+ */
+export type SessionChannel = "wechat" | "feishu";
 
 /**
  * 会话级代理覆盖模式（单会话开关，复用全局代理 URL，不存每会话 URL）：
@@ -178,6 +208,16 @@ export type SessionSummary = {
 	source?: SessionSource;
 	/** 运行时后端；缺省 "pi"。草稿/历史行用来区分 DSH 会话。 */
 	backend?: import("./agent").AgentBackend;
+	/**
+	 * 外部连接渠道（微信/飞书桥建的会话）：来源徽标只能区分 pi/dsh，渠道徽标区分「从哪来」。
+	 * 由 catalog 记录透传（见 sessionRecordToSummary），扫描摘要不带该字段。
+	 */
+	channel?: SessionChannel;
+	/**
+	 * 侧边任务会话（右侧抽屉「侧边任务」面板持有）：与普通会话唯一的差别是不登记主区
+	 * 常驻 Tab（发消息时抑制 promote）。缺省 = 普通会话，旧 catalog 无此字段天然兼容。
+	 */
+	sideTask?: boolean;
 	/** 标记此会话文件来自 WSL，rename/delete/copy 等操作需走 wsl.exe */
 	wsl?: boolean;
 	/** 从 JSONL 中的 model_change / thinking_level_change 提取的最后值 */
@@ -229,6 +269,10 @@ export type SessionRecord = {
 	noSession?: boolean;
 	source: SessionSource;
 	environment: SessionEnvironment;
+	/** 外部连接渠道（微信/飞书桥建的会话）；缺省 = 桌面端创建。 */
+	channel?: SessionChannel;
+	/** 侧边任务会话标记（见 SessionSummary.sideTask）；面板归属与主区 Tab 抑制的唯一判据。 */
+	sideTask?: boolean;
 	/** 运行时后端（pi/dsh）；缺省 "pi"，旧 catalog 数据无需迁移。 */
 	backend?: import("./agent").AgentBackend;
 	filePath?: string;
@@ -245,6 +289,12 @@ export type SessionRecord = {
 	forked?: boolean;
 	/** 同 SessionSummary.supersededBy：重发/编辑 fork 化替换后指向子会话 id，列表默认过滤。 */
 	supersededBy?: string;
+	/**
+	 * #354 身份归并别名：启动期修复把历史重复身份记录并入本条时，被吸收记录的历史稳定 ID。
+	 * 这些 ID 仍被 settings 置顶 / 渲染层持久化的 Tab 置顶与最近活动引用，渲染层据此把引用
+	 * 迁移到本条 id（解析入口见 shared/sessionIdAliases.ts）。缺省 = 无归并历史，旧数据无需迁移。
+	 */
+	mergedSessionIds?: string[];
 	projectPath?: string;
 	preview: string;
 	messageCount: number;
@@ -292,6 +342,8 @@ export type CreateSessionDraftInput = {
 	agentPreset?: string;
 	/** ACP 工具预选（AcpToolConfig.id）：backend=acp 草稿期选哪个 CLI，激活时随 create 应用。 */
 	acpToolId?: string;
+	/** 建为侧边任务会话（右侧抽屉「侧边任务」面板持有）；仅布尔 true 被接受，其余按普通会话。 */
+	sideTask?: boolean;
 };
 
 /** 启动前选择的模型与思考级别；显式值优先于 pi 配置默认值。 */
@@ -356,6 +408,8 @@ export type UpdateSessionRecordInput = {
 	acpToolId?: string | null;
 	/** 会话级代理覆盖；null = 恢复跟随全局（清除已保存覆盖）。 */
 	proxy?: SessionProxyOverride | null;
+	/** 侧边任务标记：true = 收进侧边任务面板，null = 释放回普通会话（面板不再列出，会话本身保留）。 */
+	sideTask?: boolean | null;
 };
 
 export type ForkMessage = {
@@ -444,6 +498,8 @@ export type SessionRuntimeInfo = SessionRuntimeTarget & {
 	createdAt: number;
 	compactionCount?: number;
 	noSession?: boolean;
+	/** PiDeck 会话身份（AgentTab.deckSessionId 透传）：渲染层侧栏 ACP「agent↔会话」配对用，缺它会把同一会话画成两行。 */
+	deckSessionId?: string;
 };
 
 export type SessionCommandErrorCode =
@@ -505,4 +561,31 @@ export type SessionBranchTree = {
 	roots: SessionBranchNode[];
 	/** 当前叶子（活跃分支末端）；空会话为 null。 */
 	leafId: string | null;
+};
+
+// ── 跨会话全文搜索（Go session-index sidecar）────────────────────────────
+
+/** 单条正文命中：messageId 供渲染层调 jumpToMessage 定位到具体消息。 */
+export type SessionSearchMatch = {
+	messageId: string;
+	role: "user" | "assistant";
+	timestampMs: number;
+	/** 命中处前后文摘要（控制字符已折叠，单行展示）。 */
+	snippet: string;
+};
+
+/** 单个会话的命中集合。filePath 是会话文件路径，**不是** SessionRecord.id（id 是跨重启稳定的身份，映射见 renderer utils/sessionContentSearchHits）。 */
+export type SessionSearchSessionHit = {
+	filePath: string;
+	updatedAtMs: number;
+	matches: SessionSearchMatch[];
+	/** 命中总数（未截断）：matches 只保留评分最高的若干条，界面用它报真实条数。 */
+	hitCount?: number;
+};
+
+export type SessionSearchResult = {
+	sessions: SessionSearchSessionHit[];
+	/** 命中会话总数（可能大于 sessions.length，后者按 limit 截断）。 */
+	totalHitSessions: number;
+	truncated: boolean;
 };

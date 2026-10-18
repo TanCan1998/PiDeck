@@ -1,5 +1,6 @@
 import { Button } from "../components/ui-shadcn/button";
 import { Switch } from "../components/ui-shadcn/switch";
+import { Badge } from "../components/ui-shadcn/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui-shadcn/table";
 import { showNotice } from "../utils/notice";
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
@@ -41,10 +42,12 @@ function DiscoveredPromptRow(props: {
 					<div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
 						<FileText size={14} strokeWidth={1.8} className="shrink-0 text-text-tertiary" />
 						<strong className="min-w-0 flex-1 break-words whitespace-normal">/{item.name}</strong>
-						<span className="skill-state" title={t("config.resourceManagedHint")}>
+						<Badge variant="outline" size="sm" title={t("config.resourceManagedHint")}>
 							{t("config.source.global")}
-						</span>
-						<span className={`skill-state ${item.enabled ? "enabled" : "disabled"}`}>{item.enabled ? t("common.enabled") : t("common.disabled")}</span>
+						</Badge>
+						<Badge variant={item.enabled ? "success" : "neutral"} size="sm">
+							{item.enabled ? t("common.enabled") : t("common.disabled")}
+						</Badge>
 					</div>
 					<span className="truncate font-mono text-caption text-muted-foreground">{item.sourceLabel}</span>
 				</div>
@@ -240,7 +243,9 @@ export function PromptsTab(props: {
 								<span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
 									<FileText size={14} strokeWidth={1.8} className="shrink-0 text-text-tertiary" />
 									<strong className="min-w-0 flex-1 break-words whitespace-normal">/{template.name}</strong>
-									<span className={`skill-state ${effectiveEnabled ? "enabled" : "disabled"}`}>{effectiveEnabled ? t("common.enabled") : t("common.disabled")}</span>
+									<Badge variant={effectiveEnabled ? "success" : "neutral"} size="sm">
+										{effectiveEnabled ? t("common.enabled") : t("common.disabled")}
+									</Badge>
 								</span>
 							</button>
 						)}
@@ -315,14 +320,14 @@ export function PromptsTab(props: {
 				<>
 					<div className="mb-3 flex items-center justify-between gap-3">
 						<div>
-							<span className="font-mono text-xs tabular-nums text-text-tertiary">{t("config.count.prompts", { count: visibleTemplateCount })}</span>
-							<small className="prompts-restart-hint">{t("config.restartHint")}</small>
+							<span className="font-mono text-xs tabular-nums text-muted-foreground">{t("config.count.prompts", { count: visibleTemplateCount })}</span>
+							<small className="text-caption text-text-tertiary">{t("config.restartHint")}</small>
 						</div>
-						<div className="prompts-toolbar-actions flex items-center gap-1.5">
+						<div className="flex items-center gap-1.5">
 							<Button variant="outline" size="sm" onClick={props.onRefresh} disabled={props.loading}>
 								{t("common.refresh")}
 							</Button>
-							<Button variant="secondary" size="sm" onClick={props.onOpenRoot}>
+							<Button variant="outline" size="sm" onClick={props.onOpenRoot}>
 								{t("config.openFolder")}
 							</Button>
 						</div>

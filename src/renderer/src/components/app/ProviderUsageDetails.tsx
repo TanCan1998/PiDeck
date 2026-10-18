@@ -108,7 +108,7 @@ export function ProviderUsageDetails(props: {
 			<div className="flex items-center gap-1.5 px-0.5">
 				<span className="text-micro font-semibold uppercase tracking-wide text-text-tertiary">{t("sessionContext.usageHeader")}</span>
 				{time && !loading && (
-					<span className="inline-flex items-center gap-0.5 text-[10px] text-text-tertiary">
+					<span className="inline-flex items-center gap-0.5 text-micro text-text-tertiary">
 						<Clock size={10} aria-hidden="true" />
 						{t(time.key, time.params)}
 					</span>

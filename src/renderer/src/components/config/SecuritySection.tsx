@@ -310,7 +310,7 @@ function SecurityLevelCard(props: {
 								<div key={tool} className="flex items-center justify-between gap-2">
 									<span className="text-control text-muted-foreground">{t(`security.tool.${tool}`)}</span>
 									<Select value={level.toolActions[tool] ?? level.defaultAction} onValueChange={(value) => onChange({ toolActions: { ...level.toolActions, [tool]: value as SecurityAction } })}>
-										<SelectTrigger className="h-7 w-24">
+										<SelectTrigger size="sm" className="w-24">
 											<SelectValue />
 										</SelectTrigger>
 										<SelectContent>
@@ -355,7 +355,7 @@ function SecurityLevelCard(props: {
 						<div className="flex flex-col gap-1">
 							<label className="text-micro text-muted-foreground">{t("security.pathPolicyTitle")}</label>
 							<Select value={level.pathPolicy} onValueChange={(value) => onChange({ pathPolicy: value as SecurityPathPolicy })}>
-								<SelectTrigger className="h-8">
+								<SelectTrigger size="sm">
 									<SelectValue />
 								</SelectTrigger>
 								<SelectContent>
@@ -368,7 +368,7 @@ function SecurityLevelCard(props: {
 						<div className="flex flex-col gap-1">
 							<label className="text-micro text-muted-foreground">{t("security.defaultActionTitle")}</label>
 							<Select value={level.defaultAction} onValueChange={(value) => onChange({ defaultAction: value as SecurityAction })}>
-								<SelectTrigger className="h-8">
+								<SelectTrigger size="sm">
 									<SelectValue />
 								</SelectTrigger>
 								<SelectContent>

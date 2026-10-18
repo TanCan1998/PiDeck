@@ -149,7 +149,7 @@ export function LogViewer(props: { refreshSignal?: number }) {
 				<Button variant="outline" size="sm" onClick={() => void refresh()} disabled={loading}>
 					{t("common.refresh")}
 				</Button>
-				{!loading && total > 0 && <span className="ml-auto text-caption text-text-tertiary tabular-nums">{t("logs.resultsCount", { count: String(total) })}</span>}
+				{!loading && total > 0 && <span className="ml-auto text-caption text-muted-foreground tabular-nums">{t("logs.resultsCount", { count: String(total) })}</span>}
 			</div>
 			{error && <div className="mb-3.5 rounded-sm border border-danger/20 bg-danger-soft px-3.5 py-2.5 text-control leading-relaxed text-danger whitespace-pre-line">{error}</div>}
 			{loading ? (

@@ -11,7 +11,7 @@
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![Electron](https://img.shields.io/badge/Electron-38-47848f)
 ![React](https://img.shields.io/badge/React-19-61dafb)
-![Version](https://img.shields.io/badge/version-0.9.0-blue)
+![Version](https://img.shields.io/badge/version-0.9.1-blue)
 
 <!-- star-history:start -->
 <picture>
@@ -81,25 +81,25 @@
 
 ## 📋 Changelog
 
-> **Latest: v0.9.0 (2026-10-14)** (2026-10-14)
+> **Latest: v0.9.1** (2026-10-18)
 
-### v0.9.0 (2026-10-14) Release Highlights
-- 🚀 **ACP backend: more AI coding tools in one workbench**
-- 🚀 **Independent PiDeck host-plugin system**
-- 🚀 **Built-in remote access and access tokens**
-- 🚀 **Web live events and Plan Mode**
-- 🚀 **Terminal settings, WebGL and snapshot replay**
-- 🚀 **Native sessions and model catalogs aligned with pi 1.0.4**
-- 🚀 **MCP service catalog and AI configuration assistant**
-- 🚀 **Session branch panel**
-- 🚀 **Project pinning and list management**
-- 🚀 **Traditional Chinese UI**
-- 🚀 **Notification history across restarts**
-- 🚀 **Choose which composer controls to show**
-- ✨ **Extension-command previews in draft sessions**
-- ✨ **Faster resource-toggle feedback**
-- ✨ **Remote and mobile polish**
-- ✨ **Security and long-running stability hardening**
+### v0.9.1 Release Highlights
+- 🚀 **WeChat (ilink) support: a second IM channel on your phone**
+- 🚀 **Cross-session body search, not just titles**
+- 🚀 **Find in session (Ctrl/Cmd+Shift+F)**
+- 🚀 **Pinyin search for session titles and the file drawer**
+- 🚀 **Search file contents from the file drawer**
+- 🚀 **Side tasks: a second session that stays out of the tab bar**
+- 🚀 **Session-level average TPS**
+- 🚀 **Web on mobile: give the portrait screen back to content**
+- 🚀 **ACP tools available on stable builds**
+- 🚀 **Synced with pi 1.3.0**
+- 🚀 **DSH runtime upgraded to 0.2.1**
+- 🚀 **Prompt library as a remote asset, with millisecond search**
+- ✨ **On-disk session index on by default**
+- ✨ **Extension list prewarmed on first screen**
+- ✨ **Goal mode stops re-injecting the full objective every turn**
+- ✨ **List ordering is drag-only**
 
 [View Full Changelog →](CHANGELOG.md)
 

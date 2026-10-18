@@ -349,3 +349,86 @@ test("isFollowEscapeEdge：仅 true→false 的沿触发 stopScroll", () => {
 	assert.equal(follow.isFollowEscapeEdge(false, true), false);
 	assert.equal(follow.isFollowEscapeEdge(true, true), false);
 });
+
+test("isFollowSnapshotFresh：提交快照必须与引擎实况一致", () => {
+	// 两侧都新鲜：可以上报
+	assert.equal(follow.isFollowSnapshotFresh(true, true), true);
+	assert.equal(follow.isFollowSnapshotFresh(false, false), true);
+	// 两侧过期：relock / unlock 共用同一判定，不允许按方向漏判
+	assert.equal(follow.isFollowSnapshotFresh(false, true), false);
+	assert.equal(follow.isFollowSnapshotFresh(true, false), false);
+});
+
+/**
+ * #185 周期-2 振荡的提交级模型：MessageScroller 的 followOutput layout effect +
+ * onFollowChange passive effect + controller autoScroll + 引擎可变单例。
+ *
+ * 一次 commit = 取本次渲染的 followOutput / 已提交快照 → layout effect 翻转引擎 →
+ * passive effect 上报并回写 controller；有 state 变化才进入下一次提交。
+ * 只保留决定收敛性的字段，判定规则全部复用 followState 的纯函数（与产量代码同源）。
+ */
+function simulateFollowReportCascade({ freshnessGuard, relockGuard = false, start, maxCommits = 60 }) {
+	const world = { ...start };
+	const commits = [];
+	for (let index = 0; index < maxCommits; index += 1) {
+		const { autoScroll: followOutput, committedAtBottom: snapshot, previousFollowOutput } = world;
+		world.previousFollowOutput = followOutput;
+		let scheduled = false;
+		if (!followOutput) {
+			// MessageScroller 的 false 分支：仅 true→false 沿解锁引擎（引擎侧还有 needsBottomUnlock 幂等守卫）
+			if (follow.isFollowEscapeEdge(previousFollowOutput, followOutput) && follow.needsBottomUnlock(world.escapedFromLock, world.engineAtBottom)) {
+				world.escapedFromLock = true;
+				if (world.engineAtBottom) {
+					world.engineAtBottom = false;
+					scheduled = true;
+				}
+				if (world.committedAtBottom) {
+					world.committedAtBottom = false;
+					scheduled = true;
+				}
+			}
+		} else if (!relockGuard || !world.engineAtBottom) {
+			// true 分支：scrollToBottom 锁底。issue 建议的 needsBottomRelock 只在已锁底时跳过 setState
+			if (!world.engineAtBottom) {
+				world.engineAtBottom = true;
+				scheduled = true;
+			}
+			if (!world.committedAtBottom) {
+				world.committedAtBottom = true;
+				scheduled = true;
+			}
+		}
+		// passive effect 上报：过期快照直接丢弃，否则回写 controller（autoScroll = 快照）
+		const fresh = !freshnessGuard || follow.isFollowSnapshotFresh(snapshot, world.engineAtBottom);
+		if (fresh && world.autoScroll !== snapshot) {
+			world.autoScroll = snapshot;
+			scheduled = true;
+		}
+		commits.push({ followOutput, snapshot, engineAtBottom: world.engineAtBottom, autoScroll: world.autoScroll });
+		if (!scheduled) return { converged: true, commits };
+		// 周期-2 检测：真实 React 里这条链会一路嵌套到 50 层才抛 #185，这里提前判定不收敛
+		if (index >= 3) {
+			const same = (left, right) => left.followOutput === right.followOutput && left.snapshot === right.snapshot && left.engineAtBottom === right.engineAtBottom && left.autoScroll === right.autoScroll;
+			if (same(commits[index], commits[index - 2]) && same(commits[index - 1], commits[index - 3])) return { converged: false, commits };
+		}
+	}
+	return { converged: false, commits };
+}
+
+test("上报新鲜度守卫覆盖 relock/unlock 两侧：缺守卫时周期-2 振荡直到 React #185", () => {
+	// 两个入口是同一 cascade 的两帧：relock 后提交快照仍说 false / unlock 后提交快照仍说 true。
+	const entries = {
+		"stale relock report": { engineAtBottom: false, escapedFromLock: true, committedAtBottom: false, autoScroll: true, previousFollowOutput: true },
+		"stale unlock report": { engineAtBottom: true, escapedFromLock: false, committedAtBottom: true, autoScroll: false, previousFollowOutput: true },
+	};
+	for (const start of Object.values(entries)) {
+		// v0.9.0（无新鲜度守卫）：relock / unlock 两个方向都周期-2 永不收敛。
+		assert.equal(simulateFollowReportCascade({ freshnessGuard: false, start }).converged, false);
+		// issue 建议的 needsBottomRelock 只跳过「已锁底」的同值 setState，翻转本身是真的，止不住振荡。
+		assert.equal(simulateFollowReportCascade({ freshnessGuard: false, relockGuard: true, start }).converged, false);
+		// dev 的新鲜度守卫：两侧的过期上报都丢弃，最多三次提交收敛。
+		const guarded = simulateFollowReportCascade({ freshnessGuard: true, start });
+		assert.equal(guarded.converged, true);
+		assert.ok(guarded.commits.length <= 3, `expected <= 3 commits, got ${guarded.commits.length}`);
+	}
+});

@@ -20,14 +20,6 @@
   display: grid;
   gap: var(--space-3);
 }
-.prompts-restart-hint {
-  color: var(--color-text-tertiary);
-  font-size: var(--font-size-caption);
-}
-.prompts-toolbar-actions {
-  display: flex;
-  gap: 8px;
-}
 .prompts-list {
   display: grid;
   gap: var(--space-2);

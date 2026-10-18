@@ -527,10 +527,11 @@ test("setTokenPolicy hot-swaps token without restart", async () => {
 // 时序安全契约：服务默认可绑 0.0.0.0 对外暴露，令牌比对必须用 timingSafeEqual，
 // 禁止 `=== this.authToken` 这类早退比较构成时序侧信道（逐字节猜测令牌）。
 // 空白容忍正则：biome 重排格式不击穿断言（AGENTS.md 正则扫描契约）。
+// 鉴权实现已迁到 WebTokenAuth（Wave 3）。
 test("isAuthorized compares tokens with timingSafeEqual, never plain ===", async () => {
-	const source = readFileSync("src/main/web/WebServiceManager.ts", "utf8");
-	const isAuthorizedBlock = source.match(/private\s+isAuthorized\([\s\S]*?\n\t\}/);
-	assert.ok(isAuthorizedBlock, "isAuthorized method must exist in WebServiceManager.ts");
+	const source = readFileSync("src/main/web/WebTokenAuth.ts", "utf8");
+	const isAuthorizedBlock = source.match(/\bisAuthorized\([\s\S]*?\n\t\}/);
+	assert.ok(isAuthorizedBlock, "isAuthorized method must exist in WebTokenAuth.ts");
 	const body = isAuthorizedBlock[0];
 	assert.match(body, /timingSafeEqual/, "token comparison must go through timingSafeEqual");
 	assert.doesNotMatch(body, /===\s*this\.authToken/, "plain string comparison of auth token leaks timing");

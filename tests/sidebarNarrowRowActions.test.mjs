@@ -27,11 +27,15 @@ test("sidebar host needs no container query anchor", () => {
 
 test("project row text yields to the hover action buttons at any width", () => {
 	const src = read("src/renderer/src/components/sidebar/ProjectTree.tsx");
-	// 项目名 conversation-body：hover 压出 88px 留白——浮层 right-1(4) + pr-1(4) +
-	// 三个 size-6 按钮（筛选 / + / ⋯，76px）+ 8px 余量；聚焦态（键盘导航）同样让位；
-	// transition 只动画 padding-right。
+	// 项目名 conversation-body：基础让位 28px（常显的「+ 新建会话」right-1(4) + size-6(24)），
+	// hover 再压到 88px——常显加号(28) + 末尾 pr-1(4) + 浮动层 2 个 size-6 按钮（筛选 / ⋯，52px）；
+	// 聚焦态（键盘导航）同样让位；transition 只动画 padding-right。
 	// 所有宽度统一让位，不能只依赖窄侧栏断点，否则中等宽度下按钮会叠在长项目名上。
-	assert.match(src, /conversation-body min-w-0 flex-1 transition-\[padding-right\] group-hover:pr-\[88px\] group-focus-within:pr-\[88px\]/);
+	assert.match(src, /conversation-body min-w-0 flex-1 pr-7 transition-\[padding-right\] group-hover:pr-\[88px\] group-focus-within:pr-\[88px\]/);
+	// 「+ 新建会话」必须脱离 hover 浮层常显（用户反馈：只在 hover 出现时容易点错到分组栏的「+ 添加项目」）
+	assert.match(src, /<div className="absolute top-1\/2 right-1 flex -translate-y-1\/2 items-center">\s*<Button[\s\S]{0,500}?newNormalSession/);
+	// 剩余筛选/⋯ 浮层左栻 32px 让开常显加号
+	assert.match(src, /dimmedActionsClass, "right-8 pr-1"/);
 	// 过滤历史记录按钮 hover 常驻（不再只在筛选激活时出现），筛选激活时高亮
 	assert.match(src, /openSourceFilter\(project\.id, event\.clientX, event\.clientY\)/);
 	assert.match(src, /sourceFilter !== null\s*\?\s*"text-primary"/);
@@ -103,4 +107,20 @@ test("hover yield classes survive tailwind-merge", () => {
 	const rowMerged = twMerge("min-w-0 flex-1 truncate transition-[padding-right] group-hover/workspace-row:pr-[52px] group-focus-within/workspace-row:pr-[52px]");
 	assert.match(rowMerged, /group-hover\/workspace-row:pr-\[52px\]/);
 	assert.match(rowMerged, /group-focus-within\/workspace-row:pr-\[52px\]/);
+});
+
+test("subagent pill never lands on the row ⋯ while the timestamp yields", () => {
+	const src = read("src/renderer/src/components/sidebar/SessionTree.tsx");
+	// 2027-02 用户反馈：胶囊右移到时间戳旁边后，hover 时行尾的「⋯」看不到/被压住。
+	// 实测成因（真实 Chromium + 编译后 CSS 量测）：时间戳 display:none 是瞬时生效的，
+	// 而 hover 让位 padding 要走 150ms，中间那段胶囊正落在「⋯」的 28px 槽位上（重叠 19px，
+	// 「⋯」字符被压在胶囊盒内）。修复两半，缺一不可：
+	//   ① 胶囊后面没有时间戳时（运行中 Agent 行）由胶囊自己 last:mr-7 预留槽位——它本来就是行内最后一个元素；
+	//   ② 有时间戳时把「消失」换成与 padding 同步的宽度收拢，胶囊缓慢滑过去而不是跳过去。
+	// 量测结论：会话行全程胶囊右缘 ≤ 1360（「⋯」盒左缘 1372），Agent 行恒 ≥ 9px 间距，任意帧都不重叠。
+	assert.match(src, /subagent-inline-toggle\s+px-1\s+py-0\.5\s+last:mr-7/);
+	assert.match(src, /w-max\s+shrink-0\s+overflow-hidden\s+whitespace-nowrap[^"]*transition-\[width,opacity\][^"]*\[interpolate-size:allow-keywords\]/);
+	assert.match(src, /group-hover\/row:w-0[^"]*group-hover\/row:opacity-0/);
+	// 时间戳不得回退成 display:none：瞬时消失 = 胶囊一步跳到行尾压在「⋯」上
+	assert.doesNotMatch(src, /text-muted-foreground group-hover\/row:hidden/);
 });

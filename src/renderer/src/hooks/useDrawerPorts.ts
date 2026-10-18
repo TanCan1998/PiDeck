@@ -17,6 +17,7 @@ type FilesPortInput = Pick<
 	| "sessionsProject"
 	| "sessionsProjectId"
 	| "files"
+	| "fileTreeContentRevision"
 	| "sessions"
 	| "sessionSourceFilter"
 	| "sessionHistoryLoading"
@@ -113,6 +114,7 @@ export function useDrawerPorts(input: UseDrawerPortsInput) {
 			sessionsProject: input.sessionsProject,
 			sessionsProjectId: input.sessionsProjectId,
 			files: input.files,
+			fileTreeContentRevision: input.fileTreeContentRevision,
 			sessions: input.sessions,
 			sessionSourceFilter: input.sessionSourceFilter,
 			sessionHistoryLoading: input.sessionHistoryLoading,
@@ -171,6 +173,7 @@ export function useDrawerPorts(input: UseDrawerPortsInput) {
 		input.sessionsProject,
 		input.sessionsProjectId,
 		input.files,
+		input.fileTreeContentRevision,
 		input.sessions,
 		input.sessionSourceFilter,
 		input.sessionHistoryLoading,

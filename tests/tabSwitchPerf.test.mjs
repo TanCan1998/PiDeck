@@ -42,8 +42,8 @@ test("file tree list is shallow by default in the drawer and accepts a scoped di
 	// （@ 引用取数已从 ComposerArea 迁入 useSessionComposerController）
 	assert.match(composerSource, /maxDepth:\s*0/);
 	// 链式调用与括号表达式可能被格式化调整（desktopApi.files 与 .list 分行、外层补括号）：
-	// 只锁「按 effectiveProjectId + maxDepth 0 拉一层」的语义。
-	assert.match(composerSource, /desktopApi\s*\.?\s*files\s*\.?\s*list\(\s*effectiveProjectId,\s*\{\s*maxDepth: 0\s*\}\)/);
+	// 只锁「按 effectiveProjectId + maxDepth 0 拉一层」的语义；实参可带额外选项（如 skipGeneratedDirs），用 [^}]* 容忍。
+	assert.match(composerSource, /desktopApi\s*\.?\s*files\s*\.?\s*list\(\s*effectiveProjectId,\s*\{\s*maxDepth: 0\b[^}]*\}/);
 	assert.match(composerSource, /\}, \[effectiveProjectId\]\);/);
 });
 

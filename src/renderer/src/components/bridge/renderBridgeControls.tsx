@@ -258,7 +258,7 @@ export function renderBridgeControl(node: BridgeUINode, onEvent: BridgeEventSink
 							onMouseEnter={() => onEvent(node.id, { type: "navigate", index })}
 						>
 							<span>{item.label}</span>
-							{item.description ? <span className="text-[10px] text-muted-foreground">{item.description}</span> : null}
+							{item.description ? <span className="text-micro text-muted-foreground">{item.description}</span> : null}
 						</button>
 					))}
 				</div>
@@ -333,7 +333,7 @@ export function renderBridgeControl(node: BridgeUINode, onEvent: BridgeEventSink
 					<span className="size-3 animate-pideck-spin rounded-full border-2 border-current border-t-transparent" aria-hidden="true" />
 					{node.label ? <span>{node.label}</span> : null}
 					{node.cancellable ? (
-						<Badge variant="secondary" className="text-[10px]">
+						<Badge variant="secondary" className="text-micro">
 							{t("bridge.control.cancellable")}
 						</Badge>
 					) : null}

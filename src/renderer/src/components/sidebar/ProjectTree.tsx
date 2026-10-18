@@ -172,8 +172,8 @@ export function ProjectTree(props: {
 						<span className="grid size-5 shrink-0 place-items-center text-muted-foreground" aria-hidden="true">
 							{collapsed ? <Folder size={14} /> : <FolderOpen size={14} />}
 						</span>
-						<div className={cn("conversation-body min-w-0 flex-1 transition-[padding-right] group-hover:pr-[88px] group-focus-within:pr-[88px]", menuOpen && "pr-[88px]")}>
-							{/* 筛选 / + / ⋯ 共 3 个按钮常驻浮层，hover 时统一让位 88px。
+						<div className={cn("conversation-body min-w-0 flex-1 pr-7 transition-[padding-right] group-hover:pr-[88px] group-focus-within:pr-[88px]", menuOpen && "pr-[88px]")}>
+							{/* 筛选 / ⋯ 共 2 个按钮 hover 浮层；「+ 新建会话」拆到下面常显。
                   twMerge 语义见 tests/sidebarNarrowRowActions.test.mjs 契约测试。 */}
 							<div className="conversation-title flex min-w-0 items-center">
 								{/* 项目名 + 运行态点合成一个截断单元：点紧跟文本而不是被 space-between
@@ -189,7 +189,7 @@ export function ProjectTree(props: {
 								</div>
 								{/* 目录已被删除/移动/未挂载：保留记录并标记，用户可右键移除或恢复目录 */}
 								{project.missing && (
-									<span className="shrink-0 rounded bg-destructive/10 px-1 text-[10px] font-medium leading-4 text-destructive" title={t("app.projectMissingHint")}>
+									<span className="shrink-0 rounded bg-destructive/10 px-1 text-micro font-medium leading-4 text-destructive" title={t("app.projectMissingHint")}>
 										{t("app.projectMissing")}
 									</span>
 								)}
@@ -197,18 +197,9 @@ export function ProjectTree(props: {
 							{/* 项目名称只承担导航信息；详细会话状态由下方的 Agent/历史会话行承担。 */}
 						</div>
 					</button>
-					<div className={cn(dimmedActionsClass, "pr-1", menuOpen && "pointer-events-auto opacity-100")}>
-						{/* 过滤历史记录入口：hover 常驻（右键菜单同款功能），筛选生效时高亮提示 */}
-						<button
-							type="button"
-							className={cn("grid size-6 place-items-center rounded-md hover:bg-background/80", sourceFilter !== null ? "text-primary" : "text-muted-foreground hover:text-foreground")}
-							title={t("menu.filterSessions")}
-							aria-label={t("menu.filterSessions")}
-							onClick={(event) => props.controller.openSourceFilter(project.id, event.clientX, event.clientY)}
-						>
-							<Filter size={12} />
-						</button>
-						{/* 新建会话入口外露为 + 号（hover 项目行可见），匿名会话保留在 ⋯ 菜单 */}
+					{/* 新建会话「+」常显：它与上方分组栏的「+ 添加项目」同在右缘，只在 hover 出现
+                会让用户在选加号时误点到添加项目（打开目录选择框），所以单独拎出常驻。 */}
+					<div className="absolute top-1/2 right-1 flex -translate-y-1/2 items-center">
 						<Button
 							type="button"
 							variant="ghost"
@@ -222,6 +213,18 @@ export function ProjectTree(props: {
 						>
 							<Plus className="size-3.5" aria-hidden="true" />
 						</Button>
+					</div>
+					<div className={cn(dimmedActionsClass, "right-8 pr-1", menuOpen && "pointer-events-auto opacity-100")}>
+						{/* 过滤历史记录入口：hover 常驻（右键菜单同款功能），筛选生效时高亮提示 */}
+						<button
+							type="button"
+							className={cn("grid size-6 place-items-center rounded-md hover:bg-background/80", sourceFilter !== null ? "text-primary" : "text-muted-foreground hover:text-foreground")}
+							title={t("menu.filterSessions")}
+							aria-label={t("menu.filterSessions")}
+							onClick={(event) => props.controller.openSourceFilter(project.id, event.clientX, event.clientY)}
+						>
+							<Filter size={12} />
+						</button>
 						{/* 三个点：把项目右键菜单变成可见入口，让用户知道项目行还有更多操作 */}
 						<Button
 							type="button"

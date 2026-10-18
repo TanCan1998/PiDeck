@@ -1,4 +1,5 @@
 import { Button } from "../components/ui-shadcn/button";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../components/ui-shadcn/dialog";
 import { Input } from "../components/ui-shadcn/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui-shadcn/table";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
@@ -10,6 +11,7 @@ import { writeClipboard } from "../utils/clipboard";
 import { extensionShortName, filterExtensionsByQuery } from "../utils/extensionFilter";
 import { ExtensionStoreTab } from "./ExtensionStoreTab";
 import { ContentTabs } from "./ContentTabs";
+import { SectionHeading } from "../components/ui-shadcn/section-heading";
 import { isProjectDiscoverySource, projectInstalledExtensionSources, type ResourceScope } from "./resourceScopeModel";
 import { buildProjectOverrideKeyIndex, matchesProjectOverride, type ProjectOverrideKeyIndex } from "./projectOverrideKeys";
 import { useResourceTogglePending } from "../hooks/useResourceTogglePending";
@@ -304,28 +306,16 @@ export function ExtensionsTab(props: {
 			) : (
 				<>
 					{showUpdateDialog && (
-						<div className="config-update-dialog-backdrop" role="dialog" aria-modal="true">
-							<div className="config-update-dialog">
-								<div className="config-update-dialog-header">
-									<strong>{t("settings.updateExtensionsAll")}</strong>
-									<Button
-										variant="ghost"
-										size="icon-sm"
-										className="size-7"
-										onClick={() => {
-											setShowUpdateDialog(false);
-											props.onRefresh();
-										}}
-										disabled={Boolean(updating)}
-									>
-										×
-									</Button>
-								</div>
-								<p className="config-im-form-hint">{updating ? t("settings.extensionsUpdatingDesc") : t("settings.extensionsUpdateResultHint")}</p>
+						<Dialog open onOpenChange={(next) => !next && !updating && setShowUpdateDialog(false)}>
+							<DialogContent className="max-w-2xl">
+								<DialogHeader>
+									<DialogTitle>{t("settings.updateExtensionsAll")}</DialogTitle>
+								</DialogHeader>
+								<p className="text-caption text-muted-foreground">{updating ? t("settings.extensionsUpdatingDesc") : t("settings.extensionsUpdateResultHint")}</p>
 								<pre className="setting-update-output">{updateResult ? `${updateResult.command}\n${updateResult.output}` : t("settings.extensionsUpdating")}</pre>
-								<div className="config-update-dialog-actions">
+								<DialogFooter>
 									<Button
-										variant="default"
+										variant="outline"
 										size="sm"
 										onClick={() => {
 											setShowUpdateDialog(false);
@@ -335,31 +325,32 @@ export function ExtensionsTab(props: {
 									>
 										{t("common.close")}
 									</Button>
-								</div>
-							</div>
-						</div>
+								</DialogFooter>
+							</DialogContent>
+						</Dialog>
 					)}
 					{false && <RecommendedPackagesPanel data={props.data} onRefresh={props.onRefresh} />}
 
 					{/* 已安装扩展列表 */}
 					<div className="config-section">
-						<h3 className="extensions-installed-title mb-2 text-sm font-semibold tracking-tight text-foreground">{t("config.installedExtensions")}</h3>
+						{/* 标题走共享 SectionHeading：与系统设置各页同一套字重/字号，不再靠 legacy 类名锚定 */}
+						<SectionHeading className="mb-2" title={t("config.installedExtensions")} />
 						<div className="mb-3 mt-2 flex flex-wrap items-center justify-between gap-3">
 							<div className="flex min-w-0 flex-1 flex-col gap-1">
 								<div className="flex min-w-0 items-center gap-2">
 									{/* 搜索框：写法对齐 DshPluginSection / ProxyTab 的「左图标 + Input」组合 */}
 									<div className="relative min-w-0 flex-1 basis-52">
 										<Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/70" aria-hidden="true" />
-										<Input type="search" value={extensionQuery} onChange={(event) => setExtensionQuery(event.currentTarget.value)} placeholder={t("config.extensionListSearchPlaceholder")} aria-label={t("config.extensionListSearchPlaceholder")} className="h-8 pl-8 text-control" />
+										<Input type="search" value={extensionQuery} onChange={(event) => setExtensionQuery(event.currentTarget.value)} placeholder={t("config.extensionListSearchPlaceholder")} aria-label={t("config.extensionListSearchPlaceholder")} size="sm" className="pl-8" />
 									</div>
 									{/* 有查询词时显示「匹配数 / 总数」，否则维持原有总数计数 */}
 									<span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">{extensionQuery.trim().length > 0 ? t("config.extensionListResultCount", { matched: filteredExtensions.length, count: visibleExtensions.length }) : t("config.count.extensions", { count: visibleExtensions.length })}</span>
 								</div>
-								<small className="skills-restart-hint block text-caption text-muted-foreground">{t("config.extensionRestartHint")}</small>
+								<small className="block text-caption text-text-tertiary">{t("config.extensionRestartHint")}</small>
 							</div>
 							{/* 窄窗口下按钮换行而不是被裁掉：shrink-0 保证按钮不被压缩，
 				    flex-wrap + justify-end 让溢出部分落到第二行右对齐 */}
-							<div className="skills-toolbar-actions flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+							<div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
 								{props.scope === "global" ? (
 									<>
 										{/* 工具栏统一 size=sm，与设置页/会话顶栏控件高度对齐 */}

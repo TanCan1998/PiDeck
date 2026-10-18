@@ -776,42 +776,7 @@
   line-height: 1.55;
   white-space: pre-wrap;
 }
-.config-update-dialog-backdrop {
-  position: absolute;
-  inset: 0;
-  z-index: 90;
-  display: grid;
-  place-items: center;
-  padding: var(--space-5);
-  background: color-mix(in srgb, var(--color-bg-app) 62%, transparent);
-  backdrop-filter: blur(4px);
-  animation: fadeIn 160ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.config-update-dialog {
-  width: min(720px, 100%);
-  max-height: min(680px, 90vh);
-  display: grid;
-  gap: var(--space-3);
-  padding: var(--space-5);
-  border: 1px solid var(--color-border-subtle);
-  border-radius: var(--radius-lg);
-  background: var(--color-bg-panel);
-  box-shadow: var(--shadow-lg);
-  animation: dialogOverlayIn var(--transition-base) var(--ease-out);
-}
-
-.config-update-dialog-header,
-.config-update-dialog-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-
-.config-update-dialog .setting-update-output {
-  margin: 0;
-}.setting-path{
+.setting-path{
   word-break: break-all;
 }
 .setting-wsl-fields {
@@ -2262,39 +2227,13 @@ div.fixed.inset-0.z-50 {
   display: grid;
   gap: var(--space-3);
 }
-.skills-restart-hint {
-  color: var(--color-text-tertiary);
-  font-size: var(--font-size-caption);
-}
-.skills-toolbar-actions {
-  display: flex;
-  gap: 8px;
-}
 .skill-badges {
   display: flex;
   gap: 6px;
   align-items: center;
   flex-shrink: 0;
 }
-.skill-state {
-  padding: 2px 6px;
-  border-radius: var(--radius-pill);
-  font-family: var(--font-family-business);
-  font-size: var(--font-size-micro);
-  font-variant-numeric: tabular-nums;
-}
-.skill-state.enabled {
-  background: var(--color-accent-soft);
-  color: var(--color-accent);
-}
-.skill-state.disabled {
-  background: var(--color-bg-muted);
-  color: var(--color-text-secondary);
-}
-.skill-state.invalid {
-  background: var(--color-danger-soft);
-  color: var(--color-danger);
-}:root[data-theme="dark"] .config-provider-card, :root[data-theme="dark"] .config-diagnostic-card, :root[data-theme="dark"] .toast{
+:root[data-theme="dark"] .config-provider-card, :root[data-theme="dark"] .config-diagnostic-card, :root[data-theme="dark"] .toast{
   background: var(--color-bg-panel);
   color: var(--color-text-primary);
   border-color: var(--color-border-subtle);

@@ -180,19 +180,52 @@ function findTitleTextBlocks(text: string): TitleTextBlock[] {
  * 从落盘的首条 user 消息里提取标题用文本。
  * blockOnly=true 表示消息里只有引用块（如只插了 /模板），此时 text 是块标签（`/模板名`）。
  */
+/** 视觉桥标记（与 shared/visionBridgeText 同规则；扩展被 pi 用 -e 独立加载，不能 import shared，只能内联一份）。 */
+const VISION_SUCCESS_MARK_RE = /\[图片 #(\d+)（视觉桥已查看[^）]*）\]/g;
+const VISION_FAILED_MARK_RE = /\[图片 #(\d+)\s+视觉桥转换失败：[\s\S]*?。请检查视觉桥设置[\s\S]*?此图片内容不可见\]/g;
+const VISION_SKIPPED_MARK_RE = /\[图片 #(\d+)\s+未发送给模型：[\s\S]*?\]/g;
+
+/**
+ * 标题专用：剥离视觉桥块（标记行 + 视觉模型描述都不是用户手写的话）。
+ * 只发图不写字的消息剥完为空——调用方回退到 assistant 首条文本，与主进程 textForSessionTitle 同语义
+ *（2026-10 现场：只发图的消息把会话自动命名为「[图片 #1（视觉桥已查看…）]」）。
+ * 成功块的描述延伸到下一个标记（或文本末尾），与渲染层解析同边界。
+ */
+function stripVisionBridgeBlocksForTitle(text: string): string {
+	if (!text.includes("[图片 #")) return text;
+	type Range = [start: number, end: number | -1];
+	const ranges: Range[] = [];
+	for (const re of [VISION_FAILED_MARK_RE, VISION_SKIPPED_MARK_RE]) {
+		for (const match of text.matchAll(re)) ranges.push([match.index, match.index + match[0].length]);
+	}
+	for (const match of text.matchAll(VISION_SUCCESS_MARK_RE)) ranges.push([match.index, -1]);
+	if (ranges.length === 0) return text;
+	ranges.sort((a, b) => a[0] - b[0]);
+	let cleaned = "";
+	let cursor = 0;
+	for (let i = 0; i < ranges.length; i++) {
+		if (ranges[i][0] > cursor) cleaned += text.slice(cursor, ranges[i][0]);
+		// -1 = 成功块：描述吃到下一个标记起点，没有下一个则吃到文末。
+		cursor = ranges[i][1] === -1 ? (i + 1 < ranges.length ? ranges[i + 1][0] : text.length) : ranges[i][1];
+	}
+	if (cursor < text.length) cleaned += text.slice(cursor);
+	return cleaned.replace(/\n{3,}/g, "\n\n").trim();
+}
+
 export function titleTextFromUserInput(text: string): { text: string; blockOnly: boolean } {
-	if (!text.includes("<")) return { text, blockOnly: false };
-	const blocks = findTitleTextBlocks(text);
-	if (blocks.length === 0) return { text, blockOnly: false };
+	const stripped = stripVisionBridgeBlocksForTitle(text);
+	if (!stripped.includes("<")) return { text: stripped, blockOnly: false };
+	const blocks = findTitleTextBlocks(stripped);
+	if (blocks.length === 0) return { text: stripped, blockOnly: false };
 	const outside: string[] = [];
 	const labels: string[] = [];
 	let cursor = 0;
 	for (const block of blocks) {
-		if (block.start > cursor) outside.push(text.slice(cursor, block.start));
+		if (block.start > cursor) outside.push(stripped.slice(cursor, block.start));
 		labels.push(block.label);
 		cursor = block.end;
 	}
-	if (cursor < text.length) outside.push(text.slice(cursor));
+	if (cursor < stripped.length) outside.push(stripped.slice(cursor));
 	const outsideText = outside.join(" ").replace(/\s+/g, " ").trim();
 	if (outsideText) return { text: outsideText, blockOnly: false };
 	return { text: labels.join(" "), blockOnly: true };
@@ -329,6 +362,35 @@ function stripMarkdownEmphasis(text: string): string {
 	return result;
 }
 
+/**
+ * 工具/上下文代理确认标记形态的标题（与 src/shared/sessionIdentity.ts 的
+ * looksLikeToolMarkerTitle 同语义，扩展由 pi 用 `-e` 独立加载、不能 import 应用源码，
+ * 所以自带一份；两侧一致性由 tests/piDeckSessionTitle.test.mjs 的对照用例锁定）。
+ *
+ * 现场（2026-10-14）：本扩展的旁路补全被第三方上下文代理接管，返回的是代理自己注入的
+ * 确认标记行（原文形如 `📦 [ACP] acp_status result: …`）。EMOJI_RE 剥掉前导 emoji、
+ * 尾部冒号被清掉后，整段标记就剩一个「看起来像标题」的字符串，于是被写进 session_info。
+ */
+const MARKER_PICTOGRAPH_PREFIX = /^[\p{Extended_Pictographic}\uFE0F\u200D]+[ \t]*/u;
+/**
+ * 工具/上下文代理确认标记行的标题形态：`[全大写标签]` + 紧随的 ASCII 正文，且这段正文里
+ * 带日志分隔符（`_` 或 `:`，如 acp_status / FAILED:）。三条同时成立才算，防止误伤正常标题——
+ * `[WIP] 重构商店页`（中文正文）、`[Bug] fix the API timeouts`（标签非全大写、正文无分隔符）都不是标记行。
+ */
+const MARKER_TAG_TITLE = /^\[[A-Z][A-Z0-9_-]{1,11}\][ \t]+[\x20-\x7E]*[:_]/;
+
+export function looksLikeToolMarkerTitle(title: string): boolean {
+	const trimmed = title.replace(/\s+/g, " ").trim().replace(MARKER_PICTOGRAPH_PREFIX, "");
+	return MARKER_TAG_TITLE.test(trimmed);
+}
+
+/**
+ * 源侧形态黑名单：`[全大写标签]` + 纯 ASCII 正文整行（如 `[ACP] Compressed 3 ranges, saved 12k tokens`）。
+ * 代理标记行不一定带 `:`/`_`，所以比宿主侧的窄判定多认这一种形态；代价只是本轮不命名，
+ * 不参与所有权判定，也不会把用户自己起的标题（中文正文、混合大小写标签）清成占位名。
+ */
+const TITLE_SOURCE_MARKER_HEAD = /^\[[A-Z][A-Z0-9_-]{1,11}\][ \t]+[\x20-\x7E]+$/;
+
 /** 清洗模型输出，确保写入 session_info 的标题短、一行且不带模型格式噪声。 */
 export function cleanTitle(raw: string): string | undefined {
 	const lines = raw
@@ -363,6 +425,10 @@ export function cleanTitle(raw: string): string | undefined {
 	if (Array.from(title).length < 2) return undefined;
 	if (GENERIC_TITLES.has(title.toLocaleLowerCase())) return undefined;
 	if (/^(?:title|session|conversation|untitled|new)\s*(?:title|session)?$/i.test(title)) return undefined;
+	// 上下文代理接管的旁路响应是一段工具日志而不是标题：收下它就会永久污染 session_info。
+	// 源侧可以比宿主侧严格：这里拒绝只是「本轮不命名」，宿主侧（shared 的 looksLikeToolMarkerTitle）
+	// 还要多一个日志分隔符才认，因为误伤会把用户自己起的标题当占位名清掉。
+	if (looksLikeToolMarkerTitle(title) || TITLE_SOURCE_MARKER_HEAD.test(title)) return undefined;
 	return title;
 }
 

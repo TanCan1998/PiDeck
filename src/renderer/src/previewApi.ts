@@ -561,6 +561,7 @@ export function createPreviewApi(): PiDesktopApi {
 			open: async () => undefined,
 			// 预览模式无主进程：文件搜索按空结果处理，搜索入口可用但不返回内容
 			search: async () => [],
+			searchContent: async () => null,
 			showInFolder: async () => undefined,
 			// 预览模式无主进程：不检测文件管理器（打开方式下拉不显示该入口）
 			detectFileManager: async () => null,
@@ -618,6 +619,10 @@ export function createPreviewApi(): PiDesktopApi {
 		},
 		sessions: {
 			list: async () => getSessions(),
+			// 预览模式无 sidecar：null 让调用方回退标题过滤
+			searchContent: async () => null,
+			// 预览模式无 sidecar：会话内查找不可用（UI 显示不可用态而不是「无匹配」）
+			searchInSession: async () => null,
 			// 预览模式无 DSH host：空预设目录满足接口契约
 			listDshAgentPresets: async () => [],
 			getDshDefaultModel: async () => undefined,
@@ -1512,8 +1517,10 @@ export function createPreviewApi(): PiDesktopApi {
 			}),
 		},
 		yaoPrompts: {
-			list: async () => ({ categories: [], prompts: [], repoPath: "" }),
+			list: async () => ({ categories: [], prompts: [], repoPath: "", dbState: "missing" }),
 			detail: async () => ({ title: "", description: "", promptContent: "", fullContent: "" }),
+			onDbStateChange: (_callback) => () => {},
+			retryDb: async () => ({ state: "missing" }),
 			import: async (_slug, _category) => ({
 				name: _slug,
 				path: `C:/Users/preview/.pi/agent/prompts/${_slug}.md`,
@@ -1542,6 +1549,8 @@ export function createPreviewApi(): PiDesktopApi {
 			search: async () => ({ query: "", total: 0, items: [] }),
 			detail: async () => null,
 			install: async (slug) => ({ success: true, slug, installDir: "", message: "Preview install" }),
+			// 预览模式无安装进程，但事件订阅形状必须完整（返回退订函数）
+			onInstallProgress: () => () => {},
 		},
 		acp: {
 			// 预览模式：无 ACP 工具数据，返回空表/恒过校验保持 PiDesktopApi 形状完整；
@@ -1822,6 +1831,23 @@ export function createPreviewApi(): PiDesktopApi {
 		},
 		browser: {
 			openExternal: async () => {},
+		},
+		wechat: {
+			snapshot: async () => ({ ok: false, message: "预览模式不支持" }),
+			setEnabled: async () => ({ ok: false, message: "预览模式不支持" }),
+			updateSettings: async () => ({ ok: false, message: "预览模式不支持" }),
+			renameAccount: async () => ({ ok: false, message: "预览模式不支持" }),
+			logout: async () => ({ ok: false, message: "预览模式不支持" }),
+			beginLogin: async () => ({ ok: false, message: "预览模式不支持" }),
+			cancelLogin: async () => ({ ok: false, message: "预览模式不支持" }),
+			submitVerifyCode: async () => ({ ok: false, message: "预览模式不支持" }),
+			getLoginState: async () => ({ phase: "idle" as const }),
+			getStatus: async () => ({ status: "disconnected" as const, account: null, activeBindings: 0 }),
+			getBindings: async () => [],
+			unbindChat: async () => ({ ok: false, message: "预览模式不支持" }),
+			onStatus: () => () => {},
+			onLoginState: () => () => {},
+			onBindingsChanged: () => () => {},
 		},
 		scratchPad: {
 			list: async () => [],

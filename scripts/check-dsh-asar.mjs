@@ -69,7 +69,9 @@ if (!existsSync(archivePath)) {
 	process.exit(1);
 }
 
-/** 回归基线：原 asar 校验的 19 个顶层 dsh 依赖，缺一个 host 就起不来。 */
+/** 回归基线：原 asar 校验的 19 个顶层 dsh 依赖，缺一个 host 就起不来。
+ *  0.2.1：dsh-invariants 停发（原 36 个包的 peer），subagent-in-process-driver 拆成
+ *  spawn/fork-in-process 两个 provider 包（dsh-base patch 的直接入口）。 */
 const REQUIRED = [
 	"cordis-plugin-group",
 	"dsh-anonymous-user-id",
@@ -78,7 +80,6 @@ const REQUIRED = [
 	"dsh-ptc-runtime-node",
 	"dsh-compaction",
 	"dsh-fs",
-	"dsh-invariants",
 	"dsh-output-retention",
 	"dsh-sandbox",
 	"dsh-scope",
@@ -86,7 +87,8 @@ const REQUIRED = [
 	"dsh-session-title-llm",
 	"dsh-shell",
 	"dsh-spill",
-	"dsh-subagent-in-process-driver",
+	"dsh-subagent-fork-in-process",
+	"dsh-subagent-spawn-in-process",
 	"dsh-subprocess",
 	"dsh-timeout",
 	"dsh-workflow",

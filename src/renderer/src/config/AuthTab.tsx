@@ -1,6 +1,7 @@
 import { Button } from "../components/ui-shadcn/button";
+import { Separator } from "../components/ui-shadcn/separator";
 import { useCallback, useEffect, useState } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronDown, ChevronRight, Copy, ExternalLink, Eye, EyeOff, GripVertical, Trash2 } from "lucide-react";
+import { ArrowUpDown, Check, ChevronDown, ChevronRight, Copy, ExternalLink, Eye, EyeOff, GripVertical, Trash2 } from "lucide-react";
 import { t } from "../i18n";
 import type { AuthFile, ModelsFile } from "./configTypes";
 import { ConfigSelect, openDocsInSystemBrowser, SecretInput } from "./ConfigShared";
@@ -125,7 +126,7 @@ export function AuthTab(props: {
 	return (
 		<div className="config-auth-tab">
 			<div className="mb-3 flex items-center justify-between gap-3">
-				<span className="font-mono text-xs tabular-nums text-text-tertiary">{t("config.count.auth", { count: allProviders.length })}</span>
+				<span className="font-mono text-xs tabular-nums text-muted-foreground">{t("config.count.auth", { count: allProviders.length })}</span>
 				<div className="flex min-w-0 items-center gap-1.5">
 					<Button
 						size="sm"
@@ -143,9 +144,13 @@ export function AuthTab(props: {
 					<Button size="sm" variant="outline" onClick={() => setShowGuide(!showGuide)} disabled={saving}>
 						{t("config.authGuide")}
 					</Button>
+					{/* 批量删除把整份 auth.json 条目批量移除，不可撤销：与普通工具按钮之间留一道分隔，
+					    避免「使用指南」紧挨红色按钮被误点（UI 走查 A7）。 */}
+					<Separator orientation="vertical" className="mx-0.5 h-5" />
 					<Button
 						size="sm"
-						variant="destructive"
+						variant="outline"
+						className="text-destructive hover:bg-destructive/10 hover:text-destructive"
 						onClick={() => {
 							if (batchMode) {
 								setBatchMode(false);
@@ -357,45 +362,16 @@ export function AuthTab(props: {
 						<div
 							key={name}
 							ref={(element) => providerReorder.registerCard(name, element)}
-							className={`relative rounded-lg border border-border-subtle bg-bg-panel transition-[border-color,box-shadow,background-color,opacity] duration-150${providerReorder.draggingName === name ? " opacity-50" : ""}${isExpanded ? " border-[color-mix(in_srgb,var(--color-accent)_32%,var(--color-border-subtle))] shadow-[var(--shadow-border)]" : ""}`}
+							className={`relative rounded-lg border border-border-subtle bg-bg-panel transition-[border-color,box-shadow,background-color,opacity] duration-150${providerReorder.draggingName === name ? " opacity-40 border-dashed" : ""}${isExpanded ? " border-[color-mix(in_srgb,var(--color-accent)_32%,var(--color-border-subtle))] shadow-[var(--shadow-border)]" : ""}`}
 							{...providerReorder.cardProps(name)}
 						>
-							{/* 插入指示线：拖拽落点在上下哪侧就画在卡片哪侧 */}
-							{providerReorder.dropTarget?.name === name && <span className={`absolute ${providerReorder.dropTarget.position === "before" ? "top-0" : "bottom-0"} right-0 left-0 z-10 h-0.5 bg-[color:var(--color-accent)]`} />}
-							<div data-provider-head="" className="group flex cursor-pointer items-center gap-2.5 rounded-t-lg px-3.5 py-2 transition-colors duration-150 hover:bg-bg-hover" onClick={() => props.onToggleAuth(name)}>
-								{/* 拖拽手柄：draggable 只落在手柄上，避免抢整行点击展开；上移/下移悬停浮现 */}
+							{/* 插入指示线：拖拽落点在上下哪侧就画在卡片哪侧；加粗 + 发光，落点一眼可见 */}
+							{providerReorder.dropTarget?.name === name && <span className={`absolute ${providerReorder.dropTarget.position === "before" ? "top-0" : "bottom-0"} right-0 left-0 z-10 h-[3px] rounded-full bg-[color:var(--color-accent)] shadow-[0_0_8px_color-mix(in_srgb,var(--color-accent)_55%,transparent)]`} />}
+							<div data-provider-head="" className="flex cursor-pointer items-center gap-2.5 rounded-t-lg px-3.5 py-2 transition-colors duration-150 hover:bg-bg-hover" onClick={() => props.onToggleAuth(name)}>
+								{/* 拖拽手柄：draggable 只落在手柄上，避免抢整行点击展开；聚焦手柄后 ↑/↓ 也可微调（键盘接线在 hook 的 gripProps 里） */}
 								<Button variant="ghost" size="icon-sm" className="size-6 shrink-0 cursor-grab text-muted-foreground active:cursor-grabbing" title={t("config.dragProvider")} {...providerReorder.gripProps(name)} onClick={(event) => event.stopPropagation()}>
 									<GripVertical size={14} />
 								</Button>
-								{/* 上移/下移：悬停浮现（键盘聚焦也可见），到顶/到底禁用 */}
-								<div className="flex shrink-0 items-center">
-									<Button
-										variant="ghost"
-										size="icon-sm"
-										className="size-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-										disabled={!providerReorder.canMove(name, -1)}
-										title={t("config.moveProviderUp")}
-										onClick={(event) => {
-											event.stopPropagation();
-											providerReorder.moveBy(name, -1);
-										}}
-									>
-										<ArrowUp size={13} />
-									</Button>
-									<Button
-										variant="ghost"
-										size="icon-sm"
-										className="size-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-										disabled={!providerReorder.canMove(name, 1)}
-										title={t("config.moveProviderDown")}
-										onClick={(event) => {
-											event.stopPropagation();
-											providerReorder.moveBy(name, 1);
-										}}
-									>
-										<ArrowDown size={13} />
-									</Button>
-								</div>
 								{batchMode && (
 									<Label className="mr-2.5 inline-flex size-4 shrink-0 items-center justify-center" onClick={(e) => e.stopPropagation()}>
 										<Checkbox
@@ -436,6 +412,9 @@ export function AuthTab(props: {
 											<EyeOff size={14} className="text-muted-foreground" />
 										</Button>
 									)}
+									{/* 删除是不可撤销动作，和上面的「隐藏/Migration/用量」用竖线隔开：
+									    图标按钮只有 4px gap 时，误点一次就删掉一组凭据。 */}
+									<Separator orientation="vertical" className="mx-0.5 h-4" />
 									<Button
 										variant="ghost"
 										size="icon-sm"

@@ -192,13 +192,19 @@ src/
 |------|--------|------|
 | README/官网共用图片 | 唯一数据源 `docs/images/`，不复制到 docs-site | README 与官网共用图片 |
 | 公告 | 只编辑 `announcements-md/*.md`，json 由脚本生成，禁止手写 | 公告维护与发布 |
-| 提示词库 xueprompts.db | `content`/`description` 是 gzip BLOB，SQL LIKE 中文恒不命中，必须应用层 gunzip 后匹配 | 商店提示词库维护 |
+| 提示词库 xueprompts.db | db 远程拉取双源成套（sha256+db 同源）；检索走 xue-index Go sidecar，缺失降级 sql.js（应用层 gunzip，SQL LIKE 中文恒不命中）；改 db 走 publish 脚本+Release 资产 | 商店提示词库维护 |
+| 跨会话正文搜索 | session-index Go sidecar（纯标准库）；语料+快照落 `<userData>/session-index/`；roots = 全局 + 全局 sessionDir + **各项目项目级 sessionDir**（WSL 不支持）；查询多词 AND（每词必中）；任何失败 IPC 返回 null 降级标题过滤；**会话内查找 = 同 sidecar 的 `search-session`，绑定 Ctrl/Cmd+Shift+F（Ctrl+F 仍是「搜索会话」，别复用）**；`SESSION_INDEX_OS/ARCH` 必须进三平台 workflow | 跨会话正文搜索 |
+| 文件抽屉搜索 | 名字走 file-index Go sidecar（不可用回退 `FileSystemService.searchNames` 扫盘）；**拼音检索只存在于 sidecar 通道**：纯字母查询（2–24）按 首字母整名 > 首字母前缀 > 全拼 > 跳字 计分（含异读首字母：`cq`/`zq` 都能命中「重庆」），全拼不覆盖异读、内容检索不参与；正文搜索 `files:search-content` 失败/未就绪/WSL 返回 null、UI 隐藏内容分区；内容扫描有扩展名白名单/忽略目录/单文件 1MiB/总 64MiB 预算；`FILE_INDEX_OS/ARCH` 必须进三平台 workflow，`native/file-index/go.sum` 必须入库 | 工作区文件搜索 |
+| 会话标题拼音 | 侧栏搜索是渲染层本地过滤（拿不到 sidecar 索引）：拼音表是**生成物** `src/renderer/src/utils/pinyinTable.ts`（`native/tools/pinyin-table` 从 go-pinyin 抽，改字典版本必须 `npm run gen:pinyin-table`，生成物禁手改）；分数与 file-index 逐值对齐（700/680/640/560），装配点 `SidebarContent` 的 `pinyin: pinyinKeys(title)`（漏喂＝拼音静默失效，`tests/morphingSearchFilter.test.mjs` 兜） | 工作区文件搜索 |
+| 会话数据面 sidecar | session-store（`get-index` 条目表 + parity 双向全绿 + **条目录盘，默认开启**）：`settings.sessionStoreEnabled` 置 false 即回退纯 TS 解析（无 UI）；`state.bin` 只存文件级记账（`size` 只推进到完整行、行 > 64MiB 只探前缀），条目表落 `<userData>/session-store/tables/<sha1>.table`（256 文件/512MiB 上限，`size+mtimeMs` 版本键，变长且上次停在换行边界→尾扫增量）；重启首次打开大会话 14–20ms（TS 冷建表 99–188ms，见计划 §8.11）；roots 逐请求不带进 spawn；构建链 `npm run build:session-store` + `extraResources` + `SESSION_STORE_OS/ARCH` 三平台 workflow，缺一即打包后 binary-missing | 会话数据面 sidecar（session-store）|
+| 技能商店安装 | 商店搜索必须走注入的 `fetchImpl`（Electron net.fetch），禁裸全局 fetch（undici 不读代理，境外 API 挂到超时）；安装用 spawn+流式解析（禁 execFile 等终态输出）、进度走 `skillHub:install-progress`、子进程必注入代理 env（CLI 内部 git 不读 npm proxy） | 技能商店安装链路 |
 | 内置扩展热更新 | 判据是逐文件 sha256 不是版本号；覆盖层必须完整快照 + vendored 依赖；磁盘根统一走 `resolveBuiltInExtensionRoots()` | 内置扩展热更新 |
 | 生图存储 | **base64 不进 JSONL**（只存 ref）；读取永远有字节上界；`<img src>` 只走 `imageContentSrc()` | 生图会话存储 |
 | 会话消息编辑/删除/重发 | 编辑/删除写 pi 原生 `context_edit`（原文不改写、费用不回退；被移出的条目界面直接不显示，原始文件仍保留）；重发仍用 `deleted` 墓碑截断分支；追加条目的 parentId 必须取当前 leaf，pi 活着禁改会话文件，三道闸不许放宽 | 会话消息编辑/删除/重发 |
 | Markdown 渲染 | 唯一引擎 MarkdownStream，禁止再引 marked/react-markdown；流式与 settle 是两条路径，**复现要看最终态** | 会话 Markdown 渲染管线 |
 | 插件开发支持 | 能力目录 `pluginDevCatalog.ts` 镜像桥实现（19 落点/42 kind），新增落点/kind 必须同步目录+契约测试；`resources/plugin-dev` 要在 extraResources；demo 已存在不覆盖 | 插件开发支持 |
 | 宿主插件 | 与 pi 扩展是两套系统（`src/main/plugins/`，不依赖 pi 进程）；授权按内容 sha256 指纹不按版本，指纹变即重新授权；历史读取 64MiB/10 万条硬预算；改 API/权限面必须同步 `src/preload/hostPlugin.ts` + `docs/host-plugin-dev-guide.md` + 脚手架（生成物过同一套 manifest 校验）；`service.local` 只给「点名权」（命令/参数/端口在主进程适配器里，id 白名单 `src/shared/localServices.ts`）；内置示例 `resources/host-plugins/` 由 `seedBuiltin` 落位（内容没被手改过才随新版刷新，手改过的永不覆盖；`seeded` 的 id 拒绝卸载）；`.pideck-plugin` NDJSON 归档逐文件 sha256；pi-context 适配器 seam 是 fail-closed 契约 | 宿主插件 |
+| Web 端流式链路 | 流式事件源必须按后端分别注入 `WebEventStreamRouter`：pi 走 `subscribePiEvents`，DSH 等非 pi 后端走 `subscribeAgentChannelEvents`（`DshChannelToPiEvents` 把通道载荷翻成 pi 事件形状，复用同一套 UIMessageStream 适配器）；漏挂的后端在 Web 端退化成「轮询 + 磁盘重拉」（输出慢、整轮无 finish 帧 → 察觉不到结束/停止）；回合边界只认 `turnEnded: true` | Web 端流式链路 |
 | i18n 文案 | 改任何 zh-CN 词典（rendererCopy / mainProcessCopy / WebI18n / FeishuI18n）后必须重跑 `node scripts/genZhTwCopy.mjs`；四份 `*.zh-TW.ts` 是生成物禁止手改（漏跑：先 typecheck 报 TS2739，改值不加键则由 `source-sha256` 指纹门禁拦下） | 繁体中文（zh-TW 四份词典 + locale 分支点） |
 | 发版 | CHANGELOG 中英一致 → sync-release-notes → sync-workflow-choices → 打包人工 smoke | docs/release-process.md |
 

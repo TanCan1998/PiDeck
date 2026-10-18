@@ -371,7 +371,7 @@ export function PluginInventoryView() {
 						setPage(1);
 					}}
 				>
-					<SelectTrigger className="h-8 w-40">
+					<SelectTrigger size="sm" className="w-40">
 						<SelectValue />
 					</SelectTrigger>
 					<SelectContent>
@@ -519,7 +519,7 @@ function InstallPluginForm(props: { sessions: Array<{ sessionId: string; title: 
 			<div className="grid gap-1.5">
 				<label className="text-micro text-muted-foreground">{t("config.dsh.pluginSession")}</label>
 				<Select value={sessionId} onValueChange={setSessionId}>
-					<SelectTrigger className="h-8">
+					<SelectTrigger size="sm">
 						<SelectValue />
 					</SelectTrigger>
 					<SelectContent>
@@ -533,15 +533,15 @@ function InstallPluginForm(props: { sessions: Array<{ sessionId: string; title: 
 			</div>
 			<div className="grid gap-1.5">
 				<label className="text-micro text-muted-foreground">{t("config.dsh.pluginIdPrefix")}</label>
-				<Input className="h-8" value={idPrefix} onChange={(event) => setIdPrefix(event.target.value)} />
+				<Input size="sm" value={idPrefix} onChange={(event) => setIdPrefix(event.target.value)} />
 			</div>
 			<div className="grid gap-1.5">
 				<label className="text-micro text-muted-foreground">{t("config.dsh.pluginName")}</label>
-				<Input className="h-8" value={name} onChange={(event) => setName(event.target.value)} />
+				<Input size="sm" value={name} onChange={(event) => setName(event.target.value)} />
 			</div>
 			<div className="grid gap-1.5">
 				<label className="text-micro text-muted-foreground">{t("config.dsh.pluginPurpose")}</label>
-				<Input className="h-8" value={purpose} onChange={(event) => setPurpose(event.target.value)} />
+				<Input size="sm" value={purpose} onChange={(event) => setPurpose(event.target.value)} />
 			</div>
 			<div className="grid gap-1.5">
 				<label className="text-micro text-muted-foreground">{t("config.dsh.pluginHostCode")}</label>

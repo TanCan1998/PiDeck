@@ -12,6 +12,7 @@ import { isRewindRestoreScope } from "../../shared/types/rewind";
 import { canonicalizeSessionPath } from "../../shared/sessionIdentity";
 import { createSessionModelPreference } from "../../shared/modelDisplayName";
 import { modelThinkingLevelOf } from "../../shared/modelThinkingLevels";
+import { collectLatestTurnFileChanges } from "../../shared/fileChanges";
 import type {
 	AvailableModel,
 	CreateSessionDraftInput,
@@ -39,11 +40,14 @@ import type {
 	ResolveLaunchDefaultsInput,
 	ResolvedLaunchDefaults,
 	ArchivedDshSession,
+	SessionSearchResult,
 } from "../../shared/types";
 import type { BridgeEventInput, BridgeResyncInput } from "../../shared/types/bridge";
 import { parseSessionProcessEventsFromFile } from "../sessions/sessionProcessEventsFile";
 import type { SessionForkCommands } from "../sessions/sessionForkCommands";
 import { dshUnavailablePageFor } from "../dsh/dshManualStop";
+import { missingSessionFilePage } from "../sessions/sessionFileMissingPage";
+import { isSessionSearchFilePath } from "../sessions/sessionSearchPath";
 import { validateNpmSpec } from "../dsh/dshPluginNpmRunner";
 import { validateSearchKeyword } from "../dsh/dshPluginMarket";
 import { downgradeRunningStartedBefore, downgradeStaleRunning } from "../pi/derivedSubagents";
@@ -336,6 +340,10 @@ export type SessionIpcDeps = {
 	getMainWindow: () => BrowserWindow | null;
 	emitSessionRuntimeEvent: (agentId: string, channel: string, payload: unknown) => boolean;
 	emitSessionRuntimeDetach: (target: SessionRuntimeTarget) => void;
+	/** 激活窗口的 session 级合成 starting 事件（bind 前 emitSessionRuntimeEvent 会丢弃一切状态，见 index.ts 实现注释）。 */
+	emitSessionActivating?: (sessionId: string) => void;
+	/** 激活失败的 session 级合成 error 事件：无绑定时失败终态同样被丢弃，不补发则加载态永挂。 */
+	emitSessionActivationFailed?: (sessionId: string) => void;
 	createAnonymousSession: (input: CreateAnonymousSessionInput) => Promise<CreateAnonymousSessionResult>;
 	stopSessionRuntime: (target: SessionRuntimeTarget) => void;
 	emitReplacementState: (runtime: SessionRuntimeInfo, includeMessages: boolean) => void;
@@ -360,6 +368,17 @@ export type SessionIpcDeps = {
 	 * 未装配（单测/无 pi 运行时的宿主）时退回仅 CLI 缓存（models.json）的旧行为。
 	 */
 	validationCatalogModels?: () => AvailableModel[] | null | undefined;
+	/**
+	 * 跨会话正文搜索（Go session-index sidecar 的适配闭包；装配层封装 roots
+	 * 解析与降级）。未装配（单测）或返回 null（sidecar 缺失/boot 中/失败）时
+	 * 渲染层回退现有标题过滤，搜索入口永远不报错。
+	 */
+	sessionContentSearch?: (query: string) => Promise<SessionSearchResult | null>;
+	/**
+	 * 会话内查找（同一 sidecar 的单文件检索）。入参是会话文件路径（= SessionRecord.id）。
+	 * 返回 null 表示「索引未就绪/不可用」——渲染层据此提示而不是显示「无匹配」。
+	 */
+	sessionMessageSearch?: (sessionPath: string, query: string) => Promise<SessionSearchResult | null>;
 	/** DSH 后端专用 IPC 依赖（C1 分组；未装配 = 无 DSH 后端）。 */
 	dshBackend?: DshBackendIpcDeps;
 };
@@ -425,6 +444,8 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		emitSessionRuntimeDetach,
 		createAnonymousSession,
 		stopSessionRuntime,
+		emitSessionActivating,
+		emitSessionActivationFailed,
 		emitReplacementState,
 		readCatalogSessionReferenceMessages,
 		// 无 pi 会话文件（纯生图草稿）历史读取回退：ImageSession 独立存储
@@ -550,6 +571,41 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		}
 		return sessionScanner.list(projectPath);
 	});
+	// 跨会话正文搜索：sidecar 不可用/boot 中/失败一律返回 null，渲染层回退标题过滤
+	ipcMain.handle(ipcChannels.sessionsSearchContent, async (_event, query: unknown) => {
+		const searcher = deps.sessionContentSearch;
+		if (!searcher) return null;
+		if (typeof query !== "string") return null;
+		const trimmed = query.trim();
+		if (!trimmed || trimmed.length > 256) return null;
+		try {
+			return await searcher(trimmed);
+		} catch (error) {
+			void appLogger.warn("session", "Content search failed", { error: error instanceof Error ? error.message : String(error) });
+			return null;
+		}
+	});
+
+	// 会话内查找：只搜当前会话单个文件，命中按时间线顺序（上一条/下一条导航）。
+	ipcMain.handle(ipcChannels.sessionsSearchInSession, async (_event, sessionPath: unknown, query: unknown) => {
+		const searcher = deps.sessionMessageSearch;
+		if (!searcher) return null;
+		if (typeof sessionPath !== "string" || typeof query !== "string") return null;
+		const trimmedPath = sessionPath.trim();
+		const trimmed = query.trim();
+		// 路径必须像会话文件（无歧义绝对路径 + .jsonl）：sidecar 只索引真实会话文件，
+		// 这里再兜一道，避免把任意路径透传给子进程。判定收口在 sessionSearchPath，
+		// Windows 反斜杠路径与 POSIX 正斜杠路径都放行（旧实现只认 `/`，Windows 全被拒）。
+		if (!isSessionSearchFilePath(trimmedPath)) return null;
+		if (!trimmed || trimmed.length > 256) return null;
+		try {
+			return await searcher(trimmedPath, trimmed);
+		} catch (error) {
+			void appLogger.warn("session", "In-session search failed", { error: error instanceof Error ? error.message : String(error) });
+			return null;
+		}
+	});
+
 	ipcMain.handle(ipcChannels.sessionsCatalogList, async (_event, projectId: string, options?: { scan?: boolean }) => {
 		const project = projectStore.get(projectId);
 		if (!project) throw new Error(mainCopy("project.notFound"));
@@ -725,6 +781,8 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			acpToolId: input.backend === "acp" && typeof input.acpToolId === "string" ? input.acpToolId : undefined,
 			model,
 			thinkingLevel,
+			// 渲染层输入不可信：侧边任务只认显式 true，其余（含任意真值）按普通会话建。
+			sideTask: input.sideTask === true,
 		});
 		void appLogger.info("session", "Session draft created", {
 			sessionId: draft.id,
@@ -774,6 +832,10 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		return result;
 	});
 	ipcMain.handle(ipcChannels.sessionsCatalogUpdate, async (_event, sessionId: string, patch: UpdateSessionRecordInput) => {
+		// 渲染层输入不可信：侧边任务标记只认真值 true 与 null（清除），其余按「本次不改」处理。
+		if (patch.sideTask !== undefined && patch.sideTask !== true && patch.sideTask !== null) {
+			patch = { ...patch, sideTask: undefined };
+		}
 		const normalizedModel = patch.model === undefined ? undefined : patch.model === null ? null : normalizeSessionModelPreference(patch.model);
 		if (patch.model !== undefined && patch.model !== null && !normalizedModel) {
 			throw new Error(mainCopy("session.invalidModel"));
@@ -998,6 +1060,11 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			if (child?.filePath) record.childSessionPath = child.filePath;
 			if (child) record.childSessionId = child.id;
 		}
+		// 列举子代理时顺带刷新会话级性能区间（按 id 幂等覆盖，重复列举不会膨胀）；
+		// 读接口不推状态事件，避免把「看子代理列表」变成高频 runtime 推送。
+		if (liveTarget?.agentId) {
+			agentManager.syncSubagentPerfSpans(liveTarget.agentId, records, { emit: false });
+		}
 		return records;
 	});
 	/**
@@ -1007,6 +1074,10 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 	ipcMain.handle(ipcChannels.sessionsListFileChanges, async (_event, sessionId: string) => {
 		if (typeof sessionId !== "string" || !sessionId) return [];
 		const entry = sessionCatalog.get(sessionId);
+		// ACP 会话无 pi 会话文件，但 tool_call 原始参数里带 filePath/edit 内容：
+		// 从运行时消息投影按「最新一轮」口径聚合（与 pi 的 readFileChangeMessages
+		// 同语义；消息列表有界且在内存，无读盘风险）。2027-03 审计发现 I。
+		if (entry?.backend === "acp") return collectLatestTurnFileChanges(readAcpMessages?.(entry.acpSessionId ?? "") ?? []);
 		// DSH/生图/生视频会话无 pi 会话文件，文件汇总无意义
 		if (!entry?.filePath || entry.backend === "dsh" || entry.backend === "imagegen" || entry.backend === "videogen") return [];
 		return agentManager.readSessionFileChanges(entry.filePath);
@@ -1079,6 +1150,14 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			await backfillHistoricalSessionMetadata(sessionId, page);
 			return page;
 		} catch (error) {
+			// 文件还不存在（新建会话在发出第一条消息前不落盘，微信/飞书桥建的会话尤其常见）：
+			// 这是「还没有内容」而不是读取故障，返回带原因的友好空页，
+			// 避免把 ENOENT 报成「会话历史加载失败/文件已删除」（2026-10 微信 /new 反馈）。
+			const missingFile = missingSessionFilePage(error);
+			if (missingFile) {
+				appLogger.info("session", "Read message page: session file not written yet", { sessionId, filePath: entry.filePath });
+				return missingFile;
+			}
 			// 文件读取失败（被删/路径失效）先查 ImageSession 兜底，命中则直接恢复历史；
 			// 都无记录才按失败处理（渲染层显示明确错误态 + 日志）。
 			const imageSessionMessages = (await readImageSessionMessages?.(sessionId)) ?? [];
@@ -1592,7 +1671,21 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 	ipcMain.handle(ipcChannels.sessionsRuntimeActivate, async (_event, sessionId: string) => {
 		const startedAt = Date.now();
 		void appLogger.info("session-perf", "Runtime activation IPC started", { sessionId });
+		// 审计发现 A：coordinator.activate 在 bind() 之前不转发任何状态事件（ACP 握手
+		// 可达 ~8.5s）。激活前先发 session 级合成 starting，渲染层立即进入加载动画，
+		// 不再静默空窗；已有活 runtime 时（预热复用/快速路径）不发，避免闪状态。
+		if (!sessionRuntimeCoordinator.hasLiveRuntime(sessionId)) emitSessionActivating?.(sessionId);
 		const result = await sessionRuntimeCoordinator.activateRuntime(sessionId);
+		if (result.ok) {
+			// 激活完成后立即补发完整 tab 状态 + 消息窗口：deckSessionId/backend 让侧栏
+			// ACP 配对即时生效（否则要等首个 agents:state 事件，期间 agent 行与 catalog
+			// 行双行并存）；播种快照历史直接进时间线，不等首个回合。
+			emitReplacementState(result.value, true);
+		} else if (!sessionRuntimeCoordinator.hasLiveRuntime(sessionId)) {
+			// 失败且无活 runtime（spawn 失败/握手超时，binding 从未建立）：合成 error
+			// 抵消上面的合成 starting，加载态收敛为可重试的静态引导。
+			emitSessionActivationFailed?.(sessionId);
+		}
 		void appLogger.info("session-perf", "Runtime activation IPC completed", {
 			sessionId,
 			ok: result.ok,

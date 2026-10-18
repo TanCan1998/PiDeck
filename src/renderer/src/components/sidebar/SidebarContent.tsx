@@ -1,6 +1,6 @@
 import { Activity, Bolt, CirclePlus, Clock, Folder, Globe, MessageSquare, Monitor, Moon, Search, Sun } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import type { AgentTab, AppThemeMode, ArchivedDshSession, ArchivedPiSession, Project, SessionRecord, SessionSummary, WorktreeEntry } from "../../../../shared/types";
+import type { AgentBackend, AgentTab, AppThemeMode, ArchivedDshSession, ArchivedPiSession, Project, SessionRecord, SessionSummary, WorktreeEntry } from "../../../../shared/types";
 import { AgentContextMenu, DraftSessionContextMenu, ProjectContextMenu, SessionContextMenu, SessionManagerModal, SessionSourceFilterMenu, WorktreeCreateDialog } from "./SidebarParts";
 import { sessionRecordToSummary } from "../../atoms";
 import { hasPendingUpdateAtom, pendingAppUpdateAtom, pendingCatalogUpdateAtom, pendingPiUpdateAtom, updateStatusAtom } from "../../atoms/update-atoms";
@@ -15,6 +15,7 @@ import type { RpcLogEntry } from "../../../../shared/types/rpcLog";
 import type { SidebarRunControl } from "./SidebarComponents";
 import { sessionDisplayName } from "../../utils/sessionDisplayName";
 import { DshSearchResults } from "./DshSearchResults";
+import { SessionContentSearchResults } from "./SessionContentSearchResults";
 import { ProjectTree } from "./ProjectTree";
 import { Button } from "../ui-shadcn/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui-shadcn/tooltip";
@@ -27,10 +28,12 @@ import { HostPluginDockButtons } from "../plugins/HostPluginDockButtons";
 import { BridgeGuiSlot } from "../bridge/BridgeSlot";
 import { MorphingSearch, type MorphingSearchItem } from "../motion/morphing-search";
 import { parseSidebarNavTab } from "../../utils/sidebarNavTab";
+import { pinyinKeys } from "../../utils/pinyinSearch";
 import { displayProjectDirectoryName, isChatProject } from "../../rendererUtils";
 import { formatAccelerator } from "../../../../shared/shortcuts";
 import { desktopApi } from "../../desktopApi";
 import { useShortcutBindings } from "../../hooks/useShortcutBindings";
+import { useRelativeTimeTicker } from "../../hooks/sidebar/useSessionActivityClock";
 
 export type SidebarActions = {
 	projects: {
@@ -70,6 +73,8 @@ export type SidebarActions = {
 		beginDrag?: (sessionId: string) => void;
 		endDrag?: () => void;
 		createDraft: (projectId: string) => Promise<void>;
+		/** 新建侧边任务：在该会话所属项目建一条带标记的会话，由右侧抽屉「侧边任务」面板承载。 */
+		createSideTask: (projectId: string, backend?: AgentBackend) => Promise<void>;
 		createAnonymous: (projectId: string) => Promise<void>;
 		/** 新建 ACP 工具会话(toolId → settings.acpTools 条目);后端固定 acp。 */
 		createAcp: (projectId: string, toolId: string) => Promise<void>;
@@ -149,6 +154,9 @@ export type SidebarContentProps = {
 
 export function SidebarContent(props: SidebarContentProps) {
 	const { controller, actions } = props;
+	// 侧栏相对时间刷新节拍：会话静置时没有别的渲染源，「n分钟」也得自己往前走。
+	// 只在本组件挂一次，行组件订阅同一个 atom。
+	useRelativeTimeTicker();
 	const menu = controller.menu;
 	// 三个更新源 atom 必须无条件读取：不能用短路合并，否则任一更新源从 false 变 true
 	// 时会跳过后续 Hook，破坏 Hook 调用顺序。快照本体供角标 tooltip 清单取版本号。
@@ -244,12 +252,15 @@ export function SidebarContent(props: SidebarContentProps) {
 
 	// MorphingSearch 检索项：扁平化所有项目 + 会话，供命令面板跳转。
 	// 项目项用目录名（chat 用「Chat」），会话项用标题 + 预览；选中即打开/选中目标。
+	// pinyin：中文标题的首字母/全拼键（纯字母查询才能命中，键按标题缓存）。
 	const searchItems: MorphingSearchItem[] = [];
 	for (const project of controller.catalog.projects) {
+		const projectTitle = displayProjectDirectoryName(project);
 		searchItems.push({
 			id: `project:${project.id}`,
-			title: displayProjectDirectoryName(project),
+			title: projectTitle,
 			description: project.path,
+			pinyin: pinyinKeys(projectTitle),
 			icon: isChatProject(project) ? MessageSquare : Folder,
 			onSelect: () => {
 				actions.projects.select(project.id);
@@ -257,10 +268,12 @@ export function SidebarContent(props: SidebarContentProps) {
 			},
 		});
 		for (const session of controller.catalog.sessionsByProject[project.id] ?? []) {
+			const sessionTitle = sessionDisplayName(session.title, session.forked) ?? session.title;
 			searchItems.push({
 				id: `session:${session.id}`,
-				title: sessionDisplayName(session.title, session.forked) ?? session.title,
+				title: sessionTitle,
 				description: session.preview,
+				pinyin: pinyinKeys(sessionTitle),
 				icon: MessageSquare,
 				onSelect: () => {
 					void actions.sessions.open(project.id, session.id);
@@ -364,6 +377,16 @@ export function SidebarContent(props: SidebarContentProps) {
 				{/* G9：DSH 全文搜索结果（搜索词非空时展示；结果按 dshSessionId 映射回 catalog） */}
 				{controller.search.trim() && (
 					<DshSearchResults
+						query={controller.search}
+						onOpen={(projectId, sessionId) => {
+							void actions.sessions.open(projectId, sessionId);
+						}}
+					/>
+				)}
+				{/* 跨会话正文搜索（Go session-index sidecar）：命中会话跨项目展示，
+				    点击打开并定位到首个命中消息（pendingMessageJump 链路）；无 sidecar 时隐藏 */}
+				{controller.search.trim() && (
+					<SessionContentSearchResults
 						query={controller.search}
 						onOpen={(projectId, sessionId) => {
 							void actions.sessions.open(projectId, sessionId);
@@ -647,6 +670,14 @@ export function SidebarContent(props: SidebarContentProps) {
 								}
 							: undefined
 					}
+					onCreateSideTask={
+						menuAgent.projectId
+							? () => {
+									controller.closeMenu();
+									void actions.sessions.createSideTask(menuAgent.projectId, menuAgent.backend);
+								}
+							: undefined
+					}
 					onToggleRpcLogging={() => {
 						// 兜底：置灰的菜单项点击不触发 onSelect，这里防御 agent 状态在菜单打开期间变化的情况
 						if (!menuAgentCanRpcLog) {
@@ -740,6 +771,11 @@ export function SidebarContent(props: SidebarContentProps) {
 					onOpenProxySetting={() => {
 						controller.closeMenu();
 						actions.sessions.openProxySetting(menuSession.id);
+					}}
+					// 侧边任务：项目归属优先取会话自己的（分屏/worktree 栏可能与菜单所在项目不同）
+					onCreateSideTask={() => {
+						controller.closeMenu();
+						void actions.sessions.createSideTask(menuSession.projectId ?? menu.projectId, menuSession.backend);
 					}}
 					// 运行控制全状态：未启动的历史会话主控项即「启动 Agent」
 					runControl={buildSidebarRunControl(menuSession.id)}

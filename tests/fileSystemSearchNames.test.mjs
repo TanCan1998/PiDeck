@@ -50,6 +50,29 @@ test("searchNames matches case-insensitive substring of file and directory names
 	}
 });
 
+test("searchNames reaches files inside generated dirs shown in the drawer", async () => {
+	// 树里能看到的文件必须搜得到；但构建产物排在源码目录之后，不能把有效命中挤掉。
+	const root = mkdtempSync(join(tmpdir(), "pideck-search-generated-"));
+	mkdirSync(join(root, "build"));
+	writeFileSync(join(root, "build", "app-release.apk"), "x");
+	mkdirSync(join(root, "src"));
+	writeFileSync(join(root, "src", "app-main.ts"), "x");
+	mkdirSync(join(root, "node_modules"));
+	writeFileSync(join(root, "node_modules", "app-dep.js"), "x");
+	try {
+		const service = new FileSystemService();
+		const results = await service.searchNames(root, "app");
+		const relative = results.map((r) => r.relativePath);
+		assert.ok(relative.includes("build/app-release.apk"), `generated file not searchable: ${relative}`);
+		assert.ok(relative.includes("src/app-main.ts"), `source file missing: ${relative}`);
+		// 源码命中必须排在构建产物之前（同层文件名排序内不约束，只看跨目录的先后）
+		assert.ok(relative.indexOf("src/app-main.ts") < relative.indexOf("build/app-release.apk"), `generated dir should be scanned after source dirs: ${relative}`);
+		assert.ok(!relative.some((path) => path.includes("node_modules")), `node_modules leaked: ${relative}`);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("searchNames skips symlinks to avoid cycles and false positives", async () => {
 	const root = createWorkspace();
 	// Windows 无特权创建符号链接会抛 EPERM：该平台降级为跳过此用例

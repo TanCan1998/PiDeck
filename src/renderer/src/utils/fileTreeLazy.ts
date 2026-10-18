@@ -108,9 +108,18 @@ export function markFileTreeLoadFailed(nodes: FileTreeNode[], directoryPath: str
 	return touched ? marked : nodes;
 }
 
+/**
+ * 把某个目录的子项并进树。
+ * 无变化时返回原数组引用（与 markFileTreeLoadFailed 同约定）：文件树的内容代次
+ * （useFileTreeContentState）以「更新函数是否返回同一引用」判定内容变没变，
+ * 目标目录不在本层（异步 listing 迟到、目录已被刷新移除）时若仍返回新数组，
+ * 会被误判成内容变化，白跑一轮 Git 着色重拉。
+ */
 export function mergeFileTreeChildren(nodes: FileTreeNode[], directoryPath: string, children: FileTreeNode[]): FileTreeNode[] {
-	return nodes.map((node) => {
+	let touched = false;
+	const merged = nodes.map((node) => {
 		if (node.type === "directory" && node.path === directoryPath) {
+			touched = true;
 			return {
 				...node,
 				children,
@@ -118,13 +127,18 @@ export function mergeFileTreeChildren(nodes: FileTreeNode[], directoryPath: stri
 			};
 		}
 		if (node.children && node.children.length > 0) {
-			return {
-				...node,
-				children: mergeFileTreeChildren(node.children, directoryPath, children),
-			};
+			const nextChildren = mergeFileTreeChildren(node.children, directoryPath, children);
+			if (nextChildren !== node.children) {
+				touched = true;
+				return {
+					...node,
+					children: nextChildren,
+				};
+			}
 		}
 		return node;
 	});
+	return touched ? merged : nodes;
 }
 
 /**

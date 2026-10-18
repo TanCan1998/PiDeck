@@ -37,6 +37,8 @@ export const ipcChannels = {
 	filesList: "files:list",
 	/** 工作区文件名搜索（issue #215）：主进程全盘扫描，不受抽屉懒加载深度限制 */
 	filesSearch: "files:search",
+	/** 工作区文件内容检索（Go file-index sidecar）：未就绪/不可用时回 null，渲染层不展示内容分区 */
+	filesSearchContent: "files:search-content",
 	filesOpen: "files:open",
 	filesShowInFolder: "files:show-in-folder",
 	/** 检测系统可用的文件管理器（打开方式下拉补充入口） */
@@ -183,6 +185,9 @@ export const ipcChannels = {
 	sessionsSetFocusedSession: "sessions:set-focused-session",
 	/** DSH 会话文件路径推导（渲染层右键「复制会话文件路径」；按 dshSessionId + cwd 计算 host 持久化路径）。 */
 	sessionsGetDshSessionPath: "sessions:get-dsh-session-path",
+	sessionsSearchContent: "sessions:search-content",
+	/** 会话内查找（单文件检索，命中按时间线返回）。 */
+	sessionsSearchInSession: "sessions:search-in-session",
 	/** DSH 会话内容搜索（session.search；结果最多 20 会话，返回 sessionId + snippet）。 */
 	sessionsSearchDsh: "sessions:search-dsh",
 	/** DSH 创建目标（goal.create；objective 必填，maxGoalRounds 可选）。 */
@@ -393,12 +398,18 @@ export const ipcChannels = {
 	yaoPromptsList: "yao-prompts:list",
 	yaoPromptsDetail: "yao-prompts:detail",
 	yaoPromptsImport: "yao-prompts:import",
+	/** 提示词库 db 就绪状态推送（main→renderer；db 远程拉取进度/完成/失败） */
+	yaoPromptsDbState: "yao-prompts:db-state",
+	/** 用户点击重试：强制重新检查远程 db（绕过 TTL） */
+	yaoPromptsDbRetry: "yao-prompts:db-retry",
 	skillStoreSearch: "skill-store:search",
 	skillStoreImport: "skill-store:import",
 	// SkillHub（api.skillhub.cn）
 	skillHubSearch: "skill-hub:search",
 	skillHubDetail: "skill-hub:detail",
 	skillHubInstall: "skill-hub:install",
+	/** 安装进度（主进程 → 渲染层推送；状态丝流程用，不用轮询） */
+	skillHubInstallProgress: "skill-hub:install-progress",
 	extensionsList: "extensions:list",
 	extensionsUninstall: "extensions:uninstall",
 	extensionsInstall: "extensions:install",
@@ -824,6 +835,27 @@ export const ipcChannels = {
 	feishuSessionBotSet: "feishu:session-bot-set",
 	/** 飞书 /whoami 结果推回前端 */
 	feishuWhoamiResult: "feishu:whoami-result",
+
+	// ===== 微信 iLink 桥接 =====
+	wechatGetSettings: "wechat:get-settings",
+	wechatSetEnabled: "wechat:set-enabled",
+	wechatUpdateSettings: "wechat:update-settings",
+	wechatRenameAccount: "wechat:rename-account",
+	wechatLogout: "wechat:logout",
+	/** 取二维码并开始轮询；返回的状态已带 qrcodeContent */
+	wechatBeginLogin: "wechat:begin-login",
+	wechatCancelLogin: "wechat:cancel-login",
+	wechatSubmitVerifyCode: "wechat:submit-verify-code",
+	wechatGetLoginState: "wechat:get-login-state",
+	wechatGetStatus: "wechat:get-status",
+	wechatGetBindings: "wechat:get-bindings",
+	wechatUnbindChat: "wechat:unbind-chat",
+	/** 主进程 → 渲染层：桥接连接状态变化 */
+	wechatStatus: "wechat:status",
+	/** 主进程 → 渲染层：扫码登录阶段变化（含二维码内容） */
+	wechatLoginState: "wechat:login-state",
+	/** 主进程 → 渲染层：聊天绑定变化 */
+	wechatBindingsChanged: "wechat:bindings-changed",
 
 	// ===== 桌面宠物（全局聚合单宠） =====
 	/** 主进程 → 宠物窗：推送聚合状态 */

@@ -8,6 +8,7 @@ import { PromptEnhanceControls } from "./PromptEnhanceControls";
 import { Button } from "../ui-shadcn/button";
 import { Command, CommandEmpty, CommandInput, CommandItem, CommandList } from "../ui-shadcn/command";
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from "../ui-shadcn/dialog";
+import { Separator } from "../ui-shadcn/separator";
 import { cn } from "../../lib/utils";
 import { showNotice } from "../../utils/notice";
 import { ModelThinkingChip } from "./ModelThinkingChip";
@@ -327,7 +328,7 @@ function ComposerBranchSwitcher(props: { gitInfo: GitBranchInfo; disabled?: bool
 					<Button
 						variant="ghost"
 						size="sm"
-						className="composer-bar-btn branch h-7 max-w-[12rem] gap-1 rounded-md px-1.5 text-sm font-semibold text-foreground/75 hover:bg-muted/60"
+						className="composer-bar-btn branch h-7 max-w-[12rem] gap-1 rounded-md px-1.5 text-control font-medium text-muted-foreground hover:bg-muted/60"
 						title={t("app.branchCurrent", {
 							branch: props.gitInfo.current,
 							count: props.gitInfo.branches.length,
@@ -525,7 +526,7 @@ export function ComposerBottomBar(props: {
 		disabled: props.disabled,
 		onChange: props.onChangeMode,
 	});
-	// 设置 → 外观 → 功能模块可隐藏模式选择器；此时特殊模式由退出×兜底，不会锁死在 plan/goal。
+	// 设置 → 外观 → 输入框功能显示可隐藏模式选择器；此时特殊模式由退出×兜底，不会锁死在 plan/goal。
 	const modesHidden = useAtomValue(composerModesHiddenAtom);
 	// 模式 chip 是否可用：可用时它自己就是开关（下拉里选「普通模式」退出，与 ComposerArea
 	// 的 onCancelPlan 是同一条 setMode("normal")），不重复摆第二个按钮（2026-10 用户反馈
@@ -606,7 +607,7 @@ export function ComposerBottomBar(props: {
 					)}
 					{/* 常驻模式选择器（外移自「+」菜单）：当前模式图标+名称直接可见可切；
 					    visibleModes 为空（imagegen 会话/legacy 锁定）不渲染，走专用生图底栏；
-					    hiddenModules 隐藏时收起入口（特殊模式仍可由上方退出×退出）；
+					    输入框功能设置隐藏时收起入口（特殊模式仍可由上方退出×退出）；
 					    打开时刷新扩展开关可用性（设置页可能刚改过 plan/goal 扩展）。 */}
 					{/* 只剩 normal 一项（ACP 会话无 pi 扩展 / plan+goal 都被关）不渲染单选项下拉——
 					    没有意义还占位；ACP 的模式等价物是 configOptions 的 mode 类选项（已由 AcpConfigControls 渲染）。打开时刷新扩展开关可用性（设置页可能刚改过 plan/goal 扩展）。 */}
@@ -673,8 +674,11 @@ export function ComposerBottomBar(props: {
 					   且 SecurityControl 按 backend 分发时没有 imagegen 分支会误显示成 pi 安全等级菜单；
 					   飞书镜像把输入同步到 IM，生图/生视频的 prompt 不走会话 runtime；
 					   快捷消息同理（正文是给对话模型的指令），四个控制位一起屏蔽。 */}
+					{/* 左区两组：①输入动作（模式/「+」）②会话级开关（飞书/安全等级/快捷消息）。
+						组间竖线让「改动输入内容」与「改动会话策略」不混成一片图标海。 */}
 					{isMediaComposer ? null : (
 						<>
+							{props.feishuIndicator || props.securityControl || props.quickMessagesControl ? <Separator orientation="vertical" className="mx-0.5 h-4" /> : null}
 							{props.feishuIndicator}
 							{props.securityControl}
 							{props.quickMessagesControl}
@@ -731,7 +735,7 @@ export function ComposerBottomBar(props: {
 						<ComposerBranchSwitcher gitInfo={props.gitInfo} disabled={props.branchDisabled ?? props.disabled} onSwitchBranch={props.onSwitchBranch} />
 					) : props.gitInfo?.current ? (
 						<span
-							className="composer-bar-branch inline-flex max-w-[12rem] items-center gap-1.5 truncate px-1.5 text-sm font-semibold text-foreground/75"
+							className="composer-bar-branch inline-flex max-w-[12rem] items-center gap-1.5 truncate px-1.5 text-control font-medium text-muted-foreground"
 							title={t("app.branchCurrent", {
 								branch: props.gitInfo.current,
 								count: props.gitInfo.branches.length,
@@ -901,6 +905,8 @@ export function ModelPicker(props: {
 	hiddenModels?: string[];
 	/** 切换模型隐藏状态（可直接在模型选择器中隐藏模型，也可在折叠区恢复显示）。 */
 	onToggleHideModel?: (provider: string, modelId: string) => void;
+	/** 打开时展开所有供应商分组：用于「从全部模型里挑一个」的场景（如外部连接的模型优先级）。 */
+	expandAllProviders?: boolean;
 }) {
 	const currentModelKey = props.current?.provider && props.current?.modelId ? `${props.current.provider}/${props.current.modelId}` : undefined;
 	const favoritesSet = new Set(props.favoriteModels ?? []);
@@ -944,6 +950,7 @@ export function ModelPicker(props: {
 			favorites,
 			current: props.current,
 			providers: sortedProviders,
+			expandAll: props.expandAllProviders,
 		}),
 	);
 	// 主体状态：加载中 / 失败或空态引导 / 模型列表（纯函数，见 sessionPickerOptions）。

@@ -4,8 +4,9 @@ import { cp, readFile, rename as fsRename, rm, stat, writeFile } from "node:fs/p
 import { basename, join } from "node:path";
 import { ipcChannels } from "../../shared/ipc";
 import type { FileManagerInfo, ProjectFileAccessScope } from "../../shared/types/project";
-import type { FileSearchResult } from "../../shared/types";
+import type { FileContentSearchResult, FileSearchResult } from "../../shared/types";
 import { detectFileManager, openFileManagerAt } from "../files/FileManager";
+import type { FileIndexService } from "../files/FileIndexService";
 import { createProjectFileReadBoundary, resolveProjectFileReadPath, type ProjectFileReadBoundary } from "../files/projectFileAccess";
 import type { FileSystemService } from "../fs/FileSystemService";
 import type { ProjectStore } from "../projects/ProjectStore";
@@ -24,12 +25,14 @@ export type FilesIpcDeps = {
 	fileSystemService: FileSystemService;
 	projectStore: ProjectStore;
 	settingsStore: SettingsStore;
+	/** 文件索引 sidecar（可选：未装配时文件名搜索直接走现有 BFS 扫盘）。 */
+	getFileIndexService?: () => FileIndexService | null;
 	appLogger: Pick<AppLogger, "info" | "error">;
 	getMainWindow: () => BrowserWindow | null;
 	openExternalUrl: (url: string, forceSystem?: boolean) => Promise<void>;
 };
 
-export function registerFilesIpc({ fileSystemService, projectStore, settingsStore, appLogger, getMainWindow, openExternalUrl }: FilesIpcDeps): void {
+export function registerFilesIpc({ fileSystemService, projectStore, settingsStore, getFileIndexService, appLogger, getMainWindow, openExternalUrl }: FilesIpcDeps): void {
 	// Windows Node / Electron 边界不能直接消费 WSL Linux 路径：统一走 WslPaths 转成当前发行版的主机 UNC。
 	// 已经是普通 Windows/非 WSL 网络盘的输入保持不变，避免误伤非 WSL 路径。
 	const toWindowsPath = (path: string): string => {
@@ -78,7 +81,7 @@ export function registerFilesIpc({ fileSystemService, projectStore, settingsStor
 		return result.canceled ? [] : result.filePaths;
 	});
 
-	ipcMain.handle(ipcChannels.filesList, async (_event, projectId: string, options?: { maxDepth?: number; directory?: string }) => {
+	ipcMain.handle(ipcChannels.filesList, async (_event, projectId: string, options?: { maxDepth?: number; directory?: string; skipGeneratedDirs?: boolean }) => {
 		const project = projectStore.get(projectId);
 		if (!project) throw new Error(`Project not found: ${projectId}`);
 		const maxDepth = typeof options?.maxDepth === "number" && Number.isFinite(options.maxDepth) ? options.maxDepth : undefined;
@@ -86,7 +89,7 @@ export function registerFilesIpc({ fileSystemService, projectStore, settingsStor
 		// directory 必须落在项目内；越界由 FileSystemService.listTree 拒绝。
 		const projectPath = toWindowsPath(project.path);
 		try {
-			return await fileSystemService.listTree(projectPath, maxDepth, directory);
+			return await fileSystemService.listTree(projectPath, maxDepth, directory, { skipGeneratedDirs: options?.skipGeneratedDirs === true });
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 			// 项目根被外部删除时用稳定错误码替代 Node/Electron 的整段 ENOENT scandir，
@@ -107,11 +110,56 @@ export function registerFilesIpc({ fileSystemService, projectStore, settingsStor
 		return query;
 	};
 
+	// 文件索引 sidecar 的根：WSL 项目的根是 UNC 路径，宿主侧走 9p 扫盘既慢又容易踩权限，
+	// 直接返回空让搜索回退 BFS（与跨会话正文搜索的 WSL 口径一致）。
+	const indexRootsFor = (environment: string | undefined, windowsPath: string): string[] => (environment === "wsl" || !windowsPath ? [] : [windowsPath]);
+
 	ipcMain.handle(ipcChannels.filesSearch, async (_event, projectId: string, query: string): Promise<FileSearchResult[]> => {
 		const project = projectStore.get(projectId);
 		if (!project) throw new Error(`Project not found: ${projectId}`);
 		const normalizedQuery = parseFileSearchQuery(query);
-		return fileSystemService.searchNames(toWindowsPath(project.path), normalizedQuery);
+		const root = toWindowsPath(project.path);
+		// 索引就绪时走 Go sidecar（评分排序 + 路径段命中）；否则回退实时 BFS 扫盘（fail-open）。
+		const fileIndex = getFileIndexService?.() ?? null;
+		const roots = fileIndex ? indexRootsFor(project.environment, root) : [];
+		if (fileIndex && roots.length > 0) {
+			try {
+				if (fileIndex.isReady(roots)) {
+					const result = await fileIndex.searchNames(roots, normalizedQuery);
+					if (result.ok) {
+						return result.value.hits.map((hit) => ({ name: hit.name, path: hit.path, relativePath: hit.relativePath, type: hit.type }));
+					}
+				} else {
+					// 未就绪：这次先回退 BFS 保证有结果，同时后台建索引（下一次输入即走索引）。
+					fileIndex.warmup(roots);
+				}
+			} catch (error) {
+				void appLogger.error("file", "文件索引检索失败，已回退扫盘", error instanceof Error ? error.message : String(error));
+			}
+		}
+		return fileSystemService.searchNames(root, normalizedQuery);
+	});
+
+	ipcMain.handle(ipcChannels.filesSearchContent, async (_event, projectId: string, query: string): Promise<FileContentSearchResult | null> => {
+		const project = projectStore.get(projectId);
+		if (!project) throw new Error(`Project not found: ${projectId}`);
+		const normalizedQuery = parseFileSearchQuery(query);
+		const fileIndex = getFileIndexService?.() ?? null;
+		if (!fileIndex) return null;
+		const roots = indexRootsFor(project.environment, toWindowsPath(project.path));
+		if (roots.length === 0) return null;
+		// 未就绪同样返回 null：渲染层不展示内容分区，索引建好后下一次输入自然出现。
+		if (!fileIndex.isReady(roots)) {
+			fileIndex.warmup(roots);
+			return null;
+		}
+		try {
+			const result = await fileIndex.searchContent(roots, normalizedQuery);
+			return result.ok ? result.value : null;
+		} catch (error) {
+			void appLogger.error("file", "文件内容检索失败", error instanceof Error ? error.message : String(error));
+			return null;
+		}
 	});
 
 	ipcMain.handle(ipcChannels.filesOpen, async (_event, path: unknown, scope?: unknown) => {

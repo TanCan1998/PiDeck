@@ -25,6 +25,8 @@ import {
 	Fingerprint,
 	// 抽屉 RPC 日志 Tab 图标
 	ScrollText,
+	// 抽屉侧边任务 Tab 图标：不用 PanelRight——那是会话头部抽屉开关的图形，并排会认错
+	Rocket,
 } from "lucide-react";
 import { configureNoticeDefaults, showNotice, type NoticeKind } from "./utils/notice";
 import { copyTextWithCopiedNotice } from "./utils/clipboardNotice";
@@ -38,6 +40,7 @@ import {
 	effectiveAgentBackendAtom,
 	busySendDeliveryAtom,
 	hiddenModulesAtom,
+	hiddenComposerFeaturesAtom,
 	imageGenConfigAtom,
 	enhanceModelAtom,
 	enhanceIncludeContextAtom,
@@ -93,6 +96,7 @@ import { useSidebarArchiveActions } from "./hooks/sidebar/useSidebarArchiveActio
 import { useSettingsUpdater } from "./hooks/settings/useSettingsUpdater";
 import { useTpsDisplayMode } from "./hooks/settings/useTpsDisplayMode";
 import { useSessionRunControl } from "./hooks/session/useSessionRunControl";
+import { useCloseSessionTabShortcut } from "./hooks/useCloseSessionTabShortcut";
 import { useProjectFileTreeController } from "./hooks/files/useProjectFileTreeController";
 import { useSessionDurationTracking } from "./hooks/session/useSessionDurationTracking";
 import { useSessionPromptDispatch } from "./hooks/session/useSessionPromptDispatch";
@@ -111,7 +115,6 @@ import {
 	applySessionRuntimeEventAtom,
 	currentSessionAtom,
 	currentSessionIdAtom,
-	currentSessionMessagesAtom,
 	currentSessionRuntimeAtom,
 	projectInventoryAtom,
 	removeSessionComposerStateAtom,
@@ -127,6 +130,7 @@ import {
 	sessionCatalogLoadStateAtom,
 	sessionMessagesCacheAtom,
 	sessionSummariesByProjectIdAtomFamily,
+	modifiedFilesAtom,
 	promoteSessionComposerStateAtom,
 	promoteSessionMessagesCacheAtom,
 	setSessionAttachmentsAtom,
@@ -138,7 +142,6 @@ import {
 	upsertSessionAtom,
 	acpToolsAtom,
 	acpEnabledAtom,
-	acpChannelAvailableAtom,
 } from "./atoms";
 import { isSameSessionPath } from "./agentListDisplay";
 import { t } from "./i18n";
@@ -162,7 +165,9 @@ import { SessionStatusPanel } from "./components/session/statusPanel/SessionStat
 import { ProjectEmptyState } from "./components/session/ProjectEmptyState";
 import { FileLinkBaseProvider } from "./components/session/FileLinkBase";
 import { useSessionWorkspaceChrome } from "./hooks/useSessionWorkspaceChrome";
+import { useSessionIdAliasMigration } from "./hooks/useSessionIdAliasMigration";
 import { useQuickTask } from "./hooks/useQuickTask";
+import { useSideTasks } from "./hooks/useSideTasks";
 import { QuickTaskSurface } from "./components/app/QuickTaskSurface";
 import { AskPanelOverlay } from "./components/overlays/AskPanelOverlay";
 import { HostPluginPanelHost } from "./components/plugins/HostPluginPanelHost";
@@ -184,10 +189,10 @@ import { CuaApprovalDialog, useCuaApproval } from "./components/overlays/CuaAppr
 import { ImportOverlayHost } from "./components/overlays/ImportOverlayHost";
 import { EnvironmentOverlay } from "./components/overlays/EnvironmentOverlay";
 import { usePiEnvironmentGuide } from "./hooks/usePiEnvironmentGuide";
-import { EnvironmentDialog, FileContextMenu, ImagePreviewModal, type SessionModifiedFile } from "./components/app/AppParts";
+import { EnvironmentDialog, FileContextMenu, ImagePreviewModal } from "./components/app/AppParts";
 import { ExternalEditorOverlay } from "./components/workspace/ExternalEditorOverlay";
 import { navigateTo } from "./components/app/BrowserPanel";
-import { flattenFiles, fileNodeDragPayloadToRef, mergeCommands, getToolFilePath, getToolNewContent, getToolChangedLineCount } from "./components/app/AppUtils";
+import { flattenFiles, fileNodeDragPayloadToRef, mergeCommands } from "./components/app/AppUtils";
 // ProjectResourcesModal 仅在打开资源弹层时加载
 const ProjectResourcesModal = lazy(() => import("./components/app/ProjectResourcesModal").then((m) => ({ default: m.ProjectResourcesModal })));
 import { createDefaultAppSettings } from "../../shared/types";
@@ -247,9 +252,9 @@ export function App() {
 	useBootOverlayReady(currentSessionId !== undefined);
 	const currentSession = useAtomValue(currentSessionAtom);
 	// currentSessionRuntime / currentSessionRuntimeUi / currentSessionSendState: sync store.get() only.
-	// Streaming subscriptions are in SessionRuntimeInjector.
-	// Timeline 由各 ChatSessionPane 自持；大纲只读当前聚焦会话的消息缓存。
-	const activeMessages = useAtomValue(currentSessionMessagesAtom);
+	// Streaming subscriptions are in SessionRuntimeInjector. 修改文件清单走内容稳定投影 atom，
+	// 消息 flush 不改变清单内容时不会叫醒 App 根（否则文件抽屉等大树每 50ms 全量重渲）。
+	const modifiedFiles = useAtomValue(modifiedFilesAtom);
 	const projects = useAtomValue(projectInventoryAtom);
 	const agents = useAtomValue(agentInventoryAtom);
 	const setCurrentSessionId = useSetAtom(currentSessionIdAtom);
@@ -461,6 +466,7 @@ export function App() {
 		branchByProject,
 		setBranchByProject,
 		files,
+		fileTreeContentRevision,
 		setFiles,
 		gitInfo,
 		setGitInfo,
@@ -629,8 +635,6 @@ export function App() {
 
 	// 通道切换状态订阅：初拉当前通道 + 切换快照，AppUpdateCard 徽章/切换向导消费。
 	useChannelSwitchWatch({ api });
-	// ACP 入口仅开发构建可见（stable 隐藏新建会话菜单里的 ACP 组；设置页/模块可见性另在各自组件过滤）。
-	const acpChannelAvailable = useAtomValue(acpChannelAvailableAtom);
 
 	// 数据环境事件订阅：dev 首启模式选择 / 目录标记警告 / 导入进度（弹窗由 dataEnvAtoms 驱动）。
 	useDataEnvWatch({ api });
@@ -672,6 +676,13 @@ export function App() {
 	useEffect(() => {
 		setHiddenModules(settings.hiddenModules ?? []);
 	}, [settings.hiddenModules, setHiddenModules]);
+
+	// 隐藏的输入框功能入口同步给不持有 settings props 的消费方（ComposerBottomBar 的模式选择器），
+	// 与 hiddenModules 同一模式。
+	const setHiddenComposerFeatures = useSetAtom(hiddenComposerFeaturesAtom);
+	useEffect(() => {
+		setHiddenComposerFeatures(settings.hiddenComposerFeatures ?? []);
+	}, [settings.hiddenComposerFeatures, setHiddenComposerFeatures]);
 
 	// 启动预热：应用起来后把「已开启用量查询」的供应商各查一次（串行错峰），
 	// 打开模型/认证页即可直接看到徽章数值，不必先手动刷新。
@@ -1032,37 +1043,6 @@ export function App() {
 		persistWidth: persistSidebarWidth,
 	});
 
-	/** 当前会话中 agent 修改过的文件(从 tool 消息 meta 中提取) */
-	// 优化:只在消息数量变化时才重新计算,减少不必要的遍历
-	const modifiedFiles = useMemo(() => {
-		const byPath = new Map<string, SessionModifiedFile>();
-		for (const msg of activeMessages) {
-			if (msg.role !== "tool") continue;
-			const toolName: string | undefined = msg.meta?.toolName as string | undefined;
-			// 工具入参只可能是字符串或参数对象（投影器写入 meta 的两路形态），先收窄再交给工具解析器
-			const argsRaw: unknown = msg.meta?.args;
-			const args = typeof argsRaw === "string" || (argsRaw && typeof argsRaw === "object") ? (argsRaw as string | Record<string, unknown>) : undefined;
-			const status: string = String(msg.meta?.status ?? "done");
-			// 只收集文件写入/编辑类的工具调用，作为右侧 Files 与会话结束摘要的统一数据源。
-			if (!toolName || !/write|edit|create|patch/i.test(toolName)) continue;
-			const filePath = getToolFilePath(args);
-			if (!filePath || !args) continue;
-			const previous = byPath.get(filePath);
-			// 同一路径再次被修改时移动到 Map 末尾，右侧修改清单才能按"最新修改"展示。
-			if (previous) byPath.delete(filePath);
-			// originalContent 不再存储到消息 meta 中（full file 会使会话体积过大）。
-			// diff 展示时使用工具参数（oldText/newText）显示变动区域。
-			byPath.set(filePath, {
-				path: filePath,
-				toolName,
-				status: status === "running" ? "running" : (previous?.status ?? status),
-				changedLines: (previous?.changedLines ?? 0) + getToolChangedLineCount(toolName, args),
-				originalContent: "",
-				content: getToolNewContent(toolName, args) ?? previous?.content,
-			});
-		}
-		return Array.from(byPath.values());
-	}, [activeMessages, activeAgentId]);
 	const flatFiles = useMemo(() => flattenFiles(files), [files]);
 	// === file editor hook ===
 	const {
@@ -1132,6 +1112,8 @@ export function App() {
 		currentSessionId,
 		activeProjectId,
 	});
+	// #354：catalog 身份归并后迁移渲染层持久化的「最近活动」引用（Tab 置顶在 chrome hook 内迁移）。
+	useSessionIdAliasMigration();
 
 	const {
 		selectProject: selectProjectCommand,
@@ -1208,6 +1190,10 @@ export function App() {
 		suppressQueueAutoDrain: queue.suppressSessionQueueAutoDrain,
 	});
 
+	// Cmd/Ctrl+W 关闭当前会话标签页：回答进行中先弹确认（确认 = 停止 + 关闭），空闲直接关。
+	// 会话目标解析/停止/确认框分别复用 runControl/overlays，本处仅装配。
+	useCloseSessionTabShortcut({ closeTab: workspaceChrome.closeTab, abortAgent, overlays });
+
 	// 终端 IPC 目标：Agent 会话优先绑定当前 runtime；未启动或已停止时回退到项目 cwd。
 	// 该计算必须放在 useSessionRunControl 之后，因为 runtime target resolver 是该 hook 的返回值。
 	const terminalTarget: TerminalTarget | undefined = useMemo(() => {
@@ -1225,6 +1211,14 @@ export function App() {
 	}, [terminalOwner, currentSessionId, currentSessionRecord, projects, activeProjectId, getRuntimeTargetForSession]);
 
 	const quickTask = useQuickTask({ ready: settingsLoaded, backend: effectiveAgentBackend, upsertSession, selectSession: selectSessionCommand, registerSession: workspaceChrome.registerOpenSession, refreshProjects, getSessionRecord });
+
+	// 侧边任务：抽屉「侧边任务」面板持有的轻量会话。创建/切换/释放都在 useSideTasks 里，
+	// App 只负责「建好后把抽屉开到这个面板」，不登记主区 Tab、不改当前会话（面板自己寻址）。
+	const sideTasks = useSideTasks({
+		backend: effectiveAgentBackend,
+		showToast,
+		onCreated: () => workspace.openDrawerForce("sideTask"),
+	});
 
 	// 外部链接与本地服务 Web UI 共用同一个出口：强制打开 browser 抽屉 + 内置浏览器新建 tab。
 	const openInBrowser = (url: string) => {
@@ -2051,6 +2045,11 @@ export function App() {
 			createDraft: async (projectId) => {
 				await createSessionDraftWithTab(projectId);
 			},
+			// 侧边任务：建带标记的会话 + 打开抽屉面板。刻意不选会话、不登记主区 Tab——
+			// 侧边任务与主工作区互不打扰是这条链路的底线（面板自己按 sessionId 寻址）。
+			createSideTask: async (projectId, backend) => {
+				await sideTasks.create({ projectId, backend });
+			},
 			createAnonymous: async (projectId) => {
 				await createAnonymousSessionWithTab(projectId);
 			},
@@ -2286,11 +2285,15 @@ export function App() {
 		const agentId = runtime?.agentId;
 		// 草稿闸门：草稿期不提供重命名（自动命名还没跑，先钉名字会让条目进 manual
 		// 终态，扩展规划的会话名再也写不进来）；复制/导出同款闸门。
+		// ACP 同样隐藏：live 复制走 pi manager cloneSession 会报 unknown agent，历史会话
+		// 无 filePath 只会报「文件不存在」——两条路都是死胡同（2027-03 审计发现 H）。
 		const canRename = record.status !== "draft";
 		return {
-			canCopySession: canRename && (isLive || record.backend !== "dsh"),
-			canExportHtml: canRename && record.backend !== "dsh",
+			canCopySession: canRename && record.backend !== "acp" && (isLive || record.backend !== "dsh"),
+			canExportHtml: canRename && record.backend !== "dsh" && record.backend !== "acp",
 			hasFilePath: Boolean(record.filePath),
+			// 侧边任务：目标会话的项目与后端原样带过去；不登记主区常驻 Tab、不改当前会话焦点。
+			onCreateSideTask: () => void sideTasks.create({ projectId: record.projectId, backend: record.backend }),
 			onCopySession: () => {
 				if (isLive && agentId) {
 					void cloneAgentSession(agentId);
@@ -2390,15 +2393,10 @@ export function App() {
 			void createSessionDraftWithTab(projectId);
 		},
 		// ACP 工具会话入口（Tab 栏 + 下拉尾部，工具→项目二级）：走 sidebarActions.createAcp，
-		// 与设置页共用同一条创建链（backend=acp + acpToolId）。stable 通道不传 → SessionTabsBar
-		// 的 acpVisible（Boolean(onNewAcpSession) && …）自然隐藏整个 ACP 菜单组。
-		...(acpChannelAvailable
-			? {
-					onNewAcpSession: (projectId: string, toolId: string) => {
-						void sidebarActions.sessions.createAcp(projectId, toolId);
-					},
-				}
-			: {}),
+		// 与设置页共用同一条创建链（backend=acp + acpToolId）。
+		onNewAcpSession: (projectId: string, toolId: string) => {
+			void sidebarActions.sessions.createAcp(projectId, toolId);
+		},
 		onTogglePin: workspaceChrome.togglePin,
 		onReorder: workspaceChrome.reorderTab,
 		// 分屏组胶囊：分屏内会话聚合为组（颜色标记 + 展开/收起）
@@ -2427,7 +2425,9 @@ export function App() {
 			: undefined,
 		// 会话代理（网络代理）入口：与侧栏会话菜单同源，打开同一个弹框。
 		// 仅在有当前会话时给出；弹框内自行判断 DSH 等宿主差异并给出「下次启动生效」提示。
-		onOpenProxySetting: currentSessionId ? () => setProxyDialogSessionId(currentSessionId) : undefined,
+		// ACP 隐藏：会话代理只在 pi spawn 时消费（AgentManager.resolveSessionProxy），
+		// ACP 子进程从不读取——入口是死胡同（2027-03 审计发现 H）。
+		onOpenProxySetting: currentSessionId && getSessionRecord(currentSessionId)?.backend !== "acp" ? () => setProxyDialogSessionId(currentSessionId) : undefined,
 		onToggleDrawer: toggleRightDrawer,
 		drawerOpen: Boolean(drawer && !drawerCollapsed),
 		listCollapsed,
@@ -2842,6 +2842,7 @@ export function App() {
 		sessionsProject,
 		sessionsProjectId,
 		files,
+		fileTreeContentRevision,
 		sessions,
 		sessionSourceFilter,
 		sessionHistoryLoading,
@@ -3066,6 +3067,19 @@ export function App() {
 									onTogglePinned: () => workspace.toggleDrawerPanelPinned("browser"),
 									onClick: () => handleToolDrawerAction("browser"),
 								},
+								// 侧边任务 Tab：点了「新建侧边任务」才出现（面板正打开时也保留，
+								// 否则空态面板会挂在没有归属 tab 的内容上）。
+								...(sideTasks.ids.length > 0 || drawer === "sideTask"
+									? [
+											{
+												id: "sideTask",
+												label: t("sideTask.title"),
+												icon: <Rocket size={16} />,
+												active: drawer === "sideTask",
+												onClick: () => handleToolDrawerAction("sideTask"),
+											},
+										]
+									: []),
 								{
 									id: "scratchPad",
 									label: t("scratchPad.title"),
@@ -3111,6 +3125,7 @@ export function App() {
 							files={drawerPorts.files}
 							rpcLog={drawerPorts.rpcLog}
 							scratchPad={scratchPad}
+							sideTask={{ controller: sideTasks, paneServices: sessionPaneServices }}
 							branchTree={{ forkAtEntry: (entryId, fallbackText) => void forkAtEntry(entryId, fallbackText, `branch:${entryId}`) }}
 						/>
 					)}

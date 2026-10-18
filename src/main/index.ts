@@ -19,6 +19,7 @@ import { AutomationScheduler } from "./automation/AutomationScheduler";
 import { AutomationRunCoordinator } from "./automation/AutomationRunCoordinator";
 import { registerAutomationIpc } from "./ipc/automationIpc";
 import { registerFeishuIpc } from "./ipc/feishuIpc";
+import { registerWeChatIpc } from "./ipc/wechatIpc";
 import { applyLinuxDisplayBackendWorkaround, isUsingLinuxXWaylandWorkaround } from "./linuxDisplayBackend";
 import { readBootPreferences } from "./settings/SettingsStore";
 import { acquireVersionSingleInstance, type FocusPayload } from "./singleInstance";
@@ -45,7 +46,7 @@ import { readDataEnvDecision, validateStartupDataEnv, writeDataEnvDecision } fro
 import { registerDataEnvIpc } from "./ipc/dataEnvIpc";
 import { ChannelSwitchService } from "./update/ChannelSwitchService";
 import { registerChannelSwitchIpc } from "./ipc/channelSwitchIpc";
-import { isDevChannelBuild, resolveUpdateChannel } from "./update/channelIdentity";
+import { resolveUpdateChannel } from "./update/channelIdentity";
 import { APP_DEEP_LINK_SCHEME } from "./utils/deepLinkScheme";
 import { APP_DISPLAY_NAME, initializeAppBrand } from "./utils/appBrand";
 import { migrateDevUserData } from "./projects/devUserDataMigration";
@@ -222,6 +223,7 @@ process.on("unhandledRejection", (reason) => {
 	console.error("Unhandled rejection:", reason);
 });
 import { ipcChannels } from "../shared/ipc";
+import { collectLatestTurnFileChanges } from "../shared/fileChanges";
 import { mainProcessT, normalizeMainProcessLocale, type MainProcessLocale, type MainProcessTranslationKey } from "../shared/i18n/mainProcessCopy";
 import { buildSessionOriginKey, canonicalizeSessionPath, toAbsoluteSessionPath } from "../shared/sessionIdentity";
 import type {
@@ -298,13 +300,17 @@ import { mergeCatalogModels } from "./pi/catalogModelsForValidation";
 import { createSessionModelPreference } from "../shared/modelDisplayName";
 import { modelThinkingLevelOf } from "../shared/modelThinkingLevels";
 import { SessionCatalog, canAttachRuntimeMetadata } from "./sessions/SessionCatalog";
+import { waitForSessionRunEnd } from "./sessions/sessionRunWaiter";
 import { aggregateDshProxyMode, buildHostProxyEnvPatch, resolveDshHostProxyMode, resolveEffectiveSessionProxyMode } from "./sessions/sessionProxyPolicy";
 import { SessionRuntimeCoordinator, type SessionRuntimeBinding } from "./sessions/SessionRuntimeCoordinator";
+import { migrateMergedSessionPinnedIds } from "./sessions/sessionPinnedIdsMigration";
 import { IdleAgentReleaser } from "./sessions/IdleAgentReleaser";
 import { StaleDraftReaper } from "./sessions/StaleDraftReaper";
 import { SessionCommandIpcError } from "./sessions/SessionCommandIpcError";
 import { appendSessionForkSuffix } from "./sessions/sessionForkTitle";
+import { sanitizeAutomaticTitle } from "./sessions/sessionTitleSanitize";
 import { createSessionForkCommands } from "./sessions/sessionForkCommands";
+import { registerAllDomains } from "./api/domainAssembly";
 import { CodexSessionImporter } from "./sessions/CodexSessionImporter";
 import { ClaudeSessionImporter } from "./sessions/ClaudeSessionImporter";
 import { QoderSessionImporter } from "./sessions/QoderSessionImporter";
@@ -338,8 +344,12 @@ import { TelemetryService } from "./telemetry/TelemetryService";
 import { collectTelemetrySnapshot } from "./telemetry/telemetrySnapshot";
 import { PromptManager } from "./prompts/PromptManager";
 import { XuePromptManager } from "./prompts/XuePromptManager";
+import { XueIndexService } from "./prompts/XueIndexService";
+import { SessionIndexService } from "./sessions/SessionIndexService";
+import { XuePromptDbStore } from "./prompts/XuePromptDbStore";
 import { SkillManager } from "./skills/SkillManager";
 import { readSkillContent } from "./skills/readSkillContent";
+import { buildSkillInstallProxyEnv } from "./skills/skillHubInstallProxy";
 import { ExtensionManager } from "./extensions/ExtensionManager";
 import { BuiltInExtensionsUpdater } from "./extensions/builtInExtensionsUpdater";
 import { readEffectiveBuiltInExtensionsVersion, resolveBuiltInExtensionsDir, resolveBuiltInExtensionsOverlayDir, resolveVendorNodeModulesDir, type BuiltInExtensionPathRoots } from "./extensions/builtInExtensions";
@@ -419,6 +429,8 @@ import { getPiAiCatalogIndex, lookupPiAiCatalogEntry, setPiAiCatalogUserDataDir 
 import { PiAiCatalogUpdater } from "./pi/PiAiCatalogUpdater";
 import { fetchModelList, refreshModelCatalogIfStale, refreshModelList, getCachedModelList } from "./pi/modelListCache";
 import { registerFilesIpc } from "./ipc/filesIpc";
+import { FileIndexService } from "./files/FileIndexService";
+import { SessionStoreService } from "./sessions/SessionStoreService";
 import { registerClipboardIpc } from "./ipc/clipboardIpc";
 import { registerShellMenuIpc } from "./ipc/shellMenuIpc";
 import { QuickTaskWindowChrome } from "./quickTask/quickTaskWindowChrome";
@@ -443,6 +455,7 @@ import { feishuT, normalizeFeishuLocale, type FeishuLocale } from "./feishu/Feis
 import { wantsFeishuDoc } from "./feishu/docActions";
 import { resolveFeishuFileSendIntent } from "./feishu/fileIntent";
 import { listBots, getBot, addBot as addFeishuBot, removeBot as removeFeishuBot, updateBot as updateFeishuBot, getDecryptedBotAppSecret, getSessionBotId, setSessionBotId, setFeishuConfigDefaultBotName } from "./feishu/FeishuConfig";
+import { WeChatService } from "./wechat/WeChatService";
 import { startMemoryProfile, isMemoryProfileEnabled, type MemoryProfileHandle } from "./memory/MemoryMonitor";
 import { DiagnosticsMonitor } from "./diagnostics/DiagnosticsMonitor";
 import { EnvironmentDoctor } from "./health/EnvironmentDoctor";
@@ -473,6 +486,17 @@ let isQuitting = false;
 const rendererCrashGuard = createRendererCrashRecoveryGuard();
 let projectStore: ProjectStore;
 let fileSystemService: FileSystemService;
+/**
+ * 跨会话正文搜索的项目来源：当前环境可见的项目（WSL 项目不进——宿主 Go 进程读 UNC
+ * 不可靠，WSL 模式下 scanner 自身也会返回空根整体降级）。项目级 sessionDir 是不少
+ * 用户实际的会话落点，漏掉它就会出现「明明有这条消息却搜不到」。
+ */
+function projectPathsForContentSearch(): string[] {
+	return projectStore
+		.list()
+		.filter((project) => project.environment !== "wsl")
+		.map((project) => project.path);
+}
 let sessionScanner: SessionScanner;
 let sessionCatalog: SessionCatalog;
 let sessionRuntimeCoordinator: SessionRuntimeCoordinator;
@@ -534,6 +558,18 @@ let extensionManagerNativePackages: unknown[] | null = null;
 let configBackupManager: ConfigBackupManager | undefined;
 let promptManager: PromptManager;
 let xuePromptManager: XuePromptManager;
+/** 提示词库 Go sidecar 客户端（null = 未装配；进程生命周期与 app 一致）。 */
+let xueIndexService: XueIndexService | null = null;
+let sessionIndexService: SessionIndexService | null = null;
+/** 工作区文件索引 sidecar（Go file-index）：名字模糊检索 + 有界内容检索，缺失时回退 BFS。 */
+let fileIndexService: FileIndexService | null = null;
+/**
+ * 会话数据面 sidecar（Go session-store，Wave 1 骨架）：快照 + 行边界增量扫描。
+ * 暂无消费者（Wave 2 的窗口化读取会接进来），装配只做二进制定位与退出清理登记。
+ */
+let sessionStoreService: SessionStoreService | null = null;
+/** 提示词库 db 远程拉取/缓存服务；null = 未装配。 */
+let xuePromptDbStore: XuePromptDbStore | null = null;
 let skillManager: SkillManager;
 let extensionManager: ExtensionManager;
 /** 后台更新检查服务（启动延迟 + 2h 周期，无配额方案）；null = 未初始化。 */
@@ -567,6 +603,8 @@ let logBundleExporter: LogBundleExporter | null = null;
 // feishuBridge 是跨域共享可变单例：飞书 IPC（连接/重连/删除）、退出清理、setLocale、
 // 会话绑定查询都读写它；用 ref 对象而非裸 let，便于把飞书 IPC 域迁出本文件后共享同一槽位。
 const feishuBridgeRef: { current: FeishuBridge | null } = { current: null };
+// 微信桥接同样需要跨域共享（IPC 域 + 退出清理），用同一套 ref 槽位约定。
+const wechatServiceRef: { current: WeChatService | null } = { current: null };
 // 退出清理路径与 IPC 域共用同一槽位（见 ipc/feishuIpc.ts）。
 let usageStatsService: UsageStatsService | null = null;
 /**
@@ -586,6 +624,10 @@ const quitCleanup = new QuitCleanupRegistry();
 quitCleanup.register("feishu-bridge", () => {
 	feishuBridgeRef.current?.stop();
 	feishuBridgeRef.current = null;
+});
+quitCleanup.register("wechat-bridge", () => {
+	void wechatServiceRef.current?.stop();
+	wechatServiceRef.current = null;
 });
 
 // 窗口整体缩放快捷键（Ctrl/Cmd+= 放大、Ctrl/Cmd+- 缩小）：按 shared/zoom 档位应用并持久化。
@@ -700,6 +742,22 @@ async function runDshForeignSync(): Promise<{ imported: number; skipped: number 
 	return result;
 }
 
+/**
+ * 激活失败的 session 级合成 error 事件：激活失败时 binding 从未建立，manager 的
+ * 终态事件同样被丢弃——若不补发，渲染层会永远停在合成 starting 的加载态。
+ * 仅在失败后仍无活 runtime 时发（bind 后才失败的边缘路径不深究，真实事件已可路由）。
+ */
+function emitSessionActivationFailed(sessionId: string): void {
+	sendSessionRuntimeEnvelope({
+		kind: "event",
+		sessionId,
+		agentId: "",
+		runtimeGeneration: sessionRuntimeCoordinator.currentRuntimeGeneration(sessionId),
+		sourceChannel: ipcChannels.agentsState,
+		payload: { status: "error" },
+	});
+}
+
 function sendSessionRuntimeEnvelope(event: SessionRuntimeEvent): void {
 	const window = mainWindow;
 	if (window && !window.isDestroyed()) {
@@ -735,6 +793,16 @@ function emitAgentsNotice(payload: { message: string; i18nKey: string; i18nParam
 	sendSessionRuntimeEnvelope(event);
 }
 
+/**
+ * 会话运行时事件的模块内旁路监听（IM 桥接等宿主模块等回合收口用）。
+ *
+ * 为什么不做在 Coordinator 里：observeRuntimeEvent 是「路由」不是订阅中心
+ * （它只维护 agents:ui-request 待决表与自动化协调器），而这里的监听者要的是
+ * 同一条事件流上的旁路副本——挂在事件出口处最不容易漏，也天然覆盖
+ * 「compositeAgentGateway.onOutput 拆包后」的所有分支。
+ */
+const runtimeEventListeners = new Set<(event: SessionRuntimeEvent) => void>();
+
 function emitSessionRuntimeEvent(agentId: string, sourceChannel: string, payload: unknown): boolean {
 	const runtimeBinding = sessionRuntimeCoordinator.getRuntimeBinding(agentId);
 	if (!runtimeBinding) return false;
@@ -746,6 +814,14 @@ function emitSessionRuntimeEvent(agentId: string, sourceChannel: string, payload
 		sourceChannel,
 		payload,
 	};
+	for (const listener of runtimeEventListeners) {
+		// 监听者抛错不影响事件主链路（渲染层状态、自动化、会话落盘都在后面）。
+		try {
+			listener(event);
+		} catch (error) {
+			void appLogger.warn("session", "Runtime event listener failed", { agentId, sourceChannel, error: error instanceof Error ? error.message : String(error) });
+		}
+	}
 	sessionRuntimeCoordinator.observeRuntimeEvent(event);
 	automationRunCoordinator?.observeRuntimeEvent(event);
 	if (payload && typeof payload === "object" && !Array.isArray(payload)) {
@@ -955,18 +1031,54 @@ async function stopDshHostFromMonitor(): Promise<SessionCommandResult<undefined>
 	return { ok: true, value: undefined };
 }
 
+/**
+ * 全后端 runtime 查找（pi/DSH/ACP 统一）。
+ * composite 未装配时（启动极早期/测试沙箱）回退 pi 查找——回退只是兼容，别在回退上建新功能。
+ */
+function findRuntimeTab(agentId: string): AgentTab | undefined {
+	return compositeAgentGateway?.list().find((candidate) => candidate.id === agentId) ?? agentManager.list().find((candidate) => candidate.id === agentId);
+}
+
 function emitReplacementState(binding: SessionRuntimeBinding, includeMessages: boolean): void {
-	const tab = agentManager.list().find((candidate) => candidate.id === binding.agentId);
+	// 多后端查找：ACP/DSH 的 tab 不在 pi AgentManager 里。此前只查 agentManager，
+	// 查不到直接 return，导致换绑/重启后的状态+消息窗口重下发对 ACP/DSH 全部静默失效
+	//（渲染层停在旧 runtime 的窗口/live 身份，重启后编辑/删除/重发定位失败）。
+	// 2027-03 审计发现 B；`findRuntimeTab` 里保留了 composite 未装配时的 pi 回退。
+	const tab = findRuntimeTab(binding.agentId);
 	if (!tab) return;
 	emitSessionRuntimeEvent(binding.agentId, ipcChannels.agentsState, tab);
 	if (includeMessages) {
 		// 与 flush 同一窗口协议：只下发显示窗口段 + windowStart/totalLength/fileVersion，
-		// 渲染层合并逻辑一处生效（窗口前历史由 disk 轮次分页 prepend）
+		// 渲染层合并逻辑一处生效（窗口前历史由 disk 轮次分页 prepend）；
+		// ACP/DSH 无窗口实现时为全量（live 列表有界，协议兼容：无 windowStart = 全窗口）。
+		const messageWindow = compositeAgentGateway?.getMessageWindow(binding.agentId) ?? agentManager.getMessageWindow(binding.agentId);
 		emitSessionRuntimeEvent(binding.agentId, ipcChannels.agentsMessage, {
 			agentId: binding.agentId,
-			...agentManager.getMessageWindow(binding.agentId),
+			...messageWindow,
 		});
 	}
+}
+
+/**
+ * 激活窗口的 session 级合成 starting 事件（2027-03 审计发现 A）。
+ *
+ * 背景：emitSessionRuntimeEvent 依赖 binding 才转发，而 coordinator.activate 要等
+ * create+waitUntilReady 完成才 bind()——ACP 握手可达 ~8.5s，期间 manager 发的一切
+ * agents:state（含 starting）全部被丢弃，渲染层全程静默、恢复条停在静态提示。
+ * 激活开始时先发一条 session 级合成事件（agentId 占位、代数取 bind 前当前值，
+ * 能压住旧 runtime 的迟到事件），渲染层据 status="starting" 显示加载动画；
+ * 激活完成后由 emitReplacementState / 后续真实事件接管。与 emitAgentsNotice 同一
+ * 合成模式；不经过 observeRuntimeEvent/automation，避免合成状态驱动运行编排。
+ */
+function emitSessionActivating(sessionId: string): void {
+	sendSessionRuntimeEnvelope({
+		kind: "event",
+		sessionId,
+		agentId: "",
+		runtimeGeneration: sessionRuntimeCoordinator.currentRuntimeGeneration(sessionId),
+		sourceChannel: ipcChannels.agentsState,
+		payload: { status: "starting" },
+	});
 }
 
 async function readCatalogSessionReferenceMessages(sessionId: string) {
@@ -1254,7 +1366,7 @@ function cancelUnboundUiRequest(payload: unknown): void {
 	void agentManager.sendUIResponse(request.agentId, request.requestId, { cancelled: true });
 }
 
-const feishuSessionRuntimeBindings: SessionRuntimeBindingGateway = {
+const imSessionRuntimeBindings: SessionRuntimeBindingGateway = {
 	async ensureSession(input) {
 		if (input.existingSessionId) {
 			const existing = sessionCatalog.get(input.existingSessionId);
@@ -1270,24 +1382,41 @@ const feishuSessionRuntimeBindings: SessionRuntimeBindingGateway = {
 				source: "pi",
 				environment,
 				filePath: input.sessionPath,
+				// 已存在的会话文件：标题按权威名落库（有历史就不会再有自动命名），只透传渠道标志。
+				channel: input.channel,
 				wslDistro: environment === "wsl" ? settingsStore.get().wslDistro : undefined,
 				wslUser: environment === "wsl" ? settingsStore.get().wslUser : undefined,
 			});
 			return { sessionId: restored.id };
 		}
+		if (input.backend === "dsh" && dshRuntimeStatus.canCreateDshSession() !== true) {
+			// 与 sessions:create-anonymous 同一道门控：不可用后端建不出会话。
+			// 这里只抛机器可读错误码，通道文案由桥接词典决定（装配层不写用户文案）。
+			const error: Error & { code?: string } = new Error("DSH runtime is not available");
+			error.code = "dshUnavailable";
+			throw error;
+		}
 		const draft = await sessionCatalog.createDraft({
 			projectId: input.projectId,
 			title: input.title,
 			environment,
+			// 渠道后端（缺省 pi：保持与历史行为一致，undefined 与 pi 等价）。
+			backend: input.backend,
+			// source 是历史来源（pi JSONL 语系），后端才是引擎：新建渠道会话一律 source=pi，
+			// DSH 会话也一样（且不带 filePath——DSH 会话文件是 zstd，
+			// canAttachRuntimeMetadata 会拒绝，host id 由 Coordinator 回写）。
 			source: "pi",
-			titleOrigin: "manual",
+			channel: input.channel,
+			// 外部连接（微信等）要的是「像桌面会话一样自动命名」：不写 titleOrigin 即留一次
+			// 自动命名机会（见 createDraft 的 titleOrigin 说明），pi 侧命名扩展的模型标题随后领取。
+			...(input.autoTitle ? {} : { titleOrigin: "manual" as const }),
 		});
 		return { sessionId: draft.id };
 	},
 	async activateRuntime(sessionId) {
 		const activated = await sessionRuntimeCoordinator.activateRuntime(sessionId);
 		if (!activated.ok) throw sessionCommandIpcError(activated.error);
-		const tab = agentManager.list().find((candidate) => candidate.id === activated.value.agentId);
+		const tab = findRuntimeTab(activated.value.agentId);
 		if (!tab)
 			throw sessionCommandIpcError({
 				code: "SESSION_COMMAND_FAILED",
@@ -1379,6 +1508,29 @@ const feishuSessionRuntimeBindings: SessionRuntimeBindingGateway = {
 		const result = await sessionRuntimeCoordinator.abortRuntime(target);
 		if (!result.ok) throw sessionCommandIpcError(result.error);
 	},
+	findRuntimeAgent(agentId) {
+		return findRuntimeTab(agentId);
+	},
+	getRuntimeMessages(sessionId) {
+		// 无 runtime（草稿/已释放）按空时间线处理：调用方用它取本轮起点，空数组是安全缺省。
+		return sessionRuntimeCoordinator.getRuntimeMessages(sessionId)?.value ?? [];
+	},
+	waitForRunEnd(input) {
+		// 监听在提交 prompt 之前同步注册（waitForSessionRunEnd 的第一件事就是 subscribe），
+		// 终态契约见 sessions/sessionRunWaiter.ts。
+		return waitForSessionRunEnd(
+			{
+				subscribe: (listener) => {
+					runtimeEventListeners.add(listener);
+					return () => {
+						runtimeEventListeners.delete(listener);
+					};
+				},
+				getMessages: (id) => sessionRuntimeCoordinator.getRuntimeMessages(id)?.value ?? [],
+			},
+			input,
+		);
+	},
 	async listRuntimeModels(sessionId) {
 		const target = sessionRuntimeCoordinator.getTarget(sessionId);
 		if (!target) throw sessionCommandIpcError({ code: "SESSION_RUNTIME_UNAVAILABLE" });
@@ -1397,6 +1549,12 @@ const feishuSessionRuntimeBindings: SessionRuntimeBindingGateway = {
 		const target = sessionRuntimeCoordinator.getTarget(sessionId);
 		if (!target) throw sessionCommandIpcError({ code: "SESSION_RUNTIME_UNAVAILABLE" });
 		const result = await sessionRuntimeCoordinator.setRuntimeModel(target, provider, modelId);
+		if (!result.ok) throw sessionCommandIpcError(result.error);
+	},
+	async setRuntimeThinking(sessionId, level) {
+		const target = sessionRuntimeCoordinator.getTarget(sessionId);
+		if (!target) throw sessionCommandIpcError({ code: "SESSION_RUNTIME_UNAVAILABLE" });
+		const result = await sessionRuntimeCoordinator.setRuntimeThinking(target, level);
 		if (!result.ok) throw sessionCommandIpcError(result.error);
 	},
 	// ask/confirm 等扩展 UI 请求的答案回写：agentId 是 runtime id，直接走 AgentManager（与桌面端弹窗同链路）。
@@ -1933,6 +2091,13 @@ function configureBrowserPanelWebviewHost(window: BrowserWindow): void {
 				window.webContents.send(ipcChannels.appShortcutTriggered, "cycleSessionTabsReverse");
 				return;
 			}
+			// Cmd/Ctrl+W 关闭当前会话标签页：目标会话与「回答中先弹确认」由渲染层判定，主进程只命中广播。
+			if (isShortcutInput("closeSessionTab", input)) {
+				event.preventDefault();
+				if (!window || window.isDestroyed()) return;
+				window.webContents.send(ipcChannels.appShortcutTriggered, "closeSessionTab");
+				return;
+			}
 			if (!isShortcutInput("toggleDevTools", input)) return;
 			event.preventDefault();
 			toggleMainWindowDevTools(window);
@@ -2143,7 +2308,12 @@ async function createWindow() {
 	});
 	mainWindow.webContents.on("console-message", (event) => {
 		if (!["warning", "error"].includes(event.level)) return;
-		void appLogger.warn("app", "Main window renderer console error", {
+		// 渲染层 console 镜像只作排查线索，不参与健康统计：这里聚集的是第三方/框架的原始输出
+		// （KaTeX strict 警告、React 开发期提示等，实测 40k+ 行/天），按 error/warn 记会让
+		// EnvironmentDoctor 的「最近 7 天报错 / 警告明细」被噪音填满。降一档：error → warn、
+		// warning → info（仍按天写进日志文件，可检索）。真正的渲染层故障由 main.tsx 的
+		// rendererLog 显式上报（uncaught error / unhandled rejection），那条链路仍是 error。
+		void appLogger.log(event.level === "error" ? "warn" : "info", "app", "Main window renderer console error", {
 			level: event.level,
 			message: event.message,
 			line: event.lineNumber,
@@ -2210,6 +2380,13 @@ async function createWindow() {
 			mainWindow.webContents.send(ipcChannels.appShortcutTriggered, "openSearch");
 			return;
 		}
+		// 会话内查找：与 openSearch（跨会话）分开，默认 Ctrl/Cmd+Shift+F；由聚焦的会话栏
+		// 自己响应（分屏时只作用于用户正在看的那一栏），主进程不持有会话上下文。
+		if (isShortcutInput("findInSession", input)) {
+			event.preventDefault();
+			mainWindow.webContents.send(ipcChannels.appShortcutTriggered, "findInSession");
+			return;
+		}
 		if (isShortcutInput("openCommandPalette", input)) {
 			event.preventDefault();
 			mainWindow.webContents.send(ipcChannels.appShortcutTriggered, "openCommandPalette");
@@ -2252,6 +2429,13 @@ async function createWindow() {
 		if (isShortcutInput("cycleSessionTabsReverse", input)) {
 			event.preventDefault();
 			mainWindow.webContents.send(ipcChannels.appShortcutTriggered, "cycleSessionTabsReverse");
+			return;
+		}
+		// Cmd/Ctrl+W 关闭当前会话标签页：与 Ctrl+Tab 同链路；「回答中先弹确认、确认后停止并关闭」
+		// 由渲染层判定（main 不持有会话上下文）。
+		if (isShortcutInput("closeSessionTab", input)) {
+			event.preventDefault();
+			mainWindow.webContents.send(ipcChannels.appShortcutTriggered, "closeSessionTab");
 			return;
 		}
 		if (isShortcutInput("toggleDevTools", input)) {
@@ -2574,8 +2758,6 @@ function registerIpc() {
 	// quitApp 先置 isQuitting，与托盘「退出」菜单同一写法，避免 closeToTray 把退出吞成隐藏到托盘。
 	registerAcpIpc({
 		settingsStore,
-		// ACP 仅供开发构建（未打包 dev / dev 通道包）：stable 隐藏全部入口，工具域 IPC 拒绝。
-		isDevChannel: () => isDevChannelBuild(),
 		// 会话级配置桥惰性取 manager:注册时(此处)尚未实例化(4786 行 opt-in 段),
 		// 与生命周期依赖同一条惰性模式。
 		getSessionManager: () => acpAgentManager,
@@ -3061,6 +3243,8 @@ function registerIpc() {
 		getMainWindow: () => mainWindow,
 		emitSessionRuntimeEvent,
 		emitSessionRuntimeDetach,
+		emitSessionActivating,
+		emitSessionActivationFailed,
 		createAnonymousSession,
 		stopSessionRuntime,
 		emitReplacementState,
@@ -3077,6 +3261,42 @@ function registerIpc() {
 		validationCatalogModels,
 		// fork/clone 统一命令层：重发/编辑 fork 化（mutationFork/branchMode）与 Web HTTP 同源
 		sessionForkCommands,
+		// 跨会话正文搜索适配闭包：roots 解析（全局根 + 全局 settings sessionDir + 各项目
+		// 项目级 sessionDir）+ sidecar 调用；搜索前先增量 refresh（stat 全目录毫秒级）保证
+		// 新会话可搜；任何失败返回 null，渲染层回退标题过滤，搜索入口永不报错。未就绪
+		// （冷启动首建索引/预热中）直接降级，不把渲染层请求挂到 boot 结束（首建可达数十秒）；
+		// refresh 失败但进程仍活着时继续用现有索引搜一次（transient 失败不该让本次搜索静默无内容）。
+		sessionContentSearch: async (query) => {
+			if (!sessionIndexService) return null;
+			const roots = await sessionScanner.resolveContentSearchRoots(projectPathsForContentSearch());
+			if (roots.length === 0) return null;
+			if (!sessionIndexService.isReady(roots)) {
+				// 本次降级标题过滤，但后台必须有人建索引：首次安装/roots 刚变更时
+				// 没有别处会预热，否则内容搜索会一直空着（就绪后下一次输入自然生效）
+				sessionIndexService.warmup(roots);
+				return null;
+			}
+			const refreshed = await sessionIndexService.refresh(roots);
+			if (!refreshed.ok && !sessionIndexService.isReady(roots)) return null;
+			const result = await sessionIndexService.search(roots, query);
+			return result.ok ? result.value : null;
+		},
+		// 会话内查找（Ctrl+Shift+F / 会话头部放大镜）：只扫一个会话文件、命中按时间线
+		// 返回。就绪判定与降级策略与跨会话搜索一致——未就绪先 warmup 再回 null，渲染层
+		// 显示「索引准备中」，绝不让输入框等 boot。
+		sessionMessageSearch: async (sessionPath, query) => {
+			if (!sessionIndexService) return null;
+			const roots = await sessionScanner.resolveContentSearchRoots(projectPathsForContentSearch());
+			if (roots.length === 0) return null;
+			if (!sessionIndexService.isReady(roots)) {
+				sessionIndexService.warmup(roots);
+				return null;
+			}
+			const refreshed = await sessionIndexService.refresh(roots);
+			if (!refreshed.ok && !sessionIndexService.isReady(roots)) return null;
+			const result = await sessionIndexService.searchInSession(roots, sessionPath, query);
+			return result.ok ? result.value : null;
+		},
 		// C1：DSH 后端专用 IPC 依赖按后端分组（注册表化铺路；未来新增后端各自提供一份）
 		dshBackend: {
 			listDshModels: () => dshHost.listModels(),
@@ -3262,6 +3482,12 @@ function registerIpc() {
 		// 内部已吞错记日志，此处再兜一层同步异常，失败绝不会影响启动与 catalog 预热。
 		try {
 			void extensionManager?.warmPiVersionProbe();
+			// 扩展列表预热：把首次 `pi list` 子进程与磁盘扫描移出用户打开扩展页的关键路径。
+			// 与版本探测一样尽力而为（失败只记日志，不影响启动）；列表缓存自身的 in-flight
+			// 去重保证用户随后真正发起的 extensions:list 不会重复起进程。
+			void extensionManager?.list(false).catch((error) => {
+				void appLogger.warn("extension", "extension list prewarm failed", { error: error instanceof Error ? error.message : String(error) });
+			});
 		} catch (error) {
 			void appLogger.warn("extension", "pi version prewarm failed", { error: error instanceof Error ? error.message : String(error) });
 		}
@@ -3590,6 +3816,28 @@ function registerIpc() {
 			}
 			return projectRoot;
 		},
+		// 商店搜索必须走 Electron net（跟随桌面代理/系统代理）；裸 fetch 在需要代理的网络上会挂到超时。
+		netFetch: (url, init) => net.fetch(url, init),
+		resolveInstallProxyEnv: async () => {
+			const settings = settingsStore.get();
+			const desktop = { enabled: settings.desktopProxyEnabled, url: settings.desktopProxyUrl, bypass: settings.desktopProxyBypass };
+			// 与 DesktopProxy 同一套语义：开关关闭/地址非法 = 交还系统，因此这里解析系统代理补上。
+			// 解决 git clone（安装链路的关键步骤）不认 Chromium 代理的问题。
+			let systemRules: string | null = null;
+			if (!desktop.enabled || !desktop.url.trim()) {
+				try {
+					systemRules = await session.defaultSession.resolveProxy("https://github.com");
+				} catch (error) {
+					// 解析失败不阻断安装：无 PAC/直连环境本就没有代理可注入，返回 undefined 即可
+					void appLogger.warn("skill-hub", "Resolve system proxy failed", { error: error instanceof Error ? error.message : String(error) });
+				}
+			}
+			return buildSkillInstallProxyEnv(desktop, systemRules);
+		},
+		sendSkillHubInstallProgress: (progress) => {
+			if (!mainWindow || mainWindow.isDestroyed()) return;
+			mainWindow.webContents.send(ipcChannels.skillHubInstallProgress, progress);
+		},
 		appLogger,
 		mainCopy: mainCopy as (key: string, params?: Record<string, string | number>) => string,
 	});
@@ -3628,6 +3876,8 @@ function registerIpc() {
 		fileSystemService,
 		projectStore,
 		settingsStore,
+		// 文件索引 sidecar 在下方 sidecar 装配区创建，这里用 getter 取（注册时序不受影响）
+		getFileIndexService: () => fileIndexService,
 		appLogger,
 		getMainWindow: () => mainWindow,
 		openExternalUrl,
@@ -3938,11 +4188,131 @@ app
 		});
 		registerContentStoreIpc(promptStoreUpdater, PROMPTS_STORE_CHANNELS);
 		registerContentStoreIpc(skillStoreUpdater, SKILLS_STORE_CHANNELS);
+		// 提示词库双通道装配：db 远程拉取（安装包不内置 db，首次使用从 Release 资产下载缓存）
+		// + Go sidecar 检索（常驻内存，中文搜索可用；缺失/失败自动降级 sql.js，商店始终可用）。
+		xuePromptDbStore = new XuePromptDbStore({
+			userDataDir: app.getPath("userData"),
+			repoResourceDir: () => (app.isPackaged ? null : join(app.getAppPath(), "resources")),
+			log: (domain, message, details) => void appLogger.info(domain, message, details),
+			onStateChange: (state) => {
+				// 推送前判 isDestroyed（窗口销毁后 send 会抛）；下载完成/失败时渲染层据此刷新空态
+				const win = mainWindow;
+				if (win && !win.isDestroyed()) win.webContents.send(ipcChannels.yaoPromptsDbState, state);
+			},
+		});
+		xueIndexService = new XueIndexService({
+			resolveBinaryPath: () => {
+				// 打包后：resourcesPath/xue-index/xue-index(.exe)（extraResources）；
+				// dev：仓库构建产物 resources/xue-index/bin/（scripts/dev.js 自动 fail-open 构建）
+				const dir = app.isPackaged ? join(process.resourcesPath, "xue-index") : join(app.getAppPath(), "resources", "xue-index", "bin");
+				const name = process.platform === "win32" ? "xue-index.exe" : "xue-index";
+				const path = join(dir, name);
+				return existsSync(path) ? path : null;
+			},
+			logger: {
+				debug: (m) => appLogger.debug("xue-index", m),
+				info: (m) => void appLogger.info("xue-index", m),
+				warn: (m) => void appLogger.warn("xue-index", m),
+				error: (m) => void appLogger.error("xue-index", m),
+			},
+		});
 		xuePromptManager = new XuePromptManager(
 			undefined,
 			// 官方模板覆盖层叠加：热更新后商店列表/详情立即显示覆盖层版本
 			() => promptStoreUpdater.resolveEffectiveOverlayDir(),
+			{ dbStore: xuePromptDbStore, xueIndex: xueIndexService },
 		);
+		// 退出清理：结算在途请求并停掉 sidecar，避免退出阶段仍拉起进程
+		quitCleanup.register("xue-index", () => {
+			xueIndexService?.dispose();
+			xueIndexService = null;
+			xuePromptDbStore?.dispose();
+			xuePromptDbStore = null;
+		});
+		// 跨会话正文搜索 sidecar（Go session-index）：预提取正文语料+分片扫描，
+		// 补齐「全部历史会话正文搜词」能力；缺失/失败自动降级侧栏标题过滤。
+		// 语料落 <userData>/session-index/（与设置/缓存同生命周期，卸载重装可重建）。
+		sessionIndexService = new SessionIndexService({
+			corpusDir: join(app.getPath("userData"), "session-index"),
+			resolveBinaryPath: () => {
+				// 打包后：resourcesPath/session-index/session-index(.exe)（extraResources）；
+				// dev：仓库构建产物 resources/session-index/bin/（build 链自动 fail-open 构建）
+				const dir = app.isPackaged ? join(process.resourcesPath, "session-index") : join(app.getAppPath(), "resources", "session-index", "bin");
+				const name = process.platform === "win32" ? "session-index.exe" : "session-index";
+				const path = join(dir, name);
+				return existsSync(path) ? path : null;
+			},
+			logger: {
+				debug: (m) => appLogger.debug("session-index", m),
+				info: (m) => void appLogger.info("session-index", m),
+				warn: (m) => void appLogger.warn("session-index", m),
+				error: (m) => void appLogger.error("session-index", m),
+			},
+		});
+		quitCleanup.register("session-index", () => {
+			sessionIndexService?.dispose();
+			sessionIndexService = null;
+		});
+		// 工作区文件索引 sidecar（Go file-index）：名字检索从实时 BFS 扫盘换成内存索引打分，
+		// 并补上文件内容检索；索引在内存里不落盘（进程重启重建由 Go 侧毫秒级完成），
+		// 缺失/失败/超时自动回退现有 BFS（fail-open）。
+		fileIndexService = new FileIndexService({
+			resolveBinaryPath: () => {
+				// 打包后：resourcesPath/file-index/file-index(.exe)（extraResources）；
+				// dev：仓库构建产物 resources/file-index/bin/（build 链自动 fail-open 构建）
+				const dir = app.isPackaged ? join(process.resourcesPath, "file-index") : join(app.getAppPath(), "resources", "file-index", "bin");
+				const name = process.platform === "win32" ? "file-index.exe" : "file-index";
+				const path = join(dir, name);
+				return existsSync(path) ? path : null;
+			},
+			logger: {
+				debug: (m) => appLogger.debug("file-index", m),
+				info: (m) => void appLogger.info("file-index", m),
+				warn: (m) => void appLogger.warn("file-index", m),
+				error: (m) => void appLogger.error("file-index", m),
+			},
+		});
+		quitCleanup.register("file-index", () => {
+			fileIndexService?.dispose();
+			fileIndexService = null;
+		});
+		// 会话数据面 sidecar（Go session-store）：快照持久化 + 行边界增量扫描，Wave 2 起提供行级
+		// 条目表（get-index）。收益门禁未过（见计划 §8.10），默认不预热、由开关控制。
+		sessionStoreService = new SessionStoreService({
+			statePath: join(app.getPath("userData"), "session-store", "state.bin"),
+			// Wave 2b：条目表落盘（重启后首次打开大会话直接读表，不再重扫源文件）。
+			tablesDir: join(app.getPath("userData"), "session-store", "tables"),
+			resolveBinaryPath: () => {
+				// dev：仓库构建产物 resources/session-store/bin/（build 链自动 fail-open 构建）；
+				// 打包后需补 extraResources 才会命中 resourcesPath 分支（Wave 2 接线时加）。
+				const dir = app.isPackaged ? join(process.resourcesPath, "session-store") : join(app.getAppPath(), "resources", "session-store", "bin");
+				const name = process.platform === "win32" ? "session-store.exe" : "session-store";
+				const path = join(dir, name);
+				return existsSync(path) ? path : null;
+			},
+			logger: {
+				debug: (m) => appLogger.debug("session-store", m),
+				info: (m) => void appLogger.info("session-store", m),
+				warn: (m) => void appLogger.warn("session-store", m),
+				error: (m) => void appLogger.error("session-store", m),
+			},
+		});
+		quitCleanup.register("session-store", () => {
+			sessionStoreService?.dispose();
+			sessionStoreService = null;
+		});
+		// Wave 2 读取路径默认关（收益门禁未过，见 docs/session-data-plane-plan.md §8.10）。
+		// 开关打开时才预热：读者侧只在 sidecar 已就绪时问，不预热的话这条路径永远不会生效；
+		// 预热本身只拉进程 + 载入快照（毫秒级），真正的条目解析由 get-index 触发。
+		if (settingsStore.get().sessionStoreEnabled) sessionStoreService.warmup();
+		// 后台预热：首次全量建索引可达十余秒，启动后稍等即预热，避免用户首搜撞上
+		// 冷启动（预热失败静默——运行时搜索会再试）
+		setTimeout(() => {
+			void sessionScanner
+				.resolveContentSearchRoots(projectPathsForContentSearch())
+				.then((roots) => sessionIndexService?.warmup(roots))
+				.catch(() => {});
+		}, 5_000);
 		skillManager = new SkillManager(undefined, mainCopy);
 		// 内置技能覆盖层叠加：安装内置技能模板时覆盖层优先（修 bug/新增技能免发版）
 		skillManager.configureSkillOverlay(() => skillStoreUpdater.resolveEffectiveOverlayDir());
@@ -4180,6 +4550,18 @@ app
 		);
 		// C12：退出清理登记（before-quit 统一 runAll，新增资源不再改 before-quit）
 		quitCleanup.register("pi-agents", () => agentManager?.stopAll());
+
+		// Wave 2 + 2b：把 session-store 条目表接进会话历史读取（TS 缓存未命中时优先问 Go）。
+		// 条目表落盘后重启首次打开大会话 14–20ms（TS 冷建表 99–188ms，见计划 §8.11），故默认开启；
+		// settings.sessionStoreEnabled 置 false 即回退纯 TS 解析（紧急开关，无 UI）。
+		// 只在 sidecar **已就绪**时问：未就绪宁可走 TS 解析，也不让「打开会话」卡在冷扫上。
+		agentManager.setSessionStoreIndexReader(async (hostPath) => {
+			if (!settingsStore.get().sessionStoreEnabled) return null;
+			const service = sessionStoreService;
+			if (!service || !service.isReady()) return null;
+			const result = await service.getIndex(hostPath);
+			return result.ok ? result.value : null;
+		});
 
 		// 悬浮球控制器：主窗口隐藏后常驻屏幕角落的小圆点，点击展开 mini 浮窗/紧凑模式。
 		// 延迟到 agentManager 就绪后创建，因为依赖 addStateListener 订阅运行状态。
@@ -4506,6 +4888,15 @@ app
 			subscribePiEvents: (handler) => agentManager.addLocalEventListener((agentId, event) => handler(agentId, event as never)),
 			// agentId → sessionId 路由：pi 事件只有 agentId，SSE 连接按 session 订阅。
 			getSessionIdForAgent: (agentId) => sessionRuntimeCoordinator.getSessionId(agentId),
+			// 非 pi 后端（DSH）的通道事件：正文/思考/工具卡不在 pi 事件流里。只订 DSH 网关，
+			// 不能订 compositeAgentGateway（它把 pi 的 agents:text-stream 一并转发，会与上面
+			// 的 pi 事件源重复推帧）。agents:state 是数组无 agentId，天然被过滤。
+			subscribeAgentChannelEvents: (handler) =>
+				dshAgentManager.onOutput((channel, payload) => {
+					const agentId = payload && typeof payload === "object" && "agentId" in payload ? (payload as { agentId?: unknown }).agentId : undefined;
+					if (typeof agentId !== "string") return;
+					handler(agentId, channel, payload);
+				}),
 			listProjects: () => projectStore.list(),
 			createProject: (path) => projectStore.add(path, undefined, settingsStore.get().wslEnabled ? "wsl" : "windows"),
 			deleteProject: async (projectId) => {
@@ -4596,6 +4987,10 @@ app
 				if (!entry) return false;
 				// Web 删除与桌面 IPC 同一策略：先解绑再删 catalog，agent 后台停。
 				await sessionRuntimeCoordinator.releaseRuntimeForDelete(sessionId);
+				// 微信桥的绑定指向已删会话时必须一起清掉：留着它下次收信会拿旧 sessionPath
+				// 去恢复一个刚被删掉的文件，聊天就永久卡在「会话创建失败」。
+				// （飞书侧同样存在这个悬挂，但那是既存行为，不在微信通道的改动范围内。）
+				wechatServiceRef.current?.removeBindingsForSession(sessionId);
 				if (entry.filePath) await sessionScanner.delete(entry.filePath);
 				// DSH 没有 session.delete：与 pi 端同语义删除——把 host 会话目录移入系统回收站
 				// （可恢复；trashPath 失败时抛错由 IPC 呈现，拒绝静默硬删；目录已不在=幂等成功）。
@@ -4697,6 +5092,8 @@ app
 			// 会话活动监控（第二批 strips）：与桌面 sessionIpc.ts 同源同闸门
 			listSessionFileChanges: (sessionId) => {
 				const entry = sessionCatalog.get(sessionId);
+				// ACP 分支与桌面 sessionIpc 同源（审计发现 I）：运行时投影内存聚合，无读盘
+				if (entry?.backend === "acp") return Promise.resolve(collectLatestTurnFileChanges(acpAgentManager.readMessagesByAcpSessionId(entry.acpSessionId ?? "")));
 				// DSH/生图会话无 pi 会话文件，文件汇总无意义
 				if (!entry?.filePath || entry.backend === "dsh" || entry.backend === "imagegen") return Promise.resolve([]);
 				return agentManager.readSessionFileChanges(entry.filePath);
@@ -4855,6 +5252,15 @@ app
 		automationStore = new AutomationStore(join(app.getPath("userData"), "automation.json"));
 		const automationStorePreload = automationStore.load();
 		await Promise.all([sessionCatalog.load(), automationStorePreload]);
+		// #354：身份归并会把被吸收的历史会话 ID 从 catalog 移除，而侧栏置顶按稳定 ID 存在
+		// settings.json 里，不迁移就是死链（用户看到置顶丢失）。必须在本行完成——它早于
+		// createWindow，渲染层首次 settings.get 拿到的就是迁移后的值。
+		await migrateMergedSessionPinnedIds({
+			listCatalogSessions: () => sessionCatalog.listEntries(),
+			readPinnedSessionIds: () => settingsStore.get().pinnedSessionIds,
+			writePinnedSessionIds: (ids) => settingsStore.update({ pinnedSessionIds: ids }),
+			logWarning: (cause) => void appLogger.warn("session-catalog", "Merged session id migration for pinned sessions failed", { cause }),
+		});
 
 		// ── 旧禁用记录 → pi 原生配置迁移（计划 A3/A5）──
 		// 启动期一次性执行：旧列表一旦被清理，原生过滤就是唯一生效来源。
@@ -5015,9 +5421,8 @@ app
 		ensurePiResourceMigration = ensureResourceMigration;
 		agentManager.configureResourceMigrationGate(ensureResourceMigration);
 		// 多后端网关装配：pi + dsh + acp（DSH 在窗口创建后后台预热，失败时按需重试）。
-		// ACP 是 opt-in（settings.acpEnabled，默认 false）且仅限开发构建（未打包 dev 或 dev 通道包，
-		// isDevChannelBuild）：网关常驻注册，但开关与通道都是运行时读的（deps.isEnabled），
-		// 任一不满足时 create 直接拒绝——既保证「stable 渠道/stable 构建不 spawn 任何 ACP CLI」，
+		// ACP 是 opt-in（settings.acpEnabled，默认 false）：网关常驻注册，开关是运行时读的（deps.isEnabled），
+		// 关闭时 create 直接拒绝——保证「未开启的构建不 spawn 任何 ACP CLI」，
 		// 又让设置页开关立即生效（不必重启）。
 		// 不按启动时的开关决定是否注册：合成器的事件订阅（onOutput）与能力并集在启动时一次成形，
 		// 启动后才补注册的网关收不到事件转发，ACP 时间线会静默无输出；
@@ -5027,7 +5432,7 @@ app
 			piLocator,
 			getProject: (projectId) => projectStore.get(projectId),
 			getTools: () => settingsStore.get().acpTools ?? [],
-			isEnabled: () => settingsStore.get().acpEnabled === true && isDevChannelBuild(),
+			isEnabled: () => settingsStore.get().acpEnabled === true,
 			// configOptions 变更推送：set_config_option 响应/config_option_update 通知都走同一事件,
 			// 渲染层按 agentId 隔离(旧 agent 迟到事件写旧 atom,不再被读)。
 			onConfigOptionsChanged: (tab, options) => {
@@ -5042,11 +5447,15 @@ app
 			onTitleChanged: (deckSessionId, title) => {
 				const entry = sessionCatalog?.get(deckSessionId);
 				if (!entry || entry.title === title) return;
+				// session_info_update.title 是 agent 侧命名而非用户手动：走 applyAgentTitle
+				// （同源 last-wins、不覆盖用户改名、拒收标记脏名）。此前直接 update() 会把 CLI
+				// 标题锁成 manual 终态，用户改名在下一个回合就被 CLI 拉回。
 				void sessionCatalog
-					.update(entry.id, { title })
-					.then(() => {
+					.applyAgentTitle(deckSessionId, title)
+					.then((applied) => {
+						if (!applied) return;
 						if (mainWindow && !mainWindow.isDestroyed()) {
-							mainWindow.webContents.send(ipcChannels.sessionsCatalogRefreshed, { projectId: entry.projectId });
+							mainWindow.webContents.send(ipcChannels.sessionsCatalogRefreshed, { projectId: applied.projectId });
 						}
 					})
 					.catch((error: unknown) => {
@@ -5163,9 +5572,13 @@ app
 		// 始终是侧栏和 Tab 的显示标题权威。
 		// source 决定所有权（#266）：扩展模型标题 "auto" 可升级首条消息的 "fallback"；
 		// 反向不可（迟到的首条消息不得压住已生成的模型标题）。
-		agentManager.setAutomaticTitleChangedHandler((agentId, title, source) => {
+		agentManager.setAutomaticTitleChangedHandler((agentId, rawTitle, source) => {
 			const sessionId = sessionRuntimeCoordinator?.getSessionId(agentId);
 			if (!sessionId) return;
+			// 外部连接的通道指令随首条消息写进会话文件，pi 侧命名扩展读到的是带指令的原文：
+			// 标题是另一个出口，这里再剥一次，避免侧栏变成整段指令（2026-10 微信现场）。
+			const title = sanitizeAutomaticTitle(rawTitle);
+			if (!title) return;
 			const entry = sessionCatalog.get(sessionId);
 			// 文本相同仍可能是「fallback → auto」的所有权升级（扩展标题与首条消息恰好一致）：
 			// 只有来源已确认且非 fallback 时才是真正的 no-op。
@@ -5256,14 +5669,39 @@ app
 				void appLogger?.warn("app", "GUI bridge endpoint startup failed", error);
 			});
 		registerIpc();
+		// 统一接口聚合层：注册全部域与导入器并冻结（deps 缺省在 domainAssembly.ts 收集，FIND-5）
+		registerAllDomains();
 		registerFeishuIpc({
 			getMainWindow: () => mainWindow,
 			feishuBridgeRef,
 			agentManager,
 			projectStore,
 			sessionRuntimeCoordinator,
-			feishuSessionRuntimeBindings,
+			feishuSessionRuntimeBindings: imSessionRuntimeBindings,
 			getCurrentLocale: currentFeishuLocale,
+		});
+		// 微信 iLink 桥接：与飞书同构，但登录方式是扫码，且必须等界面就绪才能展示二维码。
+		// 服务在这里建好并登记退出清理；启用状态下的实际连接由 start() 发起（fire-and-forget，
+		// 失败只进日志/状态，不得阻断启动）。
+		const wechatService = new WeChatService({
+			getProjects: () => projectStore.list().map((project) => ({ id: project.id, name: project.name })),
+			runtimeBindings: imSessionRuntimeBindings,
+			getLocale: currentMainProcessLocale,
+			getWindow: () => mainWindow,
+			botAgent: `PiDeck/${app.getVersion()}`,
+			logger: (level, message, detail) => {
+				if (level === "warn" || level === "error") void appLogger?.warn("wechat", message, detail);
+				else void appLogger?.info("wechat", message, detail);
+			},
+		});
+		wechatServiceRef.current = wechatService;
+		registerWeChatIpc({
+			getMainWindow: () => mainWindow,
+			wechatService,
+			getProjects: () => projectStore.list().map((project) => ({ id: project.id, name: project.name })),
+		});
+		void wechatService.start().catch((error: unknown) => {
+			void appLogger?.warn("wechat", "WeChat bridge autostart failed", error);
 		});
 		// 配置备份（手动模式）：仅在备份目录为空（首次使用）时自动建一份 first-run，
 		// 之后不再自动备份。同步快，不挡首帧；失败仅记录，不阻断启动。

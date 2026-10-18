@@ -16,29 +16,35 @@ import vm from "node:vm";
 
 // ── 服务端源码契约 ──
 
+// 响应工具已迁出到 WebHttpResponders；契约分别落在「工具实现」与「manager 统一 catch 映射」两侧。
+const respondersSource = readFileSync("src/main/web/WebHttpResponders.ts", "utf8");
+const managerSource = readFileSync("src/main/web/WebServiceManager.ts", "utf8");
+const pageTemplateSource = readFileSync("src/main/web/webPageTemplate.ts", "utf8");
+const staticAssetsSource = readFileSync("src/main/web/WebStaticAssets.ts", "utf8");
+
 test("sendError guards against headersSent (streaming routes already wrote head)", () => {
-	const source = readFileSync("src/main/web/WebServiceManager.ts", "utf8");
-	assert.match(source, /if \(response\.headersSent\)/, "sendError must check headersSent before writeHead");
+	assert.match(respondersSource, /if \(response\.headersSent\)/, "sendError must check headersSent before writeHead");
 });
 
 test("invalid JSON body maps to 400 via WebInvalidJsonError sentinel", () => {
-	const source = readFileSync("src/main/web/WebServiceManager.ts", "utf8");
-	assert.match(source, /class WebInvalidJsonError extends Error/, "sentinel class must exist");
-	assert.match(source, /throw new WebInvalidJsonError\(\)/, "readJson must throw sentinel on parse failure");
-	assert.match(source, /error instanceof WebInvalidJsonError/, "unified catch must map the sentinel");
-	assert.match(source, /webError\.invalidJson/, "mapped to the 400 error code");
+	assert.match(respondersSource, /class WebInvalidJsonError extends Error/, "sentinel class must exist");
+	assert.match(respondersSource, /throw new WebInvalidJsonError\(\)/, "readJson must throw sentinel on parse failure");
+	assert.match(managerSource, /error instanceof WebInvalidJsonError/, "unified catch must map the sentinel");
+	assert.match(managerSource, /webError\.invalidJson/, "mapped to the 400 error code");
 	// JSON.parse 必须被 try/catch 包住（哨兵在 catch 里抛出）
-	assert.match(source, /try \{\s*\r?\n\s*return JSON\.parse\(Buffer\.concat\(chunks\)/);
+	assert.match(respondersSource, /try \{\s*\r?\n\s*return JSON\.parse\(Buffer\.concat\(chunks\)/);
 });
 
 test("serveRenderer prefix check enforces path-separator boundary", () => {
-	const source = readFileSync("src/main/web/WebServiceManager.ts", "utf8");
+	// 静态产物出口已迁到 WebStaticAssets（Wave 2）。
+	const source = staticAssetsSource;
 	assert.match(source, /rendererRootPrefix = normalize\(this\.rendererRoot\) \+ sep/, "prefix must end with path separator");
 	assert.match(source, /startsWith\(rendererRootPrefix\)/, "startsWith must use the bounded prefix");
 });
 
 test("legacy embedded page escapes data-* attribute interpolations", () => {
-	const source = readFileSync("src/main/web/WebServiceManager.ts", "utf8");
+	// A1 兜底页模板已迁到 webPageTemplate.ts（Wave 1）。
+	const source = pageTemplateSource;
 	// 源码是模板字符串：插值写作 \\${escapeHtml(...)}（反斜杠转义的美元符），正则需匹配字面反斜杠。
 	assert.match(source, /data-project="\\\$\{escapeHtml\(project\.id\)\}"/);
 	assert.match(source, /data-session="\\\$\{escapeHtml\(session\.id\)\}"/);

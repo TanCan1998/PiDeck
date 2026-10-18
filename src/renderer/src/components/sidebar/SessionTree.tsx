@@ -15,12 +15,14 @@ import { filterSidebarSessions, getBoundSidebarRuntimeAgent, type SidebarControl
 import { Button } from "../ui-shadcn/button";
 import type { SidebarActions } from "./SidebarContent";
 import { PendingAskBadge } from "./PendingAskBadge";
-import { AcpBackendMark, SessionBackendMark, SessionSourceBadge } from "../session/SessionSourceBadge";
+import { AcpBackendMark, SessionBackendMark, SessionChannelMark, SessionSourceBadge, SideTaskMark } from "../session/SessionSourceBadge";
 import { SessionActivityIndicator } from "../session/SessionActivityIndicator";
 import { SessionHoverCard } from "./SessionHoverCard";
 import { TitleScrollText } from "./TitleScrollText";
+import { resolveBoundSession } from "./activitySessionsModel";
 import { cn } from "../../lib/utils";
 import { SESSION_TAB_DRAG_MIME } from "../../utils/sessionSplitEdge";
+import { useSessionActivityAt } from "../../hooks/sidebar/useSessionActivityClock";
 
 /** 与 ProjectTree.treeRowClass 同尺寸同圆角：分层后 utility 生效，必须「新学旧」对齐项目行，
  * 不能再用 min-h-11/rounded-xl（会明显高于/圆于项目行）。 */
@@ -81,6 +83,8 @@ export function SessionTree(props: { project: Project; sessions: readonly Sessio
 	// 待确认 ask 以**会话**为粒度展示：同一项目下可能多个会话各自在等回答，
 	// 只挂项目/标题栏徽章会分不清是哪一个会话（用户反馈）。
 	const sessionRuntimeUiById = useAtomValue(sessionRuntimeUiByIdAtom);
+	// 相对时间的基准：live 计时点（本轮开始/上一轮结束）优先，历史会话回落会话更新时间。
+	const activityAt = useSessionActivityAt();
 	const allSummaries = props.sessions.flatMap((session) => {
 		const summary = sessionRecordToSummary(session);
 		return summary ? [summary] : [];
@@ -101,7 +105,7 @@ export function SessionTree(props: { project: Project; sessions: readonly Sessio
 		sortMode: props.controller.sessionSortMode,
 	});
 	const displayedSessionIds = collectDisplayedSessionIds(display.visibleChildren, (agent) => {
-		const linked = props.sessions.find((session) => props.controller.catalog.runtimeBySessionId[session.id]?.agentId === agent.id) ?? summaries.find((session) => session.filePath === agent.sessionPath);
+		const linked = resolveBoundSession(agent, props.sessions, props.controller.catalog.runtimeBySessionId) ?? (agent.sessionPath ? summaries.find((session) => session.filePath === agent.sessionPath) : undefined);
 		return linked?.id;
 	});
 	const draftSessions = props.sessions
@@ -221,10 +225,16 @@ export function SessionTree(props: { project: Project; sessions: readonly Sessio
 			</div>
 		);
 	};
+	/** 子会话折叠胶囊：紧贴右侧邻居左缘，自身不预留空白——留白归属由「谁在它右边」决定：
+	 *  - 历史会话行后面跟着相对时间戳 → margin 0，胶囊贴住时间戳（用户要求把标签右移，别再空 28px）；
+	 *  - 运行中 Agent 行没有时间戳，胶囊是行内最后一个元素 → `last:mr-7` 自己预留 28px（= size-6
+	 *    「⋯」按钮 + right-1），否则 hover 让位 padding 长出前的 150ms 里它会正压在「⋯」上。
+	 *   实例代价：两种行非 hover 态的胶囊右缘相差 18px（会话行多让出时间戳宽度 + 间距），
+	 *   但落点都由本行右侧邻居决定，视觉上一致。 */
 	const renderToggle = (key: string, count: number) =>
 		count > 0 ? (
 			<span
-				className={cn("subagent-inline-toggle px-1 py-0.5 mr-7")}
+				className="subagent-inline-toggle px-1 py-0.5 last:mr-7"
 				title={t("app.piSubagentCount", { count })}
 				onClick={(event) => {
 					event.stopPropagation();
@@ -233,7 +243,7 @@ export function SessionTree(props: { project: Project; sessions: readonly Sessio
 			>
 				<ChevronDown size={8} className={props.controller.expandedSubagentGroups.has(key) ? "expanded" : ""} />
 				{/* 子 Agent 数量：统一 pill 样式（与项目行会话数徽标同尺寸同圆角），紧凑档 */}
-				<span className="subagent-inline-count inline-flex h-3.5 shrink-0 items-center rounded-full px-1 text-[10px] font-medium tabular-nums">{count}</span>
+				<span className="subagent-inline-count inline-flex h-3.5 shrink-0 items-center rounded-full px-1 text-micro font-medium tabular-nums">{count}</span>
 			</span>
 		) : null;
 
@@ -243,7 +253,7 @@ export function SessionTree(props: { project: Project; sessions: readonly Sessio
 		const groupKey = `${props.project.id}:${child.key}`;
 		const childCount = child.codexSubagents.length + child.piSubagents.length;
 		if (child.type === "agent") {
-			const agentSession = props.sessions.find((session) => props.controller.catalog.runtimeBySessionId[session.id]?.agentId === child.agent.id) ?? summaries.find((session) => session.filePath === child.agent.sessionPath);
+			const agentSession = resolveBoundSession(child.agent, props.sessions, props.controller.catalog.runtimeBySessionId) ?? (child.agent.sessionPath ? summaries.find((session) => session.filePath === child.agent.sessionPath) : undefined);
 			// Catalog owns the display title. AgentTab.title may reflect a transient pi/TUI
 			// session_info event, so only use it for an unbound runtime with no record.
 			const displayTitle = (agentSession ? ("title" in agentSession ? agentSession.title : agentSession.name || child.agent.title) : child.agent.title) || t("common.untitled");
@@ -282,6 +292,7 @@ export function SessionTree(props: { project: Project; sessions: readonly Sessio
 										{child.agent.backend === "acp" ? <AcpBackendMark acpToolId={agentSession?.acpToolId} /> : <SessionBackendMark backend={child.agent.backend} />}
 										{/* 待确认 ask：运行中 Agent 行同样按会话粒度标记，避免多会话同时等待时分不清。 */}
 										{hasPendingAskForSession(agentSession?.id, sessionRuntimeUiById) && <PendingAskBadge count={1} />}
+										{agentSession?.sideTask && <SideTaskMark />}
 										{child.agent.noSession && (
 											<span className="anonymous-indicator" title={t("app.anonymousChat")}>
 												<HatGlasses size={11} aria-hidden="true" />
@@ -348,11 +359,25 @@ export function SessionTree(props: { project: Project; sessions: readonly Sessio
 									{/* 生图角标：imagegen 后端会话的徽标已含生图标识，此处仅对遗留 pi 后端含生图消息的会话补图标 */}
 									{child.session.backend !== "imagegen" && child.session.hasImageGen && <ImageIcon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />}
 									{child.session.source && child.session.source !== "pi" && <SessionSourceBadge source={child.session.source} />}
+									{child.session.channel && <SessionChannelMark channel={child.session.channel} />}
+									{child.session.sideTask && <SideTaskMark />}
 									{renderToggle(groupKey, childCount)}
-									{/* 相对时间常显：会话更新于多久前一目了然；hover 行时让位给右侧「⋯」按钮。
-                  窄侧栏时间可能被截断，title 提示完整相对时间。 */}
-									<span className="shrink-0 text-caption tabular-nums text-muted-foreground group-hover/row:hidden group-focus-within/row:hidden" title={formatRelativeTime(child.session.updatedAt)}>
-										{formatRelativeTime(child.session.updatedAt)}
+									{/* 相对时间常显：多久前用过一目了然；hover 行时让位给右侧「⋯」按钮。
+                  基准是「计时点」而不是文件 mtime（见 hooks/sidebar/useSessionActivityClock）：
+                  本轮开始（用户输入）与 turn 结束各算一次，流式期间不会一直被重置成「刚刚」。
+                  窄侧栏时间可能被截断，title 提示完整相对时间。
+                  hover 用「宽度收拢」而不是 display:none：时间瞬时消失会让左侧胶囊一步跳到行尾
+                  （那一刻正好压在「⋯」上，150ms 后才被 padding 带回左边），改成与 padding 同步
+                  （同为 150ms 默认时长）收拢后胶囊是缓慢滑过去，任何一帧都不会越过「⋯」左缘。
+                  w-max 保证非 hover 态宽度与 auto 完全一致（不写魔法宽度，「3天」这类文案不会被截）；
+                  interpolate-size 让 max-content→0 可插值（Electron 43 / Chromium 142 支持）。
+                  不支持该属性的旧浏览器退化为瞬时收拢，胶囊在该帧会短暂压到「⋯」左缘——仅降级路径，
+                  比时间直接 display:none 时「整颗胶囊跳到行尾」轻得多，故不额外加延迟。 */}
+									<span
+										className="w-max shrink-0 overflow-hidden whitespace-nowrap text-micro tabular-nums text-muted-foreground transition-[width,opacity] [interpolate-size:allow-keywords] group-hover/row:w-0 group-hover/row:opacity-0 group-focus-within/row:w-0 group-focus-within/row:opacity-0"
+										title={formatRelativeTime(activityAt(child.session.id, child.session.updatedAt))}
+									>
+										{formatRelativeTime(activityAt(child.session.id, child.session.updatedAt))}
 									</span>
 								</div>
 							</div>
@@ -413,6 +438,8 @@ export function SessionTree(props: { project: Project; sessions: readonly Sessio
 												{session.backend === "acp" ? <AcpBackendMark acpToolId={session.acpToolId} /> : <SessionBackendMark backend={session.backend} />}
 												{/* 草稿会话同样按会话粒度标记待确认 ask。 */}
 												{hasPendingAskForSession(session.id, sessionRuntimeUiById) && <PendingAskBadge count={1} />}
+												{/* 侧边任务的草稿期也要认得出来：面板与左栏是同一会话，标记缺失会让人以为建了两条 */}
+												{session.sideTask && <SideTaskMark />}
 											</div>
 										</div>
 									</button>

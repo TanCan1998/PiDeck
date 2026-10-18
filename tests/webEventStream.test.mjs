@@ -14,6 +14,9 @@ import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
  */
 
 const webServiceSource = readFileSync("src/main/web/WebServiceManager.ts", "utf8");
+const webApiRoutesSource = readFileSync("src/main/web/WebApiRoutes.ts", "utf8");
+const webSessionStreamSource = readFileSync("src/main/web/WebSessionStream.ts", "utf8");
+const webPageSource = readFileSync("src/main/web/webPageTemplate.ts", "utf8");
 const indexSource = readFileSync("src/main/index.ts", "utf8");
 
 const { PiEventToUiMessageStream, WebEventStreamRouter, SSE_DONE, serializeSseFrame } = loadTsCommonJs("src/main/web/WebEventStream.ts");
@@ -306,9 +309,11 @@ test("WebEventStreamRouter routes agent events to per-session entries only", () 
 });
 
 test("WebServiceManager registers /stream SSE endpoint with protocol header", () => {
-	assert.match(webServiceSource, /\/api\/sessions\/([^/]+)\/stream/);
-	assert.match(webServiceSource, /x-vercel-ai-ui-message-stream/);
-	assert.match(webServiceSource, /text\/event-stream/);
+	// 路由解析迁到路由表（Wave 5），SSE 头迁到 WebSessionStream（Wave 6）。
+	assert.match(webApiRoutesSource, /streamMatch = url\.pathname\.match\([^\n]*\/stream/);
+	assert.match(webSessionStreamSource, /x-vercel-ai-ui-message-stream/);
+	assert.match(webSessionStreamSource, /text\/event-stream/);
+	assert.match(webPageSource, /\/api\/sessions\/\\\$\{encodeURIComponent\(sessionId\)\}\/stream/);
 	// [DONE] 终止标记在翻译器模块
 	assert.match(readFileSync("src/main/web/WebEventStream.ts", "utf8"), /data: \[DONE\]/);
 });
@@ -322,16 +327,16 @@ test("index.ts wires pi event source + agent-to-session router to WebServiceMana
 
 test("web frontend preserves streaming block during polling refresh", () => {
 	// refresh() 在流式活跃时只渲染侧栏/状态，不整体重绘 #messages
-	assert.match(webServiceSource, /if \(streamingSessionId\)/);
-	assert.match(webServiceSource, /renderMessages\(\)/);
+	assert.match(webPageSource, /if \(streamingSessionId\)/);
+	assert.match(webPageSource, /renderMessages\(\)/);
 	// render() 不再直接操作 #messages（拆到 renderMessages）
-	const renderBody = webServiceSource.slice(webServiceSource.indexOf("function render() {"), webServiceSource.indexOf("function renderMessages()"));
+	const renderBody = webPageSource.slice(webPageSource.indexOf("function render() {"), webPageSource.indexOf("function renderMessages()"));
 	assert.doesNotMatch(renderBody, /el\("messages"\)/);
 });
 
 test("web frontend reloads authoritative messages on stream finish", () => {
 	// [DONE] 后先停流、再 loadSessionMessages + 整体重绘（替换流式增量块）
-	assert.match(webServiceSource, /finishStream\(sessionId\)/);
-	assert.match(webServiceSource, /loadSessionMessages\(sessionId\)/);
-	assert.match(webServiceSource, /async function finishStream/);
+	assert.match(webPageSource, /finishStream\(sessionId\)/);
+	assert.match(webPageSource, /loadSessionMessages\(sessionId\)/);
+	assert.match(webPageSource, /async function finishStream/);
 });

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { app, shell } from "electron";
 import { closeSync, existsSync, openSync, readSync } from "node:fs";
 import { appendFile, mkdir, open as openFile, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { basename as posixBasename, dirname as posixDirname, isAbsolute as posixIsAbsolute, join as posixJoin } from "node:path/posix";
 import type { ArchivedPiSession, ChatMessage, ChatRole, SessionSummary } from "../../shared/types";
@@ -18,7 +19,7 @@ import { isLegacySessionNameEntry, isLegacySessionNameLine, stripLegacySessionNa
 import { SessionSummaryCache, type SessionFileVersion } from "./sessionSummaryCache";
 import { rewriteJsonlLines, scanJsonlLines, type JsonlLineContext } from "./jsonlLineStream";
 
-type SessionScannerCopyKey = Extract<MainProcessTranslationKey, "session.untitled" | "session.emptyPreview" | "session.copyTitle" | "session.fileTooLargeForWholeRead">;
+type SessionScannerCopyKey = Extract<MainProcessTranslationKey, "session.untitled" | "session.emptyPreview" | "session.copyTitle" | "session.fileTooLargeForWholeRead" | "session.deleteFileBusy">;
 
 type SessionScannerCopy = (key: SessionScannerCopyKey, params?: Record<string, string | number>) => string;
 
@@ -27,10 +28,18 @@ const defaultSessionScannerCopy: Record<SessionScannerCopyKey, string> = {
 	"session.emptyPreview": "空会话",
 	"session.copyTitle": "{title} copy",
 	"session.fileTooLargeForWholeRead": "This session file is too large ({sizeMb}MB, over the {limitMb}MB whole-read limit); the operation was cancelled to avoid crashing the app.",
+	"session.deleteFileBusy": "会话文件仍被占用，请先停止该会话后重试。",
 };
 
 function defaultTranslate(key: SessionScannerCopyKey, params: Record<string, string | number> = {}): string {
 	return defaultSessionScannerCopy[key].replace(/\{([A-Za-z0-9_]+)\}/g, (match, name) => (Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : match));
+}
+
+/** 取错误的 code（ENOENT/EPERM/EBUSY…）：Electron 的 trashItem 失败信息是通用的，code 才有诊断价值。 */
+function errorCodeOf(error: unknown): string | undefined {
+	if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
+	const code = (error as { code?: unknown }).code;
+	return typeof code === "string" ? code : undefined;
 }
 
 /** catalog 扫描只取摘要字段；JSONL 行形态不固定，未知字段忽略。 */
@@ -266,6 +275,9 @@ export class SessionScanner {
 
 	constructor(private readonly translate: SessionScannerCopy = defaultTranslate) {}
 
+	/** 项目级 sessionDir 缓存：settings 文件版本 → 解析出的目录（null = 该项目无配置）。 */
+	private readonly projectSearchRootCache = new Map<string, { version: string; root: string | null }>();
+
 	/**
 	 * wsl.exe 命令与启动模式。优先绝对路径，
 	 * 文件不存在时回退到 shell PATH 查找。
@@ -318,6 +330,95 @@ export class SessionScanner {
 	/** 当前环境下的默认会话根目录（全局 encoded-cwd 布局） */
 	private get defaultSessionsRoot(): string {
 		return this.wslConfig ? this.wslSessionsDir : this.root;
+	}
+
+	/**
+	 * 跨会话全文搜索（session-index sidecar）的**全局**扫描根：全局默认根 + 全局
+	 * settings 的 sessionDir（若存在）。项目级 .pi/settings.json 的 sessionDir 不在这里，
+	 * 由 `resolveContentSearchRoots` 追加（那里能拿到已注册项目列表）。
+	 * WSL 模式下返回 Linux 侧根（宿主 Go 进程直接读 UNC 不可靠，跨 WSL 的
+	 * 全文搜索暂不支持，返回空数组由调用方降级）。
+	 */
+	async resolveGlobalSearchRoots(): Promise<string[]> {
+		if (this.wslConfig) return [];
+		const roots = [this.defaultSessionsRoot];
+		// 全局 settings：~/.pi/agent/settings.json（与 resolveConfiguredSessionDir 的全局分支同源）
+		const globalSettingsPath = join(dirname(this.root), "settings.json");
+		const globalRaw = await this.readSessionDirSettingLocal(globalSettingsPath);
+		if (!globalRaw) return roots;
+		const resolved = this.resolveSessionDirPath(globalRaw, this.root);
+		if (!resolved) return roots;
+		const normalized = this.normalize(resolved);
+		if (roots.some((root) => this.normalize(root) === normalized)) return roots;
+		if (!existsSync(resolved)) return roots;
+		roots.push(resolved);
+		return roots;
+	}
+
+	/**
+	 * 正文搜索的完整扫描根 = 全局根 + 各项目的项目级 sessionDir（合并去重）。
+	 *
+	 * 为什么必须带上项目级目录：项目 `.pi/settings.json` 的 sessionDir 是不少用户实际的
+	 * 会话落点，只喂全局根会出现「明明有这条消息却搜不到」（标题/预览能搜到，因为侧栏目录
+	 * 按项目扫描）。这里只认项目自己的配置，不回退全局——全局那份已由全局根覆盖。
+	 * 调用方负责按当前环境过滤项目（WSL 项目不传进来）。
+	 */
+	async resolveContentSearchRoots(projectPaths: readonly string[]): Promise<string[]> {
+		const roots = await this.resolveGlobalSearchRoots();
+		if (roots.length === 0) return roots;
+		const seen = new Set(roots.map((root) => this.normalize(root)));
+		for (const root of await this.resolveProjectSearchRoots(projectPaths)) {
+			const normalized = this.normalize(root);
+			if (seen.has(normalized)) continue;
+			seen.add(normalized);
+			roots.push(root);
+		}
+		return roots;
+	}
+
+	/**
+	 * 各项目的项目级会话目录（项目 `.pi/settings.json` 的 sessionDir）。
+	 *
+	 * 每次搜索按键都会调用，所以每个项目只 stat 一次 settings 文件（mtime+size 做缓存键），
+	 * 内容未变时不重复读取；目录本身每次调用校验存在性（用户可能后建目录）。
+	 * 读失败/无配置/目录不存在一律跳过：搜索入口只降级、不报错。
+	 */
+	async resolveProjectSearchRoots(projectPaths: readonly string[]): Promise<string[]> {
+		if (this.wslConfig) return [];
+		const roots: string[] = [];
+		const seen = new Set<string>();
+		for (const projectPath of projectPaths) {
+			if (!projectPath) continue;
+			const root = await this.resolveCachedProjectSearchRoot(projectPath);
+			if (!root) continue;
+			const normalized = this.normalize(root);
+			if (seen.has(normalized)) continue;
+			seen.add(normalized);
+			roots.push(root);
+		}
+		return roots;
+	}
+
+	/** 项目级 sessionDir 解析（带 settings 版本缓存）；无可用目录时返回 undefined。 */
+	private async resolveCachedProjectSearchRoot(projectPath: string): Promise<string | undefined> {
+		const settingsPath = join(projectPath, ".pi", "settings.json");
+		let version: string;
+		try {
+			const info = await stat(settingsPath);
+			version = `${info.mtimeMs}:${info.size}`;
+		} catch {
+			this.projectSearchRootCache.delete(projectPath);
+			return undefined;
+		}
+		const cached = this.projectSearchRootCache.get(projectPath);
+		if (cached && cached.version === version) {
+			return cached.root && existsSync(cached.root) ? cached.root : undefined;
+		}
+		const raw = await this.readSessionDirSettingLocal(settingsPath);
+		const resolved = raw ? this.resolveSessionDirPath(raw, projectPath) : undefined;
+		// 缓存解析结果（不缓存存在性：目录可能后建，存在性在命中缓存时现查）
+		this.projectSearchRootCache.set(projectPath, { version, root: resolved ?? null });
+		return resolved && existsSync(resolved) ? resolved : undefined;
 	}
 
 	/** 判断文件路径是否为 WSL Linux 路径（以 / 开头且属于当前 WSL 配置） */
@@ -975,8 +1076,9 @@ export class SessionScanner {
 	 * 删除会话文件，同时清理同级子会话目录（如果存在）。
 	 *
 	 * 目录结构约定：父会话 <stem>.jsonl 与子会话目录 <stem>/ 相邻。
-	 * 删除父会话时一并移除 <stem>/ 目录及其下所有子会话 JSONL，
-	 * 避免残留孤儿目录。仅删除单个子会话时（无同级目录）行为不变。
+	 * 删除父会话时一并移除 <stem>/ 目录及其下所有子会话 JSONL，避免残留孤儿目录。
+	 * 删除顺序固定为「先文件、后目录」：反过来的话文件删除失败会留下无主的孤儿目录
+	 * （issue #364 里用户看到的就是这一步之后整个会话删不掉）。
 	 */
 	async delete(filePath: string): Promise<void> {
 		if (this.isWslPath(filePath)) {
@@ -988,18 +1090,19 @@ export class SessionScanner {
 			return;
 		}
 
-		// 先删除同级子会话目录（如果存在），再删除文件本身。
-		await this.deleteSiblingDir(filePath);
 		// catalog 可能保留一个已被 pi/系统回收站移走的历史路径；删除接口必须幂等。
 		if (!existsSync(filePath)) {
 			getAppLogger()?.info("session", "Session delete skipped (file already gone)", { filePath });
-			return;
+		} else {
+			// 删除会话是用户主动操作：统一移入系统回收站（可恢复）。
+			// 回收站不可用时直接抛错——拒绝静默硬删，错误由 IPC 层呈现给用户。
+			await this.trashWithRetry(filePath, "session-file");
+			getAppLogger()?.info("session", "Session moved to trash", { filePath });
 		}
 
-		// 删除会话是用户主动操作：统一移入系统回收站（可恢复）。
-		// 回收站不可用时直接抛错——拒绝静默硬删，错误由 IPC 层呈现给用户。
-		await shell.trashItem(filePath);
-		getAppLogger()?.info("session", "Session moved to trash", { filePath });
+		// 同级目录只做尽力清理：里面可能还有仍在运行的子会话占用句柄。
+		// 它失败绝不能把「文件已经删掉」的会话报成删除失败（否则条目永远卡在列表里）。
+		await this.deleteSiblingDirBestEffort(filePath);
 	}
 
 	// ── 会话归档：移动到 <扫描根>/.pideck-archive/ 并记录原路径 ──
@@ -1139,7 +1242,7 @@ export class SessionScanner {
 			await this.deleteWslFile(archivedPath);
 		} else {
 			await this.deleteSiblingDir(archivedPath);
-			if (existsSync(archivedPath)) await shell.trashItem(archivedPath);
+			if (existsSync(archivedPath)) await this.trashWithRetry(archivedPath, "session-file");
 		}
 		await this.removeArchiveEntry(archivedPath, wsl);
 		getAppLogger()?.info("session", "Archived session deleted permanently", { archivedPath, wsl });
@@ -1258,7 +1361,69 @@ export class SessionScanner {
 		const siblingDir = this.getSiblingDir(filePath);
 		if (!siblingDir || !existsSync(siblingDir)) return;
 		// 同级子会话目录同样走系统回收站；失败抛错（拒绝静默硬删）。
-		await shell.trashItem(siblingDir);
+		await this.trashWithRetry(siblingDir, "sibling-dir");
+	}
+
+	/**
+	 * 尽力清理同级子会话目录：失败只记日志，不影响文件本体的删除结果。
+	 * 子会话可能仍被运行中的子 agent 占用，这属于「目录里还有活会话」，
+	 * 不该把父会话的删除整个报成失败（issue #364）。
+	 */
+	private async deleteSiblingDirBestEffort(filePath: string): Promise<void> {
+		try {
+			await this.deleteSiblingDir(filePath);
+		} catch (error) {
+			getAppLogger()?.warn("session", "Sibling session dir trash failed (ignored)", {
+				filePath,
+				code: errorCodeOf(error),
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	/**
+	 * 把路径移入系统回收站，失败时有限重试。
+	 *
+	 * Windows 上 pi 被 kill 后可能仍短暂持有会话 JSONL 的写句柄，此时 shell.trashItem
+	 * 只返回通用的「Failed to perform delete operation」，无法从错误里区分「被占用」还是
+	 * 「路径不存在」，因此统一按短间隔重试；路径已消失即视为成功（删除幂等）。
+	 * 重试用尽仍失败时抛带 code/target/attempts 的结构化错误，供上层记录可诊断日志
+	 * 并给用户可操作提示（issue #364）。
+	 */
+	private async trashWithRetry(targetPath: string, target: "session-file" | "sibling-dir"): Promise<void> {
+		const attempts = 3;
+		let lastError: unknown;
+		for (let attempt = 1; attempt <= attempts; attempt += 1) {
+			try {
+				await shell.trashItem(targetPath);
+				return;
+			} catch (error) {
+				lastError = error;
+				// 子目录/文件可能被并发删除或外部清理：路径已不存在即等同成功。
+				if (!existsSync(targetPath)) return;
+				getAppLogger()?.warn("session", "Trash target busy, retrying", {
+					target,
+					targetPath,
+					attempt,
+					attempts,
+					code: errorCodeOf(error),
+				});
+				if (attempt < attempts) await delay(150 * attempt);
+			}
+		}
+		const busy = new Error(this.translate("session.deleteFileBusy")) as Error & {
+			code: string;
+			target: string;
+			attempts: number;
+			errno?: string;
+			cause?: unknown;
+		};
+		busy.code = "SESSION_FILE_BUSY";
+		busy.target = target;
+		busy.attempts = attempts;
+		busy.errno = errorCodeOf(lastError);
+		busy.cause = lastError;
+		throw busy;
 	}
 
 	/** 删除 WSL 同级子会话目录（如果存在） */

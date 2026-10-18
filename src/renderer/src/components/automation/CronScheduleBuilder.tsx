@@ -109,7 +109,7 @@ export function CronScheduleBuilder({ value, onChange, previews, error }: CronSc
 							commit(switchCronKind(state, kind));
 						}}
 					>
-						<SelectTrigger className="h-8 text-xs">
+						<SelectTrigger size="sm" className="text-xs">
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>
@@ -202,7 +202,7 @@ function NumberSelect(props: { label?: string; value: number; options: number[];
 		<div className="flex min-w-0 flex-1 flex-col gap-1">
 			{props.label && <span className="text-micro text-muted-foreground">{props.label}</span>}
 			<Select value={String(props.value)} onValueChange={(next) => props.onChange(Number(next))}>
-				<SelectTrigger className="h-8 text-xs">
+				<SelectTrigger size="sm" className="text-xs">
 					<SelectValue />
 				</SelectTrigger>
 				<SelectContent className="max-h-64">

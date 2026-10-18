@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { useAtom, useSetAtom } from "jotai";
 import { ArrowDownToLine, ArrowUpFromLine, Check, CheckCircle2, ChevronDown, ChevronsDownUp, ChevronsUpDown, ClipboardPaste, FileCode2, FolderGit2, GitBranch, List, ListTree, Loader2, Plus, RefreshCw, RotateCcw, Sparkles, TriangleAlert } from "lucide-react";
 import { Button } from "../ui-shadcn/button";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "../ui-shadcn/alert-dialog";
 import { BridgeGuiSlot, useBridgeSessionId } from "../bridge/BridgeSlot";
 import { useAnimationWindow } from "../../hooks/useAnimationWindow";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "../ui-shadcn/context-menu";
@@ -981,6 +982,39 @@ export function GitPanel(props: GitPanelProps) {
 		}
 	};
 
+	// FileTree 是 memo 组件：commit composer 输入会让 GitPanel 每次按键重渲，
+	// 行内操作回调若每次重建，memo 失效 → 每敲一键都全量重建变更树行。
+	// act 本身每次 render 新建闭包（依赖 committing / mutationRunningRef 等），用 ref 转发保持回调引用稳定。
+	const actRef = useRef(act);
+	actRef.current = act;
+	const stageFile = useCallback(
+		(path: string) => {
+			void actRef.current(() => props.stageFiles(props.projectId, [path]));
+		},
+		[props.projectId, props.stageFiles],
+	);
+	const stageFiles = useCallback(
+		(paths: string[]) => {
+			void actRef.current(() => props.stageFiles(props.projectId, paths));
+		},
+		[props.projectId, props.stageFiles],
+	);
+	const unstageFile = useCallback(
+		(path: string) => {
+			void actRef.current(() => props.unstageFiles(props.projectId, [path]));
+		},
+		[props.projectId, props.unstageFiles],
+	);
+	const discardFile = useCallback((path: string, group: "workingTree" | "untracked") => {
+		setDiscardTarget({ group, path });
+	}, []);
+	const discardDir = useCallback((resources: Array<{ path: string; group: "workingTree" | "untracked" }>, label: string) => {
+		setDirectoryDiscardTarget({ resources, label });
+	}, []);
+	const deleteFile = useCallback((path: string) => {
+		setDeleteTarget(path);
+	}, []);
+
 	const runCommit = async (stageAll: boolean) => {
 		const message = commitMessage.trim();
 		if (!message || committing || mutating || hasUnresolvedConflicts || mutationRunningRef.current) return;
@@ -1393,7 +1427,7 @@ export function GitPanel(props: GitPanelProps) {
 							<GitBranch size={12} className="shrink-0 text-muted-foreground" />
 							<span className="git-branch-label min-w-0 flex-1 truncate">{props.currentBranch || t("app.branchNone")}</span>
 							{/* 多仓变更行已经很挤，数字角标会把按钮撑回宽胶囊；单仓仍显示分支数。 */}
-							{layout !== "changesOnly" && props.branches.length > 0 && <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-muted px-1 text-[10px] font-medium tabular-nums text-muted-foreground">{props.branches.length}</span>}
+							{layout !== "changesOnly" && props.branches.length > 0 && <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-muted px-1 text-micro font-medium tabular-nums text-muted-foreground">{props.branches.length}</span>}
 							<ChevronDown size={12} className={`shrink-0 text-muted-foreground transition-transform duration-fast${branchOpen ? " rotate-180" : ""}`} />
 						</Button>
 						{notAGitRepo && (
@@ -1582,8 +1616,8 @@ export function GitPanel(props: GitPanelProps) {
 												groupType="index"
 												onOpenWorkspaceFileDiff={props.onOpenWorkspaceFileDiff}
 												mutating={mutating || committing}
-												unstageFile={(path) => act(() => props.unstageFiles(props.projectId, [path]))}
-												deleteFile={props.deleteFiles ? (path) => setDeleteTarget(path) : undefined}
+												unstageFile={unstageFile}
+												deleteFile={props.deleteFiles ? deleteFile : undefined}
 												onOpenFile={props.onOpenFile}
 												projectRoot={props.projectRoot}
 												viewMode={changesViewMode}
@@ -1594,7 +1628,7 @@ export function GitPanel(props: GitPanelProps) {
 									)}
 									{workingChanges.length > 0 && (
 										<ResourceGroup
-											title={t("git.changes")}
+											title={t("git.unstagedChanges")}
 											count={workingChanges.length}
 											open={resourceOpen.changes}
 											onToggle={() => toggleResource("changes")}
@@ -1614,17 +1648,17 @@ export function GitPanel(props: GitPanelProps) {
 												groupType="workingTree"
 												onOpenWorkspaceFileDiff={props.onOpenWorkspaceFileDiff}
 												mutating={mutating || committing}
-												stageFile={(path) => act(() => props.stageFiles(props.projectId, [path]))}
-												discardFile={(path, group) => setDiscardTarget({ group, path })}
-												deleteFile={props.deleteFiles ? (path) => setDeleteTarget(path) : undefined}
+												stageFile={stageFile}
+												discardFile={discardFile}
+												deleteFile={props.deleteFiles ? deleteFile : undefined}
 												onOpenFile={props.onOpenFile}
 												stagedPaths={stagedPathSet}
 												projectRoot={props.projectRoot}
 												viewMode={changesViewMode}
 												collapsedDirs={collapsedChangeDirs}
 												onToggleDir={toggleChangeDir}
-												stageDir={(paths) => act(() => props.stageFiles(props.projectId, paths))}
-												discardDir={(resources, label) => setDirectoryDiscardTarget({ resources, label })}
+												stageDir={stageFiles}
+												discardDir={discardDir}
 											/>
 										</ResourceGroup>
 									)}
@@ -1735,38 +1769,28 @@ export function GitPanel(props: GitPanelProps) {
 					document.body,
 				)}
 
-			{showSmartCommitPrompt &&
-				createPortal(
-					<div className="absolute inset-0 z-[1200] flex items-center justify-center bg-[var(--overlay-backdrop-soft)] p-6 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-base" role="presentation" onClick={() => setShowSmartCommitPrompt(false)}>
-						<div
-							className="w-[min(520px,calc(100vw-48px))] rounded-lg border border-border-subtle bg-bg-panel p-4 font-sans text-text-primary shadow-[var(--shadow-modal)] motion-safe:animate-in motion-safe:zoom-in-95 motion-safe:duration-base"
-							role="alertdialog"
-							aria-modal="true"
-							aria-labelledby="git-smart-commit-title"
-							onClick={(event) => event.stopPropagation()}
-						>
-							<strong id="git-smart-commit-title" className="text-base leading-6">
-								{t("git.smartCommitTitle")}
-							</strong>
-							<p className="my-3 mb-4 text-sm leading-[22px] whitespace-pre-line text-text-secondary">{t("git.smartCommitPrompt")}</p>
-							<div className="flex flex-wrap justify-end gap-2">
-								<Button type="button" variant="outline" size="sm" onClick={() => setShowSmartCommitPrompt(false)}>
-									{t("common.cancel")}
-								</Button>
-								<Button type="button" variant="outline" size="sm" onClick={() => chooseSmartCommit("never")}>
-									{t("git.smartCommitNever")}
-								</Button>
-								<Button type="button" variant="outline" size="sm" onClick={() => chooseSmartCommit("always")}>
-									{t("git.smartCommitAlways")}
-								</Button>
-								<Button type="button" variant="default" size="sm" autoFocus onClick={() => chooseSmartCommit("yes")}>
-									{t("git.smartCommitYes")}
-								</Button>
-							</div>
-						</div>
-					</div>,
-					document.body,
-				)}
+			{showSmartCommitPrompt && (
+				<AlertDialog open onOpenChange={(next) => !next && setShowSmartCommitPrompt(false)}>
+					<AlertDialogContent>
+						<AlertDialogHeader>
+							<AlertDialogTitle>{t("git.smartCommitTitle")}</AlertDialogTitle>
+							<AlertDialogDescription className="whitespace-pre-line">{t("git.smartCommitPrompt")}</AlertDialogDescription>
+						</AlertDialogHeader>
+						<AlertDialogFooter>
+							<AlertDialogCancel size="sm">{t("common.cancel")}</AlertDialogCancel>
+							<Button type="button" variant="outline" size="sm" onClick={() => chooseSmartCommit("never")}>
+								{t("git.smartCommitNever")}
+							</Button>
+							<Button type="button" variant="outline" size="sm" onClick={() => chooseSmartCommit("always")}>
+								{t("git.smartCommitAlways")}
+							</Button>
+							<AlertDialogAction size="sm" autoFocus onClick={() => chooseSmartCommit("yes")}>
+								{t("git.smartCommitYes")}
+							</AlertDialogAction>
+						</AlertDialogFooter>
+					</AlertDialogContent>
+				</AlertDialog>
+			)}
 		</div>
 	);
 }

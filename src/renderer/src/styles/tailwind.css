@@ -364,6 +364,13 @@
 
 /* hover 滚动时收窄右端渐隐（legacy 的 28px mask 会吃掉滚出的尾端文字）；
  * 仅在 animate-title-scroll 同用时生效，未滚动的行保持原渐隐截断观感。 */
+/* 溢出但未 hover 时的静态渐隐：标题是硬裁（不写 ellipsis，否则 hover 滚动期间省略号会
+ * 一直贴在右缘），没有提示「后面还有字」就只能看到半个字。14px 渐隐是低成本的可供性。 */
+@utility title-scroll-mask {
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 14px), transparent);
+  mask-image: linear-gradient(90deg, #000 calc(100% - 14px), transparent);
+}
+
 @utility title-scroll-mask-narrow {
   -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 6px), transparent);
   mask-image: linear-gradient(90deg, #000 calc(100% - 6px), transparent);

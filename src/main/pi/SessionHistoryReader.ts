@@ -131,6 +131,78 @@ function readString(record: Record<string, unknown> | undefined, key: string): s
 }
 
 /**
+ * 校验并收窄 session-store sidecar（`get-index`）返回的条目表（Wave 2）。
+ *
+ * 子进程输出一律不可信（与 IPC 入参同级）：字段名、类型、可空性逐项检查，
+ * 任一条目形状不符即整体判为不可用 —— 调用方回退 TS 全量重建，绝不让脏数据进索引
+ * （索引错位的代价是历史错乱，比多扫一遍文件高得多）。
+ *
+ * 字段清单必须与 `SessionDisplayEntry` 逐字段对齐；Go 侧镜像在
+ * native/session-store/table.go，两侧同步由 tests/sessionStoreIndexParity.test.mjs 对照。
+ */
+function parseIndexTableRows(value: unknown): { entries: SessionDisplayEntry[]; lastEntryId?: string; endsWithNewline: boolean } | null {
+	if (!isRecord(value)) return null;
+	if (typeof value.endsWithNewline !== "boolean") return null;
+	const rawEntries = value.entries;
+	if (!Array.isArray(rawEntries)) return null;
+	const entries: SessionDisplayEntry[] = [];
+	for (const raw of rawEntries) {
+		const entry = parseIndexTableEntry(raw);
+		if (!entry) return null;
+		entries.push(entry);
+	}
+	const lastEntryId = typeof value.lastEntryId === "string" ? value.lastEntryId : undefined;
+	return { entries, lastEntryId, endsWithNewline: value.endsWithNewline };
+}
+
+function parseIndexTableEntry(value: unknown): SessionDisplayEntry | null {
+	if (!isRecord(value)) return null;
+	if (typeof value.id !== "string" || typeof value.type !== "string") return null;
+	if (typeof value.offset !== "number" || typeof value.byteLength !== "number") return null;
+	if (typeof value.hasMessage !== "boolean") return null;
+	if (value.parentId !== null && typeof value.parentId !== "string") return null;
+	const entry: SessionDisplayEntry = {
+		id: value.id,
+		parentId: value.parentId === null ? null : ((value.parentId as string | undefined) ?? null),
+		type: value.type,
+		offset: value.offset,
+		byteLength: value.byteLength,
+		hasMessage: value.hasMessage,
+	};
+	const model = value.assistantModel;
+	if (model !== undefined) {
+		if (!isRecord(model) || typeof model.provider !== "string" || typeof model.modelId !== "string") return null;
+		entry.assistantModel = { provider: model.provider, modelId: model.modelId };
+	}
+	if (value.oversized !== undefined) {
+		if (value.oversized !== true) return null;
+		entry.oversized = true;
+	}
+	const optionalStrings = ["modelChangeProvider", "modelChangeId", "thinkingLevel", "customType", "role", "toolName", "messageId", "summary", "firstKeptEntryId", "timestamp", "parentSession", "contextEditTargetId", "contextEditText"] as const;
+	for (const key of optionalStrings) {
+		const field = value[key];
+		if (field === undefined) continue;
+		if (typeof field !== "string") return null;
+		entry[key] = field;
+	}
+	const optionalBooleans = ["customDisplay", "contextEditExcludes"] as const;
+	for (const key of optionalBooleans) {
+		const field = value[key];
+		if (field === undefined) continue;
+		if (typeof field !== "boolean") return null;
+		entry[key] = field;
+	}
+	const optionalNumbers = ["messageTimestamp", "tokensBefore"] as const;
+	for (const key of optionalNumbers) {
+		const field = value[key];
+		if (field === undefined) continue;
+		if (typeof field !== "number" || !Number.isFinite(field)) return null;
+		entry[key] = field;
+	}
+	return entry;
+}
+
+/**
  * 从 context_edit 的 replacement.content 内容块里取可见文本（与 pi 的 content
  * 结构一致：`{type:"text", text}` 块）。
  * 无 text 块时返回 undefined：调用方回退到显示原文 + 标记，而不是显示空正文。
@@ -273,6 +345,13 @@ export type SessionHistoryReaderDeps = {
 	trimMessages: (rawMessages: unknown[], maxTurns?: number) => unknown[];
 	translate: (key: MainProcessTranslationKey, params?: Record<string, string | number>) => string;
 	logger?: Pick<AppLogger, "info" | "warn">;
+	/**
+	 * 可选：向 session-store sidecar 索取条目表（Wave 2）。
+	 *
+	 * 返回 `unknown`（子进程输出不可信，由本模块的 validator 收窄）；
+	 * 返回 null 表示 sidecar 不可用/失败，调用方回退逐行扫描。
+	 */
+	readIndexTable?: (hostPath: string, version: { size: number; mtimeMs: number }) => Promise<unknown>;
 };
 
 /**
@@ -1518,6 +1597,24 @@ export class SessionHistoryReader {
 			// 增量失败（IO 异常/无新增完整行）：回退全量重建
 		}
 
+		// Wave 2：TS 缓存未命中时先问 session-store sidecar（Go 侧 get-index）：同一份 JSONL 的
+		// 条目表在 Go 侧解析一次即落快照，重复打开不必再逐行 JSON.parse（大会话实测全量重建
+		// 87–165ms，快照命中降到个位数 ms）。行数据来自外部进程，形状不符即整体弃用，下面照旧
+		// 回退 TS 逐行重建；末尾无完整行的文件也走 TS 路径（残行口径两侧不同，见 requestIndexTable）。
+		const sidecarTable = this.parseIndexTable(await this.requestIndexTable(hostPath, version), hostPath);
+		if (sidecarTable) {
+			const sidecarEntries = new Map<string, SessionDisplayEntry>();
+			let sidecarLastEntryId: string | undefined;
+			for (const entry of sidecarTable.entries) {
+				this.chargePluginGuard(guard, entry.byteLength, entry);
+				sidecarEntries.set(entry.id, entry);
+				sidecarLastEntryId = entry.id;
+			}
+			const sidecarBranch = this.traceActiveBranch(sidecarEntries, sidecarLastEntryId);
+			const sidecarIndex = await this.mergeForkChain(hostPath, version, this.finishIndex(hostPath, version, sidecarEntries, sidecarBranch, sidecarTable.endsWithNewline), depth, visited, guard);
+			return this.storeDisplayIndex(hostPath, guard, sidecarIndex);
+		}
+
 		// 全量重建必须流式逐行：整文件 `readFile + split` 在大会话上要么撞 V8 单字符串
 		// 上限（ERR_STRING_TOO_LONG），要么先建出几百 MB 字符串再撞主进程 384MB 堆上限
 		// （V8 FatalProcessOutOfMemory → 主进程 abort，用户看到「打开大会话即闪退」）。
@@ -1558,6 +1655,11 @@ export class SessionHistoryReader {
 		const endsWithNewline = scan.endsWithNewline;
 		const activeBranch = this.traceActiveBranch(entries, lastEntryId);
 		const index = await this.mergeForkChain(hostPath, version, this.finishIndex(hostPath, version, entries, activeBranch, endsWithNewline), depth, visited, guard);
+		return this.storeDisplayIndex(hostPath, guard, index);
+	}
+
+	/** 索引落位：插件读取走独立槽位（预算口径），普通读取进 LRU 缓存。 */
+	private storeDisplayIndex(hostPath: string, guard: PluginHistoryGuard | undefined, index: SessionDisplayIndex): SessionDisplayIndex {
 		if (guard) this.pluginIndex = { hostPath, index };
 		else {
 			this.sessionDisplayIndexes.delete(hostPath);
@@ -1565,6 +1667,34 @@ export class SessionHistoryReader {
 			this.trimDisplayIndexCache();
 		}
 		return index;
+	}
+
+	/**
+	 * 向 session-store 索取条目表（Wave 2）。没注入 / 未就绪 / 抛错 / 形状不符都返回 null，
+	 * 让调用方回退 TS 逐行扫描：sidecar 是加速器，不是必需品。
+	 *
+	 * 末尾没有换行的文件不用 sidecar 的表：TS 的逐行流会把末尾残行也交给 parseIndexLine
+	 * （jsonlLineStream 的尾块语义），而 sidecar 只提交完整行，两侧条目集合会差最后一条。
+	 */
+	private async requestIndexTable(hostPath: string, version: { size: number; mtimeMs: number }): Promise<unknown> {
+		const read = this.deps.readIndexTable;
+		if (!read) return null;
+		try {
+			const table = await read(hostPath, version);
+			if (isRecord(table) && table.endsWithNewline === false) return null;
+			return table;
+		} catch (error) {
+			this.deps.logger?.warn("session-history", "Sidecar index table unavailable", { hostPath, error: error instanceof Error ? error.message : String(error) });
+			return null;
+		}
+	}
+
+	/** 校验 sidecar 行数据（外部进程输出不可信）：形状不符即整体弃用，不修不猜。 */
+	private parseIndexTable(value: unknown, hostPath: string): { entries: SessionDisplayEntry[]; lastEntryId?: string; endsWithNewline: boolean } | null {
+		if (value === null || value === undefined) return null;
+		const table = parseIndexTableRows(value);
+		if (!table) this.deps.logger?.warn("session-history", "Sidecar index table rejected", { hostPath });
+		return table;
 	}
 
 	/** 插件读取的预算扣减与 summary 截断：超限拋稳定错误码；截断只影响索引内存，分页仍读原始字节。 */

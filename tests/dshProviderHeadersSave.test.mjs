@@ -73,7 +73,7 @@ function harness(headers, { failMutate = false } = {}) {
 			"./ProviderMigrationButton": { ProviderMigrationButton: "migration" },
 			"./AddDshProviderDialog": { AddDshProviderDialog: "add-provider" },
 			"./DshHeadersEditor": { DshHeadersEditor: "headers-editor" },
-			"../hooks/useProviderReorder": { useProviderReorder: () => ({ registerCard() {}, cardProps: () => ({}), gripProps: () => ({}), canMove: () => false, moveBy() {} }) },
+			"../hooks/useProviderReorder": { useProviderReorder: () => ({ registerCard() {}, cardProps: () => ({}), gripProps: () => ({}), draggingName: null, dropTarget: null }) },
 		},
 	});
 	const { PiAiProvidersCard } = load("src/renderer/src/config/DshProviderCards.tsx");

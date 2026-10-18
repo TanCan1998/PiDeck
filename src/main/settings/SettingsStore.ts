@@ -24,7 +24,7 @@ import {
 import { normalizePinnedSessionIds } from "../../shared/pinnedSessions";
 import { normalizeSessionSortMode } from "../../shared/sessionSort";
 import { normalizeHiddenModules } from "../../shared/hiddenModules";
-import { normalizeHiddenComposerFeatures } from "../../shared/composerFeatures";
+import { normalizeHiddenComposerFeatures, toggleHiddenComposerFeature } from "../../shared/composerFeatures";
 import { parseBusySendDelivery } from "../../shared/busySendDelivery";
 import { parseSessionStatusPlacement } from "../../shared/sessionStatusPlacement";
 import { normalizeTpsDisplayMode } from "../../shared/tps";
@@ -272,6 +272,10 @@ Gitmoji 对应关系：
 
 	// standby 预热池默认开启：新建会话近即时；10 分钟未使用自动回收，与闲置释放互补
 	standbyRuntimeEnabled: true,
+
+	// session-store 条目表默认开：Wave 2b 把条目表落盘后，重启后首次打开大会话 14–20ms
+	// （TS 冷建表 99–188ms），见 docs/session-data-plane-plan.md §8.11；置 false 可回退纯 TS 解析。
+	sessionStoreEnabled: true,
 
 	// CUA 默认关闭：关闭时不监听本地端点、不改动 pi 的 mcp.json，与现状完全一致
 	cuaEnabled: false,
@@ -604,6 +608,8 @@ export class SettingsStore {
 			this.settings.hiddenModules = normalizeHiddenModules(parsed.hiddenModules);
 			// 输入框功能入口同规则清洗（与 hiddenModules 共用实现）。
 			this.settings.hiddenComposerFeatures = normalizeHiddenComposerFeatures(parsed.hiddenComposerFeatures);
+			// 兼容迁移：模式选择器开关原在「功能模块」（hiddenModules）里，现归「输入框功能显示」。
+			this.migrateComposerModesVisibility();
 		}
 		// showThinking 不再作为可持久化的独立配置项，完全跟随 pi agent 的 hideThinkingBlock。
 		// 启动时重新读取以确保每次启动都使用最新值，而非缓存的 defaultSettings。
@@ -652,6 +658,22 @@ export class SettingsStore {
 			mapped = Math.min(100, Math.max(60, Math.round(((legacyPx - 800) / 1000) * 40 + 60)));
 		}
 		this.settings.chatContentWidthPct = mapped;
+		void this.save().catch(() => undefined);
+	}
+
+	/**
+	 * 兼容迁移：模式选择器开关从「功能模块」搬到「输入框功能显示」。
+	 *
+	 * 旧数据把它存在 hiddenModules 里（id 仍是 `composerModes`）；不清洗会让升级后的用户
+	 * 丢掉「已隐藏」状态（新模式选择器又冒出来），旧 id 也会永远滞留在 hiddenModules。
+	 * 搬完立即落盘：迁移是幂等的（源 id 已删），但不落盘就要等用户下一次改设置才生效。
+	 * 目标清单里已有该 id 时迁移等价于去重，同样安全。
+	 */
+	private migrateComposerModesVisibility() {
+		const legacyHiddenModules = this.settings.hiddenModules ?? [];
+		if (!legacyHiddenModules.includes("composerModes")) return;
+		this.settings.hiddenModules = legacyHiddenModules.filter((id) => id !== "composerModes");
+		this.settings.hiddenComposerFeatures = toggleHiddenComposerFeature(this.settings.hiddenComposerFeatures ?? [], "composerModes", true);
 		void this.save().catch(() => undefined);
 	}
 
