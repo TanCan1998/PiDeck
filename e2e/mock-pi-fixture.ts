@@ -199,7 +199,7 @@ export const test = base.extend<
 			};
 			delete env.ELECTRON_RENDERER_URL;
 			const app = await electron.launch({
-				args: [join(repoRoot, "out", "main", "index.js"), `--user-data-dir=${join(userDataRoot, "profile")}`, ...launchArgs],
+				args: [repoRoot, `--user-data-dir=${join(userDataRoot, "profile")}`, ...launchArgs],
 				env,
 			});
 			await use(app);
