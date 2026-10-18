@@ -15,7 +15,7 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 
 // ── shared/hiddenModules.ts ─────────────────────────────────────────────
 
-test("可隐藏 tab 都是真实存在的设置 tab；dsh / respondingTips 是非 tab 模块（composerModes 已改归输入框功能清单）", () => {
+test("可隐藏 tab 都是真实存在的设置 tab；dsh / respondingTips 是非 tab 模块", () => {
 	for (const id of HIDEABLE_SETTINGS_TAB_IDS) {
 		assert.ok(SETTINGS_TAB_IDS.includes(id), `${id} 不是 SETTINGS_TAB_IDS 里的 tab`);
 	}

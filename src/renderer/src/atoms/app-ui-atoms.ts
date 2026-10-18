@@ -7,7 +7,6 @@ import type { QuickMessagesSnapshot } from "../../../shared/types/quickMessages"
 import type { ReplyActionsSnapshot } from "../../../shared/types/replyActions";
 import { resolveEffectiveAgentBackend } from "../../../shared/types/dshRuntime";
 import { isModuleHidden } from "../../../shared/hiddenModules";
-import { isComposerFeatureHidden } from "../../../shared/composerFeatures";
 import { dshRuntimeStatusAtom } from "./dsh-atoms";
 import type { SettingsFieldAnchorSlug } from "../utils/settingsFieldAnchors";
 import { defaultExpandedSidebarProjects, readExpandedSidebarProjects } from "../utils/sidebarExpandedProjects";
@@ -128,9 +127,6 @@ export const videoGenModuleHiddenAtom = atom((get) => isModuleHidden(get(hiddenM
  * 消费方（ComposerBottomBar 的底栏入口）从这里读，设置保存后立即生效。默认空 = 全部显示。
  */
 export const hiddenComposerFeaturesAtom = atom<readonly string[]>([]);
-
-/** 输入框底栏模式选择器是否被隐藏（设置 → 外观 → 输入框功能显示）。 */
-export const composerModesHiddenAtom = atom((get) => isComposerFeatureHidden(get(hiddenComposerFeaturesAtom), "composerModes"));
 
 /** 流式状态条右侧的功能提示轮播是否被隐藏（设置 → 外观 → 功能模块）。 */
 export const respondingTipsHiddenAtom = atom((get) => isModuleHidden(get(hiddenModulesAtom), "respondingTips"));

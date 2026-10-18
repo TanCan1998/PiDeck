@@ -24,7 +24,7 @@ import {
 import { normalizePinnedSessionIds } from "../../shared/pinnedSessions";
 import { normalizeSessionSortMode } from "../../shared/sessionSort";
 import { normalizeHiddenModules } from "../../shared/hiddenModules";
-import { normalizeHiddenComposerFeatures, toggleHiddenComposerFeature } from "../../shared/composerFeatures";
+import { normalizeHiddenComposerFeatures } from "../../shared/composerFeatures";
 import { parseBusySendDelivery } from "../../shared/busySendDelivery";
 import { parseSessionStatusPlacement } from "../../shared/sessionStatusPlacement";
 import { normalizeTpsDisplayMode } from "../../shared/tps";
@@ -609,7 +609,7 @@ export class SettingsStore {
 			// 输入框功能入口同规则清洗（与 hiddenModules 共用实现）。
 			this.settings.hiddenComposerFeatures = normalizeHiddenComposerFeatures(parsed.hiddenComposerFeatures);
 			// 兼容迁移：模式选择器开关原在「功能模块」（hiddenModules）里，现归「输入框功能显示」。
-			this.migrateComposerModesVisibility();
+			this.migrateRemovedComposerModesToggle();
 		}
 		// showThinking 不再作为可持久化的独立配置项，完全跟随 pi agent 的 hideThinkingBlock。
 		// 启动时重新读取以确保每次启动都使用最新值，而非缓存的 defaultSettings。
@@ -662,18 +662,20 @@ export class SettingsStore {
 	}
 
 	/**
-	 * 兼容迁移：模式选择器开关从「功能模块」搬到「输入框功能显示」。
+	 * 兼容迁移：输入框「模式」显示开关已删除（2026-10 用户反馈不需要这一行）。
 	 *
-	 * 旧数据把它存在 hiddenModules 里（id 仍是 `composerModes`）；不清洗会让升级后的用户
-	 * 丢掉「已隐藏」状态（新模式选择器又冒出来），旧 id 也会永远滞留在 hiddenModules。
-	 * 搬完立即落盘：迁移是幂等的（源 id 已删），但不落盘就要等用户下一次改设置才生效。
-	 * 目标清单里已有该 id 时迁移等价于去重，同样安全。
+	 * 旧数据可能把 id 存在两处——最早在 hiddenModules，后来搬到 hiddenComposerFeatures。
+	 * 开关没了，两处残留都要清掉并落盘：否则设置对象会永久携带一个没有 UI 的隐藏项，
+	 * 旧 id 也会一直滞留在文件里。迁移幂等：两处都不含该 id 时直接返回。
 	 */
-	private migrateComposerModesVisibility() {
+	private migrateRemovedComposerModesToggle() {
 		const legacyHiddenModules = this.settings.hiddenModules ?? [];
-		if (!legacyHiddenModules.includes("composerModes")) return;
-		this.settings.hiddenModules = legacyHiddenModules.filter((id) => id !== "composerModes");
-		this.settings.hiddenComposerFeatures = toggleHiddenComposerFeature(this.settings.hiddenComposerFeatures ?? [], "composerModes", true);
+		const hiddenFeatures = this.settings.hiddenComposerFeatures ?? [];
+		const hasLegacy = legacyHiddenModules.includes("composerModes");
+		const hasCurrent = hiddenFeatures.includes("composerModes");
+		if (!hasLegacy && !hasCurrent) return;
+		if (hasLegacy) this.settings.hiddenModules = legacyHiddenModules.filter((id) => id !== "composerModes");
+		if (hasCurrent) this.settings.hiddenComposerFeatures = hiddenFeatures.filter((id) => id !== "composerModes");
 		void this.save().catch(() => undefined);
 	}
 

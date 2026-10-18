@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: 32e180ce6e2d18fe8441e157ef281b0747b21eb641f8c34a64f3d9b62c597856（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: 61c4649d7e950d94e6aaa217d18102cf7c2032b86c62b734070ecc892523c640（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -586,8 +586,10 @@ export const zhTW: Record<TranslationKey, string> = {
 	"app.composerModeNormalDesc": "直接執行，適合日常修改和確認過的任務",
 	"app.composerModeSelectLabel": "切換模式",
 	"app.composerModePlan": "計劃模式",
+	"app.composerModePlanShort": "計劃",
 	"app.composerModePlanDesc": "先只讀分析並生成計劃，需要你確認後再執行",
 	"app.composerModeGoal": "目標模式",
+	"app.composerModeGoalShort": "目標",
 	"app.composerModeGoalDesc": "圍繞一條目標自動連續推進，直到完成、阻塞或你暫停",
 	"app.composerModeImagegen": "生圖模式",
 	"app.composerModeVideogen": "生影片模式",
@@ -4960,8 +4962,6 @@ export const zhTW: Record<TranslationKey, string> = {
 	"settings.modules.title": "功能模組",
 	"settings.composer.title": "輸入框功能顯示",
 	"settings.composer.sectionDesc": "關閉對應入口的顯示，不影響功能本身與快捷鍵；隨時可回這裡重新開啟。",
-	"settings.composer.modes": "模式選擇器",
-	"settings.composer.modesDesc": "輸入框底欄的普通/目標/規劃模式切換入口（進行中的特殊模式仍可退出）",
 	"settings.composer.security": "權限",
 	"settings.composer.quickMessages": "快捷訊息",
 	"settings.composer.gitBranch": "Git 分支",
@@ -5496,7 +5496,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"agent.tips.enhancePrompt": "輸入框底欄的 ✨ 能把草稿擴寫成完整提示詞",
 	"agent.tips.terminalDock": "會話「更多操作」選單裡可開終端、草稿本和外部編輯器",
 	"agent.tips.sessionMenu": "會話標籤的「更多操作」選單可匯出 HTML、複製會話或開啟會話檔案",
-	"agent.tips.composerModes": "底欄左側可切換計劃、目標、生圖等模式",
+	"agent.tips.composerModes": "「+」選單裡可切換計劃/目標模式，點底欄標籤上的 × 回到普通模式",
 	"agent.tips.multiSelect": "懸停自己的訊息可多選分享為文本 / Markdown / 圖片",
 	"agent.tips.settingsExtras": "設定裡有用量統計、桌面寵物、Web 服務與外部連線（飛書 / 微信）",
 	"agent.tips.sessionStatusPlacement": "設定 →「外觀設定」的會話狀態位置能把待辦、修改檔案、子代理挪到右側邊欄",

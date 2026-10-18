@@ -1,5 +1,5 @@
 import { useAtomValue } from "jotai";
-import { Check, ChevronDown, ChevronRight, CircleStop, CircleX, Copy, FileDown, FileText, Fingerprint, Folder, Globe, Link2, MessagesSquare, MoreHorizontal, Pencil, PanelLeft, PanelRight, Pin, PinOff, Play, Plus, RefreshCw, RotateCw, Terminal, X } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, CircleStop, CircleX, Copy, FileDown, FileText, Fingerprint, Folder, Globe, Link2, ListChecks, MessagesSquare, MoreHorizontal, Pencil, PanelLeft, PanelRight, Pin, PinOff, Play, Plus, RefreshCw, RotateCw, Target, Terminal, X } from "lucide-react";
 import { Fragment, useCallback, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { sessionRecordByIdAtomFamily, sessionRuntimeBySessionIdAtomFamily, sessionRecordsAtom, projectInventoryByIdAtom, projectByIdAtomFamily, acpEnabledAtom, acpToolsAtom } from "../../atoms";
 import { t } from "../../i18n";
@@ -944,8 +944,19 @@ function SessionTab(props: {
 						) : (
 							(record?.backend === "dsh" || record?.backend === "imagegen") && <SessionBackendBadge backend={record.backend} className="h-4 shrink-0" />
 						)}
-						{runtime?.state?.planModeActive && <span className="shrink-0 text-xs text-muted-foreground">{t("app.composerModePlan")}</span>}
-						{runtime?.state?.goal && runtime.state.goal.phase !== "complete" && <span className="shrink-0 text-xs text-muted-foreground">{t("app.composerModeGoal")}</span>}
+						{/* 模式标记与输入框底栏 chip 同源：短名 + 图标（清单/靶心），全名留在 title/aria-label。 */}
+						{runtime?.state?.planModeActive && (
+							<span className="inline-flex shrink-0 items-center gap-0.5 text-xs text-muted-foreground" title={t("app.composerModePlan")} aria-label={t("app.composerModePlan")}>
+								<ListChecks className="size-3" aria-hidden="true" />
+								{t("app.composerModePlanShort")}
+							</span>
+						)}
+						{runtime?.state?.goal && runtime.state.goal.phase !== "complete" && (
+							<span className="inline-flex shrink-0 items-center gap-0.5 text-xs text-muted-foreground" title={t("app.composerModeGoal")} aria-label={t("app.composerModeGoal")}>
+								<Target className="size-3" aria-hidden="true" />
+								{t("app.composerModeGoalShort")}
+							</span>
+						)}
 					</div>
 				</TooltipTrigger>
 				<TooltipContent side="bottom" align="start" className="max-w-80">
@@ -1027,10 +1038,13 @@ function SessionTab(props: {
 								{/* 外部连接渠道（微信/飞书）：tab 上带渠道标志，与侧栏同一套徽标 */}
 								{record?.channel && <SessionChannelMark channel={record.channel} className="size-3.5 shrink-0" />}
 								{record?.sideTask && <SideTaskMark className="size-3.5 shrink-0" />}
-								{/* G12：DSH plan 模式 / danger 权限预设全局可见（数据来自 runtime state，tab 级常显） */}
+								{/* G12：DSH plan 模式 / danger 权限预设全局可见（数据来自 runtime state，tab 级常显）。
+								    文案与图标和输入框底栏 chip 统一：短名（计划/目标）+ 模式图标，全名留在 title/aria-label；
+								    Tab 很窄，旧全名「计划模式」会把标题再挤掉两个字。 */}
 								{runtime?.state?.planModeActive && (
-									<span className="shrink-0 rounded bg-primary/15 px-1 text-micro font-medium leading-4 text-primary" title={t("app.composerModePlan")}>
-										{t("app.composerModePlan")}
+									<span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-primary/15 px-1 text-micro font-medium leading-4 text-primary" title={t("app.composerModePlan")} aria-label={t("app.composerModePlan")}>
+										<ListChecks className="size-2.5" aria-hidden="true" />
+										{t("app.composerModePlanShort")}
 									</span>
 								)}
 								{runtime?.state?.goal && runtime.state.goal.phase !== "complete" && (
@@ -1038,10 +1052,12 @@ function SessionTab(props: {
 										// 底色与 plan chip 同用 bg-primary/15：不能用 bg-accent/15——激活 tab 的
 										// 滑动背景就是实底 bg-accent，accent/15 叠上去完全不可见，chip 会退化成裸文字
 										//（浅色主题下尤其明显）。淡蓝底在明暗主题的激活/非激活 tab 上均可读。
-										className="shrink-0 rounded bg-primary/15 px-1 text-micro font-medium leading-4 text-primary"
+										className="inline-flex shrink-0 items-center gap-0.5 rounded bg-primary/15 px-1 text-micro font-medium leading-4 text-primary"
 										title={t("app.composerModeGoal")}
+										aria-label={t("app.composerModeGoal")}
 									>
-										{t("app.composerModeGoal")}
+										<Target className="size-2.5" aria-hidden="true" />
+										{t("app.composerModeGoalShort")}
 									</span>
 								)}
 								{/* 标题复用侧栏 TitleScrollText：溢出时 hover 滚动到尾、离开回开头（与左侧会话列表一致）。

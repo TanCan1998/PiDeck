@@ -119,13 +119,12 @@ test("DSH 权限预设切换、plan 模式与配置页分区", async ({ window }
 	expect(readWrite?.permissionPreset).toBe("workspace-write");
 	await expect(securityBtn).toHaveAttribute("title", /Workspace Write/, { timeout: 10_000 });
 
-	// ── 4. plan 模式：模式选择器「计划」→ 下一条消息生效 ─────────────────────
-	await window.locator(".composer-bar-btn.mode").first().click();
-	const modePicker = window.locator(".composer-mode-picker");
-	await expect(modePicker).toBeVisible();
-	await expect(modePicker.locator('[data-picker-value="plan"]')).toBeVisible();
-	await modePicker.locator('[data-picker-value="plan"]').click();
-	await expect(modePicker).toHaveCount(0, { timeout: 5_000 });
+	// ── 4. plan 模式：「+」菜单 → 模式分组「计划」→ 下一条消息生效 ────────────
+	// 2026-10 改版：模式入口收进「+」菜单（普通模式不列项），底栏用可退出的 chip 显示当前模式。
+	const modeChip = window.locator("[data-composer-mode='plan']");
+	await window.locator('[data-testid="composer-add-menu"]').click();
+	await window.locator('[data-picker-value="plan"]').click();
+	await expect(modeChip).toHaveText("计划", { timeout: 10_000 });
 
 	// 计划模式待生效：发一条消息让 plan/mode 在 pre-step 落地
 	await composer.click();
@@ -133,20 +132,18 @@ test("DSH 权限预设切换、plan 模式与配置页分区", async ({ window }
 	await window.keyboard.press("Enter");
 	const planned = await waitForState((state) => state.planModeActive === true, 30);
 	expect(planned?.planModeActive).toBe(true);
-	// 底栏模式按钮显示「计划」
-	await expect(window.locator(".composer-bar-btn.mode").first()).toContainText("计划", { timeout: 10_000 });
+	// 底栏 chip 显示短名「计划」（不再带「模式」二字）
+	await expect(modeChip).toHaveText("计划", { timeout: 10_000 });
 
-	// 退出计划模式：模式选择器「普通」→ 下一条消息生效
-	await window.locator(".composer-bar-btn.mode").first().click();
-	await expect(modePicker).toBeVisible();
-	await modePicker.locator('[data-picker-value="normal"]').click();
-	await expect(modePicker).toHaveCount(0, { timeout: 5_000 });
+	// 退出计划模式：鼠标移到 chip 上（图标变 ×）后点击——整枚 chip 就是退出按钮
+	await modeChip.hover();
+	await modeChip.click();
 	await composer.click();
 	await window.keyboard.type("恢复正常");
 	await window.keyboard.press("Enter");
 	const normal = await waitForState((state) => state.planModeActive === false, 30);
 	expect(normal?.planModeActive).toBe(false);
-	await expect(window.locator(".composer-bar-btn.mode").first()).not.toContainText("计划", { timeout: 10_000 });
+	await expect(modeChip).toHaveCount(0, { timeout: 10_000 });
 
 	// ── 5. 配置管理页：预设设置 / 插件 / 安全 分区 ───────────────────────────
 	await openConfigPane(window);
