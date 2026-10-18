@@ -337,21 +337,11 @@ export function TerminalDock(props: {
 		// 再搜索/回放序列化/Unicode 宽度，最后链接点击。
 		// allowTransparency 不设置：PiDeck 走 CSS 层透明（实测 WebGL 下与 DOM 渲染器逐像素一致），
 		// 再开 xterm 自己的透明通道是重复实现。
-		try {
-			const webgl = new WebglAddon();
-			// WebGL 上下文可能因 OOM / 系统休眠被浏览器回收；丢失时 dispose 回退 DOM 渲染器，
-			// 终端本身不受影响（官方 README 推荐的兜底方式）。
-			webgl.onContextLoss(() => {
-				if (webglRef.current !== webgl) return;
-				webglRef.current = null;
-				webgl.dispose();
-			});
-			terminal.loadAddon(webgl);
-			webglRef.current = webgl;
-		} catch (error) {
-			// 部分 Windows 机器/驱动不支持 WebGL2：静默回退 DOM 渲染器，不给用户报错
-			console.warn("[TerminalDock] WebGL renderer unavailable, falling back to DOM renderer", error);
-		}
+		// WebGL 渲染器在 terminal.open() 之后装配（见下方 attachWebglRenderer）：
+		// WebglAddon 的 activate() 要等终端挂到 DOM 才跑，而 activate 内部 new 渲染器时
+		// 若拿不到 WebGL2 会同步 throw —— 那个 throw 发生在 xterm 的事件派发里，
+		// 外层 try/catch 包不住，会变成未捕获异常（实测：--disable-gpu 下 renderer 崩在
+		// commitPassiveMountEffect）。因此装配点必须跟着 open() 一起纳入受控范围。
 		// SearchAddon 已装配（后续搜索栏 UI 直接可用），本组件暂不持引用
 		terminal.loadAddon(new SearchAddon());
 		const serialize = new SerializeAddon();
@@ -365,6 +355,26 @@ export function TerminalDock(props: {
 		terminal.open(containerRef.current);
 		xtermRef.current = terminal;
 		fitRef.current = fit;
+		// WebGL 只在 open() 之后装配：activate() 需要挂到 DOM 的终端才有 renderer，
+		// 且它在拿不到 WebGL2 时同步 throw（见上方注释）。这里整体 try/catch，
+		// 任何失败都只是留在 xterm 内置 DOM 渲染器上——产品路径本就依赖这条降级。
+		try {
+			const webgl = new WebglAddon();
+			// WebGL 上下文可能因 OOM / 系统休眠被浏览器回收；丢失时 dispose 回退 DOM 渲染器，
+			// 终端本身不受影响（官方 README 推荐的兜底方式）。
+			webgl.onContextLoss(() => {
+				if (webglRef.current !== webgl) return;
+				webglRef.current = null;
+				webgl.dispose();
+				// dispose 后 renderer 回到 DOM；尺寸可能因换渲染器而变，补一次 fit 保持列数一致。
+				fit.fit();
+			});
+			terminal.loadAddon(webgl);
+			webglRef.current = webgl;
+		} catch (error) {
+			// 部分 Windows 机器/驱动（以及 --disable-gpu）不支持 WebGL2：静默回退 DOM 渲染器，不给用户报错。
+			console.warn("[TerminalDock] WebGL renderer unavailable, falling back to DOM renderer", error);
+		}
 		// 首次 fit、容器/设置/高度变化共用同一实例边界，旧 xterm 的迟到失败不能干扰新面板。
 		const io = createTerminalDockIo(props.terminal, activeTab.id, () => xtermRef.current === terminal && ownsTab(activeTab.id) && !activeTab.exited);
 		ioRef.current = io;
