@@ -15,7 +15,7 @@ import { join } from "node:path";
  * 这个断言防的是「有人把 useLazyListWindow 去掉、退回全量 map」。
  */
 const ROOT_FILE_COUNT = 1200;
-/** 与 FileTreeRows.tsx 的 FILE_TREE_RENDER_BATCH 一致；单独写死是为了让本测试在
+/** 与 utils/fileTreeRenderBudget.ts 的 FILE_TREE_RENDER_BATCH 一致；单独写死是为了让本测试在
  *  实现常量被悄悄改大时也能失败（契约测试不读实现常量）。 */
 const RENDER_BATCH = 200;
 /** 两批 + 余量的 DOM 上限（追加由 IntersectionObserver 触发，可能有竞态多挂一批）。 */

@@ -17,7 +17,8 @@ import { useLazyListWindow } from "../../hooks/useLazyListWindow";
 import { useFileTreeGitStatus } from "../../hooks/files/useFileTreeGitStatus";
 import { useFileTreeGitStatusRefresh } from "../../hooks/files/useFileTreeGitStatusRefresh";
 import { FileSearchResults } from "./FileSearchResults";
-import { FILE_TREE_RENDER_BATCH, FileTreeNodeRow } from "./FileTreeRows";
+import { FILE_TREE_RENDER_BATCH } from "../../utils/fileTreeRenderBudget";
+import { FileTreeNodeRow } from "./FileTreeRows";
 import { SessionsPanel } from "./SessionHistoryPanel";
 import { isEditableTarget, isFileSearchShortcut, isTypeToSearchKey } from "../../utils/fileSearchTrigger";
 

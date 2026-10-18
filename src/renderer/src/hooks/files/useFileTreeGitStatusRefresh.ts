@@ -9,7 +9,8 @@ export const FILE_TREE_GIT_STATUS_REFRESH_DEBOUNCE_MS = 400;
 /**
  * 文件树内容变化 → 防抖重拉 Git 着色。
  *
- * 触发键只有内容代次（owner 在 useFileTreeContentState：树内容真的变了才 +1）：
+ * 触发键只有内容代次（owner 在 useFileTreeContentState：setFiles 返回同一引用＝不变，
+ * 换新数组就 +1；等价重载也会推进一次，代价只是一轮多拉）：
  * - 重渲染、引用变化不触发；展开/收起只改视图，不进依赖，因此不会像旧实现那样
  *   「内容变化后 400ms 内发生一次展开」就清掉待执行的刷新且永无补偿；
  * - refresh 走 ref 调用：调用方重建回调引用不进依赖，同样不会打断待执行的刷新。

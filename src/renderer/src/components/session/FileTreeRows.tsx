@@ -8,6 +8,7 @@ import { writeFileNodeDragPayload } from "../app/AppUtils";
 import { t } from "../../i18n";
 import type { FileTreeNode } from "../../../../shared/types";
 import { useLazyListWindow } from "../../hooks/useLazyListWindow";
+import { FILE_TREE_RENDER_BATCH } from "../../utils/fileTreeRenderBudget";
 import { fileTreeGitStatusClass, fileTreeGitStatusLabelKey, type FileTreeGitStatusHit } from "../../utils/fileTreeGitStatus";
 
 // 文件树的行组件域（从 WorkspaceSurface.tsx 整块迁出，行为零变化）：
@@ -36,8 +37,7 @@ const FILE_TOOLBAR_HEIGHT_PX = 28;
 /* 最外层最多三行吸顶；缩进只放在行内，所有层的行盒都覆盖完整面板宽度。 */
 const FILE_STICKY_MAX_LEVELS = 3;
 
-/** 文件树单批渲染行数：根层与每个目录各自独立窗口，滚动到底再追加。 */
-export const FILE_TREE_RENDER_BATCH = 200;
+// 分批预算常量在 utils/fileTreeRenderBudget（组件模块只导出组件/hook，否则 Fast Refresh 整页刷新）。
 const EMPTY_FILE_TREE_CHILDREN: readonly FileTreeNode[] = [];
 
 type FileTreeRowProps = {

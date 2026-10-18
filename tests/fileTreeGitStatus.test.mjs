@@ -348,7 +348,8 @@ test("接线契约：文件行与目录行都叠着色类、查表函数接进�
 	assert.match(refreshHook, /FILE_TREE_GIT_STATUS_REFRESH_DEBOUNCE_MS\s*=\s*400\s*;/, "防抖窗口 400ms");
 	assert.match(refreshHook, /window\.setTimeout\(\s*\(\)\s*=>\s*void\s+refreshRef\.current\(\)\s*,\s*FILE_TREE_GIT_STATUS_REFRESH_DEBOUNCE_MS\s*\)/, "防抖重拉必须挂在定时器上（不是每次内容变化都拉）");
 	assert.match(refreshHook, /\}\s*,\s*\[\s*contentRevision\s*\]\s*\)/, "effect 只以内容代次为键（引用/展开变化不得取消待执行的刷新）");
-	// 代次 owner 是文件树 state hook：代次与 nodes 同源，只有内容真的换了才 +1
+	// 代次 owner 是文件树 state hook：代次与 nodes 同源，setFiles 返回同一引用＝不推进、
+	// 返回新数组＝推进一次（等价重载也会推进，代价只是一轮多拉，不是回归）
 	const projectSync = readSource("src/renderer/src/hooks/useProjectSync.ts");
 	assert.match(projectSync, /const\s*\{\s*files\s*,\s*fileTreeContentRevision\s*,\s*setFiles\s*\}\s*=\s*useFileTreeContentState\(\)/, "内容代次由 useFileTreeContentState 拥有");
 	const drawerSurface = readSource("src/renderer/src/components/workspace/DrawerSurface.tsx");

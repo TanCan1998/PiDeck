@@ -23,13 +23,20 @@ import { existsSync, readFileSync } from "node:fs";
 // 根层窗口与面板接线仍在 WorkspaceSurface。两个文件合起来看才等价于拆分前的单文件断言。
 const surface = readFileSync("src/renderer/src/components/session/WorkspaceSurface.tsx", "utf8");
 const rows = readFileSync("src/renderer/src/components/session/FileTreeRows.tsx", "utf8");
+// 分批预算常量后来从行组件再搬到 utils：组件模块只能导出组件/hook（Fast Refresh），
+// 面板与行组件都从这里 import。
+const renderBudget = readFileSync("src/renderer/src/utils/fileTreeRenderBudget.ts", "utf8");
 const app = readFileSync("src/renderer/src/App.tsx", "utf8");
 const outlineAtoms = readFileSync("src/renderer/src/atoms/session-outline-atoms.ts", "utf8");
 const gitResourceTree = readFileSync("src/renderer/src/components/app/git/GitResourceTree.tsx", "utf8");
 const gitPanel = readFileSync("src/renderer/src/components/app/GitPanel.tsx", "utf8");
 
 test("文件树行组件 memo 化，活跃文件 atom 只由面板订阅一次", () => {
-	assert.match(rows, /const\s+FILE_TREE_RENDER_BATCH\s*=\s*200\s*;/);
+	assert.match(renderBudget, /export\s+const\s+FILE_TREE_RENDER_BATCH\s*=\s*200\s*;/);
+	// 组件模块导出非组件常量会让 dev 下改该文件整页刷新（Fast Refresh 只认组件/hook 导出）。
+	assert.doesNotMatch(rows, /export\s+const\s+FILE_TREE_RENDER_BATCH/, "分批预算常量不得从组件模块导出（破坏 Fast Refresh）");
+	assert.match(rows, /import\s*\{\s*FILE_TREE_RENDER_BATCH\s*\}\s*from\s*"\.\.\/\.\.\/utils\/fileTreeRenderBudget"/, "行组件从 utils 取分批预算");
+	assert.match(surface, /import\s*\{\s*FILE_TREE_RENDER_BATCH\s*\}\s*from\s*"\.\.\/\.\.\/utils\/fileTreeRenderBudget"/, "面板从 utils 取分批预算");
 	assert.match(rows, /const\s+FileRow\s*=\s*memo\(/, "文件行必须 memo：否则流式消息 flush 会重渲每一行");
 	assert.match(rows, /const\s+DirectoryRow\s*=\s*memo\(/, "目录行必须 memo");
 	assert.match(rows, /const\s+FileTreeNodeRow\s*=\s*memo\(/, "行分发器必须 memo");

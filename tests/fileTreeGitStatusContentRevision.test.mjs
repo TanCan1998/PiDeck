@@ -2,8 +2,10 @@
  * 文件树内容代次 + 着色防抖重拉（useFileTreeContentState / useFileTreeGitStatusRefresh）。
  *
  * 这两条规则都是「什么时候该重拉 Git 着色」，纯展示与源码扫描都覆盖不到行为：
- * - 内容代次只在树内容真的变了时前进：引用变化/重渲染/展开已加载目录都不算，否则每次展开
- *   都要白付一轮 listRepos + 每仓 `git status -uall`（评审 P1-a 缺陷 1）；
+ * - 内容代次只在 setFiles 换了新数组时前进（返回同一引用不算）：无关重渲染、展开已加载
+ *   目录不得推进，否则每次展开都要白付一轮 listRepos + 每仓 `git status -uall`
+ *   （评审 P1-a 缺陷 1）。边界：判据只认引用，refreshFiles 的「等价重载」也会推进一次
+ *   （代价仅一轮多拉，与引入代次前一致，不是回归）；
  * - 代次前进后的防抖窗口内发生任何重渲染都不得把待执行的刷新清掉。旧实现用
  *   props.files + props.expandedDirs 两个 ref 做启发式、cleanup 无条件清定时器，
  *   「内容变化后 400ms 内发生一次展开」会把刷新清掉且永无补偿（缺陷 2）。
@@ -86,7 +88,8 @@ test("内容代次：更新函数返回同一引用（无变化的变换）不�
 	const initial = render();
 	initial.setFiles([dir("src", "/p/src", [file("a.ts", "/p/src/a.ts")])]);
 	const loaded = render();
-	// 展开已加载目录时 toggleDirectory 走 no-op 分支：更新函数返回 current（同一引用）
+	// 展开已加载目录时 toggleDirectory 已经在 updater 之外 return（不调 setFiles）；
+	// 这里直接构造「同一引用」的 no-op 更新，锁住 hook 自己的契约：返回 current 不推进代次
 	loaded.setFiles((current) => current);
 	const afterNoop = render();
 	assert.equal(afterNoop.files, loaded.files, "同一引用：整树不重渲");

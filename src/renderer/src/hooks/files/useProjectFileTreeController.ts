@@ -223,24 +223,25 @@ export function useProjectFileTreeController({ files, setFiles, refreshFiles, be
 			void drillCompactChain(projectId, path);
 			return;
 		}
-		setFiles((current) => {
-			if (findLoadedDirectory(current, path)) return current;
-			void api.files
-				.list(projectId, { maxDepth: 0, directory: path })
-				.then((children) => {
-					if (activeProjectIdRef.current !== projectId) return;
-					setFiles((tree) => mergeFileTreeChildren(tree, path, children));
-				})
-				.catch((error) => {
-					// 拉取失败（目录被删/无权限/超上限）：不打标的话该目录会永远停在
-					// 「加载中...」占位。标记 hasChildren=false 让占位立刻消失；重新点开
-					// 目录时 findLoadedDirectory 未命中会再次拉取，形成重试入口。
-					console.error("[Files] expand failed", error);
-					if (activeProjectIdRef.current !== projectId) return;
-					setFiles((tree) => markFileTreeLoadFailed(tree, path));
-				});
-			return current;
-		});
+		// 「已加载就跳过」的判据必须在 updater 之外：updater 必须是纯函数（StrictMode 会跑两遍），
+		// 把判据 + IPC 写进 updater 会让 dev 下一次展开发两次 files:list。直接读当前树的 files
+		//（hook 每次渲染都拿到最新值）；拉取回来的 merge 本身幂等（无变化返回原数组）。
+		if (findLoadedDirectory(files, path)) return;
+		void api.files
+			.list(projectId, { maxDepth: 0, directory: path })
+			.then((children) => {
+				if (activeProjectIdRef.current !== projectId) return;
+				setFiles((tree) => mergeFileTreeChildren(tree, path, children));
+			})
+			.catch((error) => {
+				// 拉取失败（目录被删/无权限/超上限）：不打标的话该目录会永远停在
+				// 「加载中...」占位。标记 hasChildren=false 让占位立刻消失；重新点开
+				// 目录时 findLoadedDirectory 未命中会再次拉取，形成重试入口。
+				// console.error 在这里属于异步回调，不是 setState updater 副作用，保留。
+				console.error("[Files] expand failed", error);
+				if (activeProjectIdRef.current !== projectId) return;
+				setFiles((tree) => markFileTreeLoadFailed(tree, path));
+			});
 	}
 
 	function collapseAllDirectories() {
