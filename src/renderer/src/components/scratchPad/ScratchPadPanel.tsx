@@ -272,7 +272,7 @@ export const ScratchPadPanel = memo(function ScratchPadPanel(props: ScratchPadPa
 										</li>
 									);
 								},
-								input: ({ className, ...inputProps }) => {
+								input: ({ className, size: _nativeSize, ...inputProps }) => {
 									if (inputProps.type === "checkbox") {
 										/* 任务项 checkbox 不能用共享 Input：h-9 w-full 会把方框
 													   撑成整行，文字被挤到下一行 */

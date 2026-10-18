@@ -23,7 +23,6 @@ export const dshWebAgentPlaneDisabledIds = [
 	"tool-subagent-fork",
 	"workflow-ptc",
 	"tool-workflow",
-	"tool-ralph",
 	"agent-instructions",
 	"tool-todo",
 	"tool-web",

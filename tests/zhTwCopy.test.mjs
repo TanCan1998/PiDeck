@@ -73,11 +73,11 @@ test("Web 客户端：词典含 zh-TW，注入脚本按浏览器语言分流", (
 	assert.match(web.serializeWebClientDictionaries(), /"zh-TW"/);
 	assert.match(web.serializeWebClientDictionaries(), /"zh-CN"/);
 
-	// 注入给手机端页面的那段脚本在模板字符串里，只能按源码断言（大小写与下划线都要归一）
-	const manager = readSource("src/main/web/WebServiceManager.ts");
-	assert.match(manager, /replace\(\/_\/g,\s*"-[^"]*"\)/);
-	assert.match(manager, /hant/);
-	assert.match(manager, /"zh-TW"/);
+	// 注入给手机端页面的那段脚本在模板字符串里（已迁到 webPageTemplate.ts），只能按源码断言（大小写与下划线都要归一）
+	const pageTemplate = readSource("src/main/web/webPageTemplate.ts");
+	assert.match(pageTemplate, /replace\(\/_\/g,\s*"-[^"]*"\)/);
+	assert.match(pageTemplate, /hant/);
+	assert.match(pageTemplate, /"zh-TW"/);
 });
 
 /** 飞书的 zhCN 是模块内局部常量（未导出），从 `const zhCN = {` 到键类型声明之间提取键。 */

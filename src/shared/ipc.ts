@@ -37,6 +37,8 @@ export const ipcChannels = {
 	filesList: "files:list",
 	/** 工作区文件名搜索（issue #215）：主进程全盘扫描，不受抽屉懒加载深度限制 */
 	filesSearch: "files:search",
+	/** 工作区文件内容检索（Go file-index sidecar）：未就绪/不可用时回 null，渲染层不展示内容分区 */
+	filesSearchContent: "files:search-content",
 	filesOpen: "files:open",
 	filesShowInFolder: "files:show-in-folder",
 	/** 检测系统可用的文件管理器（打开方式下拉补充入口） */
@@ -183,6 +185,9 @@ export const ipcChannels = {
 	sessionsSetFocusedSession: "sessions:set-focused-session",
 	/** DSH 会话文件路径推导（渲染层右键「复制会话文件路径」；按 dshSessionId + cwd 计算 host 持久化路径）。 */
 	sessionsGetDshSessionPath: "sessions:get-dsh-session-path",
+	sessionsSearchContent: "sessions:search-content",
+	/** 会话内查找（单文件检索，命中按时间线返回）。 */
+	sessionsSearchInSession: "sessions:search-in-session",
 	/** DSH 会话内容搜索（session.search；结果最多 20 会话，返回 sessionId + snippet）。 */
 	sessionsSearchDsh: "sessions:search-dsh",
 	/** DSH 创建目标（goal.create；objective 必填，maxGoalRounds 可选）。 */
@@ -403,6 +408,8 @@ export const ipcChannels = {
 	skillHubSearch: "skill-hub:search",
 	skillHubDetail: "skill-hub:detail",
 	skillHubInstall: "skill-hub:install",
+	/** 安装进度（主进程 → 渲染层推送；状态丝流程用，不用轮询） */
+	skillHubInstallProgress: "skill-hub:install-progress",
 	extensionsList: "extensions:list",
 	extensionsUninstall: "extensions:uninstall",
 	extensionsInstall: "extensions:install",

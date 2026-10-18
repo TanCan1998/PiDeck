@@ -95,13 +95,18 @@ export function registerProjectsIpc({ projectStore, settingsStore, gitService, w
 		return project;
 	});
 	ipcMain.handle(ipcChannels.projectsRemove, async (_event, id: string) => {
+		const removed = projectStore.get(id);
+		const childIds = removed ? projectStore.listWorktreeChildren(removed.id).map((child) => child.id) : [];
+		// 预热进程属于本项目但 UI 不可见：不先回收，它会以「仍有运行中的 Agent」挡住删除，
+		// 而用户在界面上找不到可停止的会话（issue #360）。
+		for (const projectId of [id, ...childIds]) agentManager.releaseStandbyAgent(projectId);
 		// 删除前拦截：项目仍有运行中的 Agent（pi 子进程）时禁止删除，避免进程悬挂后台继续占用资源。
 		if (agentManager.hasAgentForProject(id)) {
 			throw new Error("PROJECT_HAS_RUNNING_AGENT");
 		}
-		const removed = projectStore.get(id);
-		const childIds = removed ? projectStore.listWorktreeChildren(removed.id).map((child) => child.id) : [];
 		await projectStore.remove(id);
+		// 进程已退出、runtime 还留在内存里的会话随项目一起丢弃，避免删后残留幽灵会话。
+		for (const projectId of [id, ...childIds]) agentManager.discardStoppedAgentsForProject(projectId);
 		// 侧栏项目删了，catalog 映射也必须走：否则启动 DSH 自动导入按 cwd 再把项目/会话加回来。
 		if (sessionCatalog) {
 			for (const projectId of [id, ...childIds]) {

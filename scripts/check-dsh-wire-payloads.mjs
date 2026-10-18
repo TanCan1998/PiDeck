@@ -22,6 +22,18 @@ import { join, resolve } from "node:path";
 
 const require = createRequire(import.meta.url);
 const zod = require("zod");
+// 0.2.1 起 typert 描述符会 import `createTypertRemoteInfo` 生成 $remote（TYPERT 只
+// 暴露 invocations getter）；旧版没有这个模块（描述符里也不引用），取不到时留空实现。
+let createTypertRemoteInfo = () => ({
+	get descriptors() {
+		return [];
+	},
+});
+try {
+	({ createTypertRemoteInfo } = await import("@deepseek-ai/dsh-typert-protocol/remote-info"));
+} catch {
+	// 忽略：旧 runtime 或依赖缺失时既无 import 行也无 $remote 引用。
+}
 const root = resolve(import.meta.dirname, "..");
 const clientPath = join(root, "src/main/dsh/dshRemoteClient.ts");
 
@@ -37,17 +49,20 @@ for (const pkg of readdirSync(scope)) {
 		const src = readFileSync(join(dir, f), "utf8");
 		const body = src
 			.replace(/^import \{ z \} from ['"]zod['"];?/m, "")
+			.replace(/^import \{ createTypertRemoteInfo \} from ['"]@deepseek-ai\/dsh-typert-protocol\/remote-info['"];?/m, "")
 			.replace(/^export const (TYPERT_REMOTE|TYPERT) =/m, "const __OUT__ =")
 			.replace(/^export default .*$/m, "")
 			.replace(/^export \{[\s\S]*?\};?\s*$/m, "");
 		let value;
 		try {
-			value = new Function("z", `${body}\nreturn __OUT__;`)(zod);
+			value = new Function("z", "createTypertRemoteInfo", `${body}\nreturn __OUT__;`)(zod, createTypertRemoteInfo);
 		} catch {
 			continue;
 		}
-		if (!Array.isArray(value?.descriptors)) continue;
-		for (const d of value.descriptors) {
+		// 0.2.0：描述符直接挂 descriptors；0.2.1：改为 TYPERT.invocations getter。
+		const descriptors = Array.isArray(value?.descriptors) ? value.descriptors : Array.isArray(value?.invocations) ? value.invocations : undefined;
+		if (!descriptors) continue;
+		for (const d of descriptors) {
 			if (typeof d?.id !== "string") continue;
 			const endpoint = d.id.slice(d.id.indexOf("#") + 1);
 			contracts.set(endpoint, {

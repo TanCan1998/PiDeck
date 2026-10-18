@@ -1,13 +1,17 @@
 import { ipcChannels } from "../../shared/ipc";
-import { calculateTokensPerSecond } from "../../shared/tps";
+import { calculateTokensPerSecond, calculateSessionTokensPerSecond, type TaskPerfSpan } from "../../shared/tps";
 
-/** 最近一次 assistant 回复的性能指标（结算后保留，供 getRuntimeState 合并展示）。 */
+/** 最近一次 assistant 回复及会话级性能指标（结算后保留，供 getRuntimeState 合并展示）。 */
 export interface MessagePerfSnapshot {
 	ttftMs?: number;
 	totalMs: number;
 	endToEndTps?: number;
 	/** 首个有效 thinking/text delta 到回复结束期间的速度。 */
 	tps?: number;
+	/** 会话累计平均流式速度（tokens/s；解码活跃耗时并集）。 */
+	sessionTps?: number;
+	/** 会话累计平均端到端速度（tokens/s；整体活跃耗时并集）。 */
+	sessionEndToEndTps?: number;
 	at: number;
 }
 
@@ -29,6 +33,8 @@ export class MessagePerfTracker {
 	private readonly promptRequestedAtByAgent = new Map<string, number>();
 	/** 最近一次 assistant 回复的性能指标。 */
 	private readonly lastPerfByAgent = new Map<string, MessagePerfSnapshot>();
+	/** 会话内已结算的模型回复与派生任务性能区间（per agent）。 */
+	private readonly spansByAgent = new Map<string, TaskPerfSpan[]>();
 
 	/**
 	 * sendPrompt 请求发出时刻：把 pi 内部排队与模型服务端等待计入用户体感的
@@ -106,11 +112,113 @@ export class MessagePerfTracker {
 		const streamingMs = perf.firstDeltaAt > 0 ? now - perf.firstDeltaAt : undefined;
 		const tps = calculateTokensPerSecond(outputTokens, streamingMs);
 		const endToEndTps = calculateTokensPerSecond(outputTokens, totalMs);
-		this.lastPerfByAgent.set(agentId, { ttftMs, totalMs, endToEndTps, tps, at: now });
+
+		if (outputTokens !== undefined && outputTokens >= 0 && totalMs > 0) {
+			const span: TaskPerfSpan = {
+				startedAt: perf.startedAt,
+				firstDeltaAt: perf.firstDeltaAt > 0 ? perf.firstDeltaAt : undefined,
+				completedAt: now,
+				outputTokens,
+			};
+			let spans = this.spansByAgent.get(agentId);
+			if (!spans) {
+				spans = [];
+				this.spansByAgent.set(agentId, spans);
+			}
+			spans.push(span);
+		}
+
+		const sessionPerf = calculateSessionTokensPerSecond(this.spansByAgent.get(agentId) ?? []);
+		const sessionTps = sessionPerf.sessionTps;
+		const sessionEndToEndTps = sessionPerf.sessionEndToEndTps;
+
+		this.lastPerfByAgent.set(agentId, { ttftMs, totalMs, endToEndTps, tps, sessionTps, sessionEndToEndTps, at: now });
 		emit(ipcChannels.agentsRuntimeState, {
 			agentId,
-			state: { ttftMs, totalMs, endToEndTps, tps, perfAt: now },
+			state: { ttftMs, totalMs, endToEndTps, tps, sessionTps, sessionEndToEndTps, perfAt: now },
 		});
+	}
+
+	/**
+	 * 写入/覆盖一条性能区间，只改区间表，不重算也不推送：
+	 * 单条记录与批量同步共用，保证批量同步在整批写入后只重算一次会话级指标。
+	 * 返回是否写入（非法区间直接忽略，批次据此判断要不要重算）。
+	 */
+	private upsertSpan(agentId: string, task: { id?: string; startedAt: number; completedAt: number; tokens: number; firstDeltaAt?: number }): boolean {
+		if (!task || !Number.isFinite(task.startedAt) || !Number.isFinite(task.completedAt) || !Number.isFinite(task.tokens)) return false;
+		if (task.tokens < 0 || task.completedAt <= task.startedAt) return false;
+		let spans = this.spansByAgent.get(agentId);
+		if (!spans) {
+			spans = [];
+			this.spansByAgent.set(agentId, spans);
+		}
+		const span: TaskPerfSpan = {
+			...(task.id ? { id: task.id } : {}),
+			startedAt: task.startedAt,
+			firstDeltaAt: task.firstDeltaAt && task.firstDeltaAt > 0 ? task.firstDeltaAt : undefined,
+			completedAt: task.completedAt,
+			outputTokens: task.tokens,
+		};
+		// 有 id 的记录原地覆盖：列举子代理会反复回放同一批记录，追加会让 token 与耗时重复膨胀。
+		const existingIndex = task.id ? spans.findIndex((s) => s.id === task.id) : -1;
+		if (existingIndex >= 0) spans[existingIndex] = span;
+		else spans.push(span);
+		return true;
+	}
+
+	/**
+	 * 用当前区间重算会话级指标并刷新最近快照。
+	 * at 取本次刷新时刻，与随后推送的 perfAt 同源：否则 get_state 会带更旧的结算时刻，
+	 * 与已推送的「刚刚更新」自相矛盾。
+	 */
+	private refreshSessionPerf(agentId: string): MessagePerfSnapshot {
+		const sessionPerf = calculateSessionTokensPerSecond(this.spansByAgent.get(agentId) ?? []);
+		const last = this.lastPerfByAgent.get(agentId);
+		const updated: MessagePerfSnapshot = {
+			ttftMs: last?.ttftMs,
+			totalMs: last?.totalMs ?? 0,
+			endToEndTps: last?.endToEndTps,
+			tps: last?.tps,
+			sessionTps: sessionPerf.sessionTps,
+			sessionEndToEndTps: sessionPerf.sessionEndToEndTps,
+			at: Date.now(),
+		};
+		this.lastPerfByAgent.set(agentId, updated);
+		return updated;
+	}
+
+	/** 会话级三字段补丁；perfAt 直接取快照 at，两者永远一致。 */
+	private sessionStatePatch(snapshot: MessagePerfSnapshot) {
+		return { sessionTps: snapshot.sessionTps, sessionEndToEndTps: snapshot.sessionEndToEndTps, perfAt: snapshot.at };
+	}
+
+	/**
+	 * 记录派生任务（如 subagent 派生执行）的用量与耗时区间，消除重叠并纳入会话级平均 TPS 计算。
+	 */
+	recordSubagentTask(agentId: string, task: { id?: string; startedAt: number; completedAt: number; tokens: number; firstDeltaAt?: number }, emit?: (channel: string, payload: unknown) => void): void {
+		if (!this.upsertSpan(agentId, task)) return;
+		const updated = this.refreshSessionPerf(agentId);
+		emit?.(ipcChannels.agentsRuntimeState, { agentId, state: this.sessionStatePatch(updated) });
+	}
+
+	/**
+	 * 批量同步子代理记录（例如从会话持久化条目或列表恢复）。
+	 * 整批只重算一次并只推送一次；不传 emit 时静默刷新快照（只读列举路径用，避免读接口推状态事件）。
+	 */
+	syncSubagentTasks(agentId: string, tasks: ReadonlyArray<{ id?: string; startedAt: number; completedAt?: number; tokens?: number }>, emit?: (channel: string, payload: unknown) => void): void {
+		let modified = false;
+		for (const t of tasks) {
+			if (typeof t.completedAt !== "number" || typeof t.tokens !== "number") continue;
+			modified = this.upsertSpan(agentId, { id: t.id, startedAt: t.startedAt, completedAt: t.completedAt, tokens: t.tokens }) || modified;
+		}
+		if (!modified) return;
+		const updated = this.refreshSessionPerf(agentId);
+		emit?.(ipcChannels.agentsRuntimeState, { agentId, state: this.sessionStatePatch(updated) });
+	}
+
+	/** 获取某 agent 会话已记录的所有性能区间 */
+	getSessionSpans(agentId: string): ReadonlyArray<TaskPerfSpan> {
+		return this.spansByAgent.get(agentId) ?? [];
 	}
 
 	/**
@@ -127,5 +235,6 @@ export class MessagePerfTracker {
 	clearAgent(agentId: string): void {
 		this.discardInFlight(agentId);
 		this.lastPerfByAgent.delete(agentId);
+		this.spansByAgent.delete(agentId);
 	}
 }

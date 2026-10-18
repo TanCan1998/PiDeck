@@ -288,10 +288,10 @@ export function AutomationTaskEditor({ task, defaultProjectId, lockProject = fal
 						{t("automation.project")} <span className="text-destructive">*</span>
 					</Label>
 					{lockProject ? (
-						<Input id="task-project" value={lockedProjectName} className="h-8 text-xs" disabled />
+						<Input id="task-project" value={lockedProjectName} size="sm" className="text-xs" disabled />
 					) : (
 						<Select value={projectId} onValueChange={setProjectId}>
-							<SelectTrigger id="task-project" className="h-8 text-xs">
+							<SelectTrigger id="task-project" size="sm" className="text-xs">
 								<SelectValue placeholder={t("automation.projectSelect")} />
 							</SelectTrigger>
 							<SelectContent>
@@ -314,7 +314,7 @@ export function AutomationTaskEditor({ task, defaultProjectId, lockProject = fal
 						{t("automation.backend")}
 					</Label>
 					<Select value={backend} onValueChange={(value) => setBackend(value as TaskBackend)}>
-						<SelectTrigger id="task-backend" className="h-8 text-xs">
+						<SelectTrigger id="task-backend" size="sm" className="text-xs">
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>
@@ -346,7 +346,7 @@ export function AutomationTaskEditor({ task, defaultProjectId, lockProject = fal
 							setMode(value === THINKING_INHERIT ? "" : (value as AutomationTaskMode));
 						}}
 					>
-						<SelectTrigger id="task-mode" className="h-8 text-xs">
+						<SelectTrigger id="task-mode" size="sm" className="text-xs">
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>
@@ -398,7 +398,7 @@ export function AutomationTaskEditor({ task, defaultProjectId, lockProject = fal
 							setThinkingLevel(value === THINKING_INHERIT ? "" : value);
 						}}
 					>
-						<SelectTrigger id="task-thinking" className="h-8 text-xs">
+						<SelectTrigger id="task-thinking" size="sm" className="text-xs">
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>
@@ -423,19 +423,19 @@ export function AutomationTaskEditor({ task, defaultProjectId, lockProject = fal
 				<div className="grid grid-cols-2 gap-3 md:grid-cols-4">
 					<div className="flex flex-col gap-1">
 						<span className="text-micro text-muted-foreground">{t("automation.timeoutMinutes")}</span>
-						<Input type="number" min="1" value={timeoutMinutes} onChange={(e) => setTimeoutMinutes(e.target.value)} placeholder="30" className="h-7 font-mono text-xs" />
+						<Input type="number" min="1" value={timeoutMinutes} onChange={(e) => setTimeoutMinutes(e.target.value)} placeholder="30" size="sm" className="font-mono text-xs" />
 					</div>
 					<div className="flex flex-col gap-1">
 						<span className="text-micro text-muted-foreground">{t("automation.maxTokens")}</span>
-						<Input type="number" min="1000" value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} placeholder="e.g. 500000" className="h-7 font-mono text-xs" />
+						<Input type="number" min="1000" value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} placeholder="e.g. 500000" size="sm" className="font-mono text-xs" />
 					</div>
 					<div className="flex flex-col gap-1">
 						<span className="text-micro text-muted-foreground">{t("automation.maxCostUsd")}</span>
-						<Input type="number" step="0.01" min="0.01" value={maxCostUsd} onChange={(e) => setMaxCostUsd(e.target.value)} placeholder="e.g. 1.00" className="h-7 font-mono text-xs" />
+						<Input type="number" step="0.01" min="0.01" value={maxCostUsd} onChange={(e) => setMaxCostUsd(e.target.value)} placeholder="e.g. 1.00" size="sm" className="font-mono text-xs" />
 					</div>
 					<div className="flex flex-col gap-1">
 						<span className="text-micro text-muted-foreground">{t("automation.maxSteps")}</span>
-						<Input type="number" min="1" value={maxSteps} onChange={(e) => setMaxSteps(e.target.value)} placeholder="e.g. 50" className="h-7 font-mono text-xs" />
+						<Input type="number" min="1" value={maxSteps} onChange={(e) => setMaxSteps(e.target.value)} placeholder="e.g. 50" size="sm" className="font-mono text-xs" />
 					</div>
 				</div>
 			</div>

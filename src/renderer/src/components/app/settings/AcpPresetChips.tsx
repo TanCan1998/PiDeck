@@ -12,8 +12,10 @@ import { desktopApi } from "../../../desktopApi";
 import { t } from "../../../i18n";
 import { ACP_TOOL_PRESETS, type AcpToolPreset } from "../../../../../shared/acpToolPresets";
 import type { AcpToolStatus } from "../../../../../shared/types/acp";
+import { Badge } from "../../ui-shadcn/badge";
 import { Button } from "../../ui-shadcn/button";
 import { ConfirmDialog } from "../../ui-shadcn/ConfirmDialog";
+import { SectionHeading } from "../../ui-shadcn/section-heading";
 
 type PresetAction = { preset: AcpToolPreset; kind: "install" | "uninstall" };
 
@@ -22,27 +24,30 @@ function PresetChip(props: { preset: AcpToolPreset; status?: AcpToolStatus; runn
 	const { preset, status, running, onAdd, onAction } = props;
 	const npmInstallable = preset.install?.kind === "npm";
 	const badgeText = !status ? t("acp.statusDetecting") : status.state === "installed" ? t("acp.statusInstalled", { version: status.version ?? "?" }) : status.state === "npx-ready" ? t("acp.statusNpxReady") : status.state === "missing" ? t("acp.statusMissing") : t("acp.statusUnknown");
-	const badgeTone = !status || status.state === "unknown" ? "text-muted-foreground" : status.state === "installed" || status.state === "npx-ready" ? "text-primary" : "text-muted-foreground";
+	// missing 是「需要处理」，不能和 unknown 同灰；primary 是主题强调色，不是状态色。
+	const badgeVariant = !status || status.state === "unknown" ? "neutral" : status.state === "missing" ? "warning" : "success";
 	return (
 		<div className="border-border bg-background flex flex-wrap items-center gap-2 rounded-md border px-2.5 py-1.5">
 			<button type="button" className="hover:bg-accent flex items-center gap-1.5 rounded px-1 py-0.5 text-left" title={t(PRESET_DESC_KEYS[preset.id])} onClick={() => onAdd(preset)}>
 				<Plus size={12} aria-hidden="true" />
 				<span className="text-xs">{preset.name}</span>
 			</button>
-			<span className={`text-[10px] ${badgeTone}`}>{badgeText}</span>
+			<Badge variant={badgeVariant} size="sm">
+				{badgeText}
+			</Badge>
 			{running ? <Loader2 size={11} className="animate-pideck-spin" aria-label={t("acp.installRunning")} /> : null}
 			{npmInstallable && status?.state === "missing" ? (
-				<Button variant="ghost" size="sm" className="h-6 px-1.5 text-[11px]" title={t("acp.installAction")} onClick={() => onAction({ preset, kind: "install" })}>
-					<Download size={11} aria-hidden="true" />
+				<Button variant="ghost" size="xs" title={t("acp.installAction")} onClick={() => onAction({ preset, kind: "install" })}>
+					<Download aria-hidden="true" />
 					{t("acp.installAction")}
 				</Button>
 			) : null}
 			{npmInstallable && status?.state === "installed" ? (
-				<Button variant="ghost" size="sm" className="text-muted-foreground h-6 px-1.5 text-[11px]" title={t("acp.uninstallAction")} onClick={() => onAction({ preset, kind: "uninstall" })}>
-					<Trash2 size={11} aria-hidden="true" />
+				<Button variant="ghost" size="icon-xs" className="text-muted-foreground" title={t("acp.uninstallAction")} onClick={() => onAction({ preset, kind: "uninstall" })}>
+					<Trash2 aria-hidden="true" />
 				</Button>
 			) : null}
-			{preset.install?.kind === "manual" && status?.state === "missing" ? <span className="text-muted-foreground text-[10px]">{t("acp.manualInstallHint")}</span> : null}
+			{preset.install?.kind === "manual" && status?.state === "missing" ? <span className="text-muted-foreground text-micro">{t("acp.manualInstallHint")}</span> : null}
 			<a href={preset.homepage} target="_blank" rel="noreferrer" className="text-muted-foreground hover:text-foreground" title={t("acp.presetHome")}>
 				<ExternalLink size={11} aria-hidden="true" />
 			</a>
@@ -102,14 +107,14 @@ export function AcpPresetChips(props: { onAdd: (preset: AcpToolPreset) => void }
 
 	return (
 		<section className="flex flex-col gap-2">
-			<h4 className="text-xs font-semibold">{t("acp.presetsTitle")}</h4>
+			<SectionHeading title={t("acp.presetsTitle")} />
 			<div className="flex flex-wrap gap-2">
 				{ACP_TOOL_PRESETS.map((preset) => (
 					<PresetChip key={preset.id} preset={preset} status={statuses[preset.id]} running={runningId === preset.id} onAdd={props.onAdd} onAction={setConfirmAction} />
 				))}
 			</div>
 			{logLines.length > 0 ? (
-				<pre className="bg-muted/50 text-muted-foreground max-h-28 overflow-y-auto rounded-md p-2 font-mono text-[10px] leading-relaxed" aria-label={t("acp.installLog")}>
+				<pre className="bg-muted/50 text-muted-foreground max-h-28 overflow-y-auto rounded-md p-2 font-mono text-micro leading-relaxed" aria-label={t("acp.installLog")}>
 					{logLines.join("\n")}
 				</pre>
 			) : (

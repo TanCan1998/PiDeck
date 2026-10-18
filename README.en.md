@@ -85,6 +85,7 @@
 
 ### v0.9.1 (2026-10-14) Release Highlights
 - ✨ **macOS app would not launch on Apple Silicon**
+- ✨ **Local network access and terminal SSH work again**
 
 [View Full Changelog →](CHANGELOG.md)
 

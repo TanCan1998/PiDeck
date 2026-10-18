@@ -348,7 +348,7 @@ export function WeChatSection() {
 						<div className="flex items-center gap-2">
 							{renaming ? (
 								<>
-									<Input value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} className="h-7 text-xs" />
+									<Input value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} size="sm" className="text-xs" />
 									<Button size="sm" variant="secondary" disabled={busy} onClick={() => void handleRenameSave()}>
 										{t("common.save")}
 									</Button>
@@ -373,8 +373,11 @@ export function WeChatSection() {
 							)}
 						</div>
 						<span className="text-muted-foreground text-xs">{t("config.wechat.loggedInHint", { time: formatI18nDateTime(account.loggedInAt) })}</span>
+						<span className="text-muted-foreground text-xs">{t("config.wechat.displayNameHint")}</span>
 						{status?.errorMessage === "login-required" ? <span className="text-destructive text-xs">{t("config.wechat.needRelogin")}</span> : null}
 						{status?.errorMessage === "credential-unavailable" ? <span className="text-destructive text-xs">{t("config.wechat.credentialUnavailable")}</span> : null}
+						{/* 单账号是协议约束：换绑后旧号的白名单会被覆写，不写清楚就会被当成「坏掉」*/}
+						<span className="text-muted-foreground text-xs">{t("config.wechat.singleAccountHint")}</span>
 						<div className="flex gap-2">
 							<Button size="sm" variant="secondary" disabled={busy} onClick={() => void handleBeginLogin()}>
 								<RefreshCw className="mr-1 h-3.5 w-3.5" />
@@ -404,7 +407,7 @@ export function WeChatSection() {
 						{loginState.error ? <span className="text-muted-foreground text-xs">{t(LOGIN_ERROR_LABEL[loginState.error] ?? "config.wechat.phase.error")}</span> : null}
 						{loginState.phase === "need-verify-code" ? (
 							<div className="flex w-full items-center gap-2">
-								<Input value={verifyCode} onChange={(event) => setVerifyCode(event.target.value)} placeholder={t("config.wechat.verifyCodePlaceholder")} className="h-7 text-xs" />
+								<Input value={verifyCode} onChange={(event) => setVerifyCode(event.target.value)} placeholder={t("config.wechat.verifyCodePlaceholder")} size="sm" className="text-xs" />
 								<Button size="sm" disabled={busy || !verifyCode.trim()} onClick={() => void handleSubmitVerifyCode()}>
 									{t("common.submit")}
 								</Button>

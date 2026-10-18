@@ -92,23 +92,23 @@ export function AutomationWorkspace(props: AutomationWorkspaceProps) {
 			</header>
 
 			<Tabs value={activeTab} onValueChange={handleTabChange} className="flex min-h-0 flex-1 flex-col gap-3 px-5 pb-5 pt-3">
-				<TabsList className="w-auto self-start bg-bg-muted/70 p-0.5">
-					<TabsTrigger value="tasks" className="h-7 gap-1.5 px-3 text-xs data-[state=active]:bg-background">
+				<TabsList className="w-auto self-start">
+					<TabsTrigger value="tasks" className="gap-1.5">
 						<ListFilter className="size-3.5" />
 						{t("automation.tasksTab")}
 					</TabsTrigger>
-					<TabsTrigger value="history" className="h-7 gap-1.5 px-3 text-xs data-[state=active]:bg-background">
+					<TabsTrigger value="history" className="gap-1.5">
 						<History className="size-3.5" />
 						{t("automation.historyTab")}
 					</TabsTrigger>
 					{!props.projectId && (
-						<TabsTrigger value="settings" className="h-7 gap-1.5 px-3 text-xs data-[state=active]:bg-background">
+						<TabsTrigger value="settings" className="gap-1.5">
 							<Sliders className="size-3.5" />
 							{t("automation.settingsTab")}
 						</TabsTrigger>
 					)}
 					{activeTab === "editor" && (
-						<TabsTrigger value="editor" className="h-7 gap-1.5 px-3 text-xs data-[state=active]:bg-background">
+						<TabsTrigger value="editor" className="gap-1.5">
 							{editingTask ? t("automation.editTask") : t("automation.createTask")}
 						</TabsTrigger>
 					)}

@@ -106,6 +106,28 @@ export type FileSearchResult = {
 	type: "file" | "directory";
 };
 
+/**
+ * 工作区文件内容检索命中（Go file-index sidecar）。
+ * `line` 为 1 起行号，`column` 为命中词在行内的 0 起字符位置，`snippet` 是窗口化后的可读片段。
+ */
+export type FileContentSearchHit = {
+	name: string;
+	path: string;
+	relativePath: string;
+	line: number;
+	column: number;
+	snippet: string;
+};
+
+/** 内容检索聚合结果：hits 已按相关度排序并截断，其余字段用于「扫了多少、是否截断」的提示。 */
+export type FileContentSearchResult = {
+	hits: FileContentSearchHit[];
+	matchedFiles: number;
+	scannedFiles: number;
+	scannedBytes: number;
+	truncated: boolean;
+};
+
 export type SessionSource = "pi" | "codex" | "claude" | "opencode" | "zcode" | "workbuddy" | "cursor" | "qoder" | "kimi" | "kimiwork" | "minimax";
 export type SessionEnvironment = "native" | "wsl";
 
@@ -539,4 +561,31 @@ export type SessionBranchTree = {
 	roots: SessionBranchNode[];
 	/** 当前叶子（活跃分支末端）；空会话为 null。 */
 	leafId: string | null;
+};
+
+// ── 跨会话全文搜索（Go session-index sidecar）────────────────────────────
+
+/** 单条正文命中：messageId 供渲染层调 jumpToMessage 定位到具体消息。 */
+export type SessionSearchMatch = {
+	messageId: string;
+	role: "user" | "assistant";
+	timestampMs: number;
+	/** 命中处前后文摘要（控制字符已折叠，单行展示）。 */
+	snippet: string;
+};
+
+/** 单个会话的命中集合。filePath 是会话文件路径，**不是** SessionRecord.id（id 是跨重启稳定的身份，映射见 renderer utils/sessionContentSearchHits）。 */
+export type SessionSearchSessionHit = {
+	filePath: string;
+	updatedAtMs: number;
+	matches: SessionSearchMatch[];
+	/** 命中总数（未截断）：matches 只保留评分最高的若干条，界面用它报真实条数。 */
+	hitCount?: number;
+};
+
+export type SessionSearchResult = {
+	sessions: SessionSearchSessionHit[];
+	/** 命中会话总数（可能大于 sessions.length，后者按 limit 截断）。 */
+	totalHitSessions: number;
+	truncated: boolean;
 };

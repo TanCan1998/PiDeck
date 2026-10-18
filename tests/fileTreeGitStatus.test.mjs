@@ -283,7 +283,8 @@ test("着色类映射：两档各自的 utility，未命中不染色", () => {
 
 test("接线契约：文件行与目录行都叠着色类、查表函数接进树、两处刷新调用点都在", () => {
 	const surface = readSource("src/renderer/src/components/session/WorkspaceSurface.tsx");
-	const row = readSource("src/renderer/src/components/session/FileNode.tsx");
+	// 行组件与面板在同一个文件里（行拆分在上游「分批渲染」重构中被合并回去），断言照旧按出现次数钉住
+	const row = surface;
 	// 出现次数而不是「有没有」：文件行 + 目录行各一处，删掉任何一种行都会红
 	const coloredRows = row.match(/cn\(\s*"file-node-name"\s*,\s*gitStatusClass\s*\)/g) ?? [];
 	assert.equal(coloredRows.length, 2, "文件行与目录行都必须按同一份着色类渲染");

@@ -5,8 +5,7 @@ import { describe, test } from "node:test";
 const definitions = JSON.parse(readFileSync("src/renderer/src/vendor/seti-icons/definitions.json", "utf8"));
 const icons = JSON.parse(readFileSync("src/renderer/src/vendor/seti-icons/icons.json", "utf8"));
 const workspaceSurface = readFileSync("src/renderer/src/components/session/WorkspaceSurface.tsx", "utf8");
-// 文件树行渲染（含 Seti 图标、缩进、原生 button）已迁到独立模块
-const fileNode = readFileSync("src/renderer/src/components/session/FileNode.tsx", "utf8");
+const fileNode = readFileSync("src/renderer/src/components/session/WorkspaceSurface.tsx", "utf8");
 const surfaceFacade = readFileSync("src/renderer/src/components/session/SurfaceComponents.tsx", "utf8");
 const gitResourceTree = readFileSync("src/renderer/src/components/app/git/GitResourceTree.tsx", "utf8");
 

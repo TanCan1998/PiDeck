@@ -71,6 +71,7 @@ function createHarness(options = {}) {
 		createInputs: [],
 		restart: 0,
 		stop: 0,
+		stopWait: 0,
 		abort: 0,
 		compact: 0,
 		runtimeState: 0,
@@ -167,6 +168,15 @@ function createHarness(options = {}) {
 			const index = tabs.findIndex((tab) => tab.id === agentId);
 			if (index >= 0) tabs.splice(index, 1);
 		},
+		// 只给需要的用例挂「等进程退出」能力：其余用例继续验证老网关回退路径。
+		...(options.stopAndWait
+			? {
+					stopAndWaitForExit: async (agentId, timeoutMs) => {
+						calls.stopWait += 1;
+						return options.stopAndWait(agentId, timeoutMs);
+					},
+				}
+			: {}),
 		abort: async () => {
 			calls.abort += 1;
 			if (options.abortError) throw new Error(options.abortError);
@@ -1583,9 +1593,9 @@ test("stop invalidates the target and restart replaces it with a higher generati
 	assert.equal(restarted.value.session.id, "session-1");
 });
 
-test("releaseRuntimeForDelete unbinds immediately and stops the agent in the background", async () => {
+test("releaseRuntimeForDelete unbinds immediately and waits for the process exit before returning", async () => {
 	const { SessionRuntimeCoordinator } = loadCoordinator();
-	const stopGate = deferred();
+	const exitGate = deferred();
 	const harness = createHarness({
 		tabs: [
 			{
@@ -1598,17 +1608,69 @@ test("releaseRuntimeForDelete unbinds immediately and stops the agent in the bac
 				createdAt: 1,
 			},
 		],
-		stopDelay: stopGate.promise,
+		stopAndWait: () => exitGate.promise,
 	});
 	const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender);
 	coordinator.bindExistingAgent("session-1", "agent-a");
-	const pending = coordinator.releaseRuntimeForDelete("session-1");
-	// 删除路径不能等 stop 完成：侧栏要立刻解绑，agent 在后台停。
+	let released = false;
+	const pending = coordinator.releaseRuntimeForDelete("session-1").then(() => {
+		released = true;
+	});
+	// 解绑是同步完成的：侧栏立刻可以移除该行，不必等进程退出；但删除必须等退出真正完成（issue #364）。
 	assert.equal(coordinator.getTarget("session-1"), undefined);
-	assert.equal(harness.calls.stop, 1);
-	stopGate.resolve();
+	assert.equal(harness.calls.stopWait, 1);
+	assert.equal(released, false);
+	exitGate.resolve(true);
 	await pending;
-	assert.equal(coordinator.getTarget("session-1"), undefined);
+	assert.equal(released, true);
+});
+
+test("releaseRuntimeForDelete resolves after a bounded wait when the process exit times out", async () => {
+	const { SessionRuntimeCoordinator } = loadCoordinator();
+	const warnings = [];
+	const harness = createHarness({
+		tabs: [
+			{
+				id: "agent-a",
+				projectId: "project-1",
+				cwd: "C:/project",
+				title: "Session",
+				status: "running",
+				sessionPath: "C:/sessions/session-1.jsonl",
+				createdAt: 1,
+			},
+		],
+		stopAndWait: async () => false,
+	});
+	const logger = { info: () => undefined, warn: (_scope, message) => warnings.push(message), error: () => undefined };
+	const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender, logger);
+	coordinator.bindExistingAgent("session-1", "agent-a");
+	await coordinator.releaseRuntimeForDelete("session-1");
+	// 超时不能挡住删除（否则又变成「删不掉」），只留一条可诊断的 warn。
+	assert.equal(harness.calls.stopWait, 1);
+	assert.deepEqual(warnings, ["Agent exit timed out before session delete"]);
+});
+
+test("releaseRuntimeForDelete falls back to a plain stop for gateways without exit waiting", async () => {
+	const { SessionRuntimeCoordinator } = loadCoordinator();
+	const harness = createHarness({
+		tabs: [
+			{
+				id: "agent-a",
+				projectId: "project-1",
+				cwd: "C:/project",
+				title: "Session",
+				status: "running",
+				sessionPath: "C:/sessions/session-1.jsonl",
+				createdAt: 1,
+			},
+		],
+	});
+	const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender);
+	coordinator.bindExistingAgent("session-1", "agent-a");
+	await coordinator.releaseRuntimeForDelete("session-1");
+	assert.equal(harness.calls.stop, 1);
+	assert.equal(harness.calls.stopWait, 0);
 });
 
 test("commandFailure classifies message-not-found separately from session-not-found", () => {

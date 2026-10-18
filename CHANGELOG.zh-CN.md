@@ -4,6 +4,7 @@ macOS 安装包修复版：0.9.0 的 macOS 包缺少代码签名，Apple Silicon
 
 ### 🐛 修复
 - **macOS 安装包在 Apple Silicon 上无法启动** — 0.9.0 的 macOS 包在打包时被静默跳过代码签名（electron-builder 26.15 起，找不到证书时不再自动回退 ad-hoc 签名），装好后双击没有窗口、进程停在 `_dyld_start`，也不会出现「仍要打开」入口。现在打包显式使用 ad-hoc 签名，发布流程同时新增签名校验，签名缺失会让打包任务直接失败而不是发出坏包。已安装 0.9.0 的用户重新安装本版本即可；暂时不想升级时，也可以对已安装的应用手动重新签名（`codesign --force --deep --sign -`）恢复启动，注意每次重新安装后都要再执行一次。
+- **局域网访问与终端 SSH 恢复正常** — 同一次签名退化还把签名标识变成了 `Electron`：macOS 按签名标识记录「本地网络」授权，用户此前给 `com.ayuayue.pi-desktop` 的授权因此失效。0.9.0 上的表现是局域网模型服务连不上（`Connection error` / `EHOSTUNREACH`）、PiDeck 终端里 `ssh` 报 `No route to host`，而系统的「本地网络」开关看起来是开着的。现在签名标识恢复为应用自身的 Bundle ID，嵌套 Helper 也用自己的标识签名，并补上 `NSLocalNetworkUsageDescription` 声明。升级到本版本后如果局域网仍不通，请到系统设置 → 隐私与安全性 → 本地网络里删掉旧的 `Electron` 条目、重新允许 PiDeck。
 
 ### 🙏 致谢
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FileSearchResult } from "../../../shared/types";
+import type { FileContentSearchResult, FileSearchResult } from "../../../shared/types";
 import { filterSnapshotResults } from "../utils/fileSearchFilter";
 
 /**
@@ -8,12 +8,17 @@ import { filterSnapshotResults } from "../utils/fileSearchFilter";
  * UI 只消费返回值并转发输入事件，不持有搜索状态。
  */
 export const FILE_SEARCH_DEBOUNCE_MS = 250;
+/** 内容检索的最小查询词长度：单字符几乎命中所有文件，扫盘纯噪音（与跨会话正文搜索口径一致）。 */
+export const FILE_CONTENT_SEARCH_MIN_QUERY_LENGTH = 2;
 
 export function useFileSearch(options: { projectId?: string }) {
 	const { projectId } = options;
 	const [query, setQuery] = useState("");
 	const [results, setResults] = useState<FileSearchResult[] | null>(null);
 	const [isSearching, setIsSearching] = useState(false);
+	// 内容检索单独一份状态：名字结果毫秒级先出，内容要扫盘（受字节预算约束），先到先渲染。
+	const [contentResults, setContentResults] = useState<FileContentSearchResult | null>(null);
+	const [isContentSearching, setIsContentSearching] = useState(false);
 	// 代次计数：每次新请求递增；旧请求返回时因代次不匹配被丢弃，
 	// 防止慢扫描（主进程最长可跑 8s）覆盖新结果（同 #159 files:list 的防竞态思路）。
 	const requestSeqRef = useRef(0);
@@ -30,11 +35,31 @@ export function useFileSearch(options: { projectId?: string }) {
 				lastGoodRef.current = null;
 				setResults(null);
 				setIsSearching(false);
+				setContentResults(null);
+				setIsContentSearching(false);
 				return;
 			}
 			if (!projectId) return;
 			const seq = ++requestSeqRef.current;
 			setIsSearching(true);
+			// 内容检索与名字检索并行（同一防抖窗口、同一代次）：
+			// 名字结果不参与前缀快照过滤的是内容那一份，内容只认最新请求，迟到结果直接丢弃。
+			const contentEnabled = trimmed.length >= FILE_CONTENT_SEARCH_MIN_QUERY_LENGTH;
+			if (contentEnabled) setIsContentSearching(true);
+			else {
+				setContentResults(null);
+				setIsContentSearching(false);
+			}
+			void (contentEnabled ? window.piDesktop.files.searchContent(projectId, trimmed) : Promise.resolve(null))
+				.then((content) => {
+					if (seq === requestSeqRef.current) setContentResults(content);
+				})
+				.catch(() => {
+					if (seq === requestSeqRef.current) setContentResults(null);
+				})
+				.finally(() => {
+					if (seq === requestSeqRef.current) setIsContentSearching(false);
+				});
 			try {
 				const list = await window.piDesktop.files.search(projectId, trimmed);
 				if (seq !== requestSeqRef.current) return; // 迟到的旧请求：静默丢弃
@@ -91,5 +116,5 @@ export function useFileSearch(options: { projectId?: string }) {
 	/** 清空搜索框并退出搜索态（Esc / 关闭按钮） */
 	const clearSearch = useCallback(() => setQuery(""), []);
 
-	return { query, setQuery, results: displayResults, isSearching, clearSearch, searchNow };
+	return { query, setQuery, results: displayResults, isSearching, contentResults, isContentSearching, clearSearch, searchNow };
 }

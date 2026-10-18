@@ -761,7 +761,7 @@ export function useSessionComposerController(options: UseSessionComposerControll
 		// 旧实现扫 8 层会在切项目时把主进程/渲染都拖死（大会话项目尤其明显）。
 		// 引导页虚拟会话没有 record，靠 bootstrapProjectId 兑底加载文件树。
 		void desktopApi.files
-			.list(effectiveProjectId, { maxDepth: 0 })
+			.list(effectiveProjectId, { maxDepth: 0, skipGeneratedDirs: true })
 			.then((next) => {
 				if (current) setFiles(next);
 			})
@@ -931,7 +931,7 @@ export function useSessionComposerController(options: UseSessionComposerControll
 		let current = true;
 		loadingDirPathsRef.current.add(dirNode.path);
 		void desktopApi.files
-			.list(effectiveProjectId, { maxDepth: 0, directory: dirNode.path })
+			.list(effectiveProjectId, { maxDepth: 0, directory: dirNode.path, skipGeneratedDirs: true })
 			.then((children) => {
 				if (!current) return;
 				setFiles((prev) => mergeFileTreeChildren(prev, dirNode.path, children));
@@ -967,7 +967,7 @@ export function useSessionComposerController(options: UseSessionComposerControll
 		// 标记在途后即便本 effect 因继续输入被重新评估，loading 门也会挡住重复请求
 		deepTreeStateRef.current.loading = true;
 		void desktopApi.files
-			.list(effectiveProjectId, { maxDepth: FILE_TREE_ABSOLUTE_MAX_DEPTH })
+			.list(effectiveProjectId, { maxDepth: FILE_TREE_ABSOLUTE_MAX_DEPTH, skipGeneratedDirs: true })
 			.then((next) => {
 				// 用项目比对而非 current 标志：输入过程中的每个按键都会触发本 effect
 				// 重新评估并清理旧闭包，但请求仍属于当前项目——数据不该被丢弃，

@@ -350,7 +350,7 @@ export function SettingsTab(props: {
 	return (
 		<div className="config-settings-tab">
 			<div className="mb-3 flex items-center justify-between gap-3">
-				<span className="font-mono text-xs tabular-nums text-text-tertiary">{t("config.count.configItems", { count: entries.length })}</span>
+				<span className="font-mono text-xs tabular-nums text-muted-foreground">{t("config.count.configItems", { count: entries.length })}</span>
 			</div>
 
 			{/* ── 模型切换列表（enabledModels）：单行分区，行标题即一级标题（同「常用设置」语言分区） ── */}

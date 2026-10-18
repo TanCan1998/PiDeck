@@ -17,6 +17,7 @@ import { SessionHoverCard } from "./SessionHoverCard";
 import { TitleScrollText } from "./TitleScrollText";
 import { SESSION_TAB_DRAG_MIME } from "../../utils/sessionSplitEdge";
 import { formatRelativeTime } from "../../utils/relativeTime";
+import { useSessionActivityAt } from "../../hooks/sidebar/useSessionActivityClock";
 import { RECENT_SESSIONS_INITIAL_VISIBLE, collectActiveSessionRows, collectRecentActivityRows, growRecentVisible } from "./activitySessionsModel";
 import { RecentSessionsSection } from "./RecentSessionsSection";
 
@@ -45,6 +46,8 @@ export function ActiveSessionsTree(props: { controller: SidebarController; actio
 	// 活动页以会话为粒度，待确认标记直接按本行 sessionId 判定，
 	// 避免订阅项目级聚合值导致一个会话的 ask 点亮整页。
 	const sessionRuntimeUiById = useAtomValue(sessionRuntimeUiByIdAtom);
+	// 相对时间基准：live 计时点（本轮开始/上一轮结束）优先，否则用行的排序时间。
+	const activityAt = useSessionActivityAt();
 	// 活动行：跨项目收集所有已绑定 runtime 的 Agent（live + 终态）。
 	// catalog 只含 runtime 绑定（detached 已被 agentInventoryAtom 排除），
 	// 因此不再按 isLiveRuntimeStatus 过滤——否则 error/closed 的失败会话会从活动页消失。
@@ -163,8 +166,9 @@ export function ActiveSessionsTree(props: { controller: SidebarController; actio
 											{/* 待确认标记：该会话正在等用户回答 ask，与项目行徽章共用同一组件 */}
 											{pendingAsk && <PendingAskBadge count={1} />}
 											{record?.sideTask && <SideTaskMark />}
-											{/* 相对时间常显：hover 时被右侧「⋯」浮层盖住（与历史会话行同一策略） */}
-											<span className="shrink-0 text-caption tabular-nums text-muted-foreground group-hover/row:hidden">{formatRelativeTime(sortAt)}</span>
+											{/* 相对时间常显：hover 时被右侧「⋯」浮层盖住（与历史会话行同一策略）。
+											   基准是计时点（用户输入 / turn 结束），不是每次写入都刷新的文件时间。 */}
+											<span className="shrink-0 text-micro tabular-nums text-muted-foreground group-hover/row:hidden">{formatRelativeTime(activityAt(sessionId, sortAt))}</span>
 										</div>
 									</div>
 								</button>

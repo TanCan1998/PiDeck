@@ -64,7 +64,7 @@ function SoundEventRow(props: { kind: SoundAlertKind; settings: SoundAlertSettin
 			<div className="flex w-full items-center gap-2">
 				<Switch checked={config.enabled} disabled={!settings.enabled} aria-label={t(`settings.sound.${kind}Enable`)} onCheckedChange={(value) => onChange({ ...config, enabled: value })} />
 				<Select value={config.sound} disabled={!settings.enabled || !config.enabled} onValueChange={(value) => onChange({ ...config, sound: value })}>
-					<SelectTrigger className="h-9 min-w-0 flex-1" aria-label={t(`settings.sound.${kind}`)}>
+					<SelectTrigger className="min-w-0 flex-1" aria-label={t(`settings.sound.${kind}`)}>
 						<SelectValue placeholder={t("settings.sound.choose")} />
 					</SelectTrigger>
 					<SelectContent>
@@ -175,7 +175,7 @@ export const NotificationTab = memo(function NotificationTab(props: Notification
 			<SettingsSection id="settings-section-notification-in-app" title={t("settings.inAppNotificationSection")}>
 				<SettingRow anchor="notification-toast-duration" title={t("settings.toastDuration")} description={t("settings.toastDurationDesc")}>
 					<Select value={String(draft.toastDurationMs)} onValueChange={(value) => updateDraft({ toastDurationMs: Number(value) })}>
-						<SelectTrigger className="h-9 min-w-0" aria-label={t("settings.toastDuration")}>
+						<SelectTrigger className="min-w-0" aria-label={t("settings.toastDuration")}>
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>

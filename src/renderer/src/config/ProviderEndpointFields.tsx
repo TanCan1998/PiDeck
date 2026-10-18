@@ -20,7 +20,7 @@ export function ProviderEndpointFields(props: {
 			<div className="config-provider-field items-center">
 				<Label className="pl-0.5 text-left text-xs font-medium text-text-secondary">{t("config.field.baseUrl")}</Label>
 				<div className="config-base-url-field">
-					<Input value={props.baseUrl} aria-label={t("config.field.baseUrl")} className="h-8 min-w-0" onChange={(event) => props.onChangeBaseUrl(event.target.value)} placeholder="https://api.openai.com/v1" />
+					<Input value={props.baseUrl} aria-label={t("config.field.baseUrl")} size="sm" className="min-w-0" onChange={(event) => props.onChangeBaseUrl(event.target.value)} placeholder="https://api.openai.com/v1" />
 					<span className="mt-1 block text-micro leading-relaxed text-text-tertiary">{t(props.backend === "dsh" ? "config.dsh.baseUrlHint" : "config.baseUrlHint")}</span>
 				</div>
 			</div>

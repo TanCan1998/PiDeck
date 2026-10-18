@@ -297,7 +297,7 @@ export function AskPanelOverlay() {
 							submitFollowUp();
 						}}
 					>
-						<Input className="min-w-0 flex-1 h-8 rounded-md px-2.5 py-1 text-sm focus-visible:ring-0" value={followUpText} onChange={(event) => setFollowUpText(event.target.value)} placeholder={t("askPanel.followUpPlaceholder")} aria-label={t("askPanel.followUpPlaceholder")} disabled={panel.creating} />
+						<Input size="sm" className="min-w-0 flex-1 rounded-md px-2.5 py-1 text-sm focus-visible:ring-0" value={followUpText} onChange={(event) => setFollowUpText(event.target.value)} placeholder={t("askPanel.followUpPlaceholder")} aria-label={t("askPanel.followUpPlaceholder")} disabled={panel.creating} />
 						<button type="submit" className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/60 hover:text-foreground disabled:opacity-40" aria-label={t("askPanel.sendFollowUp")} title={t("askPanel.sendFollowUp")} disabled={panel.creating || !followUpText.trim()}>
 							<Send size={13} aria-hidden="true" />
 						</button>

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 // 被测模块以 ESM import 加载；脚本有 CLI 直跑守卫，import 时不触发网络/进程副作用
-const { isAppVersionReleaseTag, planLatestCorrection, pickReleaseStatus, planAssetActions } = await import("../scripts/sync-release-to-atomgit.mjs");
+const { isAppVersionReleaseTag, planLatestCorrection, pickReleaseStatus, planAssetActions, planLatestTouch } = await import("../scripts/sync-release-to-atomgit.mjs");
 
 test("planLatestCorrection: AtomGit latest 落后于 GitHub latest 时计划提升+降级", () => {
 	const plan = planLatestCorrection(
@@ -33,6 +33,18 @@ test("planLatestCorrection: 无差异时返回空计划（幂等）", () => {
 test("pickReleaseStatus: 仅 GitHub latest 写 latest 标记，旧 tag 不携带该字段", () => {
 	assert.equal(pickReleaseStatus(true), "latest");
 	assert.equal(pickReleaseStatus(false), undefined);
+});
+
+test("planLatestTouch: 补资产后 OpenAPI latest 被预发布 tag 顶掉时要 touch 回真正 latest", () => {
+	// 回归：给 v0.9.1 补 win32 runtime 后 AtomGit /releases/latest 返回 v0.9.1，
+	// 而更新通道与 release_status 仍指向 v0.9.0 → macOS 手动检查会误报 v0.9.1。
+	assert.equal(planLatestTouch("v0.9.1", "v0.9.0"), "v0.9.0");
+	assert.equal(planLatestTouch("v0.9.0", "v0.9.0"), "");
+});
+
+test("planLatestTouch: GitHub latest 不是应用版本 tag 时不动 OpenAPI latest", () => {
+	assert.equal(planLatestTouch("v0.9.1", "dsh-runtime-win32-x64"), "");
+	assert.equal(planLatestTouch("", "v0.9.0"), "");
 });
 
 test("isAppVersionReleaseTag: 只认 vX.Y 应用版本，sidecar tag 不算 latest 候选", () => {

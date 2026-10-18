@@ -31,6 +31,11 @@ export function quickMessageHookHost() {
 					slots[index] = { cleanup: effect(), deps };
 				});
 		},
+		useMemo(factory, deps) {
+			const index = cursor++;
+			if (!sameDeps(slots[index]?.deps, deps)) slots[index] = { value: factory(), deps };
+			return slots[index].value;
+		},
 	};
 	return {
 		react,

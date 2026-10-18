@@ -345,9 +345,11 @@ import { collectTelemetrySnapshot } from "./telemetry/telemetrySnapshot";
 import { PromptManager } from "./prompts/PromptManager";
 import { XuePromptManager } from "./prompts/XuePromptManager";
 import { XueIndexService } from "./prompts/XueIndexService";
+import { SessionIndexService } from "./sessions/SessionIndexService";
 import { XuePromptDbStore } from "./prompts/XuePromptDbStore";
 import { SkillManager } from "./skills/SkillManager";
 import { readSkillContent } from "./skills/readSkillContent";
+import { buildSkillInstallProxyEnv } from "./skills/skillHubInstallProxy";
 import { ExtensionManager } from "./extensions/ExtensionManager";
 import { BuiltInExtensionsUpdater } from "./extensions/builtInExtensionsUpdater";
 import { readEffectiveBuiltInExtensionsVersion, resolveBuiltInExtensionsDir, resolveBuiltInExtensionsOverlayDir, resolveVendorNodeModulesDir, type BuiltInExtensionPathRoots } from "./extensions/builtInExtensions";
@@ -427,6 +429,8 @@ import { getPiAiCatalogIndex, lookupPiAiCatalogEntry, setPiAiCatalogUserDataDir 
 import { PiAiCatalogUpdater } from "./pi/PiAiCatalogUpdater";
 import { fetchModelList, refreshModelCatalogIfStale, refreshModelList, getCachedModelList } from "./pi/modelListCache";
 import { registerFilesIpc } from "./ipc/filesIpc";
+import { FileIndexService } from "./files/FileIndexService";
+import { SessionStoreService } from "./sessions/SessionStoreService";
 import { registerClipboardIpc } from "./ipc/clipboardIpc";
 import { registerShellMenuIpc } from "./ipc/shellMenuIpc";
 import { QuickTaskWindowChrome } from "./quickTask/quickTaskWindowChrome";
@@ -482,6 +486,17 @@ let isQuitting = false;
 const rendererCrashGuard = createRendererCrashRecoveryGuard();
 let projectStore: ProjectStore;
 let fileSystemService: FileSystemService;
+/**
+ * 跨会话正文搜索的项目来源：当前环境可见的项目（WSL 项目不进——宿主 Go 进程读 UNC
+ * 不可靠，WSL 模式下 scanner 自身也会返回空根整体降级）。项目级 sessionDir 是不少
+ * 用户实际的会话落点，漏掉它就会出现「明明有这条消息却搜不到」。
+ */
+function projectPathsForContentSearch(): string[] {
+	return projectStore
+		.list()
+		.filter((project) => project.environment !== "wsl")
+		.map((project) => project.path);
+}
 let sessionScanner: SessionScanner;
 let sessionCatalog: SessionCatalog;
 let sessionRuntimeCoordinator: SessionRuntimeCoordinator;
@@ -545,6 +560,14 @@ let promptManager: PromptManager;
 let xuePromptManager: XuePromptManager;
 /** 提示词库 Go sidecar 客户端（null = 未装配；进程生命周期与 app 一致）。 */
 let xueIndexService: XueIndexService | null = null;
+let sessionIndexService: SessionIndexService | null = null;
+/** 工作区文件索引 sidecar（Go file-index）：名字模糊检索 + 有界内容检索，缺失时回退 BFS。 */
+let fileIndexService: FileIndexService | null = null;
+/**
+ * 会话数据面 sidecar（Go session-store，Wave 1 骨架）：快照 + 行边界增量扫描。
+ * 暂无消费者（Wave 2 的窗口化读取会接进来），装配只做二进制定位与退出清理登记。
+ */
+let sessionStoreService: SessionStoreService | null = null;
 /** 提示词库 db 远程拉取/缓存服务；null = 未装配。 */
 let xuePromptDbStore: XuePromptDbStore | null = null;
 let skillManager: SkillManager;
@@ -2357,6 +2380,13 @@ async function createWindow() {
 			mainWindow.webContents.send(ipcChannels.appShortcutTriggered, "openSearch");
 			return;
 		}
+		// 会话内查找：与 openSearch（跨会话）分开，默认 Ctrl/Cmd+Shift+F；由聚焦的会话栏
+		// 自己响应（分屏时只作用于用户正在看的那一栏），主进程不持有会话上下文。
+		if (isShortcutInput("findInSession", input)) {
+			event.preventDefault();
+			mainWindow.webContents.send(ipcChannels.appShortcutTriggered, "findInSession");
+			return;
+		}
 		if (isShortcutInput("openCommandPalette", input)) {
 			event.preventDefault();
 			mainWindow.webContents.send(ipcChannels.appShortcutTriggered, "openCommandPalette");
@@ -3231,6 +3261,42 @@ function registerIpc() {
 		validationCatalogModels,
 		// fork/clone 统一命令层：重发/编辑 fork 化（mutationFork/branchMode）与 Web HTTP 同源
 		sessionForkCommands,
+		// 跨会话正文搜索适配闭包：roots 解析（全局根 + 全局 settings sessionDir + 各项目
+		// 项目级 sessionDir）+ sidecar 调用；搜索前先增量 refresh（stat 全目录毫秒级）保证
+		// 新会话可搜；任何失败返回 null，渲染层回退标题过滤，搜索入口永不报错。未就绪
+		// （冷启动首建索引/预热中）直接降级，不把渲染层请求挂到 boot 结束（首建可达数十秒）；
+		// refresh 失败但进程仍活着时继续用现有索引搜一次（transient 失败不该让本次搜索静默无内容）。
+		sessionContentSearch: async (query) => {
+			if (!sessionIndexService) return null;
+			const roots = await sessionScanner.resolveContentSearchRoots(projectPathsForContentSearch());
+			if (roots.length === 0) return null;
+			if (!sessionIndexService.isReady(roots)) {
+				// 本次降级标题过滤，但后台必须有人建索引：首次安装/roots 刚变更时
+				// 没有别处会预热，否则内容搜索会一直空着（就绪后下一次输入自然生效）
+				sessionIndexService.warmup(roots);
+				return null;
+			}
+			const refreshed = await sessionIndexService.refresh(roots);
+			if (!refreshed.ok && !sessionIndexService.isReady(roots)) return null;
+			const result = await sessionIndexService.search(roots, query);
+			return result.ok ? result.value : null;
+		},
+		// 会话内查找（Ctrl+Shift+F / 会话头部放大镜）：只扫一个会话文件、命中按时间线
+		// 返回。就绪判定与降级策略与跨会话搜索一致——未就绪先 warmup 再回 null，渲染层
+		// 显示「索引准备中」，绝不让输入框等 boot。
+		sessionMessageSearch: async (sessionPath, query) => {
+			if (!sessionIndexService) return null;
+			const roots = await sessionScanner.resolveContentSearchRoots(projectPathsForContentSearch());
+			if (roots.length === 0) return null;
+			if (!sessionIndexService.isReady(roots)) {
+				sessionIndexService.warmup(roots);
+				return null;
+			}
+			const refreshed = await sessionIndexService.refresh(roots);
+			if (!refreshed.ok && !sessionIndexService.isReady(roots)) return null;
+			const result = await sessionIndexService.searchInSession(roots, sessionPath, query);
+			return result.ok ? result.value : null;
+		},
 		// C1：DSH 后端专用 IPC 依赖按后端分组（注册表化铺路；未来新增后端各自提供一份）
 		dshBackend: {
 			listDshModels: () => dshHost.listModels(),
@@ -3750,6 +3816,28 @@ function registerIpc() {
 			}
 			return projectRoot;
 		},
+		// 商店搜索必须走 Electron net（跟随桌面代理/系统代理）；裸 fetch 在需要代理的网络上会挂到超时。
+		netFetch: (url, init) => net.fetch(url, init),
+		resolveInstallProxyEnv: async () => {
+			const settings = settingsStore.get();
+			const desktop = { enabled: settings.desktopProxyEnabled, url: settings.desktopProxyUrl, bypass: settings.desktopProxyBypass };
+			// 与 DesktopProxy 同一套语义：开关关闭/地址非法 = 交还系统，因此这里解析系统代理补上。
+			// 解决 git clone（安装链路的关键步骤）不认 Chromium 代理的问题。
+			let systemRules: string | null = null;
+			if (!desktop.enabled || !desktop.url.trim()) {
+				try {
+					systemRules = await session.defaultSession.resolveProxy("https://github.com");
+				} catch (error) {
+					// 解析失败不阻断安装：无 PAC/直连环境本就没有代理可注入，返回 undefined 即可
+					void appLogger.warn("skill-hub", "Resolve system proxy failed", { error: error instanceof Error ? error.message : String(error) });
+				}
+			}
+			return buildSkillInstallProxyEnv(desktop, systemRules);
+		},
+		sendSkillHubInstallProgress: (progress) => {
+			if (!mainWindow || mainWindow.isDestroyed()) return;
+			mainWindow.webContents.send(ipcChannels.skillHubInstallProgress, progress);
+		},
 		appLogger,
 		mainCopy: mainCopy as (key: string, params?: Record<string, string | number>) => string,
 	});
@@ -3788,6 +3876,8 @@ function registerIpc() {
 		fileSystemService,
 		projectStore,
 		settingsStore,
+		// 文件索引 sidecar 在下方 sidecar 装配区创建，这里用 getter 取（注册时序不受影响）
+		getFileIndexService: () => fileIndexService,
 		appLogger,
 		getMainWindow: () => mainWindow,
 		openExternalUrl,
@@ -4139,6 +4229,90 @@ app
 			xuePromptDbStore?.dispose();
 			xuePromptDbStore = null;
 		});
+		// 跨会话正文搜索 sidecar（Go session-index）：预提取正文语料+分片扫描，
+		// 补齐「全部历史会话正文搜词」能力；缺失/失败自动降级侧栏标题过滤。
+		// 语料落 <userData>/session-index/（与设置/缓存同生命周期，卸载重装可重建）。
+		sessionIndexService = new SessionIndexService({
+			corpusDir: join(app.getPath("userData"), "session-index"),
+			resolveBinaryPath: () => {
+				// 打包后：resourcesPath/session-index/session-index(.exe)（extraResources）；
+				// dev：仓库构建产物 resources/session-index/bin/（build 链自动 fail-open 构建）
+				const dir = app.isPackaged ? join(process.resourcesPath, "session-index") : join(app.getAppPath(), "resources", "session-index", "bin");
+				const name = process.platform === "win32" ? "session-index.exe" : "session-index";
+				const path = join(dir, name);
+				return existsSync(path) ? path : null;
+			},
+			logger: {
+				debug: (m) => appLogger.debug("session-index", m),
+				info: (m) => void appLogger.info("session-index", m),
+				warn: (m) => void appLogger.warn("session-index", m),
+				error: (m) => void appLogger.error("session-index", m),
+			},
+		});
+		quitCleanup.register("session-index", () => {
+			sessionIndexService?.dispose();
+			sessionIndexService = null;
+		});
+		// 工作区文件索引 sidecar（Go file-index）：名字检索从实时 BFS 扫盘换成内存索引打分，
+		// 并补上文件内容检索；索引在内存里不落盘（进程重启重建由 Go 侧毫秒级完成），
+		// 缺失/失败/超时自动回退现有 BFS（fail-open）。
+		fileIndexService = new FileIndexService({
+			resolveBinaryPath: () => {
+				// 打包后：resourcesPath/file-index/file-index(.exe)（extraResources）；
+				// dev：仓库构建产物 resources/file-index/bin/（build 链自动 fail-open 构建）
+				const dir = app.isPackaged ? join(process.resourcesPath, "file-index") : join(app.getAppPath(), "resources", "file-index", "bin");
+				const name = process.platform === "win32" ? "file-index.exe" : "file-index";
+				const path = join(dir, name);
+				return existsSync(path) ? path : null;
+			},
+			logger: {
+				debug: (m) => appLogger.debug("file-index", m),
+				info: (m) => void appLogger.info("file-index", m),
+				warn: (m) => void appLogger.warn("file-index", m),
+				error: (m) => void appLogger.error("file-index", m),
+			},
+		});
+		quitCleanup.register("file-index", () => {
+			fileIndexService?.dispose();
+			fileIndexService = null;
+		});
+		// 会话数据面 sidecar（Go session-store）：快照持久化 + 行边界增量扫描，Wave 2 起提供行级
+		// 条目表（get-index）。收益门禁未过（见计划 §8.10），默认不预热、由开关控制。
+		sessionStoreService = new SessionStoreService({
+			statePath: join(app.getPath("userData"), "session-store", "state.bin"),
+			// Wave 2b：条目表落盘（重启后首次打开大会话直接读表，不再重扫源文件）。
+			tablesDir: join(app.getPath("userData"), "session-store", "tables"),
+			resolveBinaryPath: () => {
+				// dev：仓库构建产物 resources/session-store/bin/（build 链自动 fail-open 构建）；
+				// 打包后需补 extraResources 才会命中 resourcesPath 分支（Wave 2 接线时加）。
+				const dir = app.isPackaged ? join(process.resourcesPath, "session-store") : join(app.getAppPath(), "resources", "session-store", "bin");
+				const name = process.platform === "win32" ? "session-store.exe" : "session-store";
+				const path = join(dir, name);
+				return existsSync(path) ? path : null;
+			},
+			logger: {
+				debug: (m) => appLogger.debug("session-store", m),
+				info: (m) => void appLogger.info("session-store", m),
+				warn: (m) => void appLogger.warn("session-store", m),
+				error: (m) => void appLogger.error("session-store", m),
+			},
+		});
+		quitCleanup.register("session-store", () => {
+			sessionStoreService?.dispose();
+			sessionStoreService = null;
+		});
+		// Wave 2 读取路径默认关（收益门禁未过，见 docs/session-data-plane-plan.md §8.10）。
+		// 开关打开时才预热：读者侧只在 sidecar 已就绪时问，不预热的话这条路径永远不会生效；
+		// 预热本身只拉进程 + 载入快照（毫秒级），真正的条目解析由 get-index 触发。
+		if (settingsStore.get().sessionStoreEnabled) sessionStoreService.warmup();
+		// 后台预热：首次全量建索引可达十余秒，启动后稍等即预热，避免用户首搜撞上
+		// 冷启动（预热失败静默——运行时搜索会再试）
+		setTimeout(() => {
+			void sessionScanner
+				.resolveContentSearchRoots(projectPathsForContentSearch())
+				.then((roots) => sessionIndexService?.warmup(roots))
+				.catch(() => {});
+		}, 5_000);
 		skillManager = new SkillManager(undefined, mainCopy);
 		// 内置技能覆盖层叠加：安装内置技能模板时覆盖层优先（修 bug/新增技能免发版）
 		skillManager.configureSkillOverlay(() => skillStoreUpdater.resolveEffectiveOverlayDir());
@@ -4376,6 +4550,18 @@ app
 		);
 		// C12：退出清理登记（before-quit 统一 runAll，新增资源不再改 before-quit）
 		quitCleanup.register("pi-agents", () => agentManager?.stopAll());
+
+		// Wave 2 + 2b：把 session-store 条目表接进会话历史读取（TS 缓存未命中时优先问 Go）。
+		// 条目表落盘后重启首次打开大会话 14–20ms（TS 冷建表 99–188ms，见计划 §8.11），故默认开启；
+		// settings.sessionStoreEnabled 置 false 即回退纯 TS 解析（紧急开关，无 UI）。
+		// 只在 sidecar **已就绪**时问：未就绪宁可走 TS 解析，也不让「打开会话」卡在冷扫上。
+		agentManager.setSessionStoreIndexReader(async (hostPath) => {
+			if (!settingsStore.get().sessionStoreEnabled) return null;
+			const service = sessionStoreService;
+			if (!service || !service.isReady()) return null;
+			const result = await service.getIndex(hostPath);
+			return result.ok ? result.value : null;
+		});
 
 		// 悬浮球控制器：主窗口隐藏后常驻屏幕角落的小圆点，点击展开 mini 浮窗/紧凑模式。
 		// 延迟到 agentManager 就绪后创建，因为依赖 addStateListener 订阅运行状态。

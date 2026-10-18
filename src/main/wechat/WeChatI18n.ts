@@ -30,6 +30,7 @@ const zhCN = {
 	"run.stopped": "已中断当前任务。",
 	"run.nothing": "当前没有正在运行的任务。",
 	"run.noText": "任务已完成，但没有可回复的文本输出。",
+	"run.failedNoDetail": "处理失败：后端没有返回具体错误信息，请在电脑端 PiDeck 的日志里查看详情。",
 
 	"login.required": "微信登录已失效，请在电脑端 PiDeck 的「集成 → 微信」里重新扫码。",
 
@@ -68,6 +69,7 @@ const enUS: Record<WeChatTranslationKey, string> = {
 	"run.stopped": "Aborted the current task.",
 	"run.nothing": "No task is currently running.",
 	"run.noText": "The task finished but produced no text to reply with.",
+	"run.failedNoDetail": "Failed: the backend returned no error detail. Check the PiDeck desktop log for specifics.",
 
 	"login.required": "The WeChat login has expired. Re-scan the QR code in PiDeck → Integrations → WeChat.",
 

@@ -906,6 +906,66 @@ test("DSH 回合失败：按时间线里的错误消息报失败，不把半截�
 	await harness.bridge.stop();
 });
 
+test("收口后没有正文时把后端错误原文回给用户，而不是「任务已完成但没有文本」", async () => {
+	// 欠费/鉴权失败常表现为「跑完了但没有正文」；DSH 更是在 turn/end 才追加 role=error
+	// 消息（晚于 idle 快照）。只回一句「没有可回复的文本」会让用户以为跑成功了。
+	const harness = createHarness({ batches: [{ msgs: [userMessage({ text: "跑一下" })] }] });
+	await harness.start();
+
+	await waitFor(() => harness.prompts.length === 1, "the prompt");
+	harness.emitRuntimeEvent("agents:state", { id: "a1", status: "running" });
+	harness.messages.set("a1", [{ role: "user", text: "跑一下" }]);
+	harness.emitRuntimeEvent("agents:state", { id: "a1", status: "idle" });
+	// 收口判定已经成立之后，错误消息才落进时间线（真实的投影顺序就是这样）。
+	harness.messages.set("a1", [
+		{ role: "user", text: "跑一下" },
+		{ role: "error", text: "402 Insufficient Balance" },
+	]);
+
+	await waitFor(() => harness.client.calls.sent.length === 1, "the failure notice");
+	assert.ok(harness.client.calls.sent[0].text.includes("402 Insufficient Balance"), "错误原文必须回给用户（用户据此去充值/换 key）");
+	assert.ok(!harness.client.calls.sent[0].text.includes("没有可回复的文本"));
+	await harness.bridge.stop();
+});
+
+test("晚于落盘收尾的失败消息也能补上", async () => {
+	// 800ms 落盘收尾之后才到的错误消息，靠空手补读窗口抓住；本用例钉住这个窗口存在。
+	const harness = createHarness({ batches: [{ msgs: [userMessage({ text: "跑一下" })] }] });
+	await harness.start();
+
+	await waitFor(() => harness.prompts.length === 1, "the prompt");
+	harness.emitRuntimeEvent("agents:state", { id: "a1", status: "running" });
+	harness.messages.set("a1", [{ role: "user", text: "跑一下" }]);
+	harness.emitRuntimeEvent("agents:state", { id: "a1", status: "idle" });
+	setTimeout(
+		() =>
+			harness.messages.set("a1", [
+				{ role: "user", text: "跑一下" },
+				{ role: "error", text: "模型额度已用尽" },
+			]),
+		1000,
+	);
+
+	await waitFor(() => harness.client.calls.sent.length === 1, "the failure notice");
+	assert.ok(harness.client.calls.sent[0].text.includes("模型额度已用尽"));
+	await harness.bridge.stop();
+});
+
+test("连错误原文都没有时不发半句话，而是指路到日志", async () => {
+	// 全部模型都切不过去（已删/供应商下线）时没有任何错误文本：「处理失败：」后面留空
+	// 等于什么都没说，必须明说去看日志。
+	const harness = createChainHarness({ batches: [{ msgs: [userMessage({ text: "跑一下" })] }] });
+	harness.runtimeBindings.setRuntimeModel = async () => {
+		throw new Error("model not found");
+	};
+	await harness.start();
+
+	await waitFor(() => harness.client.calls.sent.length === 1, "the failure notice");
+	assert.ok(harness.client.calls.sent[0].text.includes("日志"), "要指路到日志，而不是留一个空的原因");
+	assert.equal(harness.prompts.length, 0, "模型切不过去时不该提交 prompt");
+	await harness.bridge.stop();
+});
+
 test("DSH 运行时不可用：给出可执行的提示，而不是笼统的建会话失败", async () => {
 	const harness = createHarness({ batches: [{ msgs: [userMessage({ text: "你好" })] }] });
 	harness.config.state.backend = "dsh";

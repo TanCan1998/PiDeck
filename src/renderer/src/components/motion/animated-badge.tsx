@@ -26,13 +26,16 @@ export interface AnimatedBadgeProps extends Omit<HTMLMotionProps<"span">, "child
 	bare?: boolean;
 }
 
+// 状态色一律走 foundation 的语义 token（--color-success / -warning / -danger / -info），
+// 暗色与皮肤由 token 自己翻转：此前 emerald/amber 字面色 + dark: 变体补偿，与
+// ui-shadcn/badge 的语义档会长成两种绿、两种黄（UI 走查 P0.4）。
 const STATUS_CLASS: Record<AnimatedBadgeStatus, string> = {
 	neutral: "border-border bg-card text-muted-foreground",
-	info: "border-primary/30 bg-primary/10 text-primary",
-	success: "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-	warning: "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400",
-	danger: "border-destructive/30 bg-destructive/10 text-destructive",
-	loading: "border-primary/30 bg-primary/10 text-primary",
+	info: "border-info/30 bg-info/10 text-info",
+	success: "border-success/30 bg-success/10 text-success",
+	warning: "border-warning/30 bg-warning/10 text-warning",
+	danger: "border-danger/30 bg-danger/10 text-danger",
+	loading: "border-info/30 bg-info/10 text-info",
 };
 
 const SIZE_CLASS: Record<AnimatedBadgeSize, string> = {

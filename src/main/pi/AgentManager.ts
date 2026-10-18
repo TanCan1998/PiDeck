@@ -545,8 +545,18 @@ export class AgentManager {
 			trimMessages: (rawMessages, maxTurns) => trimHistoryMessages(rawMessages, maxTurns),
 			translate: this.translate,
 			logger: appLogger,
+			// Wave 2：会话历史索引优先问 session-store sidecar。这里刻意用「延迟读字段」的
+			// 闭包：AgentManager 构造早于 sidecar 服务创建，装配期再 setSessionStoreIndexReader。
+			readIndexTable: (hostPath, version) => this.sessionStoreIndexReader?.(hostPath, version) ?? Promise.resolve(null),
 		});
 	}
+
+	/** Wave 2：注入 session-store 条目表读取器（未注入/返回 null 时读者回退 TS 逐行解析）。 */
+	setSessionStoreIndexReader(reader: ((hostPath: string, version: { size: number; mtimeMs: number }) => Promise<unknown>) | null): void {
+		this.sessionStoreIndexReader = reader ?? undefined;
+	}
+
+	private sessionStoreIndexReader?: (hostPath: string, version: { size: number; mtimeMs: number }) => Promise<unknown>;
 
 	configureWsl(environment: WslEnvironment | null): void {
 		this.wslEnvironment = environment;
@@ -1106,12 +1116,30 @@ export class AgentManager {
 	/**
 	 * 判断指定项目是否仍有运行中的 Agent（pi 子进程未退出）。
 	 * 用于删除项目前拦截，避免删除后 pi 进程悬挂后台继续占用资源。
+	 * 只看进程是否真的存活：进程退出后 runtime 仍留在 agents 里供 UI 重连（tab.status = closed），
+	 * 不按存活判断会让它一直挡住项目删除（issue #360）。
+	 * 预热进程（standby）对 UI 不可见且自带 TTL 回收，不算「会话 Agent」，不参与拦截。
 	 */
 	hasAgentForProject(projectId: string): boolean {
 		for (const runtime of this.agents.values()) {
-			if (runtime.tab.projectId === projectId) return true;
+			if (runtime.tab.standby) continue;
+			if (runtime.tab.projectId === projectId && runtime.process.isRunning()) return true;
 		}
 		return false;
+	}
+
+	/**
+	 * 删除项目后丢弃该项目的「进程已退出」runtime，避免内存里残留指向已删项目的幽灵会话。
+	 * 存活 runtime 不动：删除前的 hasAgentForProject 已把它们拦下。
+	 */
+	discardStoppedAgentsForProject(projectId: string): number {
+		let discarded = 0;
+		for (const [agentId, runtime] of [...this.agents]) {
+			if (runtime.tab.projectId !== projectId || runtime.process.isRunning()) continue;
+			void this.stop(agentId);
+			discarded += 1;
+		}
+		return discarded;
 	}
 
 	getMessages(agentId: string) {
@@ -2884,8 +2912,38 @@ export class AgentManager {
 			totalMs: perf?.totalMs,
 			endToEndTps: perf?.endToEndTps,
 			tps: perf?.tps,
+			sessionTps: perf?.sessionTps,
+			sessionEndToEndTps: perf?.sessionEndToEndTps,
 			perfAt: perf?.at,
 		};
+	}
+
+	/**
+	 * 同步某 agent 的子任务（如 subagent）记录到性能追踪器中（消解并发区间重叠）。
+	 * options.emit=false：只刷新快照不推事件，供只读列举路径使用（读接口不该产生状态推送）。
+	 */
+	syncSubagentPerfSpans(
+		agentId: string,
+		records: ReadonlyArray<{
+			id: string;
+			startedAt?: number;
+			completedAt?: number;
+			tokens?: number;
+			streamingTokens?: number;
+			streamingStartedAt?: number;
+		}>,
+		options?: { emit?: boolean },
+	): void {
+		const tasks = records
+			.filter((r): r is typeof r & { startedAt: number } => typeof r.startedAt === "number")
+			.map((r) => ({
+				id: r.id,
+				startedAt: r.startedAt,
+				completedAt: r.completedAt,
+				tokens: r.tokens,
+			}));
+		const emit = options?.emit === false ? undefined : (channel: string, payload: unknown) => this.emit(channel, payload);
+		this.messagePerf.syncSubagentTasks(agentId, tasks, emit);
 	}
 
 	private applyActiveToolCallState(agentId: string, state: ActiveToolCallState) {
@@ -3948,6 +4006,27 @@ export class AgentManager {
 		this.emitState();
 	}
 
+	/**
+	 * 停止 agent 并等待进程真正退出（最多 timeoutMs）。
+	 *
+	 * 删除会话必须先等 pi 退出：Windows 上进程还持有会话 JSONL 的写句柄时，
+	 * shell.trashItem 只会报通用的「Failed to perform delete operation」（issue #364）。
+	 * 进程已经不在时立即返回 true；超时返回 false，由调用方决定是否继续删除。
+	 */
+	async stopAndWaitForExit(agentId: string, timeoutMs = 3000): Promise<boolean> {
+		const piProcess = this.agents.get(agentId)?.process;
+		// stop 本身同步清空 agents 与运行时状态，这里只补「等进程真的退出」这一步。
+		void this.stop(agentId).catch(() => undefined);
+		if (!piProcess || !piProcess.isRunning()) return true;
+		const deadline = Date.now() + timeoutMs;
+		const pollMs = 50;
+		while (piProcess.isRunning()) {
+			if (Date.now() >= deadline) return false;
+			await new Promise((resolve) => setTimeout(resolve, pollMs));
+		}
+		return true;
+	}
+
 	/** 注册本地事件监听器（供 FeishuBridge 等主进程内部模块使用） */
 	addLocalEventListener(listener: (agentId: string, event: unknown) => void): () => void {
 		this.localEventListeners.add(listener);
@@ -4927,6 +5006,16 @@ export class AgentManager {
 			const endedToolName = typeof typed.toolName === "string" ? typed.toolName : "";
 			if (MUTATING_TOOLS.has(endedToolName)) {
 				this.rewindCheckpoints.scheduleToolCheckpoint(agentId, endedToolName, this.rewindCheckpoints.turnCounter(agentId));
+			}
+			if (endedToolName === "Agent" || endedToolName === "subagent" || endedToolName === "acp_delegate") {
+				const sessionPath = runtime?.tab.sessionPath;
+				if (sessionPath) {
+					void this.readSessionSubagentRecords(sessionPath, { liveRuntimeStartedAt: runtime.tab.createdAt })
+						.then((records) => {
+							this.syncSubagentPerfSpans(agentId, records);
+						})
+						.catch(() => {});
+				}
 			}
 			// 工具执行结束是终态，立即 flush 把最终结果推给渲染进程，避免节流窗口内用户看不到完成状态。
 			this.flushMessageEmit(agentId);
