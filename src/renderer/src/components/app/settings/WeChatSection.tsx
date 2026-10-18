@@ -487,7 +487,7 @@ export function WeChatSection() {
 									<span className="truncate" title={`${entry.provider}/${entry.modelId}`}>
 										{entry.modelName ?? entry.modelId}
 									</span>
-									<span className="text-muted-foreground shrink-0 text-[11px]">{entry.provider}</span>
+									<span className="text-muted-foreground shrink-0 text-micro">{entry.provider}</span>
 								</span>
 								<span className="flex items-center gap-1">
 									<Button size="sm" variant="ghost" disabled={busy || index === 0} aria-label={t("config.wechat.modelChainUp")} onClick={() => void handleModelChainChange(moveChainEntry(modelChain, index, index - 1))}>

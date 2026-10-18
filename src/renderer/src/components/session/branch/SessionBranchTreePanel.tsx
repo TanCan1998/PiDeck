@@ -253,7 +253,7 @@ export function SessionBranchTreePanel(props: { forkAtEntry: (entryId: string, f
 					<span key={level} className="pointer-events-none absolute top-0 bottom-0 w-px bg-border/60" style={{ left: level * 12 + 9 }} aria-hidden="true" />
 				))}
 				{clamped ? (
-					<span className="shrink-0 px-0.5 text-[10px] text-text-tertiary" title={t("session.branchTree.deeperLevels")}>
+					<span className="shrink-0 px-0.5 text-micro text-text-tertiary" title={t("session.branchTree.deeperLevels")}>
 						⋮
 					</span>
 				) : null}
@@ -278,12 +278,12 @@ export function SessionBranchTreePanel(props: { forkAtEntry: (entryId: string, f
 					{rowLabel(row)}
 				</span>
 				{runFolded ? (
-					<button type="button" className="shrink-0 rounded bg-muted px-1 text-[10px] text-text-secondary hover:bg-accent hover:text-accent-foreground" onClick={() => expandRun(node.id)} title={t("session.branchTree.expand")}>
+					<button type="button" className="shrink-0 rounded bg-muted px-1 text-micro text-text-secondary hover:bg-accent hover:text-accent-foreground" onClick={() => expandRun(node.id)} title={t("session.branchTree.expand")}>
 						{t("session.branchTree.hiddenSteps", { count: steps })}
 					</button>
 				) : null}
-				{!runFolded && row.collapsed && tail.children.length > 1 ? <span className="shrink-0 rounded bg-muted px-1 text-[10px] text-text-secondary">{t("session.branchTree.hiddenBranches", { count: tail.children.length })}</span> : null}
-				{isLeaf ? <span className="shrink-0 rounded bg-primary/15 px-1 text-[10px] text-primary">{t("session.branchTree.activeLeaf")}</span> : null}
+				{!runFolded && row.collapsed && tail.children.length > 1 ? <span className="shrink-0 rounded bg-muted px-1 text-micro text-text-secondary">{t("session.branchTree.hiddenBranches", { count: tail.children.length })}</span> : null}
+				{isLeaf ? <span className="shrink-0 rounded bg-primary/15 px-1 text-micro text-primary">{t("session.branchTree.activeLeaf")}</span> : null}
 				{node.role === "user" ? (
 					<button
 						type="button"
@@ -313,7 +313,7 @@ export function SessionBranchTreePanel(props: { forkAtEntry: (entryId: string, f
 			<div className="flex shrink-0 items-center gap-1.5 px-3 pb-1 pt-2 text-xs font-semibold text-foreground">
 				<ListTree size={13} strokeWidth={1.8} aria-hidden="true" />
 				{t("session.branchTree.title")}
-				<span className="ml-auto flex items-center gap-0.5 text-[10px] font-normal text-text-tertiary">
+				<span className="ml-auto flex items-center gap-0.5 text-micro font-normal text-text-tertiary">
 					{state.kind === "tree" ? <span className="mr-1">{t("session.branchTree.nodeCount", { count: nodeCount })}</span> : null}
 					<button type="button" className="rounded p-0.5 hover:bg-muted" onClick={expandAll} title={t("session.branchTree.expandAll")} aria-label={t("session.branchTree.expandAll")}>
 						<ChevronsUpDown size={12} strokeWidth={1.8} aria-hidden="true" />
@@ -338,7 +338,7 @@ export function SessionBranchTreePanel(props: { forkAtEntry: (entryId: string, f
 					</div>
 				) : null}
 			</div>
-			<div className="shrink-0 border-t border-border px-3 py-1.5 text-[10px] leading-4 text-text-tertiary">{t("session.branchTree.hint")}</div>
+			<div className="shrink-0 border-t border-border px-3 py-1.5 text-micro leading-4 text-text-tertiary">{t("session.branchTree.hint")}</div>
 		</div>
 	);
 }

@@ -333,7 +333,7 @@ export function AskPanelOverlay() {
 				)}
 				<span className="truncate text-xs text-foreground/90">{questionSummary || summary || (panel.creating ? t("askPanel.creating") : t("askPanel.waiting"))}</span>
 				{running && !panel.creating ? (
-					<span className="inline-flex shrink-0 items-center gap-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+					<span className="inline-flex shrink-0 items-center gap-0.5 text-micro font-medium text-emerald-600 dark:text-emerald-400">
 						<span className="size-1.5 animate-pulse rounded-full bg-emerald-500" aria-hidden="true" />
 						{t("askPanel.running")}
 					</span>

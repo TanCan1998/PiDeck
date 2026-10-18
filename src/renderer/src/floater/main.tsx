@@ -125,7 +125,7 @@ function FloaterApp() {
 				title={text}
 			>
 				<PiTuiLogoMark size={32} />
-				{state.runningCount > 0 && state.showRunningBadge !== false ? <span className="absolute -right-0.5 -top-0.5 grid h-5 min-w-5 place-items-center rounded-full bg-primary px-1 text-[10px] font-semibold text-primary-foreground shadow-sm">{state.runningCount > 99 ? "99+" : state.runningCount}</span> : null}
+				{state.runningCount > 0 && state.showRunningBadge !== false ? <span className="absolute -right-0.5 -top-0.5 grid h-5 min-w-5 place-items-center rounded-full bg-primary px-1 text-micro font-semibold text-primary-foreground shadow-sm">{state.runningCount > 99 ? "99+" : state.runningCount}</span> : null}
 			</button>
 		</div>
 	);

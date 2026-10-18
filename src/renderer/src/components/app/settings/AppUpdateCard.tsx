@@ -83,7 +83,7 @@ export function AppUpdateCard(props: AppUpdateCardProps) {
 				<div className="flex items-center gap-2">
 					<span className="text-body">{t("app.updateCardVersion", { version: props.appVersion })}</span>
 					{/* 通道徽章：dev=琥珀、stable=绿，语义色区分当前跟踪的发布线。 */}
-					<span className={cn("rounded px-1.5 py-0.5 text-[10px] font-medium", props.channel === "dev" ? "bg-amber-500/15 text-amber-500" : "bg-emerald-500/15 text-emerald-500")}>{t(props.channel === "dev" ? "settings.channelBadgeDev" : "settings.channelBadgeStable")}</span>
+					<span className={cn("rounded px-1.5 py-0.5 text-micro font-medium", props.channel === "dev" ? "bg-amber-500/15 text-amber-500" : "bg-emerald-500/15 text-emerald-500")}>{t(props.channel === "dev" ? "settings.channelBadgeDev" : "settings.channelBadgeStable")}</span>
 				</div>
 				<Button variant="secondary" size="sm" onClick={props.onCheckUpdate} loading={props.checking || phase === "checking"}>
 					{t("settings.checkUpdate")}

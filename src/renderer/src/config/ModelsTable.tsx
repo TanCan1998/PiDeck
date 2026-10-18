@@ -315,17 +315,17 @@ export function ModelsTable(props: ModelsTableProps) {
 														</Label>
 													))}
 												</div>
-												<div className="mt-1 text-[10px] leading-relaxed text-text-tertiary">{t("config.thinkingLevelsPickHint")}</div>
-												{m.reasoning !== true && <div className="mt-0.5 text-[10px] leading-relaxed text-text-tertiary">{t("config.thinkingLevelsReasoningHint")}</div>}
+												<div className="mt-1 text-micro leading-relaxed text-text-tertiary">{t("config.thinkingLevelsPickHint")}</div>
+												{m.reasoning !== true && <div className="mt-0.5 text-micro leading-relaxed text-text-tertiary">{t("config.thinkingLevelsReasoningHint")}</div>}
 												{canEditThinkingDefault && (
 													<div className="mt-1.5 border-t border-border-subtle pt-1.5">
 														{/* 说明跟在标题右侧（不另起一行）；下面是 Pi 对「已保存配置」的只读探测结果 */}
 														<div className="mb-1 flex items-baseline justify-between gap-2">
 															<span className="shrink-0 text-micro font-semibold text-text-secondary">{t("config.thinkingLevelDefault")}</span>
-															<span className="min-w-0 text-right text-[10px] leading-relaxed text-text-tertiary">{t("config.thinkingLevelDefaultHint")}</span>
+															<span className="min-w-0 text-right text-micro leading-relaxed text-text-tertiary">{t("config.thinkingLevelDefaultHint")}</span>
 														</div>
 														<ConfigSelect value={thinkingDefaultValue} options={thinkingDefaultOptions} onChange={(v) => props.onUpdateModelThinkingLevelDefault!(i, v)} disabled={thinkingDefaultDisabled} />
-														<div className="mt-1 text-[10px] leading-relaxed text-text-tertiary">{thinkingAvailabilityText}</div>
+														<div className="mt-1 text-micro leading-relaxed text-text-tertiary">{thinkingAvailabilityText}</div>
 													</div>
 												)}
 											</PopoverContent>

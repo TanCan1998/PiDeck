@@ -861,7 +861,7 @@ function GroupCapsuleButton(props: {
 		>
 			<span className="max-w-40 truncate whitespace-nowrap">{name}</span>
 			{/* 计数徽章：小圆底（组色 25%）+ 组色文字，替代旧版“名字 + 裸数字” */}
-			<span className="inline-grid h-4 min-w-4 shrink-0 place-items-center rounded-full bg-(--group-color)/25 px-1 text-[10px] leading-none font-medium text-(--group-color-text)">{count}</span>
+			<span className="inline-grid h-4 min-w-4 shrink-0 place-items-center rounded-full bg-(--group-color)/25 px-1 text-micro leading-none font-medium text-(--group-color-text)">{count}</span>
 			{expanded ? <ChevronDown className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" /> : <ChevronRight className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />}
 		</button>
 	);
@@ -1029,7 +1029,7 @@ function SessionTab(props: {
 								{record?.sideTask && <SideTaskMark className="size-3.5 shrink-0" />}
 								{/* G12：DSH plan 模式 / danger 权限预设全局可见（数据来自 runtime state，tab 级常显） */}
 								{runtime?.state?.planModeActive && (
-									<span className="shrink-0 rounded bg-primary/15 px-1 text-[10px] font-medium leading-4 text-primary" title={t("app.composerModePlan")}>
+									<span className="shrink-0 rounded bg-primary/15 px-1 text-micro font-medium leading-4 text-primary" title={t("app.composerModePlan")}>
 										{t("app.composerModePlan")}
 									</span>
 								)}
@@ -1038,7 +1038,7 @@ function SessionTab(props: {
 										// 底色与 plan chip 同用 bg-primary/15：不能用 bg-accent/15——激活 tab 的
 										// 滑动背景就是实底 bg-accent，accent/15 叠上去完全不可见，chip 会退化成裸文字
 										//（浅色主题下尤其明显）。淡蓝底在明暗主题的激活/非激活 tab 上均可读。
-										className="shrink-0 rounded bg-primary/15 px-1 text-[10px] font-medium leading-4 text-primary"
+										className="shrink-0 rounded bg-primary/15 px-1 text-micro font-medium leading-4 text-primary"
 										title={t("app.composerModeGoal")}
 									>
 										{t("app.composerModeGoal")}

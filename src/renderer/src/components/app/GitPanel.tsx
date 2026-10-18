@@ -1427,7 +1427,7 @@ export function GitPanel(props: GitPanelProps) {
 							<GitBranch size={12} className="shrink-0 text-muted-foreground" />
 							<span className="git-branch-label min-w-0 flex-1 truncate">{props.currentBranch || t("app.branchNone")}</span>
 							{/* 多仓变更行已经很挤，数字角标会把按钮撑回宽胶囊；单仓仍显示分支数。 */}
-							{layout !== "changesOnly" && props.branches.length > 0 && <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-muted px-1 text-[10px] font-medium tabular-nums text-muted-foreground">{props.branches.length}</span>}
+							{layout !== "changesOnly" && props.branches.length > 0 && <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-muted px-1 text-micro font-medium tabular-nums text-muted-foreground">{props.branches.length}</span>}
 							<ChevronDown size={12} className={`shrink-0 text-muted-foreground transition-transform duration-fast${branchOpen ? " rotate-180" : ""}`} />
 						</Button>
 						{notAGitRepo && (

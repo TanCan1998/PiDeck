@@ -114,7 +114,7 @@ export function ToolApproval({ tool, title = "Allow this tool to run?", descript
 							<div className="font-medium text-foreground">{title}</div>
 							<div className="mt-0.5 truncate font-mono text-xs text-muted-foreground">{tool}</div>
 						</div>
-						<span className={cn("shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors", getStatusBadgeClass(status))}>{getStatusCopy(status)}</span>
+						<span className={cn("shrink-0 rounded-full border px-2 py-0.5 text-micro font-medium transition-colors", getStatusBadgeClass(status))}>{getStatusCopy(status)}</span>
 					</div>
 					{description ? <p className="mt-2 leading-5 text-muted-foreground">{description}</p> : null}
 

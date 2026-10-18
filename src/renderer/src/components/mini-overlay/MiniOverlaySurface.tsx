@@ -89,7 +89,7 @@ function MiniOverlayHome({ workspace }: { workspace: MiniOverlayWorkspace }) {
 					{t("miniOverlay.project")}
 				</Label>
 				<MiniOverlayProjectPicker id="mini-home-project" projects={workspace.projects} value={workspace.project?.id} onSelectProject={workspace.selectProject} disabled={Boolean(workspace.openingSessionId)} />
-				<p className="truncate text-[11px] text-muted-foreground" title={workspace.project?.path}>
+				<p className="truncate text-micro text-muted-foreground" title={workspace.project?.path}>
 					{workspace.project?.kind === "chat" ? t("miniOverlay.chatProjectHint") : workspace.project?.path || t("miniOverlay.selectProjectHint")}
 				</p>
 			</div>
@@ -134,7 +134,7 @@ function MiniOverlayHome({ workspace }: { workspace: MiniOverlayWorkspace }) {
 								<MessageSquare className="size-4 text-muted-foreground" />
 								<span className="flex min-w-0 flex-1 flex-col gap-0.5">
 									<span className="truncate text-xs font-medium">{session.title}</span>
-									<span className="truncate text-[11px] font-normal text-muted-foreground">{session.preview || t("miniOverlay.emptySession")}</span>
+									<span className="truncate text-micro font-normal text-muted-foreground">{session.preview || t("miniOverlay.emptySession")}</span>
 								</span>
 								<ArrowRight className="size-3.5 text-muted-foreground" />
 							</Button>
@@ -173,7 +173,7 @@ function MiniOverlayNewSession({ workspace }: { workspace: MiniOverlayWorkspace 
 							{t("miniOverlay.project")}
 						</Label>
 						<MiniOverlayProjectPicker id="mini-new-project" projects={workspace.projects} value={workspace.project?.id} onSelectProject={workspace.selectProject} disabled={workspace.creating} className="h-9" />
-						<p className="break-all text-[11px] leading-relaxed text-muted-foreground">{workspace.project?.kind === "chat" ? t("miniOverlay.chatProjectHint") : workspace.project?.path || t("miniOverlay.selectProjectHint")}</p>
+						<p className="break-all text-micro leading-relaxed text-muted-foreground">{workspace.project?.kind === "chat" ? t("miniOverlay.chatProjectHint") : workspace.project?.path || t("miniOverlay.selectProjectHint")}</p>
 					</div>
 					<div className="flex flex-col gap-2 border-t border-border/55 pt-4">
 						<Label htmlFor="mini-new-model" className="text-xs">
@@ -183,7 +183,7 @@ function MiniOverlayNewSession({ workspace }: { workspace: MiniOverlayWorkspace 
 							<span className="min-w-0 flex-1 truncate text-left">{modelLabel}</span>
 							<ChevronDown />
 						</Button>
-						<p className="text-[11px] text-muted-foreground">{workspace.displayModel?.provider ?? t("miniOverlay.defaultModelHint")}</p>
+						<p className="text-micro text-muted-foreground">{workspace.displayModel?.provider ?? t("miniOverlay.defaultModelHint")}</p>
 					</div>
 				</CardContent>
 			</Card>
@@ -199,7 +199,7 @@ function MiniOverlayNewSession({ workspace }: { workspace: MiniOverlayWorkspace 
 					<Plus />
 					{workspace.creating ? t("miniOverlay.creatingSession") : t("miniOverlay.createSession")}
 				</Button>
-				<p className="text-center text-[11px] leading-relaxed text-muted-foreground">{t("miniOverlay.createHint")}</p>
+				<p className="text-center text-micro leading-relaxed text-muted-foreground">{t("miniOverlay.createHint")}</p>
 			</div>
 			{modelPickerOpen ? (
 				<ModelPicker

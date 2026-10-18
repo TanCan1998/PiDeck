@@ -280,7 +280,7 @@ function TrajectoryOverview(props: { records: TrajectoryRecord[]; domainStart: n
 	return (
 		<div className="shrink-0 border-b border-border/60 px-3 py-2">
 			<div className="grid grid-cols-[44px_minmax(0,1fr)] gap-x-2">
-				<div className="flex h-16 flex-col justify-between py-0.5 text-[10px] leading-none text-muted-foreground">
+				<div className="flex h-16 flex-col justify-between py-0.5 text-micro leading-none text-muted-foreground">
 					{LANE_ORDER.map((lane) => (
 						<span key={lane}>{laneLabel(lane)}</span>
 					))}
@@ -374,7 +374,7 @@ function TrajectoryLedger(props: {
 						return (
 							<li key={record.id}>
 								{showTurn ? (
-									<div className="flex items-center justify-between bg-muted/40 px-3 py-1 text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
+									<div className="flex items-center justify-between bg-muted/40 px-3 py-1 text-micro font-medium tracking-wide text-muted-foreground uppercase">
 										<span>{t("session.trajectory.turn", { index: record.turnIndex + 1 })}</span>
 										{turnLabel ? <span className="tabular-nums">{turnLabel}</span> : null}
 									</div>
@@ -409,10 +409,10 @@ function CopyableBlock(props: { label?: string; text: string }) {
 	return (
 		<div className="mt-3">
 			<div className="mb-1 flex items-center justify-between gap-2">
-				{props.label ? <span className="text-[10px] font-medium tracking-wide text-muted-foreground uppercase">{props.label}</span> : <span />}
+				{props.label ? <span className="text-micro font-medium tracking-wide text-muted-foreground uppercase">{props.label}</span> : <span />}
 				<button
 					type="button"
-					className="inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+					className="inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-micro text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
 					onClick={() => {
 						void onCopy();
 					}}

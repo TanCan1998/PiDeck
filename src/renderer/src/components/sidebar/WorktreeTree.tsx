@@ -106,7 +106,7 @@ export function WorktreeTree(props: {
 							<span className="conversation-title flex min-w-0 items-center gap-1.5">
 								<strong className="min-w-0 truncate font-medium">{t("app.worktreeMainWorkspace")}</strong>
 								{mainPendingAskCount > 0 && (
-									<Badge variant="outline" className="h-4 shrink-0 gap-0.5 border-amber-500/40 bg-amber-500/15 px-1 py-0 text-[10px] font-medium leading-none text-amber-600 dark:text-amber-400" title={t("sidebar.pendingConfirmationHint", { count: String(mainPendingAskCount) })}>
+									<Badge variant="outline" className="h-4 shrink-0 gap-0.5 border-amber-500/40 bg-amber-500/15 px-1 py-0 text-micro font-medium leading-none text-amber-600 dark:text-amber-400" title={t("sidebar.pendingConfirmationHint", { count: String(mainPendingAskCount) })}>
 										<HelpCircle className="size-2.5 shrink-0 animate-pulse" aria-hidden="true" />
 										<span>{mainPendingAskCount > 1 ? t("sidebar.pendingConfirmationCount", { count: String(mainPendingAskCount) }) : t("sidebar.pendingConfirmation")}</span>
 									</Badge>
@@ -239,7 +239,7 @@ function WorkspaceTreeRowView(props: {
 					<GitBranch className="size-3.5 shrink-0" aria-hidden="true" />
 					<span className="min-w-0 flex-1 truncate font-medium">{row.branch}</span>
 					{childPendingAskCount > 0 && (
-						<Badge variant="outline" className="h-4 shrink-0 gap-0.5 border-amber-500/40 bg-amber-500/15 px-1 py-0 text-[10px] font-medium leading-none text-amber-600 dark:text-amber-400" title={t("sidebar.pendingConfirmationHint", { count: String(childPendingAskCount) })}>
+						<Badge variant="outline" className="h-4 shrink-0 gap-0.5 border-amber-500/40 bg-amber-500/15 px-1 py-0 text-micro font-medium leading-none text-amber-600 dark:text-amber-400" title={t("sidebar.pendingConfirmationHint", { count: String(childPendingAskCount) })}>
 							<HelpCircle className="size-2.5 shrink-0 animate-pulse" aria-hidden="true" />
 							<span>{childPendingAskCount > 1 ? t("sidebar.pendingConfirmationCount", { count: String(childPendingAskCount) }) : t("sidebar.pendingConfirmation")}</span>
 						</Badge>
