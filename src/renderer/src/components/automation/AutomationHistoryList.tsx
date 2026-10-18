@@ -227,7 +227,7 @@ export function AutomationHistoryList({ projectId, onViewSession }: AutomationHi
 									{!isRunning && <Checkbox checked={selectedIds.has(run.id)} disabled={busy} onCheckedChange={(checked) => toggleRow(run.id, checked === true)} aria-label={run.taskName} />}
 									<span className="truncate text-xs font-medium text-foreground">{run.taskName}</span>
 									{!projectId && (
-										<Badge variant="outline" className="h-4 px-1 text-micro font-normal text-muted-foreground">
+										<Badge variant="outline" size="sm" className="font-normal text-muted-foreground">
 											{projectName}
 										</Badge>
 									)}
