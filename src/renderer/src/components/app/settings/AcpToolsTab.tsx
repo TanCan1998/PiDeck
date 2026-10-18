@@ -210,22 +210,35 @@ export const AcpToolsTab = forwardRef<AcpToolsTabHandle, { onDirtyChange?: (dirt
 							{rows.map((row, index) => (
 								// 行 key 用 index:新增/删除都经整表保存,草稿行没有稳定身份
 								<div key={index} className="border-border bg-background flex flex-col gap-2 rounded-md border p-3">
-									<div className="grid grid-cols-[1fr_1fr_auto] gap-2">
-										<Input value={row.name} placeholder={t("acp.toolName")} onChange={(event) => patchRow(index, { name: event.target.value })} />
-										<Input value={row.command} placeholder={t("acp.toolCommand")} onChange={(event) => patchRow(index, { command: event.target.value })} />
+									{/* 字段一律带可见 label：此前只靠 placeholder，填了值之后就看不出这格是什么，
+									    标签用隐式关联（label 包裹控件）同时补上可访问名。 */}
+									<div className="grid grid-cols-[1fr_1fr_auto] items-end gap-2">
+										<label className="flex min-w-0 flex-col gap-1">
+											<span className="text-micro text-muted-foreground">{t("acp.toolName")}</span>
+											<Input value={row.name} onChange={(event) => patchRow(index, { name: event.target.value })} />
+										</label>
+										<label className="flex min-w-0 flex-col gap-1">
+											<span className="text-micro text-muted-foreground">{t("acp.toolCommand")}</span>
+											<Input value={row.command} onChange={(event) => patchRow(index, { command: event.target.value })} />
+										</label>
 										<Button variant="ghost" size="icon" title={t("acp.toolRemove")} onClick={() => removeRow(index)}>
 											<Trash2 size={14} aria-hidden="true" />
 										</Button>
 									</div>
-									<Input
-										value={row.args.join(" ")}
-										placeholder={t("acp.toolArgs")}
-										onChange={(event) => {
-											// 参数按空白拆分:与主进程 spawn 的数组语义一致,避免引号转义教学成本
-											patchRow(index, { args: event.target.value.trim() ? event.target.value.split(/\s+/) : [] });
-										}}
-									/>
-									<Textarea value={row.envText} placeholder={t("acp.toolEnv")} rows={2} className="font-mono text-xs" spellCheck={false} onChange={(event) => patchRow(index, { envText: event.target.value })} aria-label={t("acp.toolEnv")} />
+									<label className="flex min-w-0 flex-col gap-1">
+										<span className="text-micro text-muted-foreground">{t("acp.toolArgs")}</span>
+										<Input
+											value={row.args.join(" ")}
+											onChange={(event) => {
+												// 参数按空白拆分:与主进程 spawn 的数组语义一致,避免引号转义教学成本
+												patchRow(index, { args: event.target.value.trim() ? event.target.value.split(/\s+/) : [] });
+											}}
+										/>
+									</label>
+									<label className="flex min-w-0 flex-col gap-1">
+										<span className="text-micro text-muted-foreground">{t("acp.toolEnv")}</span>
+										<Textarea value={row.envText} rows={2} className="font-mono text-xs" spellCheck={false} onChange={(event) => patchRow(index, { envText: event.target.value })} />
+									</label>
 								</div>
 							))}
 						</div>
