@@ -44,6 +44,10 @@ import { WebSkillsExtensionsDialog } from "./WebSkillsExtensionsDialog";
 import { applyWebTheme, readStoredWebTheme, resolveWebTheme, storeWebTheme, systemPrefersDark, type ResolvedWebTheme, type WebThemePreference } from "./webTheme";
 import { registerWebServiceWorker, usePwaInstall } from "./webPwa";
 import { decideStreamRecovery } from "./webStreamRecovery";
+import { resolveHeaderHidden } from "./headerAutoHide";
+import { resolveComposerHidden } from "./composerCollapse";
+import { readViewportWidth } from "./webViewport";
+import { useIsMobileViewport } from "./useIsMobileViewport";
 import { useExternalSessionStream } from "./webExternalStream";
 import { useWebStateEvents } from "./webStateEvents";
 import type { AgentUiResponse } from "../../../shared/types";
@@ -104,6 +108,8 @@ export function WebChatApp() {
 	const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	// P2：上下文用量（随主轮询拉取 runtime state 子集）
 	const [contextUsage, setContextUsage] = useState<WebContextUsage | undefined>(undefined);
+	const [headerHidden, setHeaderHidden] = useState(false);
+	const mobileViewport = useIsMobileViewport();
 
 	// ── 本组件自持的 per-session 消息缓存（useChat 切换 id 会重建 Chat 实例） ──
 	const messagesBySessionRef = useRef<Record<string, UIMessage[]>>({});
@@ -331,6 +337,48 @@ export function WebChatApp() {
 		if (!project?.root) return;
 		setFilePreview({ kind: "diff", projectId: project.id, projectRoot: project.root, path });
 	}, []);
+
+	const overlayOpen = mobileSidebarOpen || searchOpen || assetsOpen || dshToolsOpen || workspaceOpen || filePreview != null || renameDraft != null || deleteConfirmId != null;
+	const overlayOpenRef = useRef(overlayOpen);
+	const headerScrollRef = useRef<{ direction: number; distance: number; hidden: boolean }>({ direction: 0, distance: 0, hidden: false });
+	const applyHeaderHidden = useCallback((hidden: boolean) => {
+		headerScrollRef.current.hidden = hidden;
+		headerScrollRef.current.distance = 0;
+		setHeaderHidden(hidden);
+	}, []);
+	useEffect(() => {
+		overlayOpenRef.current = overlayOpen;
+		if (overlayOpen) applyHeaderHidden(false);
+	}, [overlayOpen, applyHeaderHidden]);
+	useEffect(() => {
+		applyHeaderHidden(false);
+	}, [activeSessionId, applyHeaderHidden]);
+	useEffect(() => {
+		if (!mobileViewport) applyHeaderHidden(false);
+	}, [mobileViewport, applyHeaderHidden]);
+	const handleTimelineScroll = useCallback(
+		(scrollTop: number, delta: number) => {
+			if (delta === 0) return;
+			const scroll = headerScrollRef.current;
+			const direction = delta > 0 ? 1 : -1;
+			if (direction !== scroll.direction) {
+				scroll.direction = direction;
+				scroll.distance = 0;
+			}
+			scroll.distance += Math.abs(delta);
+			const next = resolveHeaderHidden(scroll.hidden, { scrollTop, delta: scroll.distance * direction, viewportWidth: readViewportWidth(), forceVisible: overlayOpenRef.current });
+			if (next !== scroll.hidden) applyHeaderHidden(next);
+		},
+		[applyHeaderHidden],
+	);
+	const revealHeader = useCallback(() => applyHeaderHidden(false), [applyHeaderHidden]);
+	const [nearBottom, setNearBottom] = useState(true);
+	const [composerEngaged, setComposerEngaged] = useState(false);
+	const handleNearBottomChange = useCallback((value: boolean) => setNearBottom(value), []);
+	const handleComposerEngagedChange = useCallback((value: boolean) => setComposerEngaged(value), []);
+	useEffect(() => {
+		if (nearBottom) applyHeaderHidden(false);
+	}, [nearBottom, applyHeaderHidden]);
 
 	// 切换会话：stale-while-revalidate——缓存命中先展示旧快照立即渲染，再后台重拉磁盘
 	// 最新（桌面端/其他端跑出的新消息不会漏）；未加载过的会话直接拉首页注入。
@@ -1012,9 +1060,10 @@ export function WebChatApp() {
 	const lastUserIndex = liveMessage ? messages.map((message) => message.role).lastIndexOf("user") : -1;
 	const timelineMessages = liveMessage && lastUserIndex >= 0 ? [...messages.slice(0, lastUserIndex + 1), liveMessage] : liveMessage ? [...messages, liveMessage] : messages;
 	const combinedStreaming = streaming || externalStreaming;
+	const composerHidden = resolveComposerHidden({ headerHidden, nearBottom, streaming: combinedStreaming, engaged: composerEngaged });
 
 	return (
-		<div className="app web-app wechat-shell flex h-[100dvh] w-full min-w-0 overflow-hidden bg-background pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] text-foreground [[data-bg-image=on]_&]:bg-transparent">
+		<div className="app web-app wechat-shell flex h-[100dvh] w-full min-w-0 overflow-hidden bg-background pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] text-foreground [[data-bg-image=on]_&]:bg-transparent" data-header-hidden={headerHidden ? "on" : undefined}>
 			<WebSidebar
 				state={state}
 				activeSessionId={activeSessionId}
@@ -1033,6 +1082,7 @@ export function WebChatApp() {
 			/>
 			<main className="chat-pane flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-bg-panel" onTouchStart={onMainTouchStart} onTouchMove={onMainTouchMove} onTouchEnd={onMainTouchEnd} onTouchCancel={onMainTouchEnd}>
 				<WebHeader
+					headerHidden={headerHidden}
 					title={activeSession?.title || t("web.chooseSession")}
 					status={headerStatus}
 					onOpenSidebar={() => setMobileSidebarOpen(true)}
@@ -1086,6 +1136,8 @@ export function WebChatApp() {
 					uiResponding={uiResponding}
 					onRespondUi={(response) => void handleRespondUi(response)}
 					onLoadMore={() => void handleLoadMore()}
+					onScrollTopChange={handleTimelineScroll}
+					onNearBottomChange={handleNearBottomChange}
 					canManageMessages={activeSession?.backend !== "dsh" || Boolean(activeTarget)}
 					canDeleteMessage={Boolean(activeTarget)}
 					pendingMessageAction={pendingMessageAction}
@@ -1113,6 +1165,11 @@ export function WebChatApp() {
 					onModelChange={(model) => void handleModelChange(model)}
 					thinkingLevel={activeSession?.thinkingLevel ?? pendingThinkingLevel ?? undefined}
 					onThinkingChange={(level) => void handleThinkingChange(level)}
+					onFocusChange={(focused) => {
+						if (focused) revealHeader();
+					}}
+					onEngagedChange={handleComposerEngagedChange}
+					hidden={composerHidden}
 				/>
 			</main>
 			{/* S6.3：DSH 工具面板（仅 dsh 会话头部按钮触发） */}

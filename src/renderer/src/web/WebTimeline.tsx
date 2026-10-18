@@ -613,25 +613,44 @@ export function WebTimeline(props: {
 	onResendMessage?: (messageId: string) => void;
 	/** 文件路径链接点击 → 全屏预览（未提供时链接不可点） */
 	onOpenFile?: (path: string, line?: number) => void;
+	onScrollTopChange?: (scrollTop: number, delta: number) => void;
+	onNearBottomChange?: (nearBottom: boolean) => void;
 }) {
 	const { messages, hasActiveSession, hasMoreHistory, moreCount, loadingMore, streaming, error, onLoadMore } = props;
 	const timelineRef = useRef<HTMLDivElement | null>(null);
+	const lastScrollTopRef = useRef<number | null>(null);
 	const stickToBottomRef = useRef(true);
 	const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+	const showScrollToBottomRef = useRef(false);
+	const nearBottomRef = useRef(true);
 
 	const updateScrollState = () => {
 		const el = timelineRef.current;
 		if (!el) return;
+		const previousScrollTop = lastScrollTopRef.current;
+		lastScrollTopRef.current = el.scrollTop;
+		if (previousScrollTop !== null && Math.abs(el.scrollTop - previousScrollTop) <= el.clientHeight) {
+			props.onScrollTopChange?.(el.scrollTop, el.scrollTop - previousScrollTop);
+		}
 		const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
 		const nearBottom = distance < 160;
 		stickToBottomRef.current = nearBottom;
-		setShowScrollToBottom(!nearBottom && messages.length > 0);
+		if (nearBottom !== nearBottomRef.current) {
+			nearBottomRef.current = nearBottom;
+			props.onNearBottomChange?.(nearBottom);
+		}
+		const nextShowScrollToBottom = !nearBottom && messages.length > 0;
+		if (nextShowScrollToBottom !== showScrollToBottomRef.current) {
+			showScrollToBottomRef.current = nextShowScrollToBottom;
+			setShowScrollToBottom(nextShowScrollToBottom);
+		}
 	};
 
 	const scrollToBottom = () => {
 		const el = timelineRef.current;
 		if (!el) return;
 		stickToBottomRef.current = true;
+		showScrollToBottomRef.current = false;
 		setShowScrollToBottom(false);
 		el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
 	};

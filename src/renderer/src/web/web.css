@@ -191,6 +191,10 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-info) 18%, transparent);
 }
 
+.web-app[data-header-hidden="on"] .message-list > .scroll-mt-24 {
+  scroll-margin-top: 0;
+}
+
 /* 滚动条（--dsh-scrollbar-* 语义：细滚动条 + 低调 thumb） */
 .web-app ::-webkit-scrollbar {
   width: 8px;
@@ -338,7 +342,7 @@
     padding-bottom: 8px;
   }
   .app.wechat-shell .composer-box {
-    min-height: 6rem;
+    min-height: 0;
     border-radius: 12px;
   }
 }

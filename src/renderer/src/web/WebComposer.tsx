@@ -14,10 +14,11 @@
  * - prefill：重发（prepare-resend）/提示词插入时由父级填充文本，nonce 变化触发
  * - 无会话时禁用；流式期间提交按钮转为停止
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type FocusEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { ClipboardList, ImagePlus, X } from "lucide-react";
 import { Button } from "@/components/ui-shadcn/button";
 import { t } from "@/i18n";
+import { cn } from "@/lib/utils";
 import type { AgentBackend, AvailableModel, ComposerAgentMode, SessionModelPreference } from "../../../shared/types";
 import { buildComposerPromptSubmission } from "../composerBehavior";
 import { compressImageToDataUrl, imagesFromPasteEvent } from "./webImageCompress";
@@ -25,9 +26,13 @@ import { WebModelSelector } from "./WebModelSheet";
 import { WebBackendSelector } from "./WebBackendSelector";
 import { WebThinkingSelector } from "./WebThinkingSelector";
 import { WebPromptPicker } from "./WebPromptPicker";
+import { useIsMobileViewport } from "./useIsMobileViewport";
+import { resolveComposerCollapsed } from "./composerCollapse";
 
 /** 单会话图片上限（压缩后每张约 100–300KB，4 张足够多数场景且 body 可控）。 */
 const MAX_ATTACHED_IMAGES = 4;
+
+const BLUR_COLLAPSE_DELAY_MS = 250;
 
 export function WebComposer(props: {
 	disabled: boolean;
@@ -49,6 +54,9 @@ export function WebComposer(props: {
 	onStop: () => void;
 	/** 父级驱动的预填充（重发 / 提示词插入）；nonce 变化才生效，避免重复触发。 */
 	prefill?: { text: string; nonce: number };
+	onFocusChange?: (focused: boolean) => void;
+	onEngagedChange?: (engaged: boolean) => void;
+	hidden?: boolean;
 }) {
 	const [draft, setDraft] = useState("");
 	const [images, setImages] = useState<string[]>([]);
@@ -56,7 +64,11 @@ export function WebComposer(props: {
 	const [attachError, setAttachError] = useState(false);
 	// 计划模式：一次性提交流（对齐桌面 composer 语义），发送后自动回普通
 	const [mode, setMode] = useState<ComposerAgentMode>("normal");
+	const [focused, setFocused] = useState(false);
+	const mobileViewport = useIsMobileViewport();
 	const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+	const composerRef = useRef<HTMLDivElement | null>(null);
+	const blurTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
 	const lastPrefillNonce = useRef<number>(-1);
 
@@ -95,96 +107,148 @@ export function WebComposer(props: {
 		if (mode === "plan") setMode("normal");
 	};
 
+	const clearBlurTimer = () => {
+		if (blurTimerRef.current === null) return;
+		clearTimeout(blurTimerRef.current);
+		blurTimerRef.current = null;
+	};
+	useEffect(() => clearBlurTimer, []);
+	const handleComposerFocus = () => {
+		clearBlurTimer();
+		setFocused(true);
+		props.onFocusChange?.(true);
+	};
+	const handleComposerBlur = (event: FocusEvent<HTMLDivElement>) => {
+		const next = event.relatedTarget;
+		if (next && event.currentTarget.contains(next)) return;
+		clearBlurTimer();
+		blurTimerRef.current = setTimeout(() => {
+			blurTimerRef.current = null;
+			if (composerRef.current?.contains(document.activeElement)) return;
+			setFocused(false);
+			props.onFocusChange?.(false);
+		}, BLUR_COLLAPSE_DELAY_MS);
+	};
+
+	const collapsed = resolveComposerCollapsed({ mobileViewport, draft, imageCount: images.length, streaming: props.streaming, focused, busy, attachError, planMode: mode === "plan" });
+	const collapsedBackendPicker = collapsed && Boolean(props.onBackendChange) && !props.backendLocked;
+	const suppressPointerFocus = mobileViewport ? (event: ReactPointerEvent<HTMLDivElement>) => event.preventDefault() : undefined;
+	const engaged = focused || draft !== "" || images.length > 0;
+	useEffect(() => {
+		props.onEngagedChange?.(engaged);
+	}, [engaged, props.onEngagedChange]);
+	const sendControls = props.streaming ? (
+		<Button type="button" variant="destructive" size="sm" className="h-8 shrink-0" data-testid="web-composer-stop" onClick={props.onStop}>
+			{t("app.stop")}
+		</Button>
+	) : (
+		<Button type="submit" size="sm" className="h-8 shrink-0 whitespace-nowrap" data-testid="web-composer-send" disabled={props.disabled || busy || (!draft.trim() && images.length === 0)}>
+			{t("app.send")}
+		</Button>
+	);
+
 	return (
-		<form
-			className="composer w-full min-w-0 flex-col gap-2 bg-background px-3 pb-3"
-			onSubmit={(event) => {
-				event.preventDefault();
-				submit();
-			}}
-		>
-			<div className="composer-box relative flex min-h-[7rem] min-w-0 flex-col overflow-visible rounded-xl border border-border bg-card text-card-foreground shadow-sm transition-[border-color,box-shadow,background-color]">
-				{images.length > 0 ? (
-					<div className="flex flex-wrap gap-2 px-3 pt-3">
-						{images.map((src, index) => (
-							<span key={`${index}-${src.slice(-24)}`} className="relative inline-block size-14 overflow-hidden rounded-md border border-border">
-								<img src={src} alt={t("web.messageImage")} className="size-full object-cover" />
-								<button type="button" aria-label={t("web.removeImage")} className="absolute top-0.5 right-0.5 rounded-full bg-background/80 p-0.5 text-muted-foreground transition-colors hover:bg-background hover:text-foreground" onClick={() => setImages((prev) => prev.filter((_, position) => position !== index))}>
-									<X className="size-3" aria-hidden="true" />
-								</button>
-							</span>
-						))}
-					</div>
-				) : null}
-				<textarea
-					id="prompt"
-					ref={textareaRef}
-					/* legacy .composer textarea 带 height:100%（桌面横向布局遗留）：web 端纵列布局下会把工具行挤出，utilities 层覆盖为随内容自适应 */
-					className="h-auto max-h-[40dvh] min-h-14"
-					value={draft}
-					onChange={(event) => setDraft(event.target.value)}
-					onPaste={(event) => {
-						const pasted = imagesFromPasteEvent(event.nativeEvent as ClipboardEvent);
-						if (pasted.length > 0) {
-							event.preventDefault();
-							void addFiles(pasted);
-						}
+		<div className={cn("grid shrink-0 transition-[grid-template-rows] duration-[240ms] ease-[cubic-bezier(0.4,0,0.2,1)] motion-reduce:transition-none", props.hidden ? "grid-rows-[0fr]" : "grid-rows-[1fr]")}>
+			{/* 收起时同时 inert + aria-hidden：overflow-hidden 只裁剪，看不见的输入框仍可被 Tab 命中。
+			    justify-end 让内容贴着底部滑出（否则是从下往上被“吃掉”）；配合同步 opacity 淡出，避免硬切感 */}
+			<div className={cn("min-h-0 transition-[translate,opacity] duration-[240ms] ease-[cubic-bezier(0.4,0,0.2,1)] motion-reduce:transition-none", props.hidden ? "translate-y-full opacity-0" : "translate-y-0 opacity-100")} inert={Boolean(props.hidden)} aria-hidden={props.hidden || undefined}>
+				<form
+					className="composer w-full min-w-0 flex-col gap-2 bg-background px-3 pb-3"
+					onSubmit={(event) => {
+						event.preventDefault();
+						submit();
 					}}
-					placeholder={mode === "plan" ? t("app.composerPlanPlaceholder") : t("web.promptPlaceholder")}
-					disabled={props.disabled}
-					onKeyDown={(event) => {
-						if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
-							event.preventDefault();
-							submit();
-						}
-					}}
-					aria-label={t("web.promptPlaceholder")}
-				/>
-				{attachError ? <div className="px-3 text-micro text-danger">{t("web.imageAttachFailed")}</div> : null}
-				{/* 操作行：附件/提示词/计划模式等动作 + 发送按钮钉右（模型/思考选择器移到底部独立行，窄屏不挤） */}
-				<div className="flex shrink-0 items-center gap-1.5 border-t border-border/60 px-3 pt-2">
-					<span className="flex min-w-0 flex-1 flex-nowrap items-center gap-0.5 overflow-x-auto overflow-y-hidden [scrollbar-width:none]">
-						<input
-							ref={fileInputRef}
-							type="file"
-							accept="image/*"
-							multiple
-							className="hidden"
-							onChange={(event) => {
-								const files = Array.from(event.target.files ?? []);
-								void addFiles(files);
-								event.target.value = "";
+				>
+					<div
+						ref={composerRef}
+						onFocus={handleComposerFocus}
+						onBlur={handleComposerBlur}
+						className={cn("composer-box relative flex min-w-0 flex-col overflow-visible rounded-xl border border-border bg-card text-card-foreground shadow-sm transition-[border-color,box-shadow,background-color]", collapsed ? "min-h-14" : "min-h-[7rem]")}
+					>
+						{images.length > 0 ? (
+							<div className="flex flex-wrap gap-2 px-3 pt-3">
+								{images.map((src, index) => (
+									<span key={`${index}-${src.slice(-24)}`} className="relative inline-block size-14 overflow-hidden rounded-md border border-border">
+										<img src={src} alt={t("web.messageImage")} className="size-full object-cover" />
+										<button type="button" aria-label={t("web.removeImage")} className="absolute top-0.5 right-0.5 rounded-full bg-background/80 p-0.5 text-muted-foreground transition-colors hover:bg-background hover:text-foreground" onClick={() => setImages((prev) => prev.filter((_, position) => position !== index))}>
+											<X className="size-3" aria-hidden="true" />
+										</button>
+									</span>
+								))}
+							</div>
+						) : null}
+						<textarea
+							id="prompt"
+							ref={textareaRef}
+							/* legacy .composer textarea 带 height:100%（桌面横向布局遗留）：web 端纵列布局下会把工具行挤出，utilities 层覆盖为随内容自适应 */
+							className={cn("h-auto max-h-[40dvh] min-h-14", collapsedBackendPicker && "pr-28")}
+							value={draft}
+							onChange={(event) => setDraft(event.target.value)}
+							onPaste={(event) => {
+								const pasted = imagesFromPasteEvent(event.nativeEvent as ClipboardEvent);
+								if (pasted.length > 0) {
+									event.preventDefault();
+									void addFiles(pasted);
+								}
 							}}
+							placeholder={mode === "plan" ? t("app.composerPlanPlaceholder") : t("web.promptPlaceholder")}
+							disabled={props.disabled}
+							onKeyDown={(event) => {
+								if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+									event.preventDefault();
+									submit();
+								}
+							}}
+							aria-label={t("web.promptPlaceholder")}
 						/>
-						{props.onBackendChange ? <WebBackendSelector backend={props.backend ?? "pi"} locked={Boolean(props.backendLocked)} onChange={props.onBackendChange} /> : null}
-						<Button type="button" variant="ghost" size="sm" className="h-8 w-8 shrink-0 p-0 text-muted-foreground" disabled={props.disabled || busy || images.length >= MAX_ATTACHED_IMAGES} title={t("web.attachImage")} aria-label={t("web.attachImage")} onClick={() => fileInputRef.current?.click()}>
-							<ImagePlus className="size-4" aria-hidden="true" />
-						</Button>
-						<WebPromptPicker disabled={props.disabled} onPick={(content) => setDraft((prev) => (prev ? `${prev}\n\n${content}` : content))} />
-						{/* 计划模式切换（复用桌面「+」菜单里的模式项语义）：激活态高亮；一次性提交流，发送后自动回普通 */}
-						<Button type="button" variant={mode === "plan" ? "default" : "ghost"} size="sm" className="h-8 shrink-0 gap-1 px-2" aria-pressed={mode === "plan"} disabled={props.disabled} title={t("app.composerModePlanDesc")} onClick={() => setMode((prev) => (prev === "plan" ? "normal" : "plan"))}>
-							<ClipboardList className="size-4" aria-hidden="true" />
-							<span className="text-caption">{t("app.composerModePlan")}</span>
-						</Button>
-					</span>
-					{props.streaming ? (
-						<Button type="button" variant="destructive" size="sm" className="h-8 shrink-0" onClick={props.onStop}>
-							{t("app.stop")}
-						</Button>
-					) : (
-						<Button type="submit" size="sm" className="h-8 shrink-0 whitespace-nowrap" disabled={props.disabled || busy || (!draft.trim() && images.length === 0)}>
-							{t("app.send")}
-						</Button>
-					)}
-				</div>
-				{/* 模型行（底部驻留）：模型/思考选择器 + 状态提示（计划模式时提示只读分析语义） */}
-				<div className="flex shrink-0 items-center gap-1.5 px-3 pt-1.5 pb-2.5">
-					{/* 模型+思考两个 pill 靠左成组，提示文案推到行尾两端对齐，避免整行挤在左侧留大片空白 */}
-					<WebModelSelector model={props.model} models={props.models} refreshing={props.refreshingModels} onRefresh={props.onRefreshModels} onChange={props.onModelChange} />
-					<WebThinkingSelector level={props.thinkingLevel} onChange={props.onThinkingChange} />
-					<span className="composer-hint ml-auto hidden min-w-0 truncate text-caption text-muted-foreground sm:inline">{mode === "plan" ? t("app.composerPlanStatus") : t("web.composerHint")}</span>
-				</div>
+						{attachError ? <div className="px-3 text-micro text-danger">{t("web.imageAttachFailed")}</div> : null}
+						{collapsed ? (
+							<div className="absolute right-2 bottom-2 flex items-center gap-1" onPointerDown={suppressPointerFocus}>
+								{collapsedBackendPicker && props.onBackendChange ? <WebBackendSelector backend={props.backend ?? "pi"} locked={false} onChange={props.onBackendChange} /> : null}
+								{sendControls}
+							</div>
+						) : null}
+						{collapsed ? null : (
+							<>
+								<div className="flex shrink-0 items-center gap-1.5 border-t border-border/60 px-3 pt-2" data-testid="web-composer-ops-row" onPointerDown={suppressPointerFocus}>
+									<span className="flex min-w-0 flex-1 flex-nowrap items-center gap-0.5 overflow-x-auto overflow-y-hidden [scrollbar-width:none]">
+										<input
+											ref={fileInputRef}
+											type="file"
+											accept="image/*"
+											multiple
+											className="hidden"
+											onChange={(event) => {
+												const files = Array.from(event.target.files ?? []);
+												void addFiles(files);
+												event.target.value = "";
+											}}
+										/>
+										{props.onBackendChange ? <WebBackendSelector backend={props.backend ?? "pi"} locked={Boolean(props.backendLocked)} onChange={props.onBackendChange} /> : null}
+										<Button type="button" variant="ghost" size="sm" className="h-8 w-8 shrink-0 p-0 text-muted-foreground" disabled={props.disabled || busy || images.length >= MAX_ATTACHED_IMAGES} title={t("web.attachImage")} aria-label={t("web.attachImage")} onClick={() => fileInputRef.current?.click()}>
+											<ImagePlus className="size-4" aria-hidden="true" />
+										</Button>
+										<WebPromptPicker disabled={props.disabled} onPick={(content) => setDraft((prev) => (prev ? `${prev}\n\n${content}` : content))} />
+										{/* 计划模式切换（复用桌面「+」菜单里的模式项语义）：激活态高亮；一次性提交流，发送后自动回普通 */}
+										<Button type="button" variant={mode === "plan" ? "default" : "ghost"} size="sm" className="h-8 shrink-0 gap-1 px-2" aria-pressed={mode === "plan"} disabled={props.disabled} title={t("app.composerModePlanDesc")} onClick={() => setMode((prev) => (prev === "plan" ? "normal" : "plan"))}>
+											<ClipboardList className="size-4" aria-hidden="true" />
+											<span className="text-caption">{t("app.composerModePlan")}</span>
+										</Button>
+									</span>
+									{sendControls}
+								</div>
+								{/* 模型行（底部驻留）：模型/思考选择器 + 状态提示（计划模式时提示只读分析语义） */}
+								<div className="flex shrink-0 items-center gap-1.5 px-3 pt-1.5 pb-2.5" data-testid="web-composer-model-row" onPointerDown={suppressPointerFocus}>
+									{/* 模型+思考两个 pill 靠左成组，提示文案推到行尾两端对齐，避免整行挤在左侧留大片空白 */}
+									<WebModelSelector model={props.model} models={props.models} refreshing={props.refreshingModels} onRefresh={props.onRefreshModels} onChange={props.onModelChange} />
+									<WebThinkingSelector level={props.thinkingLevel} onChange={props.onThinkingChange} />
+									<span className="composer-hint ml-auto hidden min-w-0 truncate text-caption text-muted-foreground sm:inline">{mode === "plan" ? t("app.composerPlanStatus") : t("web.composerHint")}</span>
+								</div>
+							</>
+						)}
+					</div>
+				</form>
 			</div>
-		</form>
+		</div>
 	);
 }
