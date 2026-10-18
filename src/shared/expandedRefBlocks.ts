@@ -20,7 +20,7 @@
 
 /** XML 属性转义（label / name / messageId 可能含引号、尖括号）。 */
 export function escapeXmlAttribute(value: string): string {
-	return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, ">&").replace(/"/g, "&quot;");
+	return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 // 视觉桥块解析在独立模块（块结构与本模块的四类 XML 块无关，避免正则/类型交叉）。

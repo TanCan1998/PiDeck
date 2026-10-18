@@ -27,11 +27,15 @@ test("sidebar host needs no container query anchor", () => {
 
 test("project row text yields to the hover action buttons at any width", () => {
 	const src = read("src/renderer/src/components/sidebar/ProjectTree.tsx");
-	// 项目名 conversation-body：hover 压出 88px 留白——浮层 right-1(4) + pr-1(4) +
-	// 三个 size-6 按钮（筛选 / + / ⋯，76px）+ 8px 余量；聚焦态（键盘导航）同样让位；
-	// transition 只动画 padding-right。
+	// 项目名 conversation-body：基础让位 28px（常显的「+ 新建会话」right-1(4) + size-6(24)），
+	// hover 再压到 88px——常显加号(28) + 末尾 pr-1(4) + 浮动层 2 个 size-6 按钮（筛选 / ⋯，52px）；
+	// 聚焦态（键盘导航）同样让位；transition 只动画 padding-right。
 	// 所有宽度统一让位，不能只依赖窄侧栏断点，否则中等宽度下按钮会叠在长项目名上。
-	assert.match(src, /conversation-body min-w-0 flex-1 transition-\[padding-right\] group-hover:pr-\[88px\] group-focus-within:pr-\[88px\]/);
+	assert.match(src, /conversation-body min-w-0 flex-1 pr-7 transition-\[padding-right\] group-hover:pr-\[88px\] group-focus-within:pr-\[88px\]/);
+	// 「+ 新建会话」必须脱离 hover 浮层常显（用户反馈：只在 hover 出现时容易点错到分组栏的「+ 添加项目」）
+	assert.match(src, /<div className="absolute top-1\/2 right-1 flex -translate-y-1\/2 items-center">\s*<Button[\s\S]{0,500}?newNormalSession/);
+	// 剩余筛选/⋯ 浮层左栻 32px 让开常显加号
+	assert.match(src, /dimmedActionsClass, "right-8 pr-1"/);
 	// 过滤历史记录按钮 hover 常驻（不再只在筛选激活时出现），筛选激活时高亮
 	assert.match(src, /openSourceFilter\(project\.id, event\.clientX, event\.clientY\)/);
 	assert.match(src, /sourceFilter !== null\s*\?\s*"text-primary"/);

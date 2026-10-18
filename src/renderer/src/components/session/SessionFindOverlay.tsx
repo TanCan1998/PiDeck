@@ -5,10 +5,11 @@ import type { SessionSearchMatch } from "../../../../shared/types";
 import { t } from "../../i18n";
 import { SESSION_FIND_MIN_QUERY_LENGTH, useSessionMessageSearch } from "../../hooks/useSessionMessageSearch";
 import { resolveSessionFindAnchor, type SessionFindAnchor } from "./sessionFindAnchor";
+import { formatAbsoluteTime, formatRelativeTime } from "../../utils/relativeTime";
 import { Button } from "../ui-shadcn/button";
 import { Input } from "../ui-shadcn/input";
 
-/** 浮层宽度：够放下「片段 + 标号」，又不遮住会话正文的中间区域。 */
+/** 浮层宽度：够放下「片段 + 角色/时间」，又不遮住会话正文的中间区域。 */
 const FIND_PANEL_WIDTH = 420;
 /** 命中列表最大高度：再多就滚动，不把整屏盖掉。 */
 const FIND_LIST_MAX_HEIGHT = 260;
@@ -32,14 +33,17 @@ type SessionFindOverlayProps = {
  * 位置随窗口尺寸/消息区尺寸变化重算。锚点必须是消息区（时间线视口）而不是整栏聊天区：
  * 自定义标题栏下聊天区顶到窗口上沿，其右上角就是窗口关闭键（见 sessionFindAnchor）。
  *
- * 收起状态下它只占消息区右上角一个 24px 的图标按钮——这就是「会话内搜索在哪」的可见入口。
+ * 只有快捷键会打开它：收起态什么都不渲染。曾经在消息区右上角常驻一个放大镜按钮充当
+ * 「入口」，但它浮在正文之上、与标题栏工具行同列，看起来像多出来的一个 chrome 控件
+ * （2027-02 用户反馈「默认不要展示、位置也不对」）。可发现性改由流式状态条的提示承担
+ * （sessionFeatureTips 的 agent.tips.findInSession）。
  */
 export function SessionFindOverlay(props: SessionFindOverlayProps) {
 	const [open, setOpen] = useState(false);
 	const [query, setQuery] = useState("");
 	const [activeIndex, setActiveIndex] = useState(0);
-	// 初值给「视口右上角」而不是 null：首帧就能画出入口按钮（不闪一下才出现），
-	// 也让锚点量不到时始终有一个屏幕内的落点。
+	// 初值给「视口右上角」而不是 null：挂在 mount 上的测量完成前若被快捷键打开，
+	// 也始终有一个屏幕内的落点（锚点量不到时同样回退到这里）。
 	const [anchorBox, setAnchorBox] = useState<SessionFindAnchor>(() => resolveSessionFindAnchor(null, { width: typeof window === "undefined" ? 0 : window.innerWidth, height: typeof window === "undefined" ? 0 : window.innerHeight }));
 	const inputRef = useRef<HTMLInputElement | null>(null);
 	const listRef = useRef<HTMLDivElement | null>(null);
@@ -121,24 +125,8 @@ export function SessionFindOverlay(props: SessionFindOverlayProps) {
 
 	const positionStyle = { top: anchorBox.top, right: anchorBox.right, width: FIND_PANEL_WIDTH };
 
-	if (!open) {
-		return createPortal(
-			<Button
-				variant="ghost"
-				size="icon"
-				// 浮在消息正文之上：必须自带底板/描边，否则正文长行贴边时图标会“消失”在文字里
-				className="fixed z-40 shrink-0 border border-border-subtle bg-bg-panel/90 text-muted-foreground shadow-sm backdrop-blur-sm transition-colors hover:border-border-strong hover:bg-bg-hover hover:text-foreground"
-				// 尺寸走内联：size="icon" 的 size-9 与 h-7/w-7 是同权重 utility，谁生效取决于生成顺序
-				style={{ top: anchorBox.top, right: anchorBox.right, width: 28, height: 28 }}
-				title={t("sessionFind.open")}
-				aria-label={t("sessionFind.open")}
-				onClick={() => setOpen(true)}
-			>
-				<Search size={14} aria-hidden="true" />
-			</Button>,
-			document.body,
-		);
-	}
+	// 收起态不渲染任何东西：入口只有快捷键（Ctrl/Cmd+Shift+F），见文件头注释。
+	if (!open) return null;
 
 	return createPortal(
 		<div
@@ -190,10 +178,14 @@ export function SessionFindOverlay(props: SessionFindOverlayProps) {
 						<p className="shrink-0 px-3 py-2 text-xs text-muted-foreground">{isSearching ? t("sessionFind.searching") : unavailable ? t("sessionFind.unavailable") : t("sessionFind.noResults")}</p>
 					) : (
 						matches.map((match, index) => (
-							<button key={match.messageId} type="button" data-find-index={index} className={`flex shrink-0 flex-col gap-0.5 border-b border-border/20 px-3 py-1.5 text-left text-xs hover:bg-accent/40${index === activeIndex ? " bg-accent/60" : ""}`} onClick={() => jumpTo(index)}>
+							// key 不能只用 messageId：同一条消息的多个文本块各算一次命中，会撞 key
+							<button key={`${match.messageId}-${index}`} type="button" data-find-index={index} className={`flex shrink-0 flex-col gap-0.5 border-b border-border/20 px-3 py-1.5 text-left text-xs hover:bg-accent/40${index === activeIndex ? " bg-accent/60" : ""}`} onClick={() => jumpTo(index)}>
 								<span className="flex items-center gap-1.5 text-micro text-muted-foreground">
 									<span className="shrink-0">{match.role === "user" ? t("sessionFind.roleUser") : t("sessionFind.roleAssistant")}</span>
-									<span className="shrink-0 tabular-nums">{match.messageId}</span>
+									{/* 时间是用户定位「哪一轮」的线索；条目 id 是内部标识，露出来只是噪音 */}
+									<span className="shrink-0 tabular-nums" title={formatAbsoluteTime(match.timestampMs)}>
+										{formatRelativeTime(match.timestampMs)}
+									</span>
 								</span>
 								<span className="line-clamp-2 break-words">{match.snippet}</span>
 							</button>

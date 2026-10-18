@@ -81,11 +81,25 @@
 
 ## 📋 Changelog
 
-> **Latest: v0.9.1 (2026-10-14)** (2026-10-14)
+> **Latest: v0.9.1** (2026-10-18)
 
-### v0.9.1 (2026-10-14) Release Highlights
-- ✨ **macOS app would not launch on Apple Silicon**
-- ✨ **Local network access and terminal SSH work again**
+### v0.9.1 Release Highlights
+- 🚀 **WeChat (ilink) support: a second IM channel on your phone**
+- 🚀 **Cross-session body search, not just titles**
+- 🚀 **Find in session (Ctrl/Cmd+Shift+F)**
+- 🚀 **Pinyin search for session titles and the file drawer**
+- 🚀 **Search file contents from the file drawer**
+- 🚀 **Side tasks: a second session that stays out of the tab bar**
+- 🚀 **Session-level average TPS**
+- 🚀 **Web on mobile: give the portrait screen back to content**
+- 🚀 **ACP tools available on stable builds**
+- 🚀 **Synced with pi 1.3.0**
+- 🚀 **DSH runtime upgraded to 0.2.1**
+- 🚀 **Prompt library as a remote asset, with millisecond search**
+- ✨ **On-disk session index on by default**
+- ✨ **Extension list prewarmed on first screen**
+- ✨ **Goal mode stops re-injecting the full objective every turn**
+- ✨ **List ordering is drag-only**
 
 [View Full Changelog →](CHANGELOG.md)
 

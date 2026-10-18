@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { atom, useAtomValue, useSetAtom, useStore } from "jotai";
+import { toast } from "sonner";
 import { latestUserMessageId, SendScrollPositioner } from "./timeline/sendScroll";
 import { selectAtom } from "jotai/utils";
 import { desktopApi } from "../desktopApi";
@@ -29,6 +30,7 @@ import { beginProgrammaticScroll, clearProgrammaticScroll, createProgrammaticScr
 import { browsePinScrollTop, followBrowsePinAfterUserScroll, shouldCompensateBrowsePin, type BrowsePin } from "./timeline/browsePin";
 import { countUserTurns, TIMELINE_MOUNTED_TURN_LIMIT, TIMELINE_SCROLLED_TURN_LIMIT, TIMELINE_WINDOW_EXPAND_STEP } from "../components/session/timeline/turnRenderWindow";
 import { estimateJumpExpandTurns, resolveJumpPendingAction } from "../components/session/timeline/jumpWindowPolicy";
+import { resolveJumpMessageIndex, resolveJumpScrollTarget } from "../components/session/timeline/jumpTarget";
 
 /** 滚动接近顶部自动加载历史的阈值（px，2026-11 轮次模型）：
  *  贴顶（≤8px）才触发翻页——「滑到底才翻」，避免在顶部附近任何滚动都连翻历史页。
@@ -1291,14 +1293,19 @@ export function useSessionTimelineController(options: { sessionId?: string; mess
 			skipBrowsePinRef.current = true;
 			browsePinRef.current = null;
 			browsePinFrozenRef.current = false;
-			const existing = timeline.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`) as HTMLElement | null;
+			// 命中 id 可能是**会话文件条目 id**（会话内查找的命中）而不是投影消息 id：
+			// 先归一到当前消息列表再查 DOM，否则永远查不到节点、点击无任何反应。
+			const index = resolveJumpMessageIndex(combinedMessages, messageId);
+			const targetNodeId = index >= 0 ? combinedMessages[index].id : messageId;
+			const existing = timeline.querySelector(`[data-message-id="${CSS.escape(targetNodeId)}"]`) as HTMLElement | null;
 			if (existing) {
 				skipBrowsePinRef.current = false;
-				scrollJumpTargetIntoView(timeline, existing);
-				highlightMessage(existing, requestOwnerKey);
+				// 轮内中间回答在折叠区里是 display:none（几何全 0），落位退到所属轮次行
+				const target = resolveJumpScrollTarget(existing);
+				scrollJumpTargetIntoView(timeline, target);
+				highlightMessage(target, requestOwnerKey);
 				return;
 			}
-			const index = combinedMessages.findIndex((message) => message.id === messageId);
 			const hasMorePages = diskPage ? diskPage.nextBefore !== null : historyHasMore;
 			if (index < 0 && !hasMorePages) return;
 			// 目标可能在贴底 turn 窗口外（先取消跟随以展开挂载），也可能在尚未加载的
@@ -1573,17 +1580,23 @@ export function useSessionTimelineController(options: { sessionId?: string; mess
 		// 分批扩窗在途（点击时一次到位排满的批次 / 补页增长）：等批次消费完再评估，
 		// 避免目标刚挂载就落位、随后被后续批次推移。
 		if (pendingExpandTurnsRef.current > 0) return;
-		const element = timeline.querySelector(`[data-message-id="${CSS.escape(pendingJump.value.messageId)}"]`) as HTMLElement | null;
+		// 挂起期间每轮重新归一：目标可能是文件条目 id（会话内查找命中），补页把它
+		// 载入 combinedMessages 之后投影 id 才确定。
+		const targetIndex = resolveJumpMessageIndex(combinedMessages, pendingJump.value.messageId);
+		const targetNodeId = targetIndex >= 0 ? combinedMessages[targetIndex].id : pendingJump.value.messageId;
+		const element = timeline.querySelector(`[data-message-id="${CSS.escape(targetNodeId)}"]`) as HTMLElement | null;
 		if (element) {
 			skipBrowsePinRef.current = false;
 			setPendingJump(undefined);
-			scrollJumpTargetIntoView(timeline, element);
-			highlightMessage(element, ownerKey);
+			// 折叠区里的命中节点不可见：落位退到所属轮次行（见 timeline/jumpTarget）
+			const target = resolveJumpScrollTarget(element);
+			scrollJumpTargetIntoView(timeline, target);
+			highlightMessage(target, ownerKey);
 			return;
 		}
 		// 目标未挂载：按策略兜底扩窗（指数步长）/ 跳转驱动补页 / 放弃（防呆上限）。
 		// give-up 保留旧行为兜底：目标已不在数据（压缩清理/删除）时不无限扩窗（2026-08 黑屏治理）。
-		const stillInData = combinedMessages.some((message) => message.id === pendingJump.value.messageId);
+		const stillInData = targetIndex >= 0;
 		const hasMorePages = diskPage ? diskPage.nextBefore !== null : historyHasMore;
 		const action = resolveJumpPendingAction({
 			targetInLoadedData: stillInData,
@@ -1595,6 +1608,9 @@ export function useSessionTimelineController(options: { sessionId?: string; mess
 		if (action.kind === "give-up") {
 			skipBrowsePinRef.current = false;
 			setPendingJump(undefined);
+			// 静默放弃会被当成「点了没反应」（本次 bug 的原始反馈）：补页/扩窗都到上限时
+			// 必须给一句反馈，要么历史太远加载不到，要么这条已被 context_edit 移出展示。
+			toast(t("sessionFind.jumpFailed"));
 			return;
 		}
 		if (action.kind === "wait") return;
