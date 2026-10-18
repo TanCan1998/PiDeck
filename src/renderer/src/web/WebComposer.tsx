@@ -137,15 +137,16 @@ export function WebComposer(props: {
 	useEffect(() => {
 		props.onEngagedChange?.(engaged);
 	}, [engaged, props.onEngagedChange]);
-	const sendControls = props.streaming ? (
-		<Button type="button" variant="destructive" size="sm" className="h-8 shrink-0" data-testid="web-composer-stop" onClick={props.onStop}>
-			{t("app.stop")}
-		</Button>
-	) : (
-		<Button type="submit" size="sm" className="h-8 shrink-0 whitespace-nowrap" data-testid="web-composer-send" disabled={props.disabled || busy || (!draft.trim() && images.length === 0)}>
-			{t("app.send")}
-		</Button>
-	);
+	const sendControls = (compact: boolean) =>
+		props.streaming ? (
+			<Button type="button" variant="destructive" size="sm" className="h-8 shrink-0" data-testid={compact ? "web-composer-stop-compact" : "web-composer-stop"} onClick={props.onStop}>
+				{t("app.stop")}
+			</Button>
+		) : (
+			<Button type="submit" size="sm" className="h-8 shrink-0 whitespace-nowrap" data-testid={compact ? "web-composer-send-compact" : "web-composer-send"} disabled={props.disabled || busy || (!draft.trim() && images.length === 0)}>
+				{t("app.send")}
+			</Button>
+		);
 
 	return (
 		<div className={cn("grid shrink-0 transition-[grid-template-rows] duration-[240ms] ease-[cubic-bezier(0.4,0,0.2,1)] motion-reduce:transition-none", props.hidden ? "grid-rows-[0fr]" : "grid-rows-[1fr]")}>
@@ -205,11 +206,11 @@ export function WebComposer(props: {
 						{collapsed ? (
 							<div className="absolute right-2 bottom-2 flex items-center gap-1" onPointerDown={suppressPointerFocus}>
 								{collapsedBackendPicker && props.onBackendChange ? <WebBackendSelector backend={props.backend ?? "pi"} locked={false} onChange={props.onBackendChange} /> : null}
-								{sendControls}
+								{sendControls(true)}
 							</div>
 						) : null}
-						{collapsed ? null : (
-							<>
+						<div className={cn("grid shrink-0 transition-[grid-template-rows] duration-[240ms] ease-[cubic-bezier(0.4,0,0.2,1)] motion-reduce:transition-none", collapsed ? "grid-rows-[0fr]" : "grid-rows-[1fr]")} data-testid="web-composer-tool-rows" inert={collapsed} aria-hidden={collapsed || undefined}>
+							<div className={cn("min-h-0 overflow-hidden transition-opacity duration-[240ms] ease-[cubic-bezier(0.4,0,0.2,1)] motion-reduce:transition-none", collapsed ? "opacity-0" : "opacity-100")}>
 								<div className="flex shrink-0 items-center gap-1.5 border-t border-border/60 px-3 pt-2" data-testid="web-composer-ops-row" onPointerDown={suppressPointerFocus}>
 									<span className="flex min-w-0 flex-1 flex-nowrap items-center gap-0.5 overflow-x-auto overflow-y-hidden [scrollbar-width:none]">
 										<input
@@ -235,7 +236,7 @@ export function WebComposer(props: {
 											<span className="text-caption">{t("app.composerModePlan")}</span>
 										</Button>
 									</span>
-									{sendControls}
+									{sendControls(false)}
 								</div>
 								{/* 模型行（底部驻留）：模型/思考选择器 + 状态提示（计划模式时提示只读分析语义） */}
 								<div className="flex shrink-0 items-center gap-1.5 px-3 pt-1.5 pb-2.5" data-testid="web-composer-model-row" onPointerDown={suppressPointerFocus}>
@@ -244,8 +245,8 @@ export function WebComposer(props: {
 									<WebThinkingSelector level={props.thinkingLevel} onChange={props.onThinkingChange} />
 									<span className="composer-hint ml-auto hidden min-w-0 truncate text-caption text-muted-foreground sm:inline">{mode === "plan" ? t("app.composerPlanStatus") : t("web.composerHint")}</span>
 								</div>
-							</>
-						)}
+							</div>
+						</div>
 					</div>
 				</form>
 			</div>

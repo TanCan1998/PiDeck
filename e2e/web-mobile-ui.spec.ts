@@ -42,14 +42,15 @@ async function openMobilePage(app: import("@playwright/test").ElectronApplicatio
 	return page;
 }
 
-/** 窄屏默认折叠（C1）：聚焦输入框才展开两行工具区，按钮不存在于折叠态。 */
+/** 窄屏默认折叠（C1）：聚焦输入框才展开两行工具区；折叠时两行留在 DOM 里但收成 0 高 + inert。 */
 async function expandComposer(page: import("@playwright/test").Page) {
 	await page.locator("textarea#prompt").click();
-	const opsRow = page.getByTestId("web-composer-ops-row");
-	const modelRow = page.getByTestId("web-composer-model-row");
-	await expect(opsRow).toBeVisible();
-	await expect(modelRow).toBeVisible();
-	return { opsRow, modelRow };
+	const toolRows = page.getByTestId("web-composer-tool-rows");
+	await expect(toolRows).not.toHaveAttribute("inert", "");
+	// 等展开动画（grid-rows 240ms）落定再量几何：动画中两行会被逐步裁出，逐个按钮取 box 会拿到不同 y
+	await expect.poll(async () => (await page.locator(".composer-box").boundingBox())?.height ?? 0, { timeout: 3_000 }).toBeGreaterThan(150);
+	await page.waitForTimeout(80);
+	return { toolRows, opsRow: page.getByTestId("web-composer-ops-row"), modelRow: page.getByTestId("web-composer-model-row") };
 }
 
 test("mobile: layout fits and composer toolbar stays reachable", async ({ app }) => {
@@ -104,29 +105,29 @@ test("mobile: idle composer collapses to one line and re-expands on focus", asyn
 	test.setTimeout(120_000);
 	const page = await openMobilePage(app);
 
-	// 折叠态：只有 textarea + 发送钮，两行工具区不在 DOM（高度收益的可测断言）
+	// 折叠态：只有 textarea + 发送钮；两行工具区留在 DOM 里但收成 0 高 + inert
+	// （不卸载：否则提示词弹层、文件输入框、prefill 焦点都会随之销毁）
 	const box = page.locator(".composer-box");
-	await expect(page.getByTestId("web-composer-model-row")).toHaveCount(0);
-	await expect(page.getByTestId("web-composer-ops-row")).toHaveCount(0);
+	const toolRows = page.getByTestId("web-composer-tool-rows");
+	await expect(toolRows).toHaveAttribute("inert", "");
 	await expect(page.getByTestId("web-composer-send")).toBeVisible();
 	const collapsedBox = await box.boundingBox();
 	expect(collapsedBox?.height ?? 999).toBeLessThanOrEqual(80);
 
 	// 聚焦展开：两行工具区回来，高度明显抬升
-	await page.locator("textarea#prompt").click();
-	await expect(page.getByTestId("web-composer-model-row")).toBeVisible();
+	await expandComposer(page);
 	const expandedBox = await box.boundingBox();
 	expect((expandedBox?.height ?? 0) - (collapsedBox?.height ?? 0)).toBeGreaterThanOrEqual(60);
 
 	// 有草稿时即使失焦也不折叠（否则用户看不到自己正在输入的内容）
 	await page.locator("textarea#prompt").fill("draft");
 	await page.locator(".message-timeline").click({ position: { x: 10, y: 10 } });
-	await expect(page.getByTestId("web-composer-model-row")).toBeVisible();
+	await expect(toolRows).not.toHaveAttribute("inert", "");
 
 	// 清空并失焦 → 回到折叠态
 	await page.locator("textarea#prompt").fill("");
 	await page.locator(".message-timeline").click({ position: { x: 10, y: 10 } });
-	await expect(page.getByTestId("web-composer-model-row")).toHaveCount(0, { timeout: 5_000 });
+	await expect(toolRows).toHaveAttribute("inert", "", { timeout: 5_000 });
 });
 
 test("mobile: model bottom sheet opens from bottom and selection updates pill", async ({ app }) => {
