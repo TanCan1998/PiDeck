@@ -18,6 +18,7 @@ import { showNotice } from "../utils/notice";
 import { useProviderUsageRefresh } from "../hooks/useProviderUsage";
 import { TokenDanceTopUpDialog } from "./TokenDanceTopUpDialog";
 import { Button } from "../components/ui-shadcn/button";
+import { Badge } from "../components/ui-shadcn/badge";
 import { Input } from "../components/ui-shadcn/input";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../components/ui-shadcn/dialog";
 import { TOKENDANCE_APP_URL, TOKENDANCE_BASE_URL, TOKENDANCE_PROVIDER } from "../../../shared/tokendance";
@@ -385,7 +386,7 @@ export function TokenDancePanel(props: TokenDancePanelProps) {
 	const [expanded, setExpanded] = useState(false);
 
 	return (
-		<section className="config-builtin-provider-panel mb-2.5 rounded-lg border border-dashed border-border-subtle bg-bg-subtle/40 p-3.5">
+		<section className="config-builtin-provider-panel mb-2.5 rounded-lg border border-border-subtle bg-bg-subtle/40 p-3.5">
 			{/* 整行标题可点击展开/收起：折叠态下右侧图标小，用户可能注意不到，整行即开关 */}
 			<button type="button" className="flex w-full items-center gap-2 text-left" onClick={() => setExpanded((v) => !v)} aria-expanded={expanded} aria-label={t("config.tokendance.expandDetails")} title={t("config.tokendance.expandDetails")}>
 				<span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-[var(--color-accent-soft)]">
@@ -393,10 +394,10 @@ export function TokenDancePanel(props: TokenDancePanelProps) {
 				</span>
 				<span className="font-mono text-sm font-semibold text-text-primary">{TOKENDANCE_PROVIDER}</span>
 				{props.configured && (
-					<span className="flex items-center gap-1 rounded-full border border-emerald-300/70 bg-emerald-500/10 px-1.5 py-px text-micro text-emerald-700 dark:border-emerald-700/70 dark:text-emerald-300">
+					<Badge variant="success" size="sm">
 						<ShieldCheck className="size-3" aria-hidden="true" />
 						{t("config.tokendance.configuredBadge")}
-					</span>
+					</Badge>
 				)}
 				<span className="min-w-0 flex-1 truncate text-micro text-text-tertiary">{t("config.tokendance.subtitle")}</span>
 				<span className="shrink-0 text-text-tertiary">{expanded ? <ChevronUp className="size-4" aria-hidden="true" /> : <ChevronDown className="size-4" aria-hidden="true" />}</span>
@@ -450,7 +451,7 @@ export function TokenDancePanel(props: TokenDancePanelProps) {
 			)}
 
 			<div className="mt-3 flex flex-wrap items-center gap-1.5">
-				<Button size="sm" variant="default" onClick={() => void openSetup()} disabled={props.configured || installing} title={props.configured ? t("config.tokendance.alreadyConfiguredTitle") : undefined}>
+				<Button size="sm" variant={props.configured ? "outline" : "default"} onClick={() => void openSetup()} disabled={props.configured || installing} title={props.configured ? t("config.tokendance.alreadyConfiguredTitle") : undefined}>
 					{installing ? <Loader2 className="size-3.5 animate-pideck-spin" aria-hidden="true" /> : <PlugZap className="size-3.5" aria-hidden="true" />}
 					{props.configured ? t("config.tokendance.alreadyConfigured") : t("config.tokendance.addToConfig")}
 				</Button>

@@ -116,7 +116,7 @@ export function TitleScrollText({
 		: undefined;
 
 	return (
-		<strong ref={containerRef} className={cn("block min-w-0 flex-1 overflow-hidden whitespace-nowrap", overflowing && hovering && "title-scroll-mask-narrow", className)} onMouseEnter={handleMouseEnter} onMouseLeave={handleMouseLeave}>
+		<strong ref={containerRef} className={cn("block min-w-0 flex-1 overflow-hidden whitespace-nowrap", overflowing && !hovering && "title-scroll-mask", overflowing && hovering && "title-scroll-mask-narrow", className)} onMouseEnter={handleMouseEnter} onMouseLeave={handleMouseLeave}>
 			<span ref={textRef} className={cn("title-scroll-text inline-block whitespace-nowrap", overflowing && hovering && "animate-title-scroll")} style={scrollStyle}>
 				{text}
 			</span>

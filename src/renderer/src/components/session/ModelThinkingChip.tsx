@@ -9,8 +9,8 @@ import { THINKING_LEVELS, type ThinkingPickerLevel } from "./sessionPickerOption
 export function ModelThinkingChip(props: { modelLabel: string; modelPendingTo?: string; modelPendingTitle?: string; disabled?: boolean; onPickModel: () => void; thinkingControl: ReactNode }) {
 	const modelValue = props.modelPendingTo ? `${props.modelLabel} → ${props.modelPendingTo}` : props.modelLabel;
 	return (
-		<div className="composer-bar-btn model-thinking inline-flex h-7 min-w-0 max-w-[52ch] items-center rounded-md text-caption font-medium">
-			<Button variant="ghost" size="sm" className="h-7 min-w-0 rounded-md px-2 text-caption font-medium text-foreground hover:bg-muted/60" disabled={props.disabled} onClick={props.onPickModel} title={props.modelPendingTitle ?? t("app.modelPickerTitle")} aria-label={t("app.modelPickerTitle")}>
+		<div className="composer-bar-btn model-thinking inline-flex h-7 min-w-0 max-w-[52ch] items-center rounded-md text-control font-medium">
+			<Button variant="ghost" size="sm" className="h-7 min-w-0 rounded-md px-2 text-control font-medium text-foreground hover:bg-muted/60" disabled={props.disabled} onClick={props.onPickModel} title={props.modelPendingTitle ?? t("app.modelPickerTitle")} aria-label={t("app.modelPickerTitle")}>
 				<span className="min-w-0 truncate">{modelValue}</span>
 			</Button>
 			<span className="shrink-0 text-muted-foreground/70" aria-hidden="true">
@@ -31,7 +31,7 @@ export function ThinkingLevelDropdown(props: { current?: string; levels?: Thinki
 	return (
 		<DropdownMenu open={props.open} onOpenChange={props.onOpenChange}>
 			<DropdownMenuTrigger asChild>
-				<Button variant="ghost" size="sm" className="h-7 min-w-0 shrink-0 rounded-md px-2 text-caption font-medium text-muted-foreground hover:bg-muted/60" disabled={props.disabled} title={t("app.thinkingPickerTitle")} aria-label={t("app.thinkingPickerTitle")}>
+				<Button variant="ghost" size="sm" className="h-7 min-w-0 shrink-0 rounded-md px-2 text-control font-medium text-muted-foreground hover:bg-muted/60" disabled={props.disabled} title={t("app.thinkingPickerTitle")} aria-label={t("app.thinkingPickerTitle")}>
 					<span className="max-w-[16ch] truncate">{thinkingText}</span>
 				</Button>
 			</DropdownMenuTrigger>

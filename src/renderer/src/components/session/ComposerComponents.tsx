@@ -8,6 +8,7 @@ import { PromptEnhanceControls } from "./PromptEnhanceControls";
 import { Button } from "../ui-shadcn/button";
 import { Command, CommandEmpty, CommandInput, CommandItem, CommandList } from "../ui-shadcn/command";
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from "../ui-shadcn/dialog";
+import { Separator } from "../ui-shadcn/separator";
 import { cn } from "../../lib/utils";
 import { showNotice } from "../../utils/notice";
 import { ModelThinkingChip } from "./ModelThinkingChip";
@@ -327,7 +328,7 @@ function ComposerBranchSwitcher(props: { gitInfo: GitBranchInfo; disabled?: bool
 					<Button
 						variant="ghost"
 						size="sm"
-						className="composer-bar-btn branch h-7 max-w-[12rem] gap-1 rounded-md px-1.5 text-sm font-semibold text-foreground/75 hover:bg-muted/60"
+						className="composer-bar-btn branch h-7 max-w-[12rem] gap-1 rounded-md px-1.5 text-control font-medium text-muted-foreground hover:bg-muted/60"
 						title={t("app.branchCurrent", {
 							branch: props.gitInfo.current,
 							count: props.gitInfo.branches.length,
@@ -673,8 +674,11 @@ export function ComposerBottomBar(props: {
 					   且 SecurityControl 按 backend 分发时没有 imagegen 分支会误显示成 pi 安全等级菜单；
 					   飞书镜像把输入同步到 IM，生图/生视频的 prompt 不走会话 runtime；
 					   快捷消息同理（正文是给对话模型的指令），四个控制位一起屏蔽。 */}
+					{/* 左区两组：①输入动作（模式/「+」）②会话级开关（飞书/安全等级/快捷消息）。
+						组间竖线让「改动输入内容」与「改动会话策略」不混成一片图标海。 */}
 					{isMediaComposer ? null : (
 						<>
+							{props.feishuIndicator || props.securityControl || props.quickMessagesControl ? <Separator orientation="vertical" className="mx-0.5 h-4" /> : null}
 							{props.feishuIndicator}
 							{props.securityControl}
 							{props.quickMessagesControl}
@@ -731,7 +735,7 @@ export function ComposerBottomBar(props: {
 						<ComposerBranchSwitcher gitInfo={props.gitInfo} disabled={props.branchDisabled ?? props.disabled} onSwitchBranch={props.onSwitchBranch} />
 					) : props.gitInfo?.current ? (
 						<span
-							className="composer-bar-branch inline-flex max-w-[12rem] items-center gap-1.5 truncate px-1.5 text-sm font-semibold text-foreground/75"
+							className="composer-bar-branch inline-flex max-w-[12rem] items-center gap-1.5 truncate px-1.5 text-control font-medium text-muted-foreground"
 							title={t("app.branchCurrent", {
 								branch: props.gitInfo.current,
 								count: props.gitInfo.branches.length,
