@@ -628,6 +628,7 @@ export function WebTimeline(props: {
 	const programmaticScrollRef = useRef(false);
 	// 平滑滚到底期间持续抑制：一次 scrollTo 会连发多帧滚动事件，只跳第一帧仍会把顶栏收起
 	const suppressUntilNearBottomRef = useRef(false);
+	const lastScrollHeightRef = useRef<number | null>(null);
 
 	const updateScrollState = () => {
 		const el = timelineRef.current;
@@ -638,7 +639,13 @@ export function WebTimeline(props: {
 		// 滚动事件可能晚于下一次 scrollTo 到达，单次标记挡不住，所以按方向再兜一层
 		const wasFollowing = stickToBottomRef.current;
 		const delta = previousScrollTop === null ? 0 : el.scrollTop - previousScrollTop;
-		const programmatic = programmaticScrollRef.current || suppressUntilNearBottomRef.current || (wasFollowing && delta > 0);
+		// 内容高度变化引起的位移（加载更多前插、过程组折叠、流式增长）不是用户滚动：
+		// 浏览器锚定会让 scrollTop 随 scrollHeight 同步跳动，位移与高度变化量近似相等
+		const scrollHeight = el.scrollHeight;
+		const heightDelta = lastScrollHeightRef.current === null ? 0 : scrollHeight - lastScrollHeightRef.current;
+		lastScrollHeightRef.current = scrollHeight;
+		const contentDriven = heightDelta !== 0 && Math.abs(delta - heightDelta) <= 2;
+		const programmatic = programmaticScrollRef.current || suppressUntilNearBottomRef.current || (wasFollowing && delta > 0) || contentDriven;
 		programmaticScrollRef.current = false;
 		if (!programmatic && previousScrollTop !== null && Math.abs(delta) <= el.clientHeight) {
 			props.onScrollTopChange?.(el.scrollTop, delta);
@@ -722,7 +729,7 @@ export function WebTimeline(props: {
 						{timelineEntries.map((entry) => {
 							const exiting = entry.kind === "user" ? Boolean(props.exitingMessageIds?.has(entry.id)) : entry.turn.messageIds.some((messageId) => Boolean(props.exitingMessageIds?.has(messageId)));
 							return (
-								<div key={entry.id} id={`web-msg-${entry.id}`} className={cn("scroll-mt-24", exiting && "web-msg-exiting")}>
+								<div key={entry.id} id={`web-msg-${entry.id}`} className={cn("scroll-mt-24 [[data-header-hidden=on]_&]:scroll-mt-0", exiting && "web-msg-exiting")}>
 									{entry.kind === "user" ? (
 										<WebUserBubble
 											message={entry.message}
