@@ -296,7 +296,15 @@ test("底栏接线：安全控制位右侧渲染 props.quickMessagesControl，�
 	assert.match(source, /const isMediaComposer = [^;]*isImageGenMode[^;]*isVideoGenMode[^;]*props\.backend === "imagegen"[^;]*props\.backend === "videogen"/, "isMediaComposer 必须同时覆盖模式与后端");
 	// 生图/生视频后端没有对话 runtime，飞书镜像/安全等级/DSH 权限/快捷消息四个控制位都不该出现；
 	// 一起判断是为了防止将来只屏蔽其中几个。
-	assert.match(source, /isMediaComposer \? null : \(\s*<>\s*\{props\.feishuIndicator\}\s*\{props\.securityControl\}\s*\{props\.quickMessagesControl\}/);
+	// 守卫分支内允许夹其它节点（如分组竖线 Separator），所以不锚死「<> 后紧跟第一个控制位」；
+	// 但三个控制位必须都在同一个守卫分支里、且自左向右保持原顺序——顺序错（快捷消息跑到安全等级左边）
+	// 与漏进守卫外（生图会话也露出入口）都要能被判红。
+	const guardedGroup = source.match(/isMediaComposer\s*\?\s*null\s*:\s*\(\s*<>([\s\S]*?)<\/>\s*\)/);
+	assert.ok(guardedGroup, "四个控制位必须整体挂在 isMediaComposer ? null 分支里");
+	const guardedProps = [...guardedGroup[1].matchAll(/\{(props\.(?:feishuIndicator|securityControl|quickMessagesControl))\s*\}/g)].map((match) => match[1]);
+	assert.deepEqual(guardedProps, ["props.feishuIndicator", "props.securityControl", "props.quickMessagesControl"], "守卫分支内必须依次渲染飞书/安全等级/快捷消息，且三个都在");
+	// 渲染点唯一：移到守卫外等于生图/生视频会话也露出快捷消息入口。
+	assert.equal(source.match(/\{props\.quickMessagesControl\}/g)?.length, 1, "props.quickMessagesControl 只允许在守卫分支内渲染一次");
 });
 
 test("ComposerArea：把 controller 的 pickers/delivery 接进快捷消息入口", () => {
