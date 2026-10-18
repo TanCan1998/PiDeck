@@ -178,7 +178,7 @@ function ApiKeyField(props: {
 			</span>
 			<div className="flex items-center gap-2">
 				<div className="relative max-w-sm flex-1">
-					<Input className="h-8 w-full pr-16 font-mono" type={revealed ? "text" : "password"} placeholder={configured ? t("config.dsh.keyStored") : t("config.dsh.keyPlaceholder")} value={value} disabled={!writable || busy} onChange={(event) => onChange(event.target.value)} />
+					<Input size="sm" className="w-full pr-16 font-mono" type={revealed ? "text" : "password"} placeholder={configured ? t("config.dsh.keyStored") : t("config.dsh.keyPlaceholder")} value={value} disabled={!writable || busy} onChange={(event) => onChange(event.target.value)} />
 					<div className="absolute inset-y-0 right-0.5 my-auto flex items-center gap-0.5">
 						<Button type="button" variant="ghost" size="icon-sm" className="size-7 text-muted-foreground" title={t("config.dsh.keyCopy")} aria-label={t("config.dsh.keyCopy")} disabled={!configured || busy} onClick={() => void copyValue()}>
 							<Copy className="size-3.5" aria-hidden="true" />

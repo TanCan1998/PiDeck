@@ -155,7 +155,7 @@ export function UsagePeriodPicker(props: { mode: UsagePeriodMode; anchor: string
 
 	const yearTrigger = (
 		<Select value={String(anchorDate.getFullYear())} onValueChange={(year) => onAnchorChange(`${year}-01-01`)}>
-			<SelectTrigger className="h-8 w-auto gap-2">
+			<SelectTrigger size="sm" className="w-auto gap-2">
 				<SelectValue />
 			</SelectTrigger>
 			<SelectContent>

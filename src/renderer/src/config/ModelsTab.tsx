@@ -315,7 +315,7 @@ export function ModelsTab(props: {
 										{t("common.clearSelection")}
 									</Button>
 									<Select value={batchAction ?? undefined} onValueChange={(next) => setBatchAction(next === "delete" || next === "export" ? next : null)}>
-										<SelectTrigger aria-label={t("config.models.batchActionLabel")} className="h-8 w-32">
+										<SelectTrigger size="sm" aria-label={t("config.models.batchActionLabel")} className="w-32">
 											<SelectValue placeholder={t("config.models.batchActionLabel")} />
 										</SelectTrigger>
 										<SelectContent position="popper">

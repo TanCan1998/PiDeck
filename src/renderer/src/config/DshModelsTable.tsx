@@ -126,7 +126,8 @@ export function ModelsTable(props: {
 									)}
 									{canEditRows ? (
 										<Input
-											className="h-7 min-w-0 flex-1 font-mono"
+											size="sm"
+											className="min-w-0 flex-1 font-mono"
 											placeholder={t("config.dsh.modelIdPlaceholder")}
 											value={id}
 											disabled={!writable}
@@ -141,7 +142,7 @@ export function ModelsTable(props: {
 										<span className="min-w-0 flex-1 truncate font-mono text-control text-foreground">{id}</span>
 									)}
 									{canEditRows ? (
-										<Input className="h-7 min-w-0 flex-1" placeholder={t("config.dsh.modelNamePlaceholder")} value={name} disabled={!writable} onChange={(event) => onUpdate(index, "name", event.target.value)} />
+										<Input size="sm" className="min-w-0 flex-1" placeholder={t("config.dsh.modelNamePlaceholder")} value={name} disabled={!writable} onChange={(event) => onUpdate(index, "name", event.target.value)} />
 									) : name ? (
 										<span className="min-w-0 flex-1 truncate text-control text-muted-foreground">{name}</span>
 									) : (
@@ -173,7 +174,7 @@ export function ModelsTable(props: {
 											<Input
 												type={props.allowCapacitySuffixes ? "text" : "number"}
 												inputMode="numeric"
-												className="h-7"
+												size="sm"
 												placeholder={formatDshModelCapacity(props.defaultContextWindow)}
 												value={capacityText(index, "contextWindow", model.contextWindow)}
 												disabled={!writable}
@@ -186,7 +187,7 @@ export function ModelsTable(props: {
 											<Input
 												type={props.allowCapacitySuffixes ? "text" : "number"}
 												inputMode="numeric"
-												className="h-7"
+												size="sm"
 												placeholder={formatDshModelCapacity(props.defaultMaxTokens)}
 												value={capacityText(index, "maxTokens", model.maxTokens)}
 												disabled={!writable}

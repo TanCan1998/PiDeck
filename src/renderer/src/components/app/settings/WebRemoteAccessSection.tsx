@@ -204,7 +204,7 @@ export const WebRemoteAccessSection = memo(function WebRemoteAccessSection(props
 						<div className="grid items-center gap-2 sm:grid-cols-[auto_minmax(0,1fr)]">
 							<Label className="text-xs font-bold text-text-tertiary">{t("settings.remote.cf.protocolLabel")}</Label>
 							<Select value={props.draft.webRemoteCloudflaredProtocol ?? "http2"} onValueChange={(value) => props.updateDraft({ webRemoteCloudflaredProtocol: value as AppSettings["webRemoteCloudflaredProtocol"] })}>
-								<SelectTrigger className="h-8 w-full sm:w-[220px]">
+								<SelectTrigger size="sm" className="w-full sm:w-[220px]">
 									<SelectValue />
 								</SelectTrigger>
 								<SelectContent>

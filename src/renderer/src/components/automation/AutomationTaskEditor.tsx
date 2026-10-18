@@ -288,10 +288,10 @@ export function AutomationTaskEditor({ task, defaultProjectId, lockProject = fal
 						{t("automation.project")} <span className="text-destructive">*</span>
 					</Label>
 					{lockProject ? (
-						<Input id="task-project" value={lockedProjectName} className="h-8 text-xs" disabled />
+						<Input id="task-project" value={lockedProjectName} size="sm" className="text-xs" disabled />
 					) : (
 						<Select value={projectId} onValueChange={setProjectId}>
-							<SelectTrigger id="task-project" className="h-8 text-xs">
+							<SelectTrigger id="task-project" size="sm" className="text-xs">
 								<SelectValue placeholder={t("automation.projectSelect")} />
 							</SelectTrigger>
 							<SelectContent>
@@ -314,7 +314,7 @@ export function AutomationTaskEditor({ task, defaultProjectId, lockProject = fal
 						{t("automation.backend")}
 					</Label>
 					<Select value={backend} onValueChange={(value) => setBackend(value as TaskBackend)}>
-						<SelectTrigger id="task-backend" className="h-8 text-xs">
+						<SelectTrigger id="task-backend" size="sm" className="text-xs">
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>
@@ -346,7 +346,7 @@ export function AutomationTaskEditor({ task, defaultProjectId, lockProject = fal
 							setMode(value === THINKING_INHERIT ? "" : (value as AutomationTaskMode));
 						}}
 					>
-						<SelectTrigger id="task-mode" className="h-8 text-xs">
+						<SelectTrigger id="task-mode" size="sm" className="text-xs">
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>
@@ -398,7 +398,7 @@ export function AutomationTaskEditor({ task, defaultProjectId, lockProject = fal
 							setThinkingLevel(value === THINKING_INHERIT ? "" : value);
 						}}
 					>
-						<SelectTrigger id="task-thinking" className="h-8 text-xs">
+						<SelectTrigger id="task-thinking" size="sm" className="text-xs">
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>

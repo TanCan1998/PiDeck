@@ -452,12 +452,12 @@ export function ModelsTable(props: ModelsTableProps) {
 																<TableCell>
 																	<div className="flex items-center gap-1">
 																		<span className="text-text-tertiary">&gt;</span>
-																		<Input type="number" min="0" step="any" className="h-7" placeholder="272000" value={draft.inputTokensAbove} onChange={(e) => applyTiers(tierEditor.drafts.map((d, j) => (j === tierIndex ? { ...d, inputTokensAbove: e.target.value } : d)))} />
+																		<Input type="number" min="0" step="any" size="sm" placeholder="272000" value={draft.inputTokensAbove} onChange={(e) => applyTiers(tierEditor.drafts.map((d, j) => (j === tierIndex ? { ...d, inputTokensAbove: e.target.value } : d)))} />
 																	</div>
 																</TableCell>
 																{(["input", "output", "cacheRead", "cacheWrite"] as const).map((field) => (
 																	<TableCell key={field}>
-																		<Input type="number" min="0" step="any" className="h-7" placeholder="-" value={draft[field]} onChange={(e) => applyTiers(tierEditor.drafts.map((d, j) => (j === tierIndex ? { ...d, [field]: e.target.value } : d)))} />
+																		<Input type="number" min="0" step="any" size="sm" placeholder="-" value={draft[field]} onChange={(e) => applyTiers(tierEditor.drafts.map((d, j) => (j === tierIndex ? { ...d, [field]: e.target.value } : d)))} />
 																	</TableCell>
 																))}
 																<TableCell>
