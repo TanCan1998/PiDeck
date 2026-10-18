@@ -57,7 +57,9 @@ test("missing project directories clear stale files and refresh project presence
 	const i18n = [readFileSync("src/renderer/src/i18n/rendererCopy.zh-CN.ts", "utf8"), readFileSync("src/renderer/src/i18n/rendererCopy.en-US.ts", "utf8")].join("\n");
 
 	assert.match(sync, /message\.includes\("PROJECT_DIRECTORY_MISSING"\)/);
-	assert.match(sync, /setFiles\(\[\]\);/);
+	// 目录被外部删除时必须清掉陈旧文件树，且这一清空要落在 PROJECT_DIRECTORY_MISSING 分支里；
+	// 已经是空树时复用原数组（内容没变就不推进文件树内容代次，避免白跑一轮 Git 着色重拉）。
+	assert.match(sync, /if\s*\(projectDirectoryMissing\)\s*\{[\s\S]*?setFiles\(\s*\(current\)\s*=>\s*\(current\.length === 0 \? current : \[\]\)\s*\)/);
 	assert.match(sync, /void refreshProjects\(\)\.catch\(\(\) => undefined\);/);
 	assert.match(app, /projectDirectoryMissing[\s\S]*?refreshProjects\(\)\.catch/);
 	// PROJECT_DIRECTORY_MISSING 的项目自愈/提示文案在文件树控制器里。
