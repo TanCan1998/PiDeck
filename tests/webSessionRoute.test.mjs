@@ -60,8 +60,8 @@ test("源码契约：WebChatApp 接线了 boot 恢复 / pushState 同步 / popst
 });
 
 test("源码契约：服务端静态映射对无扩展名路径回落 web.html，/s/* 无需服务端路由", () => {
-	const src = readFileSync(resolve(import.meta.dirname, "../src/main/web/WebServiceManager.ts"), "utf8");
-	// 无扩展名 → web.html（SPA fallback）；带扩展名的静态资源走文件直出
+	// 静态出口已迁到 WebStaticAssets（Wave 2）；无扩展名 → web.html（SPA fallback）
+	const src = readFileSync(resolve(import.meta.dirname, "../src/main/web/WebStaticAssets.ts"), "utf8");
 	assert.match(src, /web\.html/);
 });
 
