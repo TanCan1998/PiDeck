@@ -29,11 +29,11 @@ test("任一「需要看工具行」的条件成立就不折叠", () => {
 test("接线契约：组件用纯函数判定，三处（行显隐 / min-h / CSS 下限）同改", () => {
 	const composer = readFileSync("src/renderer/src/web/WebComposer.tsx", "utf8");
 	assert.match(composer, /resolveComposerCollapsed\(\{/, "折叠判定必须走纯函数，不能只活在 JSX 表达式里");
-	assert.doesNotMatch(composer, /collapsed \? null : \(/, "折叠不能卸载两行工具区：卸载会连带销毁提示词弹层与文件输入框");
-	assert.match(composer, /inert=\{collapsed\}/, "折叠态改用 grid-rows 收高 + inert，而不是把 DOM 删掉");
-	assert.match(composer, /collapsed \? "grid-rows-\[0fr\]" : "grid-rows-\[1fr\]"/, "两行工具区折叠复用顶栏的 grid-rows 范式");
+	assert.doesNotMatch(composer, /collapsed\s*\?\s*null\s*:\s*\(/, "折叠不能卸载两行工具区：卸载会连带销毁提示词弹层与文件输入框");
+	assert.match(composer, /inert=\{\s*collapsed\s*\}/, "折叠态改用 grid-rows 收高 + inert，而不是把 DOM 删掉");
+	assert.match(composer, /collapsed\s*\?\s*"grid-rows-\[0fr\]"\s*:\s*"grid-rows-\[1fr\]"/, "两行工具区折叠复用顶栏的 grid-rows 范式");
 	assert.match(composer, /data-testid="web-composer-tool-rows"/, "折叠外壳必须有稳定 testid：e2e 靠 inert 判定折叠态，不能靠可见性（裁剪后的元素仍有 boundingBox）");
-	assert.match(composer, /collapsed \? "min-h-14" : "min-h-\[7rem\]"/, "composer-box 的最小高度必须随折叠态切换：只改 CSS 会被这条 utility 撑回 112px");
+	assert.match(composer, /collapsed\s*\?\s*"min-h-14"\s*:\s*"min-h-\[7rem\]"/, "composer-box 的最小高度必须随折叠态切换：只改 CSS 会被这条 utility 撑回 112px");
 
 	const css = readFileSync("src/renderer/src/web/web.css", "utf8");
 	const mobileBlock = css.match(/@media\s*\(max-width:\s*760px\)\s*\{[\s\S]*?\n\}/g) ?? [];
@@ -47,8 +47,8 @@ test("折叠态仍保留后端切换入口（否则「换个后端试试」变�
 	assert.match(composer, /const\s+collapsedBackendPicker\s*=\s*collapsed\s*&&\s*Boolean\(\s*props\.onBackendChange\s*\)\s*&&\s*!props\.backendLocked/, "折叠态后端 pill 只在草稿期出现：锁定的历史会话不摆点不动的控件");
 	assert.match(composer, /collapsedBackendPicker\s*&&\s*props\.onBackendChange\s*\?\s*<WebBackendSelector/, "折叠态浮动区必须能打开后端选择器");
 	assert.match(composer, /const\s+suppressPointerFocus\s*=\s*mobileViewport\s*\?/, "阻止焦点转移只对窄屏生效：桌面宽度不参与折叠，应保持原生焦点语义");
-	assert.match(composer, /onPointerDown=\{suppressPointerFocus\}/, "窄屏下浮动区与两行工具区都要阻止焦点转移，否则控件在 click 前被卸载");
-	assert.match(composer, /\{sendControls\(true\)\}/, "折叠态浮动区必须保留发送/停止按钮（用独立 testid，避免与工具行里的同名按钮撞车）");
+	assert.match(composer, /onPointerDown=\{\s*suppressPointerFocus\s*\}/, "窄屏下浮动区与两行工具区都要阻止焦点转移，否则控件在 click 前被卸载");
+	assert.match(composer, /\{\s*sendControls\(\s*true\s*\)\s*\}/, "折叠态浮动区必须保留发送/停止按钮（用独立 testid，避免与工具行里的同名按钮撞车）");
 	assert.match(composer, /\{sendControls\(false\)\}/, "工具行保留自己的发送/停止按钮");
 });
 
@@ -70,7 +70,7 @@ test("任一保护条件成立就不收起", () => {
 test("接线契约：输入区收起复用顶栏 slot 范式，且由时间线的贴底状态驱动", () => {
 	const app = readFileSync("src/renderer/src/web/WebChatApp.tsx", "utf8");
 	assert.match(app, /resolveComposerHidden\(\{\s*headerHidden,\s*nearBottom,\s*streaming:\s*combinedStreaming,\s*engaged:\s*composerEngaged\s*\}\)/);
-	assert.match(app, /if\s*\(\s*nearBottom\s*\)\s*applyHeaderHidden\(\s*false\s*\)/, "回到最新消息必须同时露出顶栏（输入区随顶栏恢复）");
+	assert.match(app, /if\s*\(\s*nearBottom\s*\)\s*revealHeader\(\s*\)/, "回到最新消息必须同时露出顶栏（输入区随顶栏恢复）");
 
 	const composer = readFileSync("src/renderer/src/web/WebComposer.tsx", "utf8");
 	assert.match(composer, /props\.hidden\s*\?\s*"grid-rows-\[0fr\]"\s*:\s*"grid-rows-\[1fr\]"/, "收起必须复用 grid-rows 过渡");

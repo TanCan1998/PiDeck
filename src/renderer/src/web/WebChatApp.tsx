@@ -44,9 +44,8 @@ import { WebSkillsExtensionsDialog } from "./WebSkillsExtensionsDialog";
 import { applyWebTheme, readStoredWebTheme, resolveWebTheme, storeWebTheme, systemPrefersDark, type ResolvedWebTheme, type WebThemePreference } from "./webTheme";
 import { registerWebServiceWorker, usePwaInstall } from "./webPwa";
 import { decideStreamRecovery } from "./webStreamRecovery";
-import { resolveHeaderHidden } from "./headerAutoHide";
+import { useWebHeaderAutoHide } from "./useWebHeaderAutoHide";
 import { resolveComposerHidden } from "./composerCollapse";
-import { readViewportWidth } from "./webViewport";
 import { useIsMobileViewport } from "./useIsMobileViewport";
 import { useExternalSessionStream } from "./webExternalStream";
 import { useWebStateEvents } from "./webStateEvents";
@@ -108,7 +107,9 @@ export function WebChatApp() {
 	const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	// P2：上下文用量（随主轮询拉取 runtime state 子集）
 	const [contextUsage, setContextUsage] = useState<WebContextUsage | undefined>(undefined);
-	const [headerHidden, setHeaderHidden] = useState(false);
+	// 顶栏自动收起：状态机在 headerAutoHide（纯 step 函数），hook 只持有状态与上报
+	const overlayOpenRef = useRef(false);
+	const { hidden: headerHidden, reportScroll: handleTimelineScroll, reveal: revealHeader } = useWebHeaderAutoHide(() => overlayOpenRef.current);
 	const mobileViewport = useIsMobileViewport();
 
 	// ── 本组件自持的 per-session 消息缓存（useChat 切换 id 会重建 Chat 实例） ──
@@ -339,46 +340,35 @@ export function WebChatApp() {
 	}, []);
 
 	const overlayOpen = mobileSidebarOpen || searchOpen || assetsOpen || dshToolsOpen || workspaceOpen || filePreview != null || renameDraft != null || deleteConfirmId != null;
-	const overlayOpenRef = useRef(overlayOpen);
-	const headerScrollRef = useRef<{ direction: number; distance: number; hidden: boolean }>({ direction: 0, distance: 0, hidden: false });
-	const applyHeaderHidden = useCallback((hidden: boolean) => {
-		headerScrollRef.current.hidden = hidden;
-		headerScrollRef.current.distance = 0;
-		setHeaderHidden(hidden);
-	}, []);
 	useEffect(() => {
 		overlayOpenRef.current = overlayOpen;
-		if (overlayOpen) applyHeaderHidden(false);
-	}, [overlayOpen, applyHeaderHidden]);
+		if (overlayOpen) revealHeader();
+	}, [overlayOpen, revealHeader]);
 	useEffect(() => {
-		applyHeaderHidden(false);
-	}, [activeSessionId, applyHeaderHidden]);
+		revealHeader();
+	}, [activeSessionId, revealHeader]);
 	useEffect(() => {
-		if (!mobileViewport) applyHeaderHidden(false);
-	}, [mobileViewport, applyHeaderHidden]);
-	const handleTimelineScroll = useCallback(
-		(scrollTop: number, delta: number) => {
-			if (delta === 0) return;
-			const scroll = headerScrollRef.current;
-			const direction = delta > 0 ? 1 : -1;
-			if (direction !== scroll.direction) {
-				scroll.direction = direction;
-				scroll.distance = 0;
-			}
-			scroll.distance += Math.abs(delta);
-			const next = resolveHeaderHidden(scroll.hidden, { scrollTop, delta: scroll.distance * direction, viewportWidth: readViewportWidth(), forceVisible: overlayOpenRef.current });
-			if (next !== scroll.hidden) applyHeaderHidden(next);
-		},
-		[applyHeaderHidden],
-	);
-	const revealHeader = useCallback(() => applyHeaderHidden(false), [applyHeaderHidden]);
+		if (!mobileViewport) revealHeader();
+	}, [mobileViewport, revealHeader]);
+	// 顶栏收起后是 inert 的，键盘/读屏用户没有「滚一下」这个动作可用：任何按键或焦点进入都先露出
+	useEffect(() => {
+		if (!mobileViewport) return;
+		const onKeyDown = () => revealHeader();
+		const onFocusIn = () => revealHeader();
+		window.addEventListener("keydown", onKeyDown, true);
+		document.addEventListener("focusin", onFocusIn, true);
+		return () => {
+			window.removeEventListener("keydown", onKeyDown, true);
+			document.removeEventListener("focusin", onFocusIn, true);
+		};
+	}, [mobileViewport, revealHeader]);
 	const [nearBottom, setNearBottom] = useState(true);
 	const [composerEngaged, setComposerEngaged] = useState(false);
 	const handleNearBottomChange = useCallback((value: boolean) => setNearBottom(value), []);
 	const handleComposerEngagedChange = useCallback((value: boolean) => setComposerEngaged(value), []);
 	useEffect(() => {
-		if (nearBottom) applyHeaderHidden(false);
-	}, [nearBottom, applyHeaderHidden]);
+		if (nearBottom) revealHeader();
+	}, [nearBottom, revealHeader]);
 
 	// 切换会话：stale-while-revalidate——缓存命中先展示旧快照立即渲染，再后台重拉磁盘
 	// 最新（桌面端/其他端跑出的新消息不会漏）；未加载过的会话直接拉首页注入。
