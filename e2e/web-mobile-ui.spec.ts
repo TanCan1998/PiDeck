@@ -3,7 +3,8 @@ import { test, expect } from "./mock-pi-fixture";
 /**
  * Web 端移动端专项（第三批 DeepSeek 式交互 + 移动可用性）：
  * 手机视口（375×812）下验证——
- * 1) 布局：无横向溢出；composer 工具行（模型/思考 pill、发送）同排可见
+ * 1) 布局：无横向溢出；composer 两行工具区（操作行 + 模型行）展开后可见且对齐
+ * 2) C1：窄屏空闲时输入区折叠为单行，聚焦展开、有草稿保持展开
  * 2) 模型 BottomSheet：贴底弹出、选择后关闭并更新 pill
  * 3) 思考 BottomSheet：档位列表可选、pill 标签更新
  * 4) 触屏（pointer:coarse）：消息操作按钮常驻可见（CDP 模拟，不可用则跳过）
@@ -41,9 +42,14 @@ async function openMobilePage(app: import("@playwright/test").ElectronApplicatio
 	return page;
 }
 
-/** composer 工具行按钮（按渲染顺序：模型、思考、[相机仅coarse]、图片、提示词）。 */
-function composerToolButtons(page: import("@playwright/test").Page) {
-	return page.locator(".composer-box form > div:last-child button, .composer-box form div.items-center button");
+/** 窄屏默认折叠（C1）：聚焦输入框才展开两行工具区，按钮不存在于折叠态。 */
+async function expandComposer(page: import("@playwright/test").Page) {
+	await page.locator("textarea#prompt").click();
+	const opsRow = page.getByTestId("web-composer-ops-row");
+	const modelRow = page.getByTestId("web-composer-model-row");
+	await expect(opsRow).toBeVisible();
+	await expect(modelRow).toBeVisible();
+	return { opsRow, modelRow };
 }
 
 test("mobile: layout fits and composer toolbar stays reachable", async ({ app }) => {
@@ -70,37 +76,66 @@ test("mobile: layout fits and composer toolbar stays reachable", async ({ app })
 	const [titleBox, actionsBox] = await Promise.all([titleBlock.boundingBox(), headerActions.boundingBox()]);
 	expect((titleBox?.x ?? 0) + (titleBox?.width ?? 0)).toBeLessThanOrEqual((actionsBox?.x ?? 999) + 1);
 
-	// 模型/思考 pill + 发送按钮同排可见（composer 底部工具行不溢出屏幕）
-	const toolbar = page.locator(".composer-box div.items-center.justify-between");
-	await expect(toolbar).toBeVisible();
-	const modelPill = toolbar.locator("button").first();
-	const sendButton = toolbar.locator("button").last();
-	await expect(modelPill).toBeVisible();
+	// 工具区两行：操作行（附件/提示词/计划/发送）+ 模型行（模型/思考 pill）；窄屏默认折叠，先聚焦展开
+	const { opsRow, modelRow } = await expandComposer(page);
+	const sendButton = opsRow.getByTestId("web-composer-send");
 	await expect(sendButton).toBeVisible();
-	const box = await modelPill.boundingBox();
 	const sendBox = await sendButton.boundingBox();
-	expect(box?.x ?? 999).toBeGreaterThanOrEqual(0);
+	expect(sendBox?.x ?? 999).toBeGreaterThanOrEqual(0);
 	expect((sendBox?.x ?? 0) + (sendBox?.width ?? 0)).toBeLessThanOrEqual(MOBILE.width);
 
-	// 布局对齐契约：工具行内所有可见控件高度一致（h-8=32px）且在同一中心线
+	// 布局对齐契约：每行内所有可见控件高度一致（h-8=32px）且在同一中心线
 	// ——曾因图标按钮 h-7 与 pill h-8 混排、legacy textarea height:100% 挤压而错位（2027-02 修复）
-	const visibleButtons = await toolbar.locator("button:visible").all();
-	expect(visibleButtons.length).toBeGreaterThanOrEqual(3);
-	let baselineCenter = 0;
-	for (const button of visibleButtons) {
-		const btnBox = await button.boundingBox();
-		expect(Math.abs((btnBox?.height ?? 0) - 32)).toBeLessThanOrEqual(1);
-		const center = (btnBox?.y ?? 0) + (btnBox?.height ?? 0) / 2;
-		if (baselineCenter === 0) baselineCenter = center;
-		else expect(Math.abs(center - baselineCenter)).toBeLessThanOrEqual(1);
+	for (const row of [opsRow, modelRow]) {
+		const visibleButtons = await row.locator("button:visible").all();
+		expect(visibleButtons.length).toBeGreaterThanOrEqual(2);
+		let baselineCenter = 0;
+		for (const button of visibleButtons) {
+			const btnBox = await button.boundingBox();
+			expect(Math.abs((btnBox?.height ?? 0) - 32)).toBeLessThanOrEqual(1);
+			const center = (btnBox?.y ?? 0) + (btnBox?.height ?? 0) / 2;
+			if (baselineCenter === 0) baselineCenter = center;
+			else expect(Math.abs(center - baselineCenter)).toBeLessThanOrEqual(1);
+		}
 	}
+});
+
+test("mobile: idle composer collapses to one line and re-expands on focus", async ({ app }) => {
+	test.setTimeout(120_000);
+	const page = await openMobilePage(app);
+
+	// 折叠态：只有 textarea + 发送钮，两行工具区不在 DOM（高度收益的可测断言）
+	const box = page.locator(".composer-box");
+	await expect(page.getByTestId("web-composer-model-row")).toHaveCount(0);
+	await expect(page.getByTestId("web-composer-ops-row")).toHaveCount(0);
+	await expect(page.getByTestId("web-composer-send")).toBeVisible();
+	const collapsedBox = await box.boundingBox();
+	expect(collapsedBox?.height ?? 999).toBeLessThanOrEqual(80);
+
+	// 聚焦展开：两行工具区回来，高度明显抬升
+	await page.locator("textarea#prompt").click();
+	await expect(page.getByTestId("web-composer-model-row")).toBeVisible();
+	const expandedBox = await box.boundingBox();
+	expect((expandedBox?.height ?? 0) - (collapsedBox?.height ?? 0)).toBeGreaterThanOrEqual(60);
+
+	// 有草稿时即使失焦也不折叠（否则用户看不到自己正在输入的内容）
+	await page.locator("textarea#prompt").fill("draft");
+	await page.locator(".message-timeline").click({ position: { x: 10, y: 10 } });
+	await expect(page.getByTestId("web-composer-model-row")).toBeVisible();
+
+	// 清空并失焦 → 回到折叠态
+	await page.locator("textarea#prompt").fill("");
+	await page.locator(".message-timeline").click({ position: { x: 10, y: 10 } });
+	await expect(page.getByTestId("web-composer-model-row")).toHaveCount(0, { timeout: 5_000 });
 });
 
 test("mobile: model bottom sheet opens from bottom and selection updates pill", async ({ app }) => {
 	test.setTimeout(120_000);
 	const page = await openMobilePage(app);
 
-	const modelPill = page.locator(".composer-box .items-center.justify-between button").first();
+	// 模型 pill = 模型行第一个按钮（折叠态不存在，先聚焦展开）
+	const { modelRow } = await expandComposer(page);
+	const modelPill = modelRow.locator("button").first();
 	const before = ((await modelPill.textContent()) ?? "").trim();
 
 	await modelPill.click();
@@ -117,8 +152,10 @@ test("mobile: model bottom sheet opens from bottom and selection updates pill", 
 	await firstRow.click();
 	await expect(sheet).toBeHidden({ timeout: 5_000 });
 
-	// pill 文本更新（选中模型名替换初始占位）
-	const after = ((await modelPill.textContent()) ?? "").trim();
+	// pill 文本更新（选中模型名替换初始占位）。弹层内点选后焦点已离开输入区，
+	// 窄屏会回到折叠态：重新聚焦再读 pill（同时验证折叠语义本身）
+	const reopened = await expandComposer(page);
+	const after = ((await reopened.modelRow.locator("button").first().textContent()) ?? "").trim();
 	expect(after).not.toBe(before);
 });
 
@@ -126,9 +163,9 @@ test("mobile: thinking sheet lists levels and updates pill", async ({ app }) => 
 	test.setTimeout(120_000);
 	const page = await openMobilePage(app);
 
-	// 思考 pill = 工具行第二个按钮（相机仅 coarse 显示，鼠标模式不占位）
-	const toolbarButtons = page.locator(".composer-box .items-center.justify-between button");
-	const thinkingPill = toolbarButtons.nth(1);
+	// 思考 pill = 模型行第二个按钮（相机仅 coarse 显示，鼠标模式不占位）
+	const { modelRow } = await expandComposer(page);
+	const thinkingPill = modelRow.locator("button").nth(1);
 	const before = ((await thinkingPill.textContent()) ?? "").trim();
 
 	await thinkingPill.click();
@@ -141,7 +178,8 @@ test("mobile: thinking sheet lists levels and updates pill", async ({ app }) => 
 
 	await rows.last().click();
 	await expect(sheet).toBeHidden({ timeout: 5_000 });
-	const after = ((await thinkingPill.textContent()) ?? "").trim();
+	const reopened = await expandComposer(page);
+	const after = ((await reopened.modelRow.locator("button").nth(1).textContent()) ?? "").trim();
 	expect(after).not.toBe(before);
 });
 
