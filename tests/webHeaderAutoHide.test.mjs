@@ -67,9 +67,17 @@ test("接线契约：收起靠 grid-rows + inert，滚动回调来自时间线",
 	assert.match(app, /data-header-hidden=\{headerHidden \? "on" : undefined\}/);
 
 	const timeline = readFileSync("src/renderer/src/web/WebTimeline.tsx", "utf8");
-	assert.match(timeline, /props\.onScrollTopChange\?\.\(\s*el\.scrollTop\s*,\s*el\.scrollTop\s*-\s*previousScrollTop\s*\)/, "滚动回调必须在既有 onScroll 里上报，不新增监听器");
-	assert.match(timeline, /previousScrollTop\s*!==\s*null\s*&&\s*Math\.abs\(\s*el\.scrollTop\s*-\s*previousScrollTop\s*\)\s*<=\s*el\.clientHeight/, "单次超一屏的位移是程序化跳转（贴底/跳消息/切会话），不得触发收起");
+	assert.match(timeline, /props\.onScrollTopChange\?\.\(\s*el\.scrollTop\s*,\s*delta\s*\)/, "滚动回调必须在既有 onScroll 里上报，不新增监听器");
+	assert.match(timeline, /!programmatic\s*&&\s*previousScrollTop\s*!==\s*null\s*&&\s*Math\.abs\(\s*delta\s*\)\s*<=\s*el\.clientHeight/, "程序化滚动与超一屏的跳转都不得触发收起");
 
 	const css = readFileSync("src/renderer/src/web/web.css", "utf8");
 	assert.match(css, /\.web-app\[data-header-hidden="on"\]\s+\.message-list\s*>\s*\.scroll-mt-24\s*\{[\s\S]*?scroll-margin-top:\s*0;/, "顶栏收起后消息跳转不再为头部留白");
+});
+
+test("接线契约：自动贴底与回到底部算程序化滚动，不参与顶栏收起判定", () => {
+	const timeline = readFileSync("src/renderer/src/web/WebTimeline.tsx", "utf8");
+	assert.match(timeline, /programmaticScrollRef\.current\s*=\s*true[\s\S]{0,120}el\.scrollTo\(\{\s*top:\s*el\.scrollHeight\s*\}\)/, "流式自动贴底必须先标记程序化，再 scrollTo");
+	assert.match(timeline, /suppressUntilNearBottomRef\.current\s*=\s*true/, "回到底部的平滑滚动要持续抑制到贴底为止");
+	assert.match(timeline, /const\s+programmatic\s*=\s*programmaticScrollRef\.current\s*\|\|\s*suppressUntilNearBottomRef\.current/, "上报前必须同时看两个抑制标记");
+	assert.match(timeline, /if\s*\(!programmatic\s*&&\s*previousScrollTop\s*!==\s*null/, "程序化滚动不得上报位移");
 });

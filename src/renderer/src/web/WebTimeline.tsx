@@ -623,18 +623,30 @@ export function WebTimeline(props: {
 	const [showScrollToBottom, setShowScrollToBottom] = useState(false);
 	const showScrollToBottomRef = useRef(false);
 	const nearBottomRef = useRef(true);
+	// 自动贴底/回到底部这类「程序化滚动」不参与顶栏收起的方向判定：
+	// 否则流式增量会把顶栏一路收起，而用户根本没滑过屏
+	const programmaticScrollRef = useRef(false);
+	// 平滑滚到底期间持续抑制：一次 scrollTo 会连发多帧滚动事件，只跳第一帧仍会把顶栏收起
+	const suppressUntilNearBottomRef = useRef(false);
 
 	const updateScrollState = () => {
 		const el = timelineRef.current;
 		if (!el) return;
 		const previousScrollTop = lastScrollTopRef.current;
 		lastScrollTopRef.current = el.scrollTop;
-		if (previousScrollTop !== null && Math.abs(el.scrollTop - previousScrollTop) <= el.clientHeight) {
-			props.onScrollTopChange?.(el.scrollTop, el.scrollTop - previousScrollTop);
+		// 跟底模式下向下位移一定是自动跟随（用户已经在底部，无法再往下滚）：
+		// 滚动事件可能晚于下一次 scrollTo 到达，单次标记挡不住，所以按方向再兜一层
+		const wasFollowing = stickToBottomRef.current;
+		const delta = previousScrollTop === null ? 0 : el.scrollTop - previousScrollTop;
+		const programmatic = programmaticScrollRef.current || suppressUntilNearBottomRef.current || (wasFollowing && delta > 0);
+		programmaticScrollRef.current = false;
+		if (!programmatic && previousScrollTop !== null && Math.abs(delta) <= el.clientHeight) {
+			props.onScrollTopChange?.(el.scrollTop, delta);
 		}
 		const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
 		const nearBottom = distance < 160;
 		stickToBottomRef.current = nearBottom;
+		if (nearBottom) suppressUntilNearBottomRef.current = false;
 		if (nearBottom !== nearBottomRef.current) {
 			nearBottomRef.current = nearBottom;
 			props.onNearBottomChange?.(nearBottom);
@@ -652,6 +664,8 @@ export function WebTimeline(props: {
 		stickToBottomRef.current = true;
 		showScrollToBottomRef.current = false;
 		setShowScrollToBottom(false);
+		programmaticScrollRef.current = true;
+		suppressUntilNearBottomRef.current = true;
 		el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
 	};
 
@@ -659,7 +673,10 @@ export function WebTimeline(props: {
 	useEffect(() => {
 		const frame = requestAnimationFrame(() => {
 			const el = timelineRef.current;
-			if (el && stickToBottomRef.current) el.scrollTo({ top: el.scrollHeight });
+			if (el && stickToBottomRef.current) {
+				programmaticScrollRef.current = true;
+				el.scrollTo({ top: el.scrollHeight });
+			}
 			updateScrollState();
 		});
 		return () => cancelAnimationFrame(frame);

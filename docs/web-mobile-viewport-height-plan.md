@@ -110,7 +110,7 @@ resolveHeaderHidden(previous: boolean, input): boolean
 - `scroll-mt-24`（`WebTimeline.tsx:689`）在顶栏收起时失去意义。改为由 `WebChatApp` 通过 CSS 变量注入 `--web-scroll-mt`，收起时 0、展开时 96px。`scrollToMessage` 用 `scrollIntoView`，依赖 `scroll-margin-top`，改变量即可，不必改跳转逻辑。
 - **收起态必须不可聚焦**：`grid-rows-[0fr]` + `overflow-hidden` 只裁剪，不改变可聚焦性——收起后顶栏里的会话菜单、溢出菜单、上下文环仍能被 Tab 聚焦，焦点会进入视觉上不存在的区域。收起时给 slot 内层加 `inert`（React 19 原生支持该属性）或 `visibility: hidden`，展开时移除。仓库已有同类修复先例（`b539f520`「模态 Escape 与键盘可达性修复」）。单测需覆盖「收起 → 内层元素不可聚焦」。
 
-**流式期间**：跟随底部时 `scrollTop` 单调增加，顶栏会持续处于收起态。这是期望行为（正在读最新输出时把高度让给正文）；用户上滑即恢复。
+**流式期间**：自动贴底算程序化滚动，**不参与方向判定**——用户没滑屏，顶栏就不动。判定用两层：`programmaticScrollRef`（每次 `scrollTo` 前标记）+「跟底模式下正向位移一律视为自动跟随」（滚动事件可能晚于下一次 `scrollTo` 到达，单次标记挡不住）。用户自己上滑即离开跟底，之后的方向判定恢复正常。
 
 ### C1：输入区空态折叠
 
