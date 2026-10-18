@@ -390,6 +390,11 @@ test("同一仓库的两个项目根共用一份轮询（计数为 2，逐个通
 	watcher.release(idA);
 	assert.equal(watcher.activeRepoCount, 1, "引用计数 2 → 1：还有订阅者时不得停轮询");
 	assert.equal(timers.clearCalls(), 0);
+	// 退订方必须安静下来：同仓还有别人在订阅时，旧实现只减计数、仍给已退订的 id 发通告
+	seen.length = 0;
+	writeFileSync(join(repo.gitDir, "HEAD"), "ref: refs/heads/another-branch\n");
+	timers.tick();
+	assert.deepEqual(seen, [idB], "退订的 id 不得再收到该仓库的变化通告");
 	watcher.release(idB);
 	assert.equal(watcher.activeRepoCount, 0);
 	assert.equal(timers.clearCalls(), 1, "最后一个订阅者退出必须停掉定时器");

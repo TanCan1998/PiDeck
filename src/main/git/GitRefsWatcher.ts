@@ -58,8 +58,12 @@ type RepoWatch = {
 	refs: number;
 	/** 上一次采样到的签名；登记时先读一次做基线，避免第一次 tick 误报变化。 */
 	signature: string | null;
-	/** 订阅该仓库的全部 watchId：一次变化要逐个通告，渲染层按自己的 id 过滤。 */
-	watchIds: Set<string>;
+	/**
+	 * watchId → 该订阅自身的计数：一次变化要逐个通告（渲染层按自己的 id 过滤）。
+	 * 必须按 id 分开计数：同一 watchId 可能被重复 acquire（React 双挂载、分屏各订一次），
+	 * 聚合计数只会说「仓库还有人订」，退订一方该不该继续收通告得看它自己的计数是否归零。
+	 */
+	watchIds: Map<string, number>;
 };
 
 /**
@@ -301,6 +305,7 @@ export class GitRefsWatcher {
 			const registered = this.repos.get(repoKey);
 			if (registered) {
 				registered.refs += 1;
+				registered.watchIds.set(watchId, (registered.watchIds.get(watchId) ?? 0) + 1);
 				return watchId;
 			}
 			// 绑定比仓库条目活得久（不应发生）：清掉陈旧绑定，走新登记
@@ -340,10 +345,19 @@ export class GitRefsWatcher {
 			return;
 		}
 		repo.refs -= 1;
-		// 还有别的项目根/面板订阅同一仓库：保留绑定，它重新订阅时直接命中同一份轮询
+		const ownRefs = (repo.watchIds.get(watchId) ?? 0) - 1;
+		// 同一个 watchId 还持有订阅（重复 acquire 过）：继续通告，只减自己的计数
+		if (ownRefs > 0) {
+			repo.watchIds.set(watchId, ownRefs);
+			return;
+		}
+		// 该 id 已全部退订：停止通告并解除绑定。同仓还有别的订阅者时若只减聚合计数，
+		// 退订方仍会收到后续通告（渲染层监听已退、消息白跑一趟），watchIds 也会残留陈旧 id。
+		repo.watchIds.delete(watchId);
+		this.bindings.delete(watchId);
+		// 还有别的项目根/面板订阅同一仓库：保留这份轮询（它们退订归零时再停）
 		if (repo.refs > 0) return;
 		this.repos.delete(repoKey);
-		for (const boundId of repo.watchIds) this.bindings.delete(boundId);
 		if (this.repos.size === 0) this.stopPolling();
 	}
 
@@ -375,11 +389,11 @@ export class GitRefsWatcher {
 		const existing = this.repos.get(repoKey);
 		if (existing) {
 			existing.refs += entry.refs;
-			existing.watchIds.add(watchId);
+			existing.watchIds.set(watchId, (existing.watchIds.get(watchId) ?? 0) + entry.refs);
 		} else {
 			const signature = this.sample(repoPath);
 			if (signature === null) this.warn("git refs watch skipped: not a git repository", { repoPath });
-			this.repos.set(repoKey, { repoPath, refs: entry.refs, signature, watchIds: new Set([watchId]) });
+			this.repos.set(repoKey, { repoPath, refs: entry.refs, signature, watchIds: new Map([[watchId, entry.refs]]) });
 			this.startPolling();
 		}
 		this.bindings.set(watchId, repoKey);
@@ -409,7 +423,7 @@ export class GitRefsWatcher {
 			// 先更新基线再通知：通知处理里若同步引发新的采样，也不会重复上报同一状态
 			repo.signature = next;
 			// 同一仓库可能被多个项目根/项目订阅：逐个通告，各自按自己的 watchId 过滤
-			for (const watchId of repo.watchIds) this.notify(watchId);
+			for (const watchId of repo.watchIds.keys()) this.notify(watchId);
 		}
 	}
 
