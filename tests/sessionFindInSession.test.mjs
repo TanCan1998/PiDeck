@@ -137,9 +137,10 @@ test("渠道与契约接线：IPC 常量、preload 白名单、主进程 handler
 	const preload = read("src/preload/index.ts");
 	assert.match(preload, /searchInSession:\s*\(sessionPath: string, query: string\) => ipcRenderer\.invoke\(ipcChannels\.sessionsSearchInSession, sessionPath, query\)/);
 	const handler = read("src/main/ipc/sessionIpc.ts");
-	// 入参校验：路径必须像会话文件（.jsonl），查询长度有上界
+	// 入参校验：路径必须像会话文件（绝对路径 + .jsonl，Windows 反斜杠/POSIX 都放行）
 	assert.match(handler, /ipcMain\.handle\(ipcChannels\.sessionsSearchInSession/);
-	assert.match(handler, /\\\.jsonl\$\/i\.test\(trimmedPath\)/);
+	assert.match(handler, /import\s*\{\s*isSessionSearchFilePath\s*\}\s*from\s*["']\.\.\/sessions\/sessionSearchPath["']/);
+	assert.match(handler, /!isSessionSearchFilePath\(trimmedPath\)\)\s*return null/);
 	assert.match(handler, /trimmed\.length > 256/);
 	// 短路：未装配 / 校验不过一律 null（渲染层据此显示不可用态）
 	assert.match(handler, /const searcher = deps\.sessionMessageSearch;\s*\n\s*if \(!searcher\) return null;/);

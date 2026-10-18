@@ -47,6 +47,7 @@ import { parseSessionProcessEventsFromFile } from "../sessions/sessionProcessEve
 import type { SessionForkCommands } from "../sessions/sessionForkCommands";
 import { dshUnavailablePageFor } from "../dsh/dshManualStop";
 import { missingSessionFilePage } from "../sessions/sessionFileMissingPage";
+import { isSessionSearchFilePath } from "../sessions/sessionSearchPath";
 import { validateNpmSpec } from "../dsh/dshPluginNpmRunner";
 import { validateSearchKeyword } from "../dsh/dshPluginMarket";
 import { downgradeRunningStartedBefore, downgradeStaleRunning } from "../pi/derivedSubagents";
@@ -592,9 +593,10 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		if (typeof sessionPath !== "string" || typeof query !== "string") return null;
 		const trimmedPath = sessionPath.trim();
 		const trimmed = query.trim();
-		// 路径必须像会话文件（绝对路径 + .jsonl）：sidecar 只索引真实会话文件，
-		// 这里再兜一道，避免把任意路径透传给子进程。
-		if (!trimmedPath || trimmedPath.length > 4096 || !/\.jsonl$/i.test(trimmedPath) || !/[\/]/.test(trimmedPath)) return null;
+		// 路径必须像会话文件（无歧义绝对路径 + .jsonl）：sidecar 只索引真实会话文件，
+		// 这里再兜一道，避免把任意路径透传给子进程。判定收口在 sessionSearchPath，
+		// Windows 反斜杠路径与 POSIX 正斜杠路径都放行（旧实现只认 `/`，Windows 全被拒）。
+		if (!isSessionSearchFilePath(trimmedPath)) return null;
 		if (!trimmed || trimmed.length > 256) return null;
 		try {
 			return await searcher(trimmedPath, trimmed);

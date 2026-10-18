@@ -574,7 +574,7 @@ export type SessionSearchMatch = {
 	snippet: string;
 };
 
-/** 单个会话的命中集合。filePath 即 SessionRecord.id（跨重启稳定身份）。 */
+/** 单个会话的命中集合。filePath 是会话文件路径，**不是** SessionRecord.id（id 是跨重启稳定的身份，映射见 renderer utils/sessionContentSearchHits）。 */
 export type SessionSearchSessionHit = {
 	filePath: string;
 	updatedAtMs: number;

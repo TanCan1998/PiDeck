@@ -143,7 +143,8 @@ test("装配侧契约：正文搜索闭包与预热都走组合根，并过滤 W
 	// 项目来源抽成模块级函数（闭包在 registerSessionIpc 前、5s 预热在装配尾部，两处都要用）
 	assert.match(source, /function\s+projectPathsForContentSearch\(\)\s*:\s*string\[\]\s*\{/);
 	assert.match(source, /\.filter\(\(project\)\s*=>\s*project\.environment\s*!==\s*"wsl"\)/);
-	// 闭包与 5s 预热各一处，且不得再有只取全局根的旧调用
-	assert.equal(source.match(/resolveContentSearchRoots\(projectPathsForContentSearch\(\)\)/g)?.length, 2);
+	// 正文搜索闭包、会话内查找闭包与 5s 预热各一处，且不得再有只取全局根的旧调用
+	// （会话内查找复用同一组合根：它也要项目级 sessionDir，否则「明明有这条消息却搜不到」）
+	assert.equal(source.match(/resolveContentSearchRoots\(projectPathsForContentSearch\(\)\)/g)?.length, 3);
 	assert.doesNotMatch(source, /sessionScanner\.resolveGlobalSearchRoots\(\)/);
 });
