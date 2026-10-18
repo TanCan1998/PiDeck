@@ -163,7 +163,7 @@ function parseIndexTableEntry(value: unknown): SessionDisplayEntry | null {
 	if (value.parentId !== null && typeof value.parentId !== "string") return null;
 	const entry: SessionDisplayEntry = {
 		id: value.id,
-		parentId: value.parentId === null ? null : (value.parentId as string | undefined) ?? null,
+		parentId: value.parentId === null ? null : ((value.parentId as string | undefined) ?? null),
 		type: value.type,
 		offset: value.offset,
 		byteLength: value.byteLength,
