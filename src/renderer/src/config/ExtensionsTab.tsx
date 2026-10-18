@@ -346,11 +346,11 @@ export function ExtensionsTab(props: {
 									{/* 有查询词时显示「匹配数 / 总数」，否则维持原有总数计数 */}
 									<span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">{extensionQuery.trim().length > 0 ? t("config.extensionListResultCount", { matched: filteredExtensions.length, count: visibleExtensions.length }) : t("config.count.extensions", { count: visibleExtensions.length })}</span>
 								</div>
-								<small className="skills-restart-hint block text-caption text-muted-foreground">{t("config.extensionRestartHint")}</small>
+								<small className="block text-caption text-text-tertiary">{t("config.extensionRestartHint")}</small>
 							</div>
 							{/* 窄窗口下按钮换行而不是被裁掉：shrink-0 保证按钮不被压缩，
 				    flex-wrap + justify-end 让溢出部分落到第二行右对齐 */}
-							<div className="skills-toolbar-actions flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+							<div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
 								{props.scope === "global" ? (
 									<>
 										{/* 工具栏统一 size=sm，与设置页/会话顶栏控件高度对齐 */}

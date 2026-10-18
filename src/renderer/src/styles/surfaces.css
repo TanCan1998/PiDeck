@@ -2227,14 +2227,6 @@ div.fixed.inset-0.z-50 {
   display: grid;
   gap: var(--space-3);
 }
-.skills-restart-hint {
-  color: var(--color-text-tertiary);
-  font-size: var(--font-size-caption);
-}
-.skills-toolbar-actions {
-  display: flex;
-  gap: 8px;
-}
 .skill-badges {
   display: flex;
   gap: 6px;
