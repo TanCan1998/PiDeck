@@ -168,7 +168,7 @@ export function SkillsTab(props: {
 								{t("common.refresh")}
 							</Button>
 							<ResourceImportDialog kind="skill" sourceProjectId={props.sourceProjectId ?? props.projectId} projects={projects} fixedProjectId={props.fixedProjectId} triggerLabel={t("config.import.button")} onImported={props.onRefresh} />
-							<Button variant="secondary" size="sm" onClick={props.onOpenRoot}>
+							<Button variant="outline" size="sm" onClick={props.onOpenRoot}>
 								{t("config.openFolder")}
 							</Button>
 						</div>

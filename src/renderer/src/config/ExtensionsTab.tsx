@@ -1,4 +1,5 @@
 import { Button } from "../components/ui-shadcn/button";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../components/ui-shadcn/dialog";
 import { Input } from "../components/ui-shadcn/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui-shadcn/table";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
@@ -305,28 +306,16 @@ export function ExtensionsTab(props: {
 			) : (
 				<>
 					{showUpdateDialog && (
-						<div className="config-update-dialog-backdrop" role="dialog" aria-modal="true">
-							<div className="config-update-dialog">
-								<div className="config-update-dialog-header">
-									<strong>{t("settings.updateExtensionsAll")}</strong>
-									<Button
-										variant="ghost"
-										size="icon-sm"
-										className="size-7"
-										onClick={() => {
-											setShowUpdateDialog(false);
-											props.onRefresh();
-										}}
-										disabled={Boolean(updating)}
-									>
-										×
-									</Button>
-								</div>
-								<p className="config-im-form-hint">{updating ? t("settings.extensionsUpdatingDesc") : t("settings.extensionsUpdateResultHint")}</p>
+						<Dialog open onOpenChange={(next) => !next && !updating && setShowUpdateDialog(false)}>
+							<DialogContent className="max-w-2xl">
+								<DialogHeader>
+									<DialogTitle>{t("settings.updateExtensionsAll")}</DialogTitle>
+								</DialogHeader>
+								<p className="text-caption text-muted-foreground">{updating ? t("settings.extensionsUpdatingDesc") : t("settings.extensionsUpdateResultHint")}</p>
 								<pre className="setting-update-output">{updateResult ? `${updateResult.command}\n${updateResult.output}` : t("settings.extensionsUpdating")}</pre>
-								<div className="config-update-dialog-actions">
+								<DialogFooter>
 									<Button
-										variant="default"
+										variant="outline"
 										size="sm"
 										onClick={() => {
 											setShowUpdateDialog(false);
@@ -336,9 +325,9 @@ export function ExtensionsTab(props: {
 									>
 										{t("common.close")}
 									</Button>
-								</div>
-							</div>
-						</div>
+								</DialogFooter>
+							</DialogContent>
+						</Dialog>
 					)}
 					{false && <RecommendedPackagesPanel data={props.data} onRefresh={props.onRefresh} />}
 

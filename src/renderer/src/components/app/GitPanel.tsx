@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { useAtom, useSetAtom } from "jotai";
 import { ArrowDownToLine, ArrowUpFromLine, Check, CheckCircle2, ChevronDown, ChevronsDownUp, ChevronsUpDown, ClipboardPaste, FileCode2, FolderGit2, GitBranch, List, ListTree, Loader2, Plus, RefreshCw, RotateCcw, Sparkles, TriangleAlert } from "lucide-react";
 import { Button } from "../ui-shadcn/button";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "../ui-shadcn/alert-dialog";
 import { BridgeGuiSlot, useBridgeSessionId } from "../bridge/BridgeSlot";
 import { useAnimationWindow } from "../../hooks/useAnimationWindow";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "../ui-shadcn/context-menu";
@@ -1768,38 +1769,28 @@ export function GitPanel(props: GitPanelProps) {
 					document.body,
 				)}
 
-			{showSmartCommitPrompt &&
-				createPortal(
-					<div className="absolute inset-0 z-[1200] flex items-center justify-center bg-[var(--overlay-backdrop-soft)] p-6 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-base" role="presentation" onClick={() => setShowSmartCommitPrompt(false)}>
-						<div
-							className="w-[min(520px,calc(100vw-48px))] rounded-lg border border-border-subtle bg-bg-panel p-4 font-sans text-text-primary shadow-[var(--shadow-modal)] motion-safe:animate-in motion-safe:zoom-in-95 motion-safe:duration-base"
-							role="alertdialog"
-							aria-modal="true"
-							aria-labelledby="git-smart-commit-title"
-							onClick={(event) => event.stopPropagation()}
-						>
-							<strong id="git-smart-commit-title" className="text-base leading-6">
-								{t("git.smartCommitTitle")}
-							</strong>
-							<p className="my-3 mb-4 text-sm leading-[22px] whitespace-pre-line text-text-secondary">{t("git.smartCommitPrompt")}</p>
-							<div className="flex flex-wrap justify-end gap-2">
-								<Button type="button" variant="outline" size="sm" onClick={() => setShowSmartCommitPrompt(false)}>
-									{t("common.cancel")}
-								</Button>
-								<Button type="button" variant="outline" size="sm" onClick={() => chooseSmartCommit("never")}>
-									{t("git.smartCommitNever")}
-								</Button>
-								<Button type="button" variant="outline" size="sm" onClick={() => chooseSmartCommit("always")}>
-									{t("git.smartCommitAlways")}
-								</Button>
-								<Button type="button" variant="default" size="sm" autoFocus onClick={() => chooseSmartCommit("yes")}>
-									{t("git.smartCommitYes")}
-								</Button>
-							</div>
-						</div>
-					</div>,
-					document.body,
-				)}
+			{showSmartCommitPrompt && (
+				<AlertDialog open onOpenChange={(next) => !next && setShowSmartCommitPrompt(false)}>
+					<AlertDialogContent>
+						<AlertDialogHeader>
+							<AlertDialogTitle>{t("git.smartCommitTitle")}</AlertDialogTitle>
+							<AlertDialogDescription className="whitespace-pre-line">{t("git.smartCommitPrompt")}</AlertDialogDescription>
+						</AlertDialogHeader>
+						<AlertDialogFooter>
+							<AlertDialogCancel size="sm">{t("common.cancel")}</AlertDialogCancel>
+							<Button type="button" variant="outline" size="sm" onClick={() => chooseSmartCommit("never")}>
+								{t("git.smartCommitNever")}
+							</Button>
+							<Button type="button" variant="outline" size="sm" onClick={() => chooseSmartCommit("always")}>
+								{t("git.smartCommitAlways")}
+							</Button>
+							<AlertDialogAction size="sm" autoFocus onClick={() => chooseSmartCommit("yes")}>
+								{t("git.smartCommitYes")}
+							</AlertDialogAction>
+						</AlertDialogFooter>
+					</AlertDialogContent>
+				</AlertDialog>
+			)}
 		</div>
 	);
 }

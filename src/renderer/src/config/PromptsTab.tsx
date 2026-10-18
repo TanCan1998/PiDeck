@@ -327,7 +327,7 @@ export function PromptsTab(props: {
 							<Button variant="outline" size="sm" onClick={props.onRefresh} disabled={props.loading}>
 								{t("common.refresh")}
 							</Button>
-							<Button variant="secondary" size="sm" onClick={props.onOpenRoot}>
+							<Button variant="outline" size="sm" onClick={props.onOpenRoot}>
 								{t("config.openFolder")}
 							</Button>
 						</div>

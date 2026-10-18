@@ -54,7 +54,7 @@ function ContextMenuItem({
 			data-inset={inset}
 			data-variant={variant}
 			className={cn(
-				"relative flex cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-hidden transition-colors duration-100 focus:bg-accent-soft focus:text-foreground focus:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_28%,transparent)]",
+				"relative flex cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-control outline-hidden transition-colors duration-100 focus:bg-accent-soft focus:text-foreground focus:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_28%,transparent)]",
 				"data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
 				"data-[inset]:pl-8",
 				"data-[variant=destructive]:text-destructive data-[variant=destructive]:focus:bg-destructive/10 data-[variant=destructive]:focus:text-destructive data-[variant=destructive]:focus:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-danger)_30%,transparent)] dark:data-[variant=destructive]:focus:bg-destructive/20",
@@ -71,7 +71,7 @@ function ContextMenuCheckboxItem({ className, children, checked, ...props }: Rea
 		<ContextMenuPrimitive.CheckboxItem
 			data-slot="context-menu-checkbox-item"
 			className={cn(
-				"relative flex cursor-default select-none items-center gap-2 rounded-sm py-1.5 pr-2 pl-8 text-sm outline-hidden transition-colors duration-100 focus:bg-accent-soft focus:text-foreground focus:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_28%,transparent)]",
+				"relative flex cursor-default select-none items-center gap-2 rounded-sm py-1.5 pr-2 pl-8 text-control outline-hidden transition-colors duration-100 focus:bg-accent-soft focus:text-foreground focus:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_28%,transparent)]",
 				"data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
 				className,
 			)}
@@ -93,7 +93,7 @@ function ContextMenuRadioItem({ className, children, ...props }: React.Component
 		<ContextMenuPrimitive.RadioItem
 			data-slot="context-menu-radio-item"
 			className={cn(
-				"relative flex cursor-default select-none items-center gap-2 rounded-sm py-1.5 pr-2 pl-8 text-sm outline-hidden transition-colors duration-100 focus:bg-accent-soft focus:text-foreground focus:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_28%,transparent)]",
+				"relative flex cursor-default select-none items-center gap-2 rounded-sm py-1.5 pr-2 pl-8 text-control outline-hidden transition-colors duration-100 focus:bg-accent-soft focus:text-foreground focus:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_28%,transparent)]",
 				"data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
 				className,
 			)}
@@ -116,7 +116,7 @@ function ContextMenuLabel({
 }: React.ComponentProps<typeof ContextMenuPrimitive.Label> & {
 	inset?: boolean;
 }) {
-	return <ContextMenuPrimitive.Label data-slot="context-menu-label" data-inset={inset} className={cn("px-2 py-1.5 text-sm font-medium text-foreground", "data-[inset]:pl-8", className)} {...props} />;
+	return <ContextMenuPrimitive.Label data-slot="context-menu-label" data-inset={inset} className={cn("px-2 py-1.5 text-control font-medium text-foreground", "data-[inset]:pl-8", className)} {...props} />;
 }
 
 function ContextMenuSeparator({ className, ...props }: React.ComponentProps<typeof ContextMenuPrimitive.Separator>) {
@@ -143,7 +143,7 @@ function ContextMenuSubTrigger({
 		<ContextMenuPrimitive.SubTrigger
 			data-slot="context-menu-sub-trigger"
 			data-inset={inset}
-			className={cn("flex cursor-default select-none items-center rounded-sm px-2 py-1.5 text-sm outline-hidden transition-colors duration-100 focus:bg-accent-soft focus:text-foreground focus:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_28%,transparent)]", "data-[inset]:pl-8", className)}
+			className={cn("flex cursor-default select-none items-center rounded-sm px-2 py-1.5 text-control outline-hidden transition-colors duration-100 focus:bg-accent-soft focus:text-foreground focus:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_28%,transparent)]", "data-[inset]:pl-8", className)}
 			{...props}
 		>
 			{children}
