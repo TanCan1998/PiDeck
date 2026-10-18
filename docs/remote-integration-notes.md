@@ -103,3 +103,41 @@
 - `workbenchContentHost` 契约测试同步跟到新宿主并断言 `fileActionTarget`。
 
 **门禁**：typecheck 0、check:format 0、build:fast 0；unifiedApi 三测 23/23 绿；远端域测试 1653 例仅 9 红，全部落在 §7 既有红灯清单内（无合并专属失败）。
+
+### 10.1 第二轮真机 e2e 暴露的两个真问题（已修一个）
+
+**（a）终端 WebGL 装配顺序 —— 真 bug，已修**
+
+dev 这次合并没有改终端代码，但「远端终端」用例首跑直接红：renderer 抛
+「Uncaught Error: WebGL2 not supported」，崩在 `commitPassiveMountEffect`（终端组件 effect 里）。
+
+根因不是新引入的，而是**既有实现的潜伏缺陷被合并后的环境差异踩中**：
+`WebglAddon.activate()` 要等终端挂到 DOM 才跑，而它在拿不到 WebGL2 时会在 activate 内**同步 throw**。
+原实现把 `terminal.loadAddon(webgl)` 放在 `terminal.open()` **之前**，try/catch 只包住 loadAddon 本身；
+activate 的异常发生在 xterm 事件派发里，逃出 catch 变成未捕获错误 → renderer 崩。
+
+修法（`src/renderer/src/components/terminal/TerminalDock.tsx`）：把 WebGL 装配移到 `open()` 之后，
+整段纳入 try/catch，失败只 `console.warn` 并留在 xterm 内置 DOM 渲染器上（产品本来就依赖这条降级路径）；
+`onContextLoss` 里 dispose 后补一次 `fit()`，换渲染器时列数保持一致。
+回归守卫：`tests/terminalWebglFallback.test.mjs`（钉住「装配点在 open 之后」+「try/catch 包住 + 不 rethrow」，
+已用旧实现验证该断言会红，不是恒真）。
+
+**（b）远端新建空项目偶发 「创建结果未确认」 —— 传输层抖动，非产品逻辑错误**
+
+首跑 「远端文件管理 v1」 停在 「已添加远端项目」 之前，截图显示确认框停在
+「创建结果未确认：可能已创建」。核对主机：目标目录**确实不存在**；
+把产品用的 probe / mkdir 两条命令原文拿去手工执行都 exit 0；
+单跑该用例 2/2 通过，与 `远端 Git G1` 同批串跑 2/2 通过（1.8m）。
+结论：这一轮 SSH 传输偶发失败（`client.run` 以非 0 exitCode 返回而非抛错，被映射成 create 失败/未确认），
+属环境抖动，不是合并回归。
+
+**同一现象也出现在「登记已有目录」路径**：`远端 Git G2a/G2b` 在一次 10 连跑里停在
+`enrollRemoteProjectInSidebar` 的「已添加远端项目」断言（同一句 `remoteProjectAnswer` → 复核 → 写库链路），
+单独重跑该用例 1.4m 通过；`远端文件管理 v1` 单跑 2/2、与 G1 同批 2/2 通过。两条路径共用
+`resolveRemoteBrowseRoot` 复核 + pinned SSH，抖动点一致，判定为环境层而非合并逻辑缺陷。
+
+**后续建议（未做，非阻塞）**：`client.run` 对传输失败返回 `exitCode: -1` 而不抛错，
+调用方目前把它折叠成 `createFailed`/`ROOT_UNRESOLVED`。若要区分「确定失败」与「可能已生效」，
+应让 runner 对 `-1`/`255` 抛专用错误码，再由调用方映射成 `*_UNCONFIRMED`——现在两者混在同一个码里，
+这也是 「创建结果未确认」 文案偶尔与事实（目录没建成）不符的原因。
+
