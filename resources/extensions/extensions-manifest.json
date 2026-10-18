@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "version": "1.0.1",
-  "bundleSha256": "2e23a67132a2b39fe2fc02953d768bba2303ae20b66d26d8c16bc710c29f3fdd",
+  "bundleSha256": "b69a4f22455368ab2b3b26d99b0bbd16b67fe8f5a3499dd938a0eb903dd030c5",
   "fileCount": 26,
   "files": [
     {
@@ -101,8 +101,8 @@
     },
     {
       "name": "pi-deck-session-title.ts",
-      "sha256": "cf600891b1d147d206df0405eb197eb20bff1d8861cf684afed8fad41e2132fb",
-      "bytes": 26528
+      "sha256": "acb4b8270d349bfe3c2b5f5f9bc34004044be36c512cbf2b60bf78cd1c7d952b",
+      "bytes": 28546
     },
     {
       "name": "pi-deck-shell-proxy.ts",
