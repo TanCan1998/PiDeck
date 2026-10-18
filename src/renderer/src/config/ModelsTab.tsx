@@ -1,4 +1,5 @@
 import { Button } from "../components/ui-shadcn/button";
+import { Separator } from "../components/ui-shadcn/separator";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowUpDown, ChevronDown, ChevronRight, Copy, Eye, EyeOff, ExternalLink, GripVertical, SquarePen, Trash2, X } from "lucide-react";
 import { t } from "../i18n";
@@ -525,6 +526,8 @@ export function ModelsTab(props: {
 											>
 												<Copy size={14} />
 											</Button>
+											{/* 删除供应商会连带删掉整组模型与凭据，和「隐藏/复制」用竖线隔开（同认证页） */}
+											<Separator orientation="vertical" className="mx-0.5 h-4" />
 											<Button
 												variant="ghost"
 												size="icon-sm"
