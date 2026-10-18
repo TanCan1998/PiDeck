@@ -15,7 +15,7 @@ import { desktopApi } from "../desktopApi";
 import { Input } from "../components/ui-shadcn/input";
 import { Textarea } from "../components/ui-shadcn/textarea";
 import { CreateResourceCard, CreateResourceField } from "./ConfigShared";
-import type { ResourceScope } from "./resourceScopeModel";
+import { discoveryRowKey, isGlobalDiscoverySource, isProjectDiscoverySource, type ResourceScope } from "./resourceScopeModel";
 import { buildProjectOverrideKeyIndex, matchesProjectOverride } from "./projectOverrideKeys";
 import { useResourceTogglePending } from "../hooks/useResourceTogglePending";
 import { isGlobalSkillSourceId } from "../../../shared/resourceIdentity";
@@ -83,15 +83,23 @@ export function SkillsTab(props: {
 		settle(derived);
 	}, [props.data, props.projectOverrides, settle]);
 	const projects = props.projects ?? [];
-	// Project scope shows both sources grouped by ownership; global scope only shows global skills.
+	// Project scope shows both sources grouped by ownership; global scope shows global skill dirs only
+	// (runtime-discovered package/settings rows are added below for both scopes).
 	const visibleSkills = data.skills.filter((skill) => props.scope === "project" || skill.sourceId === "pi-global" || skill.sourceId === "agents-global");
 	const projectSkills = visibleSkills.filter((skill) => skill.sourceId === "project-pi" || skill.sourceId === "project-agents");
 	const globalSkills = visibleSkills.filter((skill) => skill.sourceId === "pi-global" || skill.sourceId === "agents-global");
 	const disabledGlobalKeys = buildProjectOverrideKeyIndex(props.projectOverrides.disabledGlobalSkills);
 	const availableLocations = data.locations.filter((location) => (props.scope === "project" ? location.id === "project-pi" || location.id === "project-agents" : location.id === "pi-global" || location.id === "agents-global"));
-	// discovery 行去重：与本地列表同名的条目只保留本地行（带操作），列表只显示一次
-	const localSkillNames = new Set(visibleSkills.map((skill) => skill.name.toLowerCase()));
-	const uniqueDiscoverySkills = props.discoverySkills.filter((item) => !localSkillNames.has(item.name.toLowerCase()));
+	// discovery 行去重：键是 sourceId + name。只按 name 去重会让包/设置提供的同名技能被本地行吞掉，
+	// 而本地行只代表自己的目录，并不代表包里的那一条（见 discoveryRowKey 注释）。
+	const localSkillKeys = new Set(visibleSkills.map((skill) => discoveryRowKey(skill.sourceId, skill.name)));
+	const uniqueDiscoverySkills = props.discoverySkills.filter((item) => !localSkillKeys.has(discoveryRowKey(item.sourceId, item.name)));
+	const projectDiscoverySkills = uniqueDiscoverySkills.filter((item) => isProjectDiscoverySource(item.sourceId));
+	const globalDiscoverySkills = uniqueDiscoverySkills.filter((item) => isGlobalDiscoverySource(item.sourceId));
+	// 全局页只渲染「全局拥有」的只读发现行（package-user/settings-user）；项目来源只在项目作用域出现。
+	const visibleDiscoverySkills = props.scope === "project" ? uniqueDiscoverySkills : globalDiscoverySkills;
+	// 空态/计数必须把发现行算进去：全局页可能只有包提供的技能，本地列表为空。
+	const skillRowCount = visibleSkills.length + visibleDiscoverySkills.length;
 	// 一级 tab：本地 / 商店
 	const [skillTab, setSkillTab] = useState<"local" | "store">("local");
 	// 二级 tab（商店内）：选择供应商
@@ -159,7 +167,7 @@ export function SkillsTab(props: {
 					/>
 					<div className="mb-3 flex items-center justify-between gap-3">
 						<div>
-							<span className="font-mono text-xs tabular-nums text-muted-foreground">{t("config.count.skills", { count: visibleSkills.length })}</span>
+							<span className="font-mono text-xs tabular-nums text-muted-foreground">{t("config.count.skills", { count: skillRowCount })}</span>
 							<small className="text-caption text-text-tertiary">{t("config.restartHint")}</small>
 						</div>
 						<div className="flex items-center gap-1.5">
@@ -218,7 +226,7 @@ export function SkillsTab(props: {
 					</CreateResourceCard>
 
 					<div className="overflow-x-auto rounded-lg border border-border-subtle bg-bg-panel">
-						{visibleSkills.length === 0 ? (
+						{skillRowCount === 0 ? (
 							<div className="py-12 text-center text-control text-text-tertiary">{t("config.emptySkills")}</div>
 						) : (
 							<Table className="table-fixed">
@@ -241,7 +249,7 @@ export function SkillsTab(props: {
 										</TableRow>
 									) : null}
 									{props.scope === "project" && projectSkills.map((skill) => <SkillTableRow key={skill.id} skill={skill} effectiveEnabled={shown(skill.id, skill.enabled)} inherited={false} onToggle={handleSkillToggle} onDelete={props.onDelete} onEdit={props.onEdit} onRename={props.onRename} />)}
-									{props.scope === "project" && uniqueDiscoverySkills.filter((item) => isProjectDiscoverySource(item.sourceId)).map((item) => <DiscoveredSkillRow key={item.id} item={item} />)}
+									{props.scope === "project" && projectDiscoverySkills.map((item) => <DiscoveredSkillRow key={item.id} item={item} />)}
 									{props.scope === "project" && globalSkills.length > 0 ? (
 										<TableRow>
 											<TableCell colSpan={3} className="bg-bg-hover px-3 py-1.5 text-caption font-semibold text-foreground">
@@ -254,7 +262,17 @@ export function SkillsTab(props: {
 										const disabledHere = isGlobalSkillSourceId(skill.sourceId) ? matchesProjectOverride(disabledGlobalKeys, skill.path) : false;
 										return <SkillTableRow key={skill.id} skill={skill} effectiveEnabled={shown(skill.id, skill.enabled && !disabledHere)} inherited={inherited} onToggle={handleSkillToggle} onDelete={props.onDelete} onEdit={props.onEdit} onRename={props.onRename} />;
 									})}
-									{props.scope === "project" && uniqueDiscoverySkills.filter((item) => !isProjectDiscoverySource(item.sourceId)).map((item) => <DiscoveredSkillRow key={item.id} item={item} />)}
+									{/* 全局拥有的只读发现行：项目作用域在「全局资源」下继承展示，全局作用域单独分组展示 */}
+									{props.scope === "global" && globalDiscoverySkills.length > 0 ? (
+										<TableRow>
+											<TableCell colSpan={3} className="bg-bg-hover px-3 py-1.5 text-caption font-semibold text-foreground">
+												{t("config.resourceGroup.discovered")}
+											</TableCell>
+										</TableRow>
+									) : null}
+									{globalDiscoverySkills.map((item) => (
+										<DiscoveredSkillRow key={item.id} item={item} />
+									))}
 								</TableBody>
 							</Table>
 						)}
@@ -301,11 +319,6 @@ function DiscoveredSkillRow(props: {
 			<TableCell className="text-right" />
 		</TableRow>
 	);
-}
-
-/** Discovery rows split into the project group vs the inherited global group. */
-function isProjectDiscoverySource(sourceId: string): boolean {
-	return sourceId === "package-project" || sourceId === "settings-project" || sourceId === "ancestor-agents";
 }
 
 function SkillTableRow(props: {

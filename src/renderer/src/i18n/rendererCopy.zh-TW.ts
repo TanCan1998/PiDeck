@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: 61c4649d7e950d94e6aaa217d18102cf7c2032b86c62b734070ecc892523c640（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: 0071a8de3ddad8956193cda7ada4eeb71b95076b65374638798896e1c9e2c375（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -2542,8 +2542,11 @@ export const zhTW: Record<TranslationKey, string> = {
 	"config.resourceManagedHint": "由包或設定項載入；在此僅只讀展示。",
 	"config.resourceGroup.project": "專案資源",
 	"config.resourceGroup.global": "全域資源",
+	"config.resourceGroup.discovered": "來自包或設定（只讀）",
 	"config.source.global": "全域",
 	"config.source.project": "專案",
+	"config.source.local": "本地",
+	"config.extensionLocalVersion": "本地版本 {version}",
 	"config.openExtensionLocation": "開啟檔案位置",
 	"config.promptDeleteFailed": "專案提示詞路徑無效。",
 	"config.process.refresh": "重新整理",

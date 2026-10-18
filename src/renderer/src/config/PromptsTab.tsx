@@ -14,7 +14,7 @@ import { Input } from "../components/ui-shadcn/input";
 import { Textarea } from "../components/ui-shadcn/textarea";
 import { CreateResourceCard, CreateResourceField } from "./ConfigShared";
 import { isGlobalSkillSourceId } from "../../../shared/resourceIdentity";
-import { isProjectDiscoverySource, type ResourceScope } from "./resourceScopeModel";
+import { discoveryRowKey, isGlobalDiscoverySource, isProjectDiscoverySource, type ResourceScope } from "./resourceScopeModel";
 import { buildProjectOverrideKeyIndex, matchesProjectOverride } from "./projectOverrideKeys";
 import { useResourceTogglePending } from "../hooks/useResourceTogglePending";
 
@@ -134,10 +134,16 @@ export function PromptsTab(props: {
 	const projectTemplates = visibleTemplates.filter((template) => template.scope === "project");
 	const globalTemplates = visibleTemplates.filter((template) => template.scope !== "project");
 	const disabledGlobalKeys = buildProjectOverrideKeyIndex(props.projectOverrides.disabledGlobalPrompts);
-	// discovery 行去重：与本地列表同名的条目只保留本地行（带操作），列表只显示一次
-	const localPromptNames = new Set(visibleTemplates.map((template) => template.name.toLowerCase()));
-	const uniqueDiscoveryPrompts = props.discoveryPrompts.filter((item) => !localPromptNames.has(item.name.toLowerCase()));
-	const visibleTemplateCount = visibleTemplates.length;
+	// discovery 行去重：键是 来源 + name（本地模板的来源维度是 scope）。只按 name 去重会让包/设置里
+	// 的同名模板被本地行吞掉——本地行只代表 PromptManager 自己的目录，并不代表包里的那一条。
+	const localPromptKeys = new Set(visibleTemplates.map((template) => discoveryRowKey(template.scope, template.name)));
+	const uniqueDiscoveryPrompts = props.discoveryPrompts.filter((item) => !localPromptKeys.has(discoveryRowKey(item.sourceId, item.name)));
+	const projectDiscoveryPrompts = uniqueDiscoveryPrompts.filter((item) => isProjectDiscoverySource(item.sourceId));
+	const globalDiscoveryPrompts = uniqueDiscoveryPrompts.filter((item) => isGlobalDiscoverySource(item.sourceId));
+	// 全局页只渲染「全局拥有」的只读发现行（package-user/settings-user）；项目来源只在项目作用域出现。
+	const visibleDiscoveryPrompts = props.scope === "project" ? uniqueDiscoveryPrompts : globalDiscoveryPrompts;
+	// 空态/计数必须把发现行算进去：全局页可能只有包提供的模板，本地列表为空。
+	const visibleTemplateCount = visibleTemplates.length + visibleDiscoveryPrompts.length;
 	const canCreate = props.newName.trim().length > 0 && props.newDescription.trim().length > 0;
 
 	// tab 切换："local"（本地模板） 或 "store"（在线商店）
@@ -372,7 +378,7 @@ export function PromptsTab(props: {
 										</TableRow>
 									) : null}
 									{projectTemplates.map((template) => renderTemplateRow(template))}
-									{props.scope === "project" && uniqueDiscoveryPrompts.filter((item) => isProjectDiscoverySource(item.sourceId)).map((item) => <DiscoveredPromptRow key={`discovered:${item.path}`} item={item} />)}
+									{props.scope === "project" && projectDiscoveryPrompts.map((item) => <DiscoveredPromptRow key={`discovered:${item.path}`} item={item} />)}
 									{/* 全局组：全局模板 + 继承的全局托管资源 */}
 									{props.scope === "project" && globalTemplates.length > 0 ? (
 										<TableRow>
@@ -382,7 +388,17 @@ export function PromptsTab(props: {
 										</TableRow>
 									) : null}
 									{globalTemplates.map((template) => renderTemplateRow(template))}
-									{props.scope === "project" && uniqueDiscoveryPrompts.filter((item) => !isProjectDiscoverySource(item.sourceId)).map((item) => <DiscoveredPromptRow key={`discovered:${item.path}`} item={item} />)}
+									{/* 全局拥有的只读发现行：项目作用域在「全局资源」下继承展示，全局作用域单独分组展示 */}
+									{props.scope === "global" && globalDiscoveryPrompts.length > 0 ? (
+										<TableRow>
+											<TableCell colSpan={3} className="bg-bg-hover px-3 py-1.5 text-caption font-semibold text-foreground">
+												{t("config.resourceGroup.discovered")}
+											</TableCell>
+										</TableRow>
+									) : null}
+									{globalDiscoveryPrompts.map((item) => (
+										<DiscoveredPromptRow key={`discovered:${item.path}`} item={item} />
+									))}
 								</TableBody>
 							</Table>
 						)}

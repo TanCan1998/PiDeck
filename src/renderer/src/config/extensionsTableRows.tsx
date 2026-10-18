@@ -76,6 +76,8 @@ export function ExtensionTableRow(props: {
 						{/* 禁用态弱化名称，避免与启用扩展抢视觉层级 */}
 						<strong className={`truncate text-control font-medium text-foreground${disabled ? " opacity-50" : ""}`}>{name}</strong>
 						{extension.builtIn && <span className="text-micro text-muted-foreground">{t("common.builtIn")}</span>}
+						{/* 本地目录包（pi install <dir>）：来源是路径而非 registry 版本，单独标注避免与 npm 包混淆 */}
+						{extension.local && <span className="text-micro text-muted-foreground">{t("config.source.local")}</span>}
 						{/* 过滤式安装徽标：source 已在主进程剥离 "(filtered)" 后缀，
 						    版本查询/更新/卸载均用干净 source；此处仅展示标记。
 						    停用行不显示：pi list 对「对象形态」一律标 filtered，而 PiDeck 整包停用写的
@@ -99,10 +101,13 @@ export function ExtensionTableRow(props: {
 					? // 内置扩展是**包级**版本号（extensions-manifest.json，不跟 PiDeck 应用版本走）：
 						// 只显示当前生效版本（覆盖层优先），「最新」与更新入口由上方内置扩展面板统一负责。
 						t("config.builtInExt.rowVersion", { version: extension.currentVersion ?? "-" })
-					: t("config.extensionVersions", {
-							current: extension.currentVersion ?? "-",
-							latest: extension.latestVersion ?? "-",
-						})}
+					: extension.local
+						? // 本地目录包没有 registry 版本：只显示包自身 package.json 的版本，不展示「最新」与更新入口。
+							t("config.extensionLocalVersion", { version: extension.currentVersion ?? "-" })
+						: t("config.extensionVersions", {
+								current: extension.currentVersion ?? "-",
+								latest: extension.latestVersion ?? "-",
+							})}
 				{extension.hasUpdate && <span className="ml-1 text-text-primary">{t("config.extensionUpdateAvailable")}</span>}
 				{/* 有更新时提供单扩展更新与复制更新指令（npm 包专属；内置扩展走包级热更新面板） */}
 				{extension.hasUpdate && !extension.builtIn && (

@@ -13,6 +13,7 @@
  */
 
 import { dirname, join } from "node:path";
+import { isPackageSource as isPackageSourceImpl } from "../../shared/piPackageSource";
 import type { PiBuiltinExtension, PiBuiltinExtensionState, PiFileResourceToggleRequest, PiPackageToggleRequest, PiResourceConfigSummary, PiResourceKind, PiResourceScope, PiResourceToggleResult } from "../../shared/types/piResources";
 import { PI_BUILTIN_EXTENSIONS, PI_RESOURCE_KINDS } from "../../shared/types/piResources";
 import { resolveDefaultToolsInLayer } from "../../shared/defaultTools";
@@ -305,9 +306,9 @@ export class PiResourceConfigService {
 
 // ── 辅助（纯函数，便于测试） ─────────────────────────────
 
-/** 包安装 source 的协议前缀（与 pi list 输出的 source 形态一致）。 */
+/** 包安装 source：协议前缀或本地目录包（判据唯一来源见 shared/piPackageSource）。 */
 export function isPackageSource(source: string): boolean {
-	return /^(?:npm|file|github|git|https?):/i.test(source.trim());
+	return isPackageSourceImpl(source);
 }
 
 /**

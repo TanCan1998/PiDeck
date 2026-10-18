@@ -1833,7 +1833,11 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 		}
 	};
 
-	/** 刷新 prompt templates 列表：project 数据仅在 project scope 拉取，旧响应不得覆盖新 scope 结果。 */
+	/**
+	 * 刷新 prompt templates 列表：project 自有数据仅在 project scope 拉取，旧响应不得覆盖新 scope 结果。
+	 * discovery 例外：它同时解析全局 settings.json 的 packages/显式路径，全局页也要展示这些只读行，
+	 * 因此总是请求（无项目时 projectId 传 undefined，后端只返回全局来源）。
+	 */
 	const refreshPrompts = async () => {
 		const generation = resourceGenerationRef.current;
 		const projectIdHere = resourceScope === "project" ? effectiveProjectId : undefined;
@@ -1841,7 +1845,7 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 			api.prompts.list(),
 			projectIdHere && hasProject ? api.prompts.listByProject(projectIdHere) : Promise.resolve(null),
 			projectIdHere && hasProject ? api.projectResources.list(projectIdHere) : Promise.resolve(emptyProjectResourceData()),
-			projectIdHere && hasProject ? api.projectResources.discovery(projectIdHere) : Promise.resolve(emptyDiscoveryData()),
+			api.projectResources.discovery(projectIdHere),
 		]);
 		if (generation !== resourceGenerationRef.current) return;
 		const globalTemplates = globalResult.templates
@@ -2058,15 +2062,14 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 		}
 	};
 
-	/** Refresh global resources and, when in project scope, project-owned resources plus overrides. */
+	/**
+	 * Refresh global resources and, when in project scope, project-owned resources plus overrides.
+	 * Discovery is always requested: the global page renders package/settings owned rows too.
+	 */
 	const refreshSkills = async () => {
 		const generation = resourceGenerationRef.current;
 		const projectIdHere = resourceScope === "project" ? effectiveProjectId : undefined;
-		const [globalResult, projectResult, discoveryResult] = await Promise.all([
-			api.skills.list(),
-			projectIdHere && hasProject ? api.projectResources.list(projectIdHere) : Promise.resolve(emptyProjectResourceData()),
-			projectIdHere && hasProject ? api.projectResources.discovery(projectIdHere) : Promise.resolve(emptyDiscoveryData()),
-		]);
+		const [globalResult, projectResult, discoveryResult] = await Promise.all([api.skills.list(), projectIdHere && hasProject ? api.projectResources.list(projectIdHere) : Promise.resolve(emptyProjectResourceData()), api.projectResources.discovery(projectIdHere)]);
 		if (generation !== resourceGenerationRef.current) return;
 		setDiscoveryData(discoveryResult);
 		setProjectResourcesData(projectResult);
@@ -2237,18 +2240,17 @@ function ConfigModalContent(props: ConfigModalContentProps) {
 		}
 	};
 
-	/** Load the complete list, while project-owned rows are fetched only in project scope. */
+	/**
+	 * Load the complete list, while project-owned rows are fetched only in project scope.
+	 * Discovery is always requested: extension discovery also resolves global settings packages.
+	 */
 	const refreshExtensions = async (forceRefresh = false) => {
 		setExtensionsLoading(true);
 		setError(null);
 		const generation = resourceGenerationRef.current;
 		const projectIdHere = resourceScope === "project" ? effectiveProjectId : undefined;
 		try {
-			const [globalResult, projectResult, discoveryResult] = await Promise.all([
-				api.extensions.list(forceRefresh),
-				projectIdHere && hasProject ? api.projectResources.list(projectIdHere) : Promise.resolve(emptyProjectResourceData()),
-				projectIdHere && hasProject ? api.projectResources.discovery(projectIdHere) : Promise.resolve(emptyDiscoveryData()),
-			]);
+			const [globalResult, projectResult, discoveryResult] = await Promise.all([api.extensions.list(forceRefresh), projectIdHere && hasProject ? api.projectResources.list(projectIdHere) : Promise.resolve(emptyProjectResourceData()), api.projectResources.discovery(projectIdHere)]);
 			if (generation !== resourceGenerationRef.current) return;
 			setDiscoveryData(discoveryResult);
 			const globalExtensions = globalResult.extensions.filter((extension) => !isProjectExtension(extension));

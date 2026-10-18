@@ -669,7 +669,19 @@ test("uninstall removes a local extension and clears its stale disable entry", a
 		await assert.rejects(readFile(join(extensionsDir, "local-tool.ts"), "utf8"), { code: "ENOENT" });
 		const settings = JSON.parse(await readFile(settingsPath, "utf8"));
 		assert.deepEqual(settings.disabledExtensions, ["other.ts"]);
-		await assert.rejects(manager.uninstall("../outside.ts"), /Invalid extension path/);
+
+		// 路径型 source（../outside.ts、F:\pkg 等）是 pi packages 条目，不是 extensions 目录里的
+		// 本地文件：卸载必须交给 pi remove，绝不进删文件分支（旧实现会拼成
+		// ~/.pi/agent/extensions/../outside.ts 去删，必然失败且报告误导）。
+		const piCommands = [];
+		manager.runPi = async (args) => {
+			piCommands.push([...args]);
+			return "";
+		};
+		await manager.uninstall("../outside.ts");
+		assert.deepEqual(piCommands, [["remove", "../outside.ts"]]);
+		// 删文件分支的穿越防护不放宽：非裸文件名仍被拒绝拼进 extensions 目录。
+		await assert.rejects(manager.removeLocalExtension("../outside.ts"), /Invalid extension path/);
 	} finally {
 		await rm(home, { recursive: true, force: true });
 	}
