@@ -186,6 +186,7 @@ test("resolveShortcutBindings：覆盖 ∪ 默认；非法覆盖回退默认；�
 		openSettings: "Ctrl+K",
 		openNewSession: "Ctrl+N",
 		openSearch: "Ctrl+F",
+		findInSession: "Ctrl+Shift+F",
 		openCommandPalette: "Ctrl+P",
 		cycleModel: "Ctrl+M",
 		cycleThinking: "Ctrl+T",
@@ -228,6 +229,7 @@ test("平台默认键列表完整（覆盖表之外不丢键）", () => {
 		openSettings: "Ctrl+Alt+S",
 		openNewSession: "Ctrl+N",
 		openSearch: "Ctrl+F",
+		findInSession: "Ctrl+Shift+F",
 		openCommandPalette: "Ctrl+P",
 		cycleModel: "Ctrl+M",
 		cycleThinking: "Ctrl+T",
@@ -246,6 +248,7 @@ test("平台默认键列表完整（覆盖表之外不丢键）", () => {
 		openSettings: "Cmd+,",
 		openNewSession: "Cmd+N",
 		openSearch: "Cmd+F",
+		findInSession: "Cmd+Shift+F",
 		openCommandPalette: "Cmd+P",
 		// macOS 避开 Cmd+M（最小化窗口）与 Cmd+T（新标签页惯例）
 		cycleModel: "Cmd+Alt+M",

@@ -45,6 +45,8 @@ const timeline = compile("src/renderer/src/hooks/useSessionTimelineController.ts
 	// useSessionTimelineController 引入 jumpWindowPolicy（策略函数），loader 缺此 stub 时
 	// 回落到 nodeRequire 解析 .ts 失败。其自身依赖 ./turnRenderWindow，用同名 mock 即可。
 	"../components/session/timeline/jumpWindowPolicy": compile("src/renderer/src/components/session/timeline/jumpWindowPolicy.ts", { "./turnRenderWindow": { TIMELINE_WINDOW_EXPAND_STEP: 3 } }),
+	// 会话内查找落位归一（1055e794b 引入）：纯函数 + DOM 兜底，无内部 import。
+	"../components/session/timeline/jumpTarget": compile("src/renderer/src/components/session/timeline/jumpTarget.ts"),
 	"./timeline/browsePin": compile("src/renderer/src/hooks/timeline/browsePin.ts"),
 	// SendScrollPositioner（612bb51c1 从 controller 迁出）：真实模块自身只依赖
 	// ../../lib/pinTurnScroll，与 ../lib/pinTurnScroll 同名 mock 共享即可。

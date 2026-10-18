@@ -45,7 +45,8 @@ function parseChangelog(lang) {
 	const section = lines.slice(versionStart, versionEnd).join("\n");
 	const version = versionLine
 		.replace(/^##\s+/, "")
-		.replace(/\s*-\s*\d{4}-\d{2}-\d{2}/, "")
+		.replace(/\s*[-–—]\s*\d{4}-\d{2}-\d{2}\s*$/, "")
+		.replace(/\s*\(\s*\d{4}-\d{2}-\d{2}\s*\)\s*$/, "")
 		.trim();
 
 	// 提取日期
