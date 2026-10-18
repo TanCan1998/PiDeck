@@ -1,4 +1,5 @@
 import { Button } from "../components/ui-shadcn/button";
+import { Separator } from "../components/ui-shadcn/separator";
 import { useCallback, useEffect, useState } from "react";
 import { ArrowUpDown, Check, ChevronDown, ChevronRight, Copy, ExternalLink, Eye, EyeOff, GripVertical, Trash2 } from "lucide-react";
 import { t } from "../i18n";
@@ -143,6 +144,9 @@ export function AuthTab(props: {
 					<Button size="sm" variant="outline" onClick={() => setShowGuide(!showGuide)} disabled={saving}>
 						{t("config.authGuide")}
 					</Button>
+					{/* 批量删除把整份 auth.json 条目批量移除，不可撤销：与普通工具按钮之间留一道分隔，
+					    避免「使用指南」紧挨红色按钮被误点（UI 走查 A7）。 */}
+					<Separator orientation="vertical" className="mx-0.5 h-5" />
 					<Button
 						size="sm"
 						variant="destructive"
