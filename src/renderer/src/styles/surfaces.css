@@ -2276,25 +2276,7 @@ div.fixed.inset-0.z-50 {
   align-items: center;
   flex-shrink: 0;
 }
-.skill-state {
-  padding: 2px 6px;
-  border-radius: var(--radius-pill);
-  font-family: var(--font-family-business);
-  font-size: var(--font-size-micro);
-  font-variant-numeric: tabular-nums;
-}
-.skill-state.enabled {
-  background: var(--color-accent-soft);
-  color: var(--color-accent);
-}
-.skill-state.disabled {
-  background: var(--color-bg-muted);
-  color: var(--color-text-secondary);
-}
-.skill-state.invalid {
-  background: var(--color-danger-soft);
-  color: var(--color-danger);
-}:root[data-theme="dark"] .config-provider-card, :root[data-theme="dark"] .config-diagnostic-card, :root[data-theme="dark"] .toast{
+:root[data-theme="dark"] .config-provider-card, :root[data-theme="dark"] .config-diagnostic-card, :root[data-theme="dark"] .toast{
   background: var(--color-bg-panel);
   color: var(--color-text-primary);
   border-color: var(--color-border-subtle);

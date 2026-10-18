@@ -1,5 +1,6 @@
 import { Button } from "../components/ui-shadcn/button";
 import { Switch } from "../components/ui-shadcn/switch";
+import { Badge } from "../components/ui-shadcn/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui-shadcn/table";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "../components/ui-shadcn/select";
 import { useEffect, useState, type ReactNode } from "react";
@@ -284,10 +285,12 @@ function DiscoveredSkillRow(props: {
 					<div className="flex min-w-0 items-center gap-2">
 						<Sparkles size={14} strokeWidth={1.8} className="shrink-0 text-text-tertiary" />
 						<strong className="truncate text-control font-medium text-foreground">{item.name}</strong>
-						<span className="skill-state" title={t("config.resourceManagedHint")}>
+						<Badge variant="outline" size="sm" title={t("config.resourceManagedHint")}>
 							{t("config.source.global")}
-						</span>
-						<span className={`skill-state ${item.enabled ? "enabled" : "disabled"}`}>{item.enabled ? t("common.enabled") : t("common.disabled")}</span>
+						</Badge>
+						<Badge variant={item.enabled ? "success" : "neutral"} size="sm">
+							{item.enabled ? t("common.enabled") : t("common.disabled")}
+						</Badge>
 					</div>
 					<span className="truncate font-mono text-caption text-muted-foreground">{item.sourceLabel}</span>
 				</div>
@@ -374,8 +377,14 @@ function SkillTableRow(props: {
 							<Sparkles size={14} strokeWidth={1.8} className="shrink-0 text-text-tertiary" />
 							<strong className="truncate text-control font-medium text-foreground">{skill.name}</strong>
 							<div className="skill-badges">
-								<span className={`skill-state ${effectiveEnabled ? "enabled" : "disabled"}`}>{effectiveEnabled ? t("common.enabled") : t("common.disabled")}</span>
-								{!skill.valid && <span className="skill-state invalid">{t("config.needsFix")}</span>}
+								<Badge variant={effectiveEnabled ? "success" : "neutral"} size="sm">
+									{effectiveEnabled ? t("common.enabled") : t("common.disabled")}
+								</Badge>
+								{!skill.valid && (
+									<Badge variant="danger" size="sm">
+										{t("config.needsFix")}
+									</Badge>
+								)}
 							</div>
 						</div>
 						<span className="truncate font-mono text-caption text-muted-foreground">{skill.sourceLabel}</span>
