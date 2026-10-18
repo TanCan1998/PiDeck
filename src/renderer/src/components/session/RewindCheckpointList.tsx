@@ -317,7 +317,7 @@ function CheckpointRow(props: {
 						</span>
 					</div>
 					<div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-micro text-text-tertiary">
-						<Badge variant="outline" className="h-4 px-1 text-micro font-normal">
+						<Badge variant="outline" size="sm" className="font-normal">
 							{t(TRIGGER_LABEL_KEY[cp.trigger])}
 						</Badge>
 						{showToolName && (

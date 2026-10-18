@@ -27,30 +27,34 @@ function PresetChip(props: { preset: AcpToolPreset; status?: AcpToolStatus; runn
 	// missing 是「需要处理」，不能和 unknown 同灰；primary 是主题强调色，不是状态色。
 	const badgeVariant = !status || status.state === "unknown" ? "neutral" : status.state === "missing" ? "warning" : "success";
 	return (
-		<div className="flex flex-wrap items-center gap-2 rounded-md border border-border-subtle bg-bg-panel px-2.5 py-1.5">
-			<button type="button" className="hover:bg-accent flex items-center gap-1.5 rounded px-1 py-0.5 text-left" title={t(PRESET_DESC_KEYS[preset.id])} onClick={() => onAdd(preset)}>
-				<Plus size={12} aria-hidden="true" />
-				<span className="text-control">{preset.name}</span>
+		<div className="flex min-w-0 items-center gap-2 rounded-md border border-border-subtle bg-bg-panel px-2.5 py-1.5">
+			<button type="button" className="hover:bg-accent flex min-w-0 items-center gap-1.5 rounded px-1 py-0.5 text-left" title={t(PRESET_DESC_KEYS[preset.id])} onClick={() => onAdd(preset)}>
+				<Plus size={12} aria-hidden="true" className="shrink-0" />
+				<span className="truncate text-control">{preset.name}</span>
 			</button>
-			<Badge variant={badgeVariant} size="sm">
+			<Badge variant={badgeVariant} size="sm" className="shrink-0">
 				{badgeText}
 			</Badge>
-			{running ? <Loader2 size={11} className="animate-pideck-spin" aria-label={t("acp.installRunning")} /> : null}
-			{npmInstallable && status?.state === "missing" ? (
-				<Button variant="ghost" size="xs" title={t("acp.installAction")} onClick={() => onAction({ preset, kind: "install" })}>
-					<Download aria-hidden="true" />
-					{t("acp.installAction")}
-				</Button>
-			) : null}
-			{npmInstallable && status?.state === "installed" ? (
-				<Button variant="ghost" size="icon-xs" className="text-muted-foreground" title={t("acp.uninstallAction")} onClick={() => onAction({ preset, kind: "uninstall" })}>
-					<Trash2 aria-hidden="true" />
-				</Button>
-			) : null}
-			{preset.install?.kind === "manual" && status?.state === "missing" ? <span className="text-muted-foreground text-micro">{t("acp.manualInstallHint")}</span> : null}
-			<a href={preset.homepage} target="_blank" rel="noreferrer" className="text-muted-foreground hover:text-foreground" title={t("acp.presetHome")}>
-				<ExternalLink size={11} aria-hidden="true" />
-			</a>
+			{running ? <Loader2 size={11} className="animate-pideck-spin shrink-0" aria-label={t("acp.installRunning")} /> : null}
+			{/* 右侧动作组统一靠右：安装/卸载/外链三种可供性在网格里对齐成一列，
+			    而不是每张芯片各自参差贴住名称。 */}
+			<div className="ml-auto flex shrink-0 items-center gap-0.5">
+				{npmInstallable && status?.state === "missing" ? (
+					<Button variant="ghost" size="xs" title={t("acp.installAction")} onClick={() => onAction({ preset, kind: "install" })}>
+						<Download aria-hidden="true" />
+						{t("acp.installAction")}
+					</Button>
+				) : null}
+				{npmInstallable && status?.state === "installed" ? (
+					<Button variant="ghost" size="icon-xs" className="text-muted-foreground" title={t("acp.uninstallAction")} onClick={() => onAction({ preset, kind: "uninstall" })}>
+						<Trash2 aria-hidden="true" />
+					</Button>
+				) : null}
+				{preset.install?.kind === "manual" && status?.state === "missing" ? <span className="text-muted-foreground text-micro">{t("acp.manualInstallHint")}</span> : null}
+				<a href={preset.homepage} target="_blank" rel="noreferrer" className="text-muted-foreground hover:text-foreground" title={t("acp.presetHome")}>
+					<ExternalLink size={11} aria-hidden="true" />
+				</a>
+			</div>
 		</div>
 	);
 }
@@ -108,7 +112,7 @@ export function AcpPresetChips(props: { onAdd: (preset: AcpToolPreset) => void }
 	return (
 		<section className="flex flex-col gap-2">
 			<SectionHeading title={t("acp.presetsTitle")} />
-			<div className="flex flex-wrap gap-2">
+			<div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
 				{ACP_TOOL_PRESETS.map((preset) => (
 					<PresetChip key={preset.id} preset={preset} status={statuses[preset.id]} running={runningId === preset.id} onAdd={props.onAdd} onAction={setConfirmAction} />
 				))}
