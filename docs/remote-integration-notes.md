@@ -167,30 +167,26 @@ activate 的异常发生在 xterm 事件派发里，逃出 catch 变成未捕获
 **背景**：`npm run pack:dev` / `dist:win` 产出的是**已打包**应用（`app.isPackaged = true`），
 旧门禁 `!app.isPackaged && PIDECK_REMOTE_EXPERIMENTAL === "1"` 导致打包版恒关——用户拿 exe 测不到远端。
 
-**决策：不「直接放开」，改为 dev 通道专用 opt-in。** 判据收敛成纯函数
-`src/main/remote/remoteFeatureGate.ts` 的 `resolveRemoteExperimentEnabled`，三档语义：
+**决策（用户裁定，2026-10-19）：本分支直接开放，不做发布门禁区分。**
+`registerIpc` 里改为单一策略位：
 
-| 场景 | isPackaged | devBuild | 环境变量 | 远端 |
-|------|-----------|----------|----------|------|
-| 正式发布包（stable） | true | false | 任意（含 `1`） | **恒关** |
-| 未打包开发态（`npm run dev`） | false | false | 需 `1` | 与历史完全一致 |
-| dev 品牌包（`PIDECK_DEV_BUILD=1`） | true | true | 不需要 | **默认开启** |
+```ts
+const remoteExperimentEnabled = true;
+```
 
-- 为什么不做「直接放开」：远端 SSH 面仍是实验能力（Fork 偶发挂起未修、安全评审有遗留项），
-  正式包不能留一个「设了环境变量就能开」的后门；dev 品牌包与 stable 是两个 appId / 两个品牌，
-  只用于真机验收，放开它不影响正式用户。
-- 装配点只喂输入：`index.ts` 不再自己写布尔表达式（守卫 `remoteHostIpc.test.mjs` 已改，
-  并新增 `remoteFeatureGate.test.mjs` 覆盖三档真值表与「表达式必须留在纯函数里」）。
-- dev 品牌包构建：`node scripts/dist-dev.js --win portable`（`dist-dev.js` 自带
-  `PIDECK_DEV_BUILD=1`，产物 `PiDeck-Dev-<version>-portable.exe`）。`npm run pack:dev`
-  不带该标记仍是 stable 品牌包，远端照旧关闭；若坚持用 pack:dev，需自己带标记：
-  `$env:PIDECK_DEV_BUILD='1'; npm run pack:dev -- portable`（产物在 `release-dev/`，品牌显示 PiDeck Dev）。
+- 任何构建（`npm run dev` / `npm run pack:dev` / `dist:*`）都直接带远端能力，不再读
+  `app.isPackaged` 与 `PIDECK_REMOTE_EXPERIMENTAL`。用户目标是在这个实验分支上随便打包试用，
+  发现问题由分支自己修；正式发布前收回只需改这一行。
+- 只保留一个策略位的原因：远端通道在全关时本就会统一返回 `REMOTE_FEATURE_DISABLED`，
+  开关只影响装配，不牵扯其它逻辑。
+- 守卫：`tests/remoteHostIpc.test.mjs` 断言该行是字面量 `true`，且禁止重新耦合
+  `app.isPackaged` / 环境变量（否则 `pack:dev` 出的包又会静默关掉远端）。
+- 曾短暂采用的 `remoteFeatureGate.ts`（三档：stable 恒关 / dev 态需环境变量 / dev 品牌包默认开）
+  已随本决策删除；`channelIdentity.ts` 的 `isDevBrandBuild()` 一并移除。
 
-**验收证据（2026-10-19）**：产物 `release\PiDeck-Dev-0.9.1-portable.exe`
-（84,739,759 字节，SHA256 `310BE8109A4AAA0C08944A8334387163936EE31A82302F55125950527D66CDBB`）。
-- 静态：打包后 `resources/app.asar` 内 `isDevBrandBuild()` 已固化为 `return true`。
-- 运行：CDP 连进打包版渲染层调 `window.piDesktop.remoteHosts.list()` →
-  `{"ok":true,"status":"ready","hosts":[]}`（门禁关闭时应为 `REMOTE_FEATURE_DISABLED`）。
+**验收证据**：打包产物里渲染层调 `window.piDesktop.remoteHosts.list()` 返回
+`{"ok":true,"status":"ready","hosts":[]}`（门禁关闭时应为 `REMOTE_FEATURE_DISABLED`），
+CDP 直连实测；`npm run pack:dev` 的 win-unpacked 产物同法验证。
 
 **冒烟时的坑**：agent/终端环境常带 `ELECTRON_RUN_AS_NODE=1`，此时双击 exe 会被当成纯 Node 跑
 （`--version` 输出 `v24.x`、无窗口、exit 0、无日志）。人工双击不受影响；脚本化启动必须先

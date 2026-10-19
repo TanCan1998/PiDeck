@@ -32,13 +32,11 @@ test("remote host channel is declared, bridged, and registered behind the dev ga
 	const catalog = readFileSync("src/main/remote/RemoteHostCatalogView.ts", "utf8");
 	assert.match(shared, /remoteHostsList:\s*"remote:hosts-list"/);
 	assert.match(preload, /remoteHosts:\s*\{[\s\S]*?ipcRenderer\.invoke\(ipcChannels\.remoteHostsList\)/);
-	// 门禁把开关接到一个局部变量上（连接服务需要懒构建），再传给注册点。
-	// 判据收敛到纯函数 remoteFeatureGate（三档语义见该文件与 remoteFeatureGate.test.mjs）：
-	// 装配点只负责把 app.isPackaged / dev 品牌标记 / 环境变量三件事喂进去，不得自己写布尔表达式。
-	assert.match(main, /remoteExperimentEnabled\s*=\s*resolveRemoteExperimentEnabled\(\{/);
-	assert.match(main, /isPackaged:\s*app\.isPackaged/);
-	assert.match(main, /devBuild:\s*isDevBrandBuild\(\)/);
-	assert.match(main, /experimentalEnv:\s*process\.env\.PIDECK_REMOTE_EXPERIMENTAL/);
+	// 集成分支策略（2026-10-19）：远端面恒定开启，任何构建（dev / pack:dev / dist）都可直接验收。
+	// 因此门禁表达式必须是字面量 true —— 不得重新耦合 app.isPackaged 或环境变量，否则
+	// `npm run pack:dev` 打出来的包又会静默关掉远端（真机验收时表现为「功能没启用」且难排查）。
+	assert.match(main, /const remoteExperimentEnabled = true;/);
+	assert.doesNotMatch(main, /remoteExperimentEnabled\s*=\s*(?:!app\.isPackaged|process\.env\.PIDECK_REMOTE_EXPERIMENTAL)/);
 	assert.match(main, /registerRemoteHostIpc\(\{[\s\S]{0,400}?enabled:\s*remoteExperimentEnabled/);
 	// 目录读取在装配处接上「主机退役即清 trust 决策」的钩子（P4.4b；与 pin 清理同一位置、同一重试语义）。
 	assert.match(main, /openRemoteHostCatalogView\(app\.getPath\("userData"\),\s*\{\s*onHostRetired:[\s\S]{0,200}?forgetHost\(hostId\)/);

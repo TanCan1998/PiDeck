@@ -36,8 +36,8 @@ import type { PiRpcBaseArgsSettings, PiTrustOverride } from "./piRpcArgs";
  * 「拿不到服务」有三种来源，调用方无法区分——实验门禁关闭、装配还没跑到（本服务是懒建单例）、
  * 服务建造失败（ssh 客户端发现等）。前两种恰好是同一个「不可用」，第三种还要带上自己的原因，
  * 所以会话链路用一个更宽的 `unavailable`，而不是把「连不上/没建好」误报成「功能没开」。
- * **门禁位置不变**：仍只由 `registerIpc` 里的 `!app.isPackaged && PIDECK_REMOTE_EXPERIMENTAL === "1"`
- * 裁定，本模块不自己读环境变量（读第二处迟早会与它漂移）。
+ * **门禁位置不变**：仍只由 `registerIpc` 里的单一策略位 `remoteExperimentEnabled` 裁定
+ * （集成分支当前恒为 true），本模块不自己读环境变量（读第二处迟早会与它漂移）。
  */
 export const REMOTE_RUNTIME_CODES = {
 	/** 连接服务拿不到（门禁关闭 / 尚未装配 / 建造失败）：远端运行时不可用（**不**回退本机）。 */

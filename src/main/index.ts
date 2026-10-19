@@ -47,11 +47,10 @@ import { readDataEnvDecision, validateStartupDataEnv, writeDataEnvDecision } fro
 import { registerDataEnvIpc } from "./ipc/dataEnvIpc";
 import { ChannelSwitchService } from "./update/ChannelSwitchService";
 import { registerChannelSwitchIpc } from "./ipc/channelSwitchIpc";
-import { isDevBrandBuild, resolveUpdateChannel } from "./update/channelIdentity";
+import { resolveUpdateChannel } from "./update/channelIdentity";
 import { APP_DEEP_LINK_SCHEME } from "./utils/deepLinkScheme";
 import { APP_DISPLAY_NAME, initializeAppBrand } from "./utils/appBrand";
 import { migrateDevUserData } from "./projects/devUserDataMigration";
-import { resolveRemoteExperimentEnabled } from "./remote/remoteFeatureGate";
 import { isMainWindowFocused, shouldAlertNow } from "./notifications/alertFocusGate";
 import { buildToastXml, notificationLaunchUrl, resolveNotificationLogoUri } from "./notifications/notificationToast";
 import { extractFocusTargetFromArgv } from "./utils/focusTarget";
@@ -2858,16 +2857,12 @@ function resolveBuiltInExtensionRoots(): BuiltInExtensionPathRoots {
 }
 
 function registerIpc() {
-	// Only the explicit dev experiment can read the remote catalog; listing starts no SSH process.
-	// The connection service is built lazily and only when the experiment is on, so a shipped build
-	// constructs nothing and every remote channel answers REMOTE_FEATURE_DISABLED.
-	// 判据本身是纯函数（三档语义见 remoteFeatureGate.ts）：stable 发布包恒关；未打包开发态仍需
-	// PIDECK_REMOTE_EXPERIMENTAL=1；dev 品牌包（PIDECK_DEV_BUILD=1）默认开启供真机验收。
-	const remoteExperimentEnabled = resolveRemoteExperimentEnabled({
-		isPackaged: app.isPackaged,
-		devBuild: isDevBrandBuild(),
-		experimentalEnv: process.env.PIDECK_REMOTE_EXPERIMENTAL,
-	});
+	// 集成分支策略（2026-10-19）：远端能力在本分支**恒开**，不再区分打包/开发态，也不再读
+	// PIDECK_REMOTE_EXPERIMENTAL —— 目标是任何构建（npm run dev / pack:dev / dist）都能直接验收远端，
+	// 发现的问题由本分支直接修。历史上这里是 !app.isPackaged && env === "1"；
+	// 正式发布前若要收回，只改这一行即可（远端通道在没有启用时本就会统一返回 REMOTE_FEATURE_DISABLED，
+	// 所以开关只是策略位，不牵扯装配）。
+	const remoteExperimentEnabled = true;
 	let remoteHostService: import("./remote/RemoteHostConnectionService").RemoteHostConnectionService | undefined;
 	/**
 	 * 已解析的 OpenSSH 客户端（SSH 路由校验与每个 ssh/scp 子进程共用同一份）。
