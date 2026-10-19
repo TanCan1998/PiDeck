@@ -1,4 +1,4 @@
-import type { SessionCommandError, SessionCommandResult, SessionRuntimeTarget } from "../../../shared/types";
+import type { AgentBackend, SessionCommandError, SessionCommandResult, SessionRuntimeTarget } from "../../../shared/types";
 import { t, type TranslationKey } from "../i18n";
 
 /**
@@ -103,12 +103,23 @@ export type SessionRunState = "starting" | "idle" | "running" | "error" | "close
  *   （与输入框的「停止」按钮同义）；
  * - `reloadResources`：热重载 pi 的扩展/技能/提示词/主题/上下文文件（pi 扩展命令 `/reload`）；
  *   只对 live idle 的 pi 会话开放，不重启进程；
+ * - `reloadDshHost`：DSH 没有会话级 reload，入口映射为重启共享 DSH Host（会停止活跃 DSH 会话）；
  * - `reload`：无进程时从磁盘刷新消息文件。
  *
  * 「关闭 Agent」（杀进程 + 解绑，会话记录与历史消息保留）不是运行控制动作：
  * 它走独立的 closeAgent 链路，见 App 的 closeAgent / requestCloseAgent。
  */
-export type SessionRunAction = "start" | "restart" | "reloadResources" | "reload" | "abort";
+export type SessionRunAction = "start" | "restart" | "reloadResources" | "reloadDshHost" | "reload" | "abort";
+
+/** 会话头部 reload 入口的语义：pi 热重载 / DSH host 重启 / 不提供。 */
+export type SessionReloadMode = "resources" | "dshHost" | "none";
+
+/** 按后端决定 reload 入口：缺省 backend 视为 pi（旧记录兼容）。 */
+export function resolveSessionReloadMode(backend: AgentBackend | undefined): SessionReloadMode {
+	if (!backend || backend === "pi") return "resources";
+	if (backend === "dsh") return "dshHost";
+	return "none";
+}
 
 export interface SessionRunCapabilities {
 	/** 归一化后的运行状态（UI 可直接用于文案/徽章） */
@@ -121,7 +132,7 @@ export interface SessionRunCapabilities {
 	/** 中断当前回合（abort）：仅回合正在执行且无互斥操作时可用 */
 	canAbort: boolean;
 	canRestart: boolean;
-	/** 热重载扩展/技能/提示词（`/reload`）：仅 live idle 且无排队消息时可用 */
+	/** 热重载扩展/技能（pi）或重启 DSH Host：仅 live idle 且无排队消息时可用 */
 	canHotReload: boolean;
 	/** 无进程时从磁盘刷新消息文件 */
 	canReload: boolean;
@@ -132,9 +143,9 @@ export interface SessionRunCapabilities {
 }
 
 /**
- * 运行控制视图快照：Tab 菜单、侧栏菜单、会话悬停工具条共用。
- * 只携带策略结论与动作回调，不暴露 store/hook；`supportsHotReload` 由装配层按
- * 会话 backend 计算（DSH/ACP 不显示 `/reload` 入口）。
+ * 运行控制视图快照：Tab 菜单、侧栏菜单、会话头部工具条共用。
+ * 只携带策略结论与动作回调，不暴露 store/hook；`reloadMode` 由装配层按会话
+ * backend 计算（pi 热重载 / DSH host 重启 / ACP 不提供）。
  */
 export type SessionRunControlView = {
 	capabilities: SessionRunCapabilities;
@@ -142,7 +153,7 @@ export type SessionRunControlView = {
 	isStopping?: boolean;
 	isRestarting?: boolean;
 	isReloading?: boolean;
-	supportsHotReload?: boolean;
+	reloadMode?: SessionReloadMode;
 	onAction: (action: SessionRunAction) => void;
 };
 
@@ -220,6 +231,8 @@ export function canRunSessionAction(capabilities: SessionRunCapabilities, action
 		case "abort":
 			return capabilities.canAbort;
 		case "reloadResources":
+		case "reloadDshHost":
+			// DSH host 重启由确认框做最终闸门；策略层复用 idle 判定，供菜单置灰参考。
 			return capabilities.canHotReload;
 		case "reload":
 			return capabilities.canReload;

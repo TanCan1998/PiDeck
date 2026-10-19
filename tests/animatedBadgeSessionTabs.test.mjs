@@ -98,8 +98,9 @@ test("tab dropdown menu: no switch-to item, state-based disable with visible gra
 	assert.match(source, /canRunSessionAction\(capabilities, "abort"\)/);
 	assert.match(source, /canRunSessionAction\(capabilities, "reloadResources"\)/);
 	assert.match(source, /canRunSessionAction\(capabilities, "reload"\)/);
-	assert.match(source, /control\.supportsHotReload/);
+	assert.match(source, /control\.reloadMode/);
 	assert.match(source, /t\("menu\.reloadResources"\)/);
+	assert.match(source, /t\("menu\.restartDshHost"\)/);
 	assert.match(source, /\? \{ opacity: 0\.4 \} : undefined/);
 	// 主控项按状态切换文案：未启动/失败/已关闭 → 启动 Agent；live → 重启
 	assert.match(source, /capabilities\.primaryAction === "start"/);

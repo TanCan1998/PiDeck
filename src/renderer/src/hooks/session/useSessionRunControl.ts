@@ -278,6 +278,55 @@ export function useSessionRunControl({
 	}
 
 	/**
+	 * DSH 共享 host 重启：DSH 没有会话级 reload，这是唯一的「重新加载」等价操作。
+	 *
+	 * host 级动作，草稿/无 runtime 也能发起；确认框明确告知会停止所有活跃 DSH 会话，
+	 * 会话记录保留，重新打开即可继续。pi 会话误调用时给出不支持提示。
+	 */
+	function restartDshHost(sessionId: string): void {
+		if (!sessionId) return;
+		const record = store.get(sessionRecordsAtom)[sessionId];
+		if (record?.backend !== "dsh") {
+			showToast(t("sessionCommand.reloadResourcesUnsupported"), 3000);
+			return;
+		}
+		if (replacingSessionIdsRef.current.has(sessionId)) {
+			showToast(t("sessionCommand.runtimeBusy"), 3000);
+			return;
+		}
+		overlays.showConfirm({
+			title: t("runControl.restartDshHostTitle"),
+			message: t("runControl.restartDshHostBody"),
+			danger: true,
+			confirmLabel: t("config.dsh.restartHost"),
+			onConfirm: () => {
+				overlays.clearConfirm();
+				void (async () => {
+					if (replacingSessionIdsRef.current.has(sessionId)) return;
+					replacingSessionIdsRef.current.add(sessionId);
+					setReloadingSessionId(sessionId);
+					store.set(sessionReloadingByIdAtom, (current) => ({ ...current, [sessionId]: true }));
+					try {
+						const ok = await api.sessions.restartDshHost();
+						showToast(ok ? t("config.dsh.hostRestarted") : t("config.dsh.hostRestartFailed"), ok ? 4000 : 6000);
+					} catch (error) {
+						showToast(error instanceof Error ? error.message : String(error), 6000);
+					} finally {
+						replacingSessionIdsRef.current.delete(sessionId);
+						setReloadingSessionId((current) => (current === sessionId ? null : current));
+						store.set(sessionReloadingByIdAtom, (current) => {
+							if (!current[sessionId]) return current;
+							const next = { ...current };
+							delete next[sessionId];
+							return next;
+						});
+					}
+				})();
+			},
+		});
+	}
+
+	/**
 	 * 关闭 Agent：杀掉绑定的 pi/DSH 进程并解绑（会话记录、历史消息与 Tab 全部保留，
 	 * 之后可再「启动 Agent」）。与「停止回答」（abort，只中断当前回合）语义不同。
 	 * 匿名会话的记录会被主进程丢弃，因此入口走 requestCloseAgent 先确认。
@@ -580,10 +629,16 @@ export function useSessionRunControl({
 	 *   与输入框的「停止」同义——要杀进程请走「关闭 Agent」（closeAgent）。
 	 * - restart：与 start 同路径（对 live 语义即重启）；running 时先弹确认，避免误杀正在输出的回答。
 	 * - reloadResources：热重载 pi 扩展/技能/提示词（不重启进程，见 reloadResources）。
+	 * - reloadDshHost：重启共享 DSH Host（DSH 没有会话级 reload，见 restartDshHost）。
 	 * - reload：无进程时从磁盘刷新消息文件。
 	 */
 	async function runSessionControl(sessionId: string, action: SessionRunAction): Promise<void> {
 		if (!sessionId) return;
+		// DSH host 重启是 host 级动作，草稿/无 runtime 也能发起；先于会话能力闸门分派。
+		if (action === "reloadDshHost") {
+			restartDshHost(sessionId);
+			return;
+		}
 		const capabilities = getSessionRunCapabilities(sessionId);
 		if (!capabilities || !canRunSessionAction(capabilities, action)) return;
 

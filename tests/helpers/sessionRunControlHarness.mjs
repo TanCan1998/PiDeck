@@ -126,6 +126,10 @@ export function harness(options = {}) {
 			calls.push(["reload-resources", plain(target)]);
 			return { ok: true, value: { target, value: [{ name: "reload", source: "extension" }] } };
 		},
+		restartDshHost: async () => {
+			calls.push(["restart-dsh-host"]);
+			return true;
+		},
 	};
 	const load = createTsSandbox({
 		globals: { Error },

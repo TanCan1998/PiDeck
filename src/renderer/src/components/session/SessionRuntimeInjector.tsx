@@ -18,7 +18,7 @@ import { usePaneGitInfo } from "../../hooks/usePaneGitInfo";
 import { useSessionCommandNames } from "../../hooks/useSessionCommandNames";
 import { desktopApi } from "../../desktopApi";
 import { t } from "../../i18n";
-import { requireSessionCommand, sessionCommandFailureToast, toSessionRuntimeTarget, type SessionRunControlView } from "../../utils/sessionCommands";
+import { requireSessionCommand, resolveSessionReloadMode, sessionCommandFailureToast, toSessionRuntimeTarget, type SessionRunControlView } from "../../utils/sessionCommands";
 import { resolveActiveAskRequest } from "../../utils/askUi";
 import { formatRelativeTime } from "../../utils/relativeTime";
 import { ConfirmDialog } from "../ui-shadcn/ConfirmDialog";
@@ -187,8 +187,8 @@ export const SessionRuntimeInjector = React.memo(function SessionRuntimeInjector
 	const canEditOrDeleteMessages = !isDshBackend && !isAcpBackend;
 	const canResend = !isDshBackend && !isAcpBackend;
 
-	// 本栏运行控制快照：悬停工具条按本会话 runtime 能力渲染，分屏两栏各算各的。
-	// 热重载只对 pi 后端开放；LAN Web 没有内部 reload 扩展注入链路，同样隐藏。
+	// 本栏运行控制快照：会话头部工具条按本会话 runtime 能力渲染，分屏两栏各算各的。
+	// 重载按后端分流（pi 热重载 / DSH host 重启）；LAN Web 没有对应链路，隐藏。
 	const paneRunCapabilities = services.getSessionRunCapabilities(currentSessionId);
 	const paneRunControl: SessionRunControlView | undefined = paneRunCapabilities
 		? {
@@ -196,7 +196,7 @@ export const SessionRuntimeInjector = React.memo(function SessionRuntimeInjector
 				isStopping: Boolean(services.stoppingAgentId && services.stoppingAgentId === currentSessionRuntime?.agentId),
 				isRestarting: runtime.isRestartingThisAgent || services.activatingSessionId === currentSessionId,
 				isReloading: services.reloadingSessionId === currentSessionId,
-				supportsHotReload: !services.isLanWeb && (!sessionRecord?.backend || sessionRecord.backend === "pi"),
+				reloadMode: services.isLanWeb ? "none" : resolveSessionReloadMode(sessionRecord?.backend),
 				onAction: (action) => void services.runSessionControl(currentSessionId, action),
 			}
 		: undefined;

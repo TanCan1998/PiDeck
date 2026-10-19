@@ -173,6 +173,22 @@ test("hot reload failure is visible and releases the busy state", async () => {
 	assert.equal(h.render().getSessionRunCapabilities("source-a").pending, false);
 });
 
+test("DSH host reload asks for confirmation and restarts the shared host", async () => {
+	const h = harness({ status: "idle" });
+	h.records["source-a"].backend = "dsh";
+	await h.hook.runSessionControl("source-a", "reloadDshHost");
+	assert.equal(h.confirmations.length, 1);
+	assert.deepEqual(h.calls, []);
+	h.confirmations[0].onConfirm();
+	await setImmediate();
+	assert.deepEqual(
+		h.calls.filter(([op]) => op !== "clear-confirm"),
+		[["restart-dsh-host"]],
+	);
+	assert.match(h.toasts[0], /hostRestarted/);
+	assert.equal(h.render().reloadingSessionId, null);
+});
+
 test("same-turn closes are deduplicated and exclude replacement until stop settles", async () => {
 	const h = harness();
 	const response = deferred();

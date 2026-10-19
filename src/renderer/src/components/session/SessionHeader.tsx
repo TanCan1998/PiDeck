@@ -10,6 +10,8 @@ import { displayProjectDirectoryName } from "../../rendererUtils";
 import { Button } from "../ui-shadcn/button";
 import { DshAgentPresetControl } from "./DshAgentPresetControl";
 import { DshAgentToolsPanel } from "./DshAgentToolsPanel";
+import { SessionRunToolbar } from "./SessionRunToolbar";
+import type { SessionRunControlView } from "../../utils/sessionCommands";
 
 type HeaderActions = {
 	headerRef: RefObject<HTMLDivElement | null>;
@@ -31,6 +33,8 @@ type HeaderActions = {
 	onExitSplit?: () => void;
 	/** 状态徽章绑定的会话（runtime / 缓存命中率）；与 mode=session 的身份可并存。 */
 	statusSessionId?: string;
+	/** 本栏运行控制快照：会话头部右侧的停止/重启/重载工具条。 */
+	runControl?: SessionRunControlView;
 };
 
 type LegacySessionHeaderProps = HeaderActions & {
@@ -52,9 +56,9 @@ export type SessionHeaderProps = LegacySessionHeaderProps | ModernSessionHeaderP
 
 /**
  * 渲染会话状态徽章（+ 分屏身份标题）。
- * 会话运行控制（启动/重启/停止回答/重载）已迁入 Tab 下拉（SessionTabsBar 的 runControl 链路），
- * 此组件不再承载操作菜单；embedded 模式供 Tab 栏 actions 复用；普通模式保留
- * 分屏 pane 外壳（paneTitle + 退出分屏）。
+ * 运行控制的快捷入口固定在头部右侧（SessionRunToolbar）；完整菜单仍在 Tab 下拉/右键，
+ * embedded 模式供 Tab 栏 actions 复用；普通模式保留分屏 pane 外壳
+ * （paneTitle + 退出分屏）。
  */
 export function SessionHeader(props: SessionHeaderProps) {
 	const sessionMode = props.mode === "session";
@@ -82,6 +86,7 @@ export function SessionHeader(props: SessionHeaderProps) {
 			)}
 			{props.embedded && session?.backend === "dsh" && <DshAgentPresetControl sessionId={sessionId} />}
 			{sessionMode && session?.backend === "dsh" && <DshToolsButton sessionId={sessionId} />}
+			{props.runControl ? <SessionRunToolbar control={props.runControl} /> : null}
 		</div>
 	);
 

@@ -7,7 +7,7 @@ import { displayProjectDirectoryName } from "../../rendererUtils";
 import { copyTextWithCopiedNotice } from "../../utils/clipboardNotice";
 import { AnimatedBadge } from "../motion/animated-badge";
 import { sessionStatusBadge } from "../../utils/sessionStatusBadge";
-import { canRunSessionAction, type SessionRunAction, type SessionRunCapabilities, type SessionRunControlView } from "../../utils/sessionCommands";
+import { canRunSessionAction, type SessionReloadMode, type SessionRunAction, type SessionRunCapabilities, type SessionRunControlView } from "../../utils/sessionCommands";
 import { sessionDisplayName } from "../../utils/sessionDisplayName";
 import { Button } from "../ui-shadcn/button";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from "../ui-shadcn/context-menu";
@@ -162,8 +162,8 @@ export type SessionTabsBarProps = {
 		isStopping?: boolean;
 		isRestarting?: boolean;
 		isReloading?: boolean;
-		/** pi 后端才提供热重载；DSH/ACP 不渲染 `/reload` 菜单项。 */
-		supportsHotReload?: boolean;
+		/** 重载入口语义：pi 热重载 / DSH host 重启 / 不提供。 */
+		reloadMode?: SessionReloadMode;
 		/**
 		 * 当前绑定运行实例的 agentId，仅用于「复制 Agent ID」。
 		 * 它与会话记录 id 不是一回事：agentId 每次 spawn 都换（排查问题时要贴进日志），
@@ -430,7 +430,7 @@ export function SessionTabsBar(props: SessionTabsBarProps) {
 							return (
 								<>
 									{currentSessionId && renderTab(currentSessionId)}
-									{currentSessionId && !hasSplitGroup && <SessionHeader mode="session" sessionId={currentSessionId} embedded headerRef={embeddedHeaderRef} />}
+									{currentSessionId && !hasSplitGroup && <SessionHeader mode="session" sessionId={currentSessionId} embedded headerRef={embeddedHeaderRef} runControl={props.runControl?.capabilities ? { ...props.runControl, capabilities: props.runControl.capabilities } : undefined} />}
 									{hasSplitGroup && (
 										<Button variant="ghost" size="icon-sm" aria-label={t("session.splitGroup.exitAll")} title={t("session.splitGroup.exitAll")} onClick={props.onExitAllSplit}>
 											<X className="size-3.5" />
@@ -1311,7 +1311,11 @@ function RunControlItems(props: { control: NonNullable<SessionTabsBarProps["runC
 
 	const startOrRestartDisabled = !canRunSessionAction(capabilities, "start") || Boolean(control.isRestarting);
 	const abortDisabled = !canRunSessionAction(capabilities, "abort");
-	const hotReloadDisabled = !canRunSessionAction(capabilities, "reloadResources") || Boolean(control.isReloading);
+	const reloadMode = control.reloadMode ?? "none";
+	const reloadAction = reloadMode === "dshHost" ? "reloadDshHost" : "reloadResources";
+	const reloadLabel = reloadMode === "dshHost" ? t("menu.restartDshHost") : t("menu.reloadResources");
+	const reloadHint = reloadMode === "dshHost" ? t("menu.restartDshHostHint") : t("menu.reloadResourcesHint");
+	const reloadEntryDisabled = reloadMode === "dshHost" ? Boolean(control.isReloading || control.isStopping || capabilities.pending) : !canRunSessionAction(capabilities, "reloadResources") || Boolean(control.isReloading);
 	const reloadDisabled = !canRunSessionAction(capabilities, "reload") || Boolean(control.isReloading);
 
 	// 主控文案：未启动/失败/已关闭 → 「启动 Agent」；live → 「重启」。
@@ -1341,11 +1345,11 @@ function RunControlItems(props: { control: NonNullable<SessionTabsBarProps["runC
 					{t("menu.stopAnswer")}
 				</span>
 			</DropdownMenuItem>
-			{control.supportsHotReload ? (
-				<DropdownMenuItem disabled={hotReloadDisabled} style={hotReloadDisabled ? { opacity: 0.4 } : undefined} title={t("menu.reloadResourcesHint")} onSelect={() => control.onAction("reloadResources")}>
+			{reloadMode !== "none" ? (
+				<DropdownMenuItem disabled={reloadEntryDisabled} style={reloadEntryDisabled ? { opacity: 0.4 } : undefined} title={reloadHint} onSelect={() => control.onAction(reloadAction)}>
 					<span className="inline-flex items-center gap-2">
 						<RefreshCw className={cn("size-3.5", control.isReloading && "animate-pideck-spin")} aria-hidden="true" />
-						{control.isReloading ? t("app.reloading") : t("menu.reloadResources")}
+						{control.isReloading ? t("app.reloading") : reloadLabel}
 					</span>
 				</DropdownMenuItem>
 			) : null}
@@ -1386,7 +1390,11 @@ function RunControlContextItems(props: { control: SessionRunControlView }) {
 	const capabilities = control.capabilities;
 	const startOrRestartDisabled = !canRunSessionAction(capabilities, "start") || Boolean(control.isRestarting);
 	const abortDisabled = !canRunSessionAction(capabilities, "abort");
-	const hotReloadDisabled = !canRunSessionAction(capabilities, "reloadResources") || Boolean(control.isReloading);
+	const reloadMode = control.reloadMode ?? "none";
+	const reloadAction = reloadMode === "dshHost" ? "reloadDshHost" : "reloadResources";
+	const reloadLabel = reloadMode === "dshHost" ? t("menu.restartDshHost") : t("menu.reloadResources");
+	const reloadHint = reloadMode === "dshHost" ? t("menu.restartDshHostHint") : t("menu.reloadResourcesHint");
+	const reloadEntryDisabled = reloadMode === "dshHost" ? Boolean(control.isReloading || control.isStopping || capabilities.pending) : !canRunSessionAction(capabilities, "reloadResources") || Boolean(control.isReloading);
 	const reloadDisabled = !canRunSessionAction(capabilities, "reload") || Boolean(control.isReloading);
 	const primaryLabel = control.isRestarting ? t("app.restarting") : capabilities.primaryAction === "start" ? t("tabs.startAgent") : t("app.restart");
 
@@ -1404,11 +1412,11 @@ function RunControlContextItems(props: { control: SessionRunControlView }) {
 					{t("menu.stopAnswer")}
 				</span>
 			</ContextMenuItem>
-			{control.supportsHotReload ? (
-				<ContextMenuItem disabled={hotReloadDisabled} style={hotReloadDisabled ? { opacity: 0.4 } : undefined} title={t("menu.reloadResourcesHint")} onSelect={() => control.onAction("reloadResources")}>
+			{reloadMode !== "none" ? (
+				<ContextMenuItem disabled={reloadEntryDisabled} style={reloadEntryDisabled ? { opacity: 0.4 } : undefined} title={reloadHint} onSelect={() => control.onAction(reloadAction)}>
 					<span className="inline-flex items-center gap-2">
 						<RefreshCw className={cn("size-3.5", control.isReloading && "animate-pideck-spin")} aria-hidden="true" />
-						{control.isReloading ? t("app.reloading") : t("menu.reloadResources")}
+						{control.isReloading ? t("app.reloading") : reloadLabel}
 					</span>
 				</ContextMenuItem>
 			) : null}

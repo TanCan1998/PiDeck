@@ -41,7 +41,7 @@ import {
 } from "lucide-react";
 import { t } from "../../i18n";
 import { copyTextWithCopiedNotice } from "../../utils/clipboardNotice";
-import { canRunSessionAction, type SessionRunAction, type SessionRunCapabilities } from "../../utils/sessionCommands";
+import { canRunSessionAction, type SessionReloadMode, type SessionRunAction, type SessionRunCapabilities } from "../../utils/sessionCommands";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "../ui-shadcn/alert-dialog";
 import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui-shadcn/dialog";
 import { X } from "lucide-react";
@@ -760,8 +760,8 @@ export type SidebarRunControl = {
 	isStopping?: boolean;
 	isRestarting?: boolean;
 	isReloading?: boolean;
-	/** pi 后端才提供热重载；DSH/ACP 不渲染 `/reload` 菜单项。 */
-	supportsHotReload?: boolean;
+	/** 重载入口语义：pi 热重载 / DSH host 重启 / 不提供。 */
+	reloadMode?: SessionReloadMode;
 	/**
 	 * 当前绑定运行实例的 agentId（pi 每次 spawn 随机生成）。
 	 * 只服务于「复制 Agent ID」：排查问题时要把它贴进日志/工单，而它与会话记录 id
@@ -788,7 +788,11 @@ function SidebarRunControlItems(props: { runControl: SidebarRunControl }) {
 
 	const primaryDisabled = disabled || !canRunSessionAction(capabilities, "start");
 	const abortDisabled = disabled || !canRunSessionAction(capabilities, "abort");
-	const hotReloadDisabled = disabled || !canRunSessionAction(capabilities, "reloadResources") || Boolean(runControl.isReloading);
+	const reloadMode = runControl.reloadMode ?? "none";
+	const reloadAction = reloadMode === "dshHost" ? "reloadDshHost" : "reloadResources";
+	const reloadLabel = reloadMode === "dshHost" ? t("menu.restartDshHost") : t("menu.reloadResources");
+	const reloadHint = reloadMode === "dshHost" ? t("menu.restartDshHostHint") : t("menu.reloadResourcesHint");
+	const reloadEntryDisabled = reloadMode === "dshHost" ? disabled || Boolean(runControl.isReloading) : disabled || !canRunSessionAction(capabilities, "reloadResources") || Boolean(runControl.isReloading);
 	const reloadDisabled = disabled || !canRunSessionAction(capabilities, "reload") || Boolean(runControl.isReloading);
 
 	const primaryLabel = runControl.isRestarting ? t("app.restarting") : capabilities.primaryAction === "start" ? t("menu.startAgent") : t("menu.restartSession");
@@ -818,11 +822,11 @@ function SidebarRunControlItems(props: { runControl: SidebarRunControl }) {
 					{t("menu.stopAnswer")}
 				</span>
 			</DropdownMenuItem>
-			{runControl.supportsHotReload ? (
-				<DropdownMenuItem disabled={hotReloadDisabled} style={hotReloadDisabled ? { opacity: 0.4 } : undefined} title={t("menu.reloadResourcesHint")} onSelect={() => runControl.onAction("reloadResources")}>
+			{reloadMode !== "none" ? (
+				<DropdownMenuItem disabled={reloadEntryDisabled} style={reloadEntryDisabled ? { opacity: 0.4 } : undefined} title={reloadHint} onSelect={() => runControl.onAction(reloadAction)}>
 					<span className="inline-flex items-center gap-2">
 						<RefreshCw className={cn("size-3.5", runControl.isReloading && "animate-pideck-spin")} aria-hidden="true" />
-						{runControl.isReloading ? t("app.reloading") : t("menu.reloadResources")}
+						{runControl.isReloading ? t("app.reloading") : reloadLabel}
 					</span>
 				</DropdownMenuItem>
 			) : null}

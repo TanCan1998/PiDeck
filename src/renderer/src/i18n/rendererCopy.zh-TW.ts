@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: ba3fefe542e86aef41fe1a143e9a29026db8f9079aa50670503f693a7e23d415（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: d6aaae40530ccb00194d441edf5b3d3013388bcc2cfc6388b8cf136ac56fd96b（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -3985,12 +3985,16 @@ export const zhTW: Record<TranslationKey, string> = {
 	"menu.restartSession": "重啟會話",
 	"menu.reloadResources": "重新載入擴充套件與技能",
 	"menu.reloadResourcesHint": "不重啟程序，重新載入擴充套件、技能、提示詞、主題和上下文檔案",
+	"menu.restartDshHost": "重啟 DSH Host",
+	"menu.restartDshHostHint": "會停止所有活躍 DSH 會話並重啟共享 host；會話記錄保留，重新開啟即可繼續",
 	"menu.reloadMessages": "從磁碟重新載入訊息",
 	"menu.reloadMessagesHint": "僅無程序會話可用：重新讀取會話檔案並重新整理時間線",
 	"menu.startAgent": "啟動 Agent",
 	"menu.sectionRunControl": "執行控制",
 	"menu.runControlHint": "會話未執行，點此啟動 Agent",
 	"runControl.toolbar": "會話執行控制",
+	"runControl.restartDshHostTitle": "重啟 DSH Host？",
+	"runControl.restartDshHostBody": "這會停止所有活躍 DSH 會話並重啟共享 host。會話記錄保留，重新開啟會話即可繼續。",
 	"runControl.restartRunningTitle": "重啟會話程序",
 	"runControl.restartRunningBody": "該會話的 Agent 正在執行，重啟會中斷當前回答並重新啟動程序。會話記錄與歷史訊息會保留。",
 	"runControl.startFailedTitle": "啟動 Agent 失敗",

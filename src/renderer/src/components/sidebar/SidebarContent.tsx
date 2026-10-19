@@ -9,7 +9,7 @@ import { isManagerSessionSummary, worktreeFamilyProjects } from "../../sessionMa
 import { t } from "../../i18n";
 import { cn } from "../../lib/utils";
 import { showNotice } from "../../utils/notice";
-import { resolveSessionRunState, sessionRunCapabilities, type SessionRunAction } from "../../utils/sessionCommands";
+import { resolveSessionReloadMode, resolveSessionRunState, sessionRunCapabilities, type SessionRunAction } from "../../utils/sessionCommands";
 import { getBoundSidebarRuntimeAgent, getBoundSidebarRuntimeAgentByAgentId, type SidebarController } from "../../hooks/useSidebarController";
 import type { RpcLogEntry } from "../../../../shared/types/rpcLog";
 import type { SidebarRunControl } from "./SidebarComponents";
@@ -233,7 +233,7 @@ export function SidebarContent(props: SidebarContentProps) {
 	 * 因此「有绑定」按 agentId 判定，与 Tab 下拉共用同一套策略函数避免判定漂移。
 	 * 过渡态（starting）由策略函数自身识别，侧栏不额外维护 busy。
 	 */
-	const buildSidebarRunControl = (sessionId: string, supportsHotReload: boolean): SidebarRunControl => {
+	const buildSidebarRunControl = (sessionId: string, backend: AgentBackend | undefined): SidebarRunControl => {
 		const runtime = controller.catalog.runtimeBySessionId[sessionId];
 		const hasBinding = Boolean(runtime?.agentId);
 		return {
@@ -243,7 +243,7 @@ export function SidebarContent(props: SidebarContentProps) {
 			}),
 			// 快照里有 agentId 就带上：菜单「复制 Agent ID」依赖它，且与 hasBinding 同源判定
 			agentId: runtime?.agentId,
-			supportsHotReload,
+			reloadMode: resolveSessionReloadMode(backend),
 			onAction: (action) => void actions.sessions.runControl(sessionId, action),
 		};
 	};
@@ -661,7 +661,7 @@ export function SidebarContent(props: SidebarContentProps) {
 						controller.closeMenu();
 					}}
 					// 运行控制全状态（启动/停止/重启/重载）：按 runtime 快照算能力，不再分 live/非 live 两套入口
-					runControl={menuAgentSessionId ? buildSidebarRunControl(menuAgentSessionId, !menuAgent.backend || menuAgent.backend === "pi") : undefined}
+					runControl={menuAgentSessionId ? buildSidebarRunControl(menuAgentSessionId, menuAgent.backend) : undefined}
 					// 会话代理：与 Tab 菜单/Session 菜单共用 App 层弹窗宿主；agent 维度此前缺失该入口
 					onOpenProxySetting={
 						menuAgentSessionId
@@ -737,7 +737,7 @@ export function SidebarContent(props: SidebarContentProps) {
 					menu={{ x: menu.x, y: menu.y }}
 					onClose={controller.closeMenu}
 					// 草稿会话同样给运行控制：不必先打开会话发消息就能启动 Agent
-					runControl={buildSidebarRunControl(menuDraft.id, !menuDraft.backend || menuDraft.backend === "pi")}
+					runControl={buildSidebarRunControl(menuDraft.id, menuDraft.backend)}
 					onCloseAgent={
 						menuDraftBoundAgent
 							? () => {
@@ -779,7 +779,7 @@ export function SidebarContent(props: SidebarContentProps) {
 						void actions.sessions.createSideTask(menuSession.projectId ?? menu.projectId, menuSession.backend);
 					}}
 					// 运行控制全状态：未启动的历史会话主控项即「启动 Agent」
-					runControl={buildSidebarRunControl(menuSession.id, !menuSession.backend || menuSession.backend === "pi")}
+					runControl={buildSidebarRunControl(menuSession.id, menuSession.backend)}
 					onExport={() => {
 						void actions.sessions.export(menu.projectId, menuSession);
 						controller.closeMenu();

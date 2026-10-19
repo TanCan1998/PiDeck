@@ -42,6 +42,15 @@ test("composer send path is gated while a hot reload is in flight", () => {
 	assert.match(send, /sessionCommand\.reloadResourcesBusy/);
 });
 
+test("DSH reload entry reuses the existing shared-host restart IPC", () => {
+	const commands = read("src/renderer/src/utils/sessionCommands.ts");
+	const hook = read("src/renderer/src/hooks/session/useSessionRunControl.ts");
+	assert.match(commands, /resolveSessionReloadMode/);
+	assert.match(commands, /dshHost/);
+	assert.match(hook, /restartDshHost/);
+	assert.match(hook, /api\.sessions\.restartDshHost\s*\(\s*\)/);
+});
+
 test("runtime adapter is always injected and listed in the extension manifest", () => {
 	const builtIns = read("src/main/extensions/builtInExtensions.ts");
 	const manifest = JSON.parse(read("resources/extensions/extensions-manifest.json"));

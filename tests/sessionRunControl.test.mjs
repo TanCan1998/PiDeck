@@ -39,7 +39,7 @@ function loadModule() {
 	return sandbox.exports;
 }
 
-const { resolveSessionRunState, sessionRunCapabilities, canRunSessionAction, resolveProxyApplyStrategy } = loadModule();
+const { resolveSessionRunState, resolveSessionReloadMode, sessionRunCapabilities, canRunSessionAction, resolveProxyApplyStrategy } = loadModule();
 
 /** 所有状态 + binding 组合：覆盖「无进程」的两类以及终态持有绑定的情形。 */
 const STATE_MATRIX = [
@@ -160,6 +160,18 @@ test("hot reload is only available for live idle sessions with no queued sends",
 	// busy（重启/停止/重载/激活在途）与排队消息都会拆掉正在处理的 handler，必须挡住。
 	assert.equal(sessionRunCapabilities({ state: "idle", hasBinding: true, busy: true }).canHotReload, false);
 	assert.equal(sessionRunCapabilities({ state: "idle", hasBinding: true, hasInFlightQueuedPrompt: true }).canHotReload, false);
+});
+
+test("reload entry is backend-specific: pi hot reload, DSH host restart, ACP none", () => {
+	assert.equal(resolveSessionReloadMode(undefined), "resources");
+	assert.equal(resolveSessionReloadMode("pi"), "resources");
+	assert.equal(resolveSessionReloadMode("dsh"), "dshHost");
+	assert.equal(resolveSessionReloadMode("acp"), "none");
+	// DSH host 重启由确认框做最终闸门；策略层复用 idle 判定。
+	const idle = sessionRunCapabilities({ state: "idle", hasBinding: true });
+	assert.equal(canRunSessionAction(idle, "reloadDshHost"), true);
+	const running = sessionRunCapabilities({ state: "running", hasBinding: true });
+	assert.equal(canRunSessionAction(running, "reloadDshHost"), false);
 });
 
 test("resolveSessionRunState normalizes runtime snapshots", () => {

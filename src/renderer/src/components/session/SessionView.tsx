@@ -17,7 +17,6 @@ import { SessionTodoStrip } from "./SessionTodoStrip";
 import { SessionTeamStrip } from "./SessionTeamStrip";
 import { SessionQueuedMessagesStrip } from "./SessionQueuedMessagesStrip";
 import { SessionSurfaceStage } from "./SessionSurfaceStage";
-import { SessionRunHoverToolbar } from "./SessionRunHoverToolbar";
 import { ComposerArea } from "./ComposerArea";
 import type { SessionRunControlView } from "../../utils/sessionCommands";
 import { useReplyActions } from "../../hooks/useReplyActions";
@@ -282,8 +281,7 @@ export function SessionView({
 
 	return (
 		<div className={splitPane ? `session-split-pane flex h-full min-h-0 flex-col${focused ? " session-split-pane-focused" : ""}` : "contents"} onMouseDown={splitPane ? () => onFocusPane?.() : undefined}>
-			{/* Tab 栏已统一外置；运行控制（停止/重启）在共享 Tab 栏的 Tab 下拉；
-          本栏只保留会话状态徽章与分屏身份标题（抽屉开关在共享 Tab 栏）。 */}
+			{/* Tab 栏已统一外置；本栏头部显示会话状态徽章、分屏身份标题与运行控制工具条。 */}
 			{(!paneServices.simpleNavigation || splitPane) && (
 				<SessionHeader
 					headerRef={chatHeaderRef}
@@ -295,6 +293,7 @@ export function SessionView({
 					isAnonymous={activeAgent?.noSession}
 					duration={sessionDuration}
 					isStarting={isAgentStarting}
+					runControl={runControl}
 				/>
 			)}
 			{/* GUI 扩展桥：会话头部状态区落点（ctx.gui.setStatusbarItem）。
@@ -319,7 +318,7 @@ export function SessionView({
 				resizeTargetMinimumSize={{ fine: 20, coarse: 24 }}
 			>
 				<ResizablePanel id="timeline" minSize={timelineColumnMinSize} className="session-v-timeline flex min-h-0 flex-col" style={timelineColumnStyle}>
-					<div className="session-v-timeline-stage group/timeline relative min-h-[var(--session-timeline-min,160px)] flex-1 overflow-hidden">
+					<div className="session-v-timeline-stage min-h-[var(--session-timeline-min,160px)] flex-1 overflow-hidden">
 						<SessionSurfaceStage
 							sessionId={sessionId}
 							sessionTimeline={sessionTimeline}
@@ -347,7 +346,6 @@ export function SessionView({
 								replyActionsRef: setReplyActionsTarget,
 							}}
 						/>
-						{runControl && !settingsOpen && !environmentDialog ? <SessionRunHoverToolbar control={runControl} className="absolute right-3 top-2 z-20" /> : null}
 					</div>
 					{/* 阻塞式 Ask 底栏（issue #230）：与输入框同级钉在对话区下方，
 					    不再随时间线滚动——用户上翻看历史时提问卡仍常驻可见，不必再往下找。

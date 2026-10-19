@@ -43,7 +43,7 @@ PiDeck 是 Electron 桌面应用，在多个项目目录间管理和运行 pi RP
 - RPC 模式不执行 pi 的 builtin `/reload`，也没有原生 reload RPC；pi 只把 `ctx.reload()` 暴露给扩展命令。内部扩展 `resources/extensions/pi-deck-runtime.ts` 只注册一个 `reload` 命令：`ctx.isIdle()` 时调用 `ctx.reload()`，不注册工具、不提供其他宿主控制。
 - 注入走 `INTERNAL_BUILT_IN_EXTENSIONS`（始终随 RPC 注入，`piRpcNoExtensions` 除外；不上设置页、不参与用户移除）。写入 `extensions-manifest.json`，热更新覆盖层按整份快照分发。
 - 宿主唯一入口：`sessions:runtime-reload-resources` → `SessionRuntimeCoordinator.reloadResources` → `AgentManager.reloadResources`。后者先 `get_state`/挂起 UI 请求校验 idle，再按 `sourceInfo.path` 确认命令来自 `pi-deck-runtime.ts`，最后直接发 RPC prompt；**禁止复用 `sendPrompt`**（它会在 RPC 前写乐观用户消息）。重载后重新 `get_commands` 返回新命令表，渲染层刷新 `/` 菜单与时间线命令 chip。
-- 只对 pi 的 live idle 会话开放；running/compacting/有排队消息/挂起 Ask 时拒绝，DSH/ACP 不提供入口。扩展缺失、重载失败、命令未被 `handled` 都返回结构化错误 + toast，不影响会话本身；禁止扩展成通用命令执行桥。
+- 扩展热重载只对 pi 的 live idle 会话开放；running/compacting/有排队消息/挂起 Ask 时拒绝，ACP 不提供。DSH 的 reload 入口复用现有 `dsh:restart-host`（共享 host，需确认，会停止活跃 DSH 会话），不经过本例外通道。扩展缺失、重载失败、命令未被 `handled` 都返回结构化错误 + toast，不影响会话本身；禁止扩展成通用命令执行桥。
 
 ## 目录结构与跨层契约
 
