@@ -327,6 +327,7 @@ export function SessionView({
 							sessionId={sessionId}
 							sessionTimeline={sessionTimeline}
 							isRestarting={isRestarting}
+							isReloading={Boolean(runControl?.isReloading)}
 							timelineProps={{
 								instantSessionSwitch: paneServices.simpleNavigation,
 								hasProject,
