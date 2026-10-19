@@ -12,7 +12,7 @@ const customLogoAtom = atom("");
 // AcpBackendMark 需要的工具表镜像（真实 acp-atoms 会引入 channelSwitchAtoms 的 jotai atom，
 // 该沙箱只提供 useAtomValue，用本地 atom 隔离即可）。
 const acpToolsAtom = atom([]);
-const { PiLogo, DshLogo, SessionSourceBadge, AcpBackendMark } = loadTsCommonJs("src/renderer/src/components/session/SessionSourceBadge.tsx", {
+const { PiLogo, DshLogo, SessionSourceBadge, SessionBackendBadge, AcpBackendMark } = loadTsCommonJs("src/renderer/src/components/session/SessionSourceBadge.tsx", {
 	stubs: {
 		// VM 用 CJS require，测试用 ESM import；共用同一个 Jotai hook，避免两个 Provider context。
 		jotai: { useAtomValue },
@@ -95,6 +95,18 @@ test("自定义 logo 风格：来源徽标渲染用户图片，风格切回内�
 	store.set(customLogoAtom, "data:image/png;base64,AAAA");
 	// 非 custom 风格下即使镜像里残留图片也不渲染它
 	assertPiTuiLogo(renderLogo(PiLogo, {}, store));
+});
+
+test("DSH 后端标记用官方鲸鱼 logo（品牌蓝），不再渲染灰色文本徽标", () => {
+	const html = renderLogo(SessionBackendBadge, { backend: "dsh" });
+	// 官方 logo 的 viewBox（DeepSeek 鲸鱼），并带品牌蓝
+	assert.match(html, /viewBox="0 0 50 50"/u);
+	assert.match(html, /text-\[#4d6bfe\]/u);
+	// 语义仍保留给悬停提示与读屏
+	assert.match(html, /aria-label="sessionBackend\.dsh"/u);
+	assert.match(html, /role="img"/u);
+	// 不再把「DSH」当正文文本渲染
+	assert.doesNotMatch(html, />sessionBackend\.dsh</u);
 });
 
 test("切换 pi logo 风格不改变 DSH 或其他会话来源品牌", () => {

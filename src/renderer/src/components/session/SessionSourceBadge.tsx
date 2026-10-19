@@ -264,12 +264,26 @@ export function AgentPresetLogo(props: { className?: string }) {
 	);
 }
 
-/** 后端文本标记：DSH=短文本；生图=图片图标+短文本/仅图标，避免与来源徽标重复；ACP=终端图标+通用名（工具名在输入框/会话详情展示）。 */
+/** DeepSeek 官方品牌蓝（logo 原色）；暗色下提亮一档保证可辨识。 */
+const DSH_LOGO_TONE = "text-[#4d6bfe] dark:text-[#8b9dff]";
+
+/**
+ * 后端标记：DSH 用官方鲸鱼 logo（品牌蓝），不再显示灰色「DSH」文本；
+ * 生图/ACP 仍是「图标 + 短文本」，避免与来源徽标重复（工具名在输入框/会话详情展示）。
+ */
 export function SessionBackendBadge(props: { backend?: AgentBackend; className?: string }) {
 	const backend = props.backend ?? "dsh";
 	const isImageGen = backend === "imagegen";
 	const isAcp = backend === "acp";
 	const label = isImageGen ? t("sessionBackend.imagegen") : isAcp ? t("sessionBackend.acp") : t("sessionBackend.dsh");
+	// DSH：会话列表 / Tab 上的品牌标识用图形而非文字（用户反馈文本徽标又灰又弱，认不出是哪个后端）。
+	if (backend === "dsh") {
+		return (
+			<span role="img" aria-label={label} title={label} data-backend={backend} className={cn("inline-flex shrink-0 items-center justify-center", props.className)}>
+				<DshLogo className={cn("size-3.5", DSH_LOGO_TONE)} />
+			</span>
+		);
+	}
 	return (
 		<Badge
 			variant="outline"
@@ -334,9 +348,10 @@ export function ImageGenSourceBadge(props: { className?: string }) {
 }
 export function DshSourceBadge(props: { className?: string }) {
 	const label = t("sessionBackend.dsh");
+	// 描边保持中性，logo 用 DeepSeek 官方品牌蓝：与列表/Tab 上的 DSH 标记同一观感。
 	return (
-		<Badge variant="outline" aria-label={label} title={label} data-source="dsh" className={cn("size-5 rounded-md p-0 border-sky-300/70 text-sky-700 dark:border-sky-700/70 dark:text-sky-300", props.className)}>
-			<DshLogo />
+		<Badge variant="outline" aria-label={label} title={label} data-source="dsh" className={cn("size-5 rounded-md border-border-strong p-0", props.className)}>
+			<DshLogo className={cn("size-3", DSH_LOGO_TONE)} />
 		</Badge>
 	);
 }
