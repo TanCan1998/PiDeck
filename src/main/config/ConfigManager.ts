@@ -22,11 +22,11 @@ import { mergeSettingsFormPayload } from "./settingsFormPayload";
 import { ensureTokendanceAttribution } from "./tokendanceAttribution";
 import { getAppLogger } from "../logging/sharedLogger";
 import { buildProbeFailureDetail, buildProbeHeaders, candidateApplies, getByPath, parseUsageResponseBody, USAGE_PROBE_CANDIDATES, usageProbeUrls } from "./providerUsageProbe";
-import { parseSub2ApiPanelBalance } from "./providerUsageCustom";
+import { fetchSub2ApiPanelBalanceWithRefresh, type Sub2ApiPanelTokens } from "./sub2apiPanelSession";
 import type { UsageProbeAttempt, UsageProbeCandidate } from "./providerUsageProbe";
 import { resolveProviderUsageEndpoint } from "./providerUsageResolver";
 import { buildDeclarativeUsageProbeTemplate, isDeclarativeTemplateId, USAGE_PROBE_CATEGORY_BY_TEMPLATE_ID } from "./usageProbeTemplates";
-import { loadUsageProbeProviderConfigs, loadUsageProbeSettings, loadUserUsageProbes, loadUserUsageProbesDetailed } from "./userUsageProbes";
+import { loadUsageProbeProviderConfigs, loadUsageProbeSettings, loadUserUsageProbes, loadUserUsageProbesDetailed, updateUsageProbeSub2ApiTokens } from "./userUsageProbes";
 import type { UserUsageProbe, UsageProbeSettingsLoadResult } from "./userUsageProbes";
 import { usageProbeRequest } from "./usageProbeTransport";
 import { pideckUsageProbesDir } from "../dsh/pideckDshHome";
@@ -50,6 +50,18 @@ export type DshUsageLookup = {
 
 // Provider 用量/连接探测面对的是第三方网关，首包可能慢于普通模型；放宽超时避免误判。
 const PROVIDER_TEST_TIMEOUT_MS = 45_000;
+
+/**
+ * Sub2API 面板登录态的续期上下文（仅 sub2api 模板的余额段使用）。
+ * persist=true 时续期成功的新 token 对会写回 configDir 下的 usage-probes.json；
+ * 弹窗「测试」路径 persist=false（用户还没保存，不能静默改盘上的配置）。
+ */
+type Sub2ApiPanelContext = {
+	provider: string;
+	configDir: string;
+	refreshToken?: string;
+	persist: boolean;
+};
 
 // 模型列表拉取的"显式代理"专用 session。
 // 为什么不用 defaultSession + session.setProxy 全局改：桌面代理全局开关是用户
@@ -1001,6 +1013,14 @@ export class ConfigManager {
 		const api = this.normalizeApiType(resolved.apiType);
 		const timeoutMs = (settings.config?.timeoutSecs ?? 10) * 1000;
 		const intervalMinutes = settings.config?.intervalMinutes ?? USAGE_PROBE_DEFAULT_INTERVAL_MINUTES;
+		// 面板登录态续期上下文：续期成功后把新 token 对写回「本次实际读取的配置目录」
+		// （回退到 Pi 侧配置时 effectiveDir 指向 Pi 目录，回来仍读同一份）。
+		const panelContext: Sub2ApiPanelContext = {
+			provider,
+			configDir: effectiveDir,
+			...(settings.config?.panelRefreshToken ? { refreshToken: settings.config.panelRefreshToken } : {}),
+			persist: true,
+		};
 
 		// 3) 模板路由：声明式模板优先（用户显式选择），否则内置 + 旧探针自动匹配。
 		const template = settings.config?.template;
@@ -1014,7 +1034,7 @@ export class ConfigManager {
 			}
 			// candidates 而不是 candidate：火山方舟是双 Action 候选（Agent Plan / Coding Plan
 			// 自动探测），其余模板 candidates 长度也是 1，走同一条执行路径。
-			return this.runProviderUsageProbes(built.baseUrl, built.apiKey, resolved.headers, built.candidates, timeoutMs, intervalMinutes);
+			return this.runProviderUsageProbes(built.baseUrl, built.apiKey, resolved.headers, built.candidates, timeoutMs, intervalMinutes, panelContext);
 		}
 
 		const userProbes = await loadUserUsageProbes(effectiveDir);
@@ -1025,7 +1045,7 @@ export class ConfigManager {
 		if (applicable.length === 0) {
 			return { success: false, error: this.translate("mainConfig.providerUsageUnsupported") };
 		}
-		return this.runProviderUsageProbes(resolvedBaseUrl, resolvedApiKey, resolved.headers, applicable, timeoutMs, intervalMinutes);
+		return this.runProviderUsageProbes(resolvedBaseUrl, resolvedApiKey, resolved.headers, applicable, timeoutMs, intervalMinutes, panelContext);
 	}
 
 	/**
@@ -1190,6 +1210,9 @@ export class ConfigManager {
 					currencyPath: input.currencyPath,
 					accessKeyId: input.accessKeyId,
 					secretAccessKey: input.secretAccessKey,
+					// 面板登录态不做主用量鉴权，但弹窗测试也要能看到钱包余额段（否则测出来总比真实查少一段）。
+					// refresh token 不经过模板构建（模板只管挂 panelBalance 候选），由 panelContext 传给执行层。
+					panelJwt: input.panelJwt,
 				},
 				{ baseUrl: resolvedBaseUrl, apiKey: resolvedApiKey },
 			);
@@ -1197,7 +1220,14 @@ export class ConfigManager {
 				return { success: false, error: built.error };
 			}
 			// candidates：火山方舟双 Action 探测（Agent Plan / Coding Plan）依次尝试。
-			return this.runProviderUsageProbes(built.baseUrl, built.apiKey, resolved.headers, built.candidates, timeoutMs, 0);
+			// 弹窗测试也允许面板登录态就地续期，但 persist=false：用户未保存前不得静默改盘上的配置。
+			const panelContext: Sub2ApiPanelContext = {
+				provider: input.provider,
+				configDir: "",
+				...(input.panelRefreshToken ? { refreshToken: input.panelRefreshToken } : {}),
+				persist: false,
+			};
+			return this.runProviderUsageProbes(built.baseUrl, built.apiKey, resolved.headers, built.candidates, timeoutMs, 0, panelContext);
 		}
 
 		// 内置模板：按 templateId 找候选（不可改写结构，测的是零配置路径本身）。
@@ -1300,12 +1330,12 @@ export class ConfigManager {
 	}
 
 	/** 带统一错误包装的探测执行：无 key 快速失败，其余走 runUsageProbes；成功时带上生效间隔。 */
-	private async runProviderUsageProbes(baseUrl: string, apiKey: string, requestHeaders: Record<string, string> | undefined, candidates: UsageProbeCandidate[], timeoutMs: number, intervalMinutes: number): Promise<ProviderUsageResult> {
+	private async runProviderUsageProbes(baseUrl: string, apiKey: string, requestHeaders: Record<string, string> | undefined, candidates: UsageProbeCandidate[], timeoutMs: number, intervalMinutes: number, panel?: Sub2ApiPanelContext): Promise<ProviderUsageResult> {
 		// 无 key 时只可能 401，快速失败并给出提示。
 		if (!apiKey) {
 			return { success: false, error: this.translate("mainConfig.providerUsageNoKey") };
 		}
-		const result = (await this.runUsageProbes(baseUrl, apiKey, this.normalizeRequestHeaders(requestHeaders), candidates, timeoutMs)) ?? {
+		const result = (await this.runUsageProbes(baseUrl, apiKey, this.normalizeRequestHeaders(requestHeaders), candidates, timeoutMs, panel)) ?? {
 			success: false,
 			error: this.translate("mainConfig.providerUsageFailed"),
 		};
@@ -1319,7 +1349,7 @@ export class ConfigManager {
 	 * timeoutMs 由 per-provider 配置（默认 10s）传入：用量查询首包超时按用户设定收紧，
 	 * 不再固定 45s（那只对模型连接探测合理）。
 	 */
-	private async runUsageProbes(baseUrl: string, apiKey: string, extraHeaders: Record<string, string>, candidates: UsageProbeCandidate[], timeoutMs: number): Promise<ProviderUsageResult | undefined> {
+	private async runUsageProbes(baseUrl: string, apiKey: string, extraHeaders: Record<string, string>, candidates: UsageProbeCandidate[], timeoutMs: number, panel?: Sub2ApiPanelContext): Promise<ProviderUsageResult | undefined> {
 		const startedAt = Date.now();
 		// 收集每次失败尝试，全部未命中时拼进 detail（URL + 状态码 + 摘要 + 归纳提示），
 		// 让用户在弹窗里能直接排查（地址对不对 / 鉴权失效 / 接口变更）。
@@ -1415,7 +1445,9 @@ export class ConfigManager {
 					// 并进结果（与已用并列展示）；JWT 过期/接口异常只丢余额段，主结果照常返回，
 					// 但带上失败原因（401=过期最常见），UI 显式提示而不是无感消失。
 					if (candidate.panelBalance && parsed.kind !== "balance" && !parsed.balance) {
-						const merged = await this.fetchSub2ApiPanelBalance(baseUrl, candidate.panelBalance.token, timeoutMs);
+						// 面板 JWT 可能在两次查询之间过期：按 exp/401 就地续期（不后台定时转 token，
+						// 上游 refresh 是单次轮转的），续期成功的新 token 对由 fetchSub2ApiPanelBalance 回写。
+						const merged = await this.fetchSub2ApiPanelBalance(baseUrl, { accessToken: candidate.panelBalance.token, ...(panel?.refreshToken ? { refreshToken: panel.refreshToken } : {}) }, timeoutMs, panel);
 						if (merged.ok) result.balance = merged.balance;
 						else result.panelBalanceError = merged.reason;
 					}
@@ -1442,38 +1474,43 @@ export class ConfigManager {
 	 * Sub2API 面板余额：GET {origin}/api/v1/auth/me（网页后台 JWT 鉴权，上游通用路由
 	 * auth_handler.GetCurrentUser → userProfileResponse 内嵌 dto.User，余额在 data.balance）。
 	 * 管理面挂在网关 host 根而非 OpenAI 兼容 base（/v1），故 rootPath 只取 origin；
-	 * 请求头以 JWT 作为 Bearer 凭据（与 apiKey 同一形式）。失败时返回 { ok:false, reason }：
-	 * 401 归因为 unauthorized（JWT 过期/无效，最常见），其余归为 failed；面板余额是锦上
-	 * 添花段，绝不能拖垮主用量结果，UI 依 reason 给出「重贴新令牌」提示。
+	 * 请求头以 JWT 作为 Bearer 凭据（与 apiKey 同一形式）。
+	 *
+	 * 登录态过期由 sub2apiPanelSession 处理：本地 JWT exp 到点或 /auth/me 返 401 时，用
+	 * refresh token 调 POST /api/v1/auth/refresh 换新令牌再重试一次，成功后（只有在 persist
+	 * 上下文下）把轮转后的 token 对写回 usage-probes.json。失败时返回 { ok:false, reason }：
+	 * 401 归因为 unauthorized（续期不可用 = 登录态真失效，需用户重贴），其余归为 failed；
+	 * 面板余额是锦上添花段，绝不能拖垮主用量结果。
 	 */
-	private async fetchSub2ApiPanelBalance(baseUrl: string, token: string, timeoutMs: number): Promise<{ ok: true; balance: ProviderUsageResult["balance"] } | { ok: false; reason: "unauthorized" | "failed" }> {
-		// rootPath：跳过版本化补齐与路径段拼接，只取 origin + /api/v1/auth/me。
-		const urls = usageProbeUrls({ path: "/api/v1/auth/me", rootPath: true }, baseUrl, (url) => this.ensureVersionPath(url));
-		let unauthorized = false;
-		for (const url of urls) {
-			const result = await usageProbeRequest(url, {
-				method: "GET",
-				headers: this.withOpenAiSdkUserAgent(buildProbeHeaders(undefined, token)),
-				timeoutMs,
-				maxBytes: MAX_USAGE_RESPONSE_BYTES,
-			});
-			if ("error" in result) continue;
-			// 401 = JWT 过期/无效：面板鉴权体系里唯一可归因的确定性失败，单独标记。
-			if (result.status === 401) {
-				unauthorized = true;
-				continue;
-			}
-			if (result.status < 200 || result.status >= 300) continue;
-			let body: unknown;
-			try {
-				body = JSON.parse(result.raw);
-			} catch {
-				body = null;
-			}
-			// 响应体先按 JWT 脱敏再进解析（profile 含邮箱等账号信息，且不能让令牌意外落入 raw）。
-			const parsed = parseSub2ApiPanelBalance(body, this.redactSecret(result.raw, token));
-			if (parsed.matched && parsed.balance) return { ok: true, balance: parsed.balance };
-		}
-		return { ok: false, reason: unauthorized ? "unauthorized" : "failed" };
+	private async fetchSub2ApiPanelBalance(baseUrl: string, tokens: Sub2ApiPanelTokens, timeoutMs: number, panel?: Sub2ApiPanelContext): Promise<{ ok: true; balance: ProviderUsageResult["balance"] } | { ok: false; reason: "unauthorized" | "failed" }> {
+		// rootPath：跳过版本化补齐与路径段拼接，只取 origin + /api/v1/...。
+		const balanceUrls = usageProbeUrls({ path: "/api/v1/auth/me", rootPath: true }, baseUrl, (url) => this.ensureVersionPath(url));
+		const refreshUrls = usageProbeUrls({ path: "/api/v1/auth/refresh", rootPath: true }, baseUrl, (url) => this.ensureVersionPath(url));
+		const outcome = await fetchSub2ApiPanelBalanceWithRefresh({
+			balanceUrls,
+			refreshUrls,
+			tokens,
+			timeoutMs,
+			maxBytes: MAX_USAGE_RESPONSE_BYTES,
+			request: usageProbeRequest,
+			// 凭据一律走 Bearer（noBearer 不适用）；UA 仍由 OpenAI SDK 伪装，避免被网关拦截。
+			buildAuthHeaders: (accessToken) => this.withOpenAiSdkUserAgent(buildProbeHeaders(undefined, accessToken)),
+			refreshHeaders: () => this.withOpenAiSdkUserAgent({}),
+			...(panel?.persist
+				? {
+						onTokensRefreshed: async (pair) => {
+							// 上游轮转：旧 refresh token 已作废，不立即落盘就会把用户的登录态彻底弄丢。
+							const saved = await updateUsageProbeSub2ApiTokens(panel.configDir, panel.provider, {
+								panelJwt: pair.accessToken,
+								...(pair.refreshToken ? { panelRefreshToken: pair.refreshToken } : {}),
+							});
+							if (!saved.ok) void getAppLogger()?.warn("config", "Sub2API panel token refresh not persisted", { provider: panel.provider, error: saved.error });
+							else void getAppLogger()?.info("config", "Sub2API panel token refreshed", { provider: panel.provider });
+						},
+					}
+				: {}),
+		});
+		if (outcome.ok) return { ok: true, balance: outcome.balance };
+		return { ok: false, reason: outcome.reason };
 	}
 }

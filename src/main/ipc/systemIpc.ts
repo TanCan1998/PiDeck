@@ -2393,6 +2393,8 @@ export function registerSystemIpc(deps: SystemIpcDeps): void {
 			...(typeof input.secretAccessKey === "string" ? { secretAccessKey: input.secretAccessKey } : {}),
 			// Sub2API 面板 JWT（可选）：透传后模板构建才会挂 panelBalance 追加余额请求。
 			...(typeof input.panelJwt === "string" ? { panelJwt: input.panelJwt } : {}),
+			// 配套 refresh token：JWT 过期时测试按钮也能就地续期（不落盘）。
+			...(typeof input.panelRefreshToken === "string" ? { panelRefreshToken: input.panelRefreshToken } : {}),
 			...(typeof input.timeoutSecs === "number" ? { timeoutSecs: input.timeoutSecs } : {}),
 		});
 		void appLogger.info("config", "Usage probe tested", {
