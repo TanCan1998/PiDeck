@@ -152,6 +152,12 @@
 - **回归测试必须跑真实层级**：表格行（cell 内 text）、跨换行正文（`\n` 之后仍是同一个 text 节点）、inline code `__fileLink` 分支、路径正好在末尾（不留空 text 节点）。写法见 `tests/markdownPathTailTruncation.test.mjs`（unified + remark-parse 二次解析对比可见文本，不依赖 cwd/真实项目）。
 - **考古别只看最近几笔提交**：渲染丢文本这类回归可能潜伏数周，用 `git log --oneline -- <文件>` / `git log -S <片段>` 回到底，确认是「谁引入、为什么当时测不出」，再把这两件事写进注释与测试。
 
+## 推送与 AtomGit 镜像（pre-push 钩子）
+
+- `.githooks/pre-push`（`core.hooksPath=.githooks`，`npm install` 的 prepare 会安装）会把本次推送的引用镜像到 AtomGit；默认尽力而为，失败只提示不阻断，`PI_DECK_ATOMGIT_STRICT=1` 才让镜像失败即推送失败。
+- **无凭据的非交互环境（CI、agent 会话）里，镜像步骤会让随后的 GitHub 主推送失败**：`Connection to github.com closed by remote host` / `fatal: unable to write flush packet: Broken pipe`（2026-10-19 连续三次必现，跳过镜像即成功）。绕过：`PI_DECK_SKIP_ATOMGIT=1 git push origin dev`；新设备首次镜像需在交互终端完成一次 AtomGit 授权。
+- 判据：`git ls-remote origin dev` 正常但 `git push` 报 broken pipe ⇒ 先怀疑镜像钩子，不要当网络问题反复重试。
+
 ## 对话内图片渲染（Markdown img / 本地路径 / 协议取舍）
 
 - **现状（未改造）**：`MarkdownStream` 的 `components` 只覆盖了 `a`，`img` 走 streamdown 默认渲染；样式只有 `.markdown-body img{max-width:100%;border-radius}`。缺懒加载、限高、点击放大（生图消息有预览浮层，可复用）、加载失败兜底、多图并排——要并排只能把图物理缩成小图再一行引用。
@@ -163,9 +169,9 @@
 - **工具结果里的 image block 目前不可见**：交互动线只渲染类别文案「已读取图片」（`src/renderer/src/components/session/timeline/toolCategory.ts`），主进程 `AgentManager` 的 `formatToolDetail` / `extractToolResultText` 只产出文本；assistant 消息里的 image block 在 `src/main/pi/messageContent.ts` 的 `extractMessageText` 被 `if (type === "image") continue` 丢弃。做可视化等于改工具投影契约（消息带 `images` 或写 blob 存 ref），**单独立 issue**，别混进渲染层改动。
 - **边界**：PiDeck 不提供「截图/贴图到会话」的工具 API——agent 行为归 pi；PiDeck 的职责只有「任何指向本地图片的 Markdown 都能稳定渲染」。
 - **已落地（2026-10，阶段 1+2）**：本地图不再走裸 `file://`，统一 `pideck-file://local/?path=<绝对路径>`（`src/shared/localImage.ts` 是线格式唯一来源）。白名单根 = userData + `<tmp>/pideck-shots` + 聊天工作区 + 全部项目路径；**realpath 后复检**（防符号链接逃逸）、≤32MiB、`no-store` + `nosniff` + CSP sandbox，判定在 `src/main/media/localImageAccess.ts`（纯函数、可单测）。不要退回 `file://`：dev 页源是 `http://localhost`，Chromium 直接拒 `file://` 子资源，等于同一段 Markdown 在 dev 白图。
-- **渲染侧硬约束**：Markdown 图片唯一入口是 `MarkdownImage`（`MarkdownStream` 的 `components.img` 注入）——懒加载、限高 420px、点击放大、失败降级成「失败文案 · alt/原路径」，**任何分支都不得产出空 `src` 的白图**。预览浮层唯一实现是 `ImageLightbox`（`ImagePreviewModal` 只剩“注入复制/保存动作条”的薄壳，Markdown 图与附件图共用）。`remarkRecoverLocalImages` 只在「段落仅一个未转义 text 节点 + `/`、`./`、盘符前缀 + 图片扩展名 + 路径含空格」时动手，放宽它会改写正文里的语法示例。
+- **渲染侧硬约束**：Markdown 图片唯一入口是 `MarkdownImage`（`MarkdownStream` 的 `components.img` 注入）——单图 `block` + `max-width:min(100%,640px)` + `max-height:360px`；同段 ≥2 张切 64px 瓷砖（数量标注见 `remarkMarkMultiImageParagraphs`，别让组件去猜兄弟节点）；懒加载、点击放大、失败降级成「失败文案 · alt/原路径」+ 重试，**任何分支都不得产出空 `src` 的白图**。预览浮层唯一实现是 `ImageLightbox`（`ImagePreviewModal` 只剩“注入复制/保存动作条”的薄壳，Markdown 图与附件图共用）。`remarkRecoverLocalImages` 只在「段落仅一个未转义 text 节点 + `/`、`./`、盘符前缀 + 图片扩展名 + 路径含空格」时动手，放宽它会改写正文里的语法示例。
 - **两个真机坑（2026-10-19 dev 实例 smoke 暴露，单测看不见）**：① Windows `app.getPath("temp")` 返回 **8.3 短名**（`C:\Users\ADMINI~1\…`），消息里是长名 → 白名单比较字面不等，白名单内的图全判 403；必须用 `realpath.native`（`main/media/nativeRealpath.ts`），**普通 `fs.realpath` 不展开中间段短名**。② `mdast-util-to-hast` 把反斜杠编码成 `%5C`（`C:\Users\a` → `C:%5CUsers%5Ca`），图片目标必须先百分号解码再判盘符/协议，否则被当未知协议丢弃、图静默变 alt。**测试要喂 hast 形态的 src**，只测 mdast url 会漏掉这两层。
-- **后续计划**：阶段 3（工具结果 image block 可视化）与取舍依据见 `docs/markdown-image-rendering-plan.md`；阶段 3 有前置探针（pi 的 `tool_execution_end.result` 到不到图片字节）。设计参照 dsh 的“双通道”（进会话的图入库做 ref，被引用的图借看），但白名单与上限是 PiDeck 自建（dsh 靠 fs sandbox，PiDeck 没有那一层）。
+- **后续计划**：阶段 3（工具结果 image block 可视化）**探针已完成**（2026-10-19）：pi 的 `toolResult.content` 确实带 `{type:"image", data:<base64>, mimeType}`，且 base64 直接内联写进 pi 的会话文件 ⇒ 可行；但当前决定**只记账不实施**。真要做时：main 侧读时投影成 blob ref（**不把 base64 塞进消息对象、不改写 pi 会话文件**），约束与范围见 `docs/markdown-image-rendering-plan.md` 阶段 3。设计参照 dsh 的“双通道”（进会话的图入库做 ref，被引用的图借看）；白名单与上限是 PiDeck 自建（dsh 靠 fs sandbox，PiDeck 没有那一层）。
 
 ## 自定义主题包（userData/custom-themes + shared/customThemes）
 

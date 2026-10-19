@@ -1,6 +1,6 @@
 # 对话内图片渲染改造计划（Markdown 图 / 本地路径 / 工具结果图）
 
-状态：阶段 1（渲染层）、阶段 2（`pideck-file://` 只读协议）已落地（2026-10-19）；阶段 3（工具结果图）待前置探针。
+状态：阶段 1（渲染层）、阶段 2（`pideck-file://` 只读协议）已落地（2026-10-19）；阶段 3（工具结果图）探针已完成、结论可行，当日决定先记账暂不实施。
 立项 2026-10-19，结论依据见文末「决策记录」，落地清单见「落地记录」。
 起点：`docs/maintenance-domains.md` →「对话内图片渲染（Markdown img / 本地路径 / 协议取舍）」小节的现状盘点。
 参照实现：dsh（本机 `F:\deepseek-harness`，只作设计参照，不引入任何依赖）。
@@ -28,7 +28,7 @@
 | 失败降级：无 resolver 不渲染 `<img>`，只显示 alt；加载失败替换成「加载失败 · alt(或原路径)」 | ✅ 照抄 | `MarkdownImage` 组件的 failed 态，文案走 i18n |
 | `recoverLocalImages`：整段唯一节点、未转义、扩展名为图片、路径含空格时，把被解析器拆坏的 `![alt](/abs/a b.png)` 还原成 image 节点 | ✅ 照抄 | 新增 remark 插件 `remarkRecoverLocalImages`（放 `src/renderer/src/utils/markdownPlugins.ts`） |
 | 相对路径按会话 cwd 解析（`resolveWorkspacePath`），绝对路径才直读 | ✅ 照抄 | 纯函数 `resolveMarkdownImageSrc(url, ctx)` 里做，ctx 注入会话 cwd + 工作区根 |
-| 尺寸规则：单图长边 240px、长宽比夹 [0.25, 4] 且裁切贴上/贴左；多图 64px 瓷砖；点击 lightbox；缩略图失败给重试 | ✅ 照抄（数值按 PiDeck 视觉再定） | `MarkdownImage` 单一组件内三种 variant |
+| 尺寸规则（两档不同起源，别搞混）：**markdown 路径图** = `display:block` + `max-width: min(100%, 640px)` + `max-height: 360px`（contain）；**消息附件图**才是「单图长边 240、长宽比夹 [0.25, 4] 且裁切贴上/贴左」与「多图 64px 瓷砖」 | ✅ 均已对照吸收：markdown 图用前一套数值；**同段多图**直接借后一套的 64px 瓷砖 + 失败图标重试 | `MarkdownImage` 两档（`groupCount` 切）+ `remarkMarkMultiImageParagraphs` 标注 |
 | 工具结果图有专属卡片，引用**只从 result content 取**、不从 meta 复制（防 hook 改过结果后显示旧图） | ✅ 抄原则 | 阶段 3；通用化为「任何工具结果里的 image block 都渲染成画廊」 |
 | 准入：单图字节 / 每消息张数 / 总字节 / 像素 / 边长 + **魔数校验**（声明格式必须与解码一致） | 🟡 部分抄 | 只抄魔数校验；字节与张数上限已有，不引 sharp |
 | 会话授权 → 字节 → blob URL → 手动 revoke（`historical-images.ts`） | ❌ 不抄 | 自定义协议由 Chromium 管缓存，少一层生命周期 |
@@ -97,20 +97,27 @@ dsh 参照文件（需要复核时直接读）：`packages/client/ui-primitives/
 
 验收：dev 与打包都能出图；白名单外路径不出图且控制台/主进程日志有可判定原因。
 
-### 阶段 3：工具结果图片（前置未决，先探针后实施）
+### 阶段 3：工具结果图片（探针已完成：可行；2026-10-19 决定先记账，未实施）
 
-**前置探针（必须先做，判定后才能排期）**：确认 pi 的工具结果在 RPC 事件里是否携带 image content block。
+**探针结果（2026-10-19 实测当前会话 JSONL）**：pi 的 `toolResult.content` 确实带图片块——
+实形是 `[{type:"text"},…,{type:"image", data:"<base64>", mimeType:"image/png"},…]`
+（一次 `read` 的 95KB PNG → base64 130060 字符）。用户贴图同样是 `{type:"image", data, mimeType}` 内联。
+⇒ **数据前提成立**，不是“拿不到”，而是主进程 `formatToolDetail` 只抽文本、image block 被丢掉，
+所以工具卡只剩「已读取图片」四个字。
 
-1. 用 `read` 读一张 png，抓 `tool_execution_end` 的 `result`。
-2. 判定：`result.content` 里有 `{type:"image", data|source.data}` → 阶段 3 可行；只有文本（如 `<path>…</path>` 信封）→ 只能靠文本路径走阶段 2 的借看通道，阶段 3 降级为「从结果文本里提取图片路径并渲染缩略图」。
+**实现约束（真的要做时照此执行）**：
 
-若可行，改动清单：
+- 落点：main 侧投影。工具结果 image block → 现有内容寻址 blob store → 工具消息带 `ImageContent{ref}` →
+  工具卡缩略图（点击复用 `ImageLightbox`）。
+- **绝不把 base64 塞进消息对象**：一次会话几张图就是上百万字符的堆内存，正是 2026-09 生图白屏事故的形态（`base64 不进会话`是生图侧的铁律）。源头在 pi（它把 base64 内联写进会话文件），
+  PiDeck 只做**读时投影**，不参与写入。
+- **不改写 pi 会话文件**（pi 活着禁改）：历史重载时按同一规则重新投影；blob put 是内容寻址的，幂等。
+- 兜底：>32MiB / mime 不在白名单 / 投影失败 → 跳过并保留工具卡原有文本，不影响工具执行。
+- 范围：`AgentManager.upsertToolMessage` + `SessionHistoryReader` 各一处投影 + 工具卡渲染 +
+  测试（1 图 / 多图 / 无图 / 超大 / mime 非白名单）。
 
-- 主进程 `AgentManager.upsertToolMessage`：解析 tool result 的 image block → `ImageBlobStore.put()` → 消息 `images: ImageContent[]`（与 `FinalAnswer` 的图片字段同构）。
-- 渲染层：工具卡内复用 `ImageGallery` 形态（阶段 1 已抽出 `MarkdownImage`，此处复用同一缩略图/lightbox）。
-- 测试：工具结果带 1 图 / 多图 / 无图 / 超大被拒 四种。
-
-若不可行：本阶段封存，在 `docs/maintenance-domains.md` 记一句「pi 工具结果不带图片字节，工具图只能靠路径借看」。
+**为什么先不做**：价值最高场景是「agent 看图后下结论」——错误不易被发现时，「过程可见」才有意义；
+日常不受影响。所以不做不阻塞任何东西，真痛了再上。
 
 ## 5. 非目标
 
@@ -193,3 +200,5 @@ dsh 参照文件（需要复核时直接读）：`packages/client/ui-primitives/
 再次验证：真机四条正例（盘符 / `file://` / 相对 / 带空格）全部出图，`%TEMP%` 根目录的反例按预期 403 降级为「失败文案 + 原路径」。
 
 吸收 dsh 的可用性细节（同批追加）：`ImageLightbox` 补上 `role="dialog"`/`aria-modal`、打开时焦点进关闭钮、**关闭后还原焦点**、Tab 圈在浮层内、Esc 捕获阶段 `stopPropagation`、backdrop 用 `mousedown` 判定（拖选松手不误关）；加载失败补「重试」按钮（清失败态 → img 重新挂载，文件修好后不用刷新会话）。
+
+布局规则照 dsh 抄（2026-10-19）：markdown 单图 = `block` + `max-width: min(100%, 640px)` + `max-height: 360px`（contain，竖排）；**同段 ≥2 张** → 64px 方块瓷砖（cover）+ 点击开原图 + 失败给刷新图标重试（对应 dsh `MessageImage` 的 tile/error 形态）。数量标注由 `remarkMarkMultiImageParagraphs` 写到 mdast `data.hProperties["data-md-image-count"]`，经 mdast-util-to-hast 透传到 hast，组件用 `imageGroupCountOf` 读取——**图片逐节点渲染，看不到兄弟节点，这个标注是唯一可靠的上下文来源**。

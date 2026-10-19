@@ -1,4 +1,5 @@
 import { memo, useCallback, useMemo, useState } from "react";
+import { ImageOff, RefreshCw } from "lucide-react";
 import { localImageUrl } from "../../../../shared/localImage";
 import { t } from "../../i18n";
 import { useFileLinkBaseDir } from "./FileLinkBase";
@@ -8,10 +9,16 @@ import { resolveMarkdownImageSrc } from "./markdownImageSrc";
 /**
  * Markdown 正文图片的唯一渲染入口（`MarkdownStream` 的 `img` 组件）。
  *
+ * 布局照 dsh（两档，数值直接抄）：
+ * - 单图：`display: block` + `max-width: min(100%, 640px)` + `max-height: 360px`（contain）
+ *   —— 大截图不会占满整条时间线，宽图按比例缩，竖排堆叠。
+ * - 同段多图（≥2）：64px 方块瓷砖（cover），细节靠点击看原图 —— 与 dsh 的
+ *   `MessageImage` tile 同一套尺寸；数量由 `remarkMarkMultiImageParagraphs` 标在节点上。
+ *
  * 三条硬约束：
  * 1. 解析不出可加载 URL 时渲染 alt 原文，**绝不产出空 src 的白图**——失败要能被看见。
- * 2. 加载失败降级成「失败文案 · alt 或原路径」：图没了，但用户知道它在说什么、指着哪个路径。
- * 3. 懒加载 + 限高：长截图不再占满整条时间线；小图仍按原尺寸排，多张小图天然并排。
+ * 2. 加载失败降级成「失败文案 · alt 或原路径」+ 可重试（瓷砖态给刷新图标，同 dsh）。
+ * 3. 失败态绑定具体 `src`：流式期间半截路径会先 404，完整路径到达后必须能自愈。
  *
  * 相对路径的基准取本站会话的 cwd（`useFileLinkBaseDir`，与文件链接同一份上下文），
  * 不在渲染层猜项目根——猜错会静默打开另一份工作区里的同名图片。
@@ -19,20 +26,31 @@ import { resolveMarkdownImageSrc } from "./markdownImageSrc";
  * 本地图统一走 `pideck-file://`（主进程白名单里的只读协议），不用 `file://`：
  * dev 下页源是 http，`file://` 子资源会被 Chromium 直接拒绝。
  */
-export const MarkdownImage = memo(function MarkdownImage(props: { destination: string; alt: string }) {
+export const MarkdownImage = memo(function MarkdownImage(props: { destination: string; alt: string; groupCount?: number }) {
 	const baseDir = useFileLinkBaseDir();
 	const src = useMemo(() => resolveMarkdownImageSrc(props.destination, { baseDir, toLocalUrl: localImageUrl }), [props.destination, baseDir]);
 	const [failedFor, setFailedFor] = useState<string | null>(null);
 	const [open, setOpen] = useState(false);
 	const close = useCallback(() => setOpen(false), []);
 	const label = props.alt || props.destination;
-	// 失败态绑定到具体的 src，而不是一个布尔：流式过程中半截路径会先打出 404，
-	// 完整路径到达后必须能自己恢复。用布尔时失败会永久粘住（dsh 的 `key={src}` 同一个道理）。
 	const failed = failedFor !== null && failedFor === src;
+	const tiled = (props.groupCount ?? 1) > 1;
 
-	if (src === undefined) return <span className="text-text-tertiary">{label}</span>;
+	if (src === undefined) {
+		return tiled ? (
+			<span className="inline-flex size-16 items-center justify-center rounded-sm bg-bg-muted text-text-tertiary" title={label} role="img" aria-label={label}>
+				<ImageOff size={16} />
+			</span>
+		) : (
+			<span className="text-text-tertiary">{label}</span>
+		);
+	}
 	if (failed) {
-		return (
+		return tiled ? (
+			<button type="button" className="inline-flex size-16 cursor-pointer items-center justify-center rounded-sm bg-bg-muted text-text-tertiary hover:text-text-secondary" title={`${t("markdown.imageLoadFailed")} · ${label}`} aria-label={`${t("markdown.imageLoadFailed")} · ${label}`} onClick={() => setFailedFor(null)}>
+				<RefreshCw size={16} />
+			</button>
+		) : (
 			<span className="text-text-tertiary">
 				{t("markdown.imageLoadFailed")}
 				{label ? ` · ${label}` : ""} {/* 重试把失败态清掉 → img 重新挂载 → 重新请求。文件被创建/改好之后不用刷新会话 */}
@@ -46,7 +64,7 @@ export const MarkdownImage = memo(function MarkdownImage(props: { destination: s
 	return (
 		<>
 			<img
-				className="inline-block max-h-[420px] w-auto max-w-full cursor-zoom-in align-bottom rounded-sm object-contain"
+				className={tiled ? "inline-block size-16 cursor-zoom-in rounded-sm object-cover align-bottom" : "block max-h-[360px] w-auto max-w-[min(100%,640px)] cursor-zoom-in rounded-sm object-contain"}
 				src={src}
 				alt={props.alt}
 				title={openLabel}
