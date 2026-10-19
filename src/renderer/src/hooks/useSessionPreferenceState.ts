@@ -142,9 +142,12 @@ export function useSessionPreferenceState(options: {
 		defaultModel: options.defaultModel,
 	});
 	// 模型选择永远取会话记录或引导页偏好；runtime 仅服务执行与能力状态。
+	// DSH 例外：host 会话投影（modelSelection.next ?? lastUsed）是会话级持久化选择，
+	// 记录缺 model 时用它兜底，避免落到全局部署默认（显示成别的会话的模型）。
 	const runtimeLive = isLiveRuntimeStatus(runtime?.status);
 	const resolvedLiveModel = resolveComposerLiveModel({
 		record: record?.model,
+		runtime: isDshSession && runtime?.state ? { provider: runtime.state.provider, modelId: runtime.state.modelId, modelName: runtime.state.modelName } : undefined,
 		fallback: {
 			// 无 record（引导页）：高亮取 guideDefaultModel（已按「点选 > 显式默认 > 切换列表 > 上次使用」
 			// 折叠）；modelName 必须同源取 guideDefaultModel，否则点选生效时会拿默认模型的展示名配点选的 id。
@@ -232,7 +235,9 @@ export function useSessionPreferenceState(options: {
 	const welcomeThinking = !record ? readWelcomeThinkingPreference()?.thinkingLevel : undefined;
 	const perModelThinkingDefault = modelThinkingLevelOfMap(options.modelThinkingLevels, resolvedLiveModel.provider, resolvedLiveModel.modelId);
 	const currentThinkingLevel = resolveComposerThinkingLevel({
-		record: record?.thinkingLevel,
+		// DSH：记录缺档位时用 host 投影的当前档位兜底（与模型同一份 runtime.state）；
+		// 不能直接落到 options.defaultThinkingLevel（全局部署默认，会显示成别的会话档位）。
+		record: record?.thinkingLevel ?? (isDshSession ? runtime?.state?.thinkingLevel : undefined),
 		// 无 record（引导页）：显式点选 > 每模型默认 > 配置默认 > 模型默认（与底栏同规则）。
 		fallback: welcomeThinking ?? perModelThinkingDefault ?? options.defaultThinkingLevel ?? currentModelEntry?.defaultEffort,
 		allowedLevels: thinkingLevels,

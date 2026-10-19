@@ -2224,3 +2224,56 @@ test("cancelQueuedMessage：remove 成功；queue-item-not-found 幂等；其他
 	await assert.rejects(() => manager.cancelQueuedMessage(tab.id, ""));
 	assert.equal(updateQueueCalls.length, 3);
 });
+
+// ── 会话模型真值冷读（catalog 补录 / Coordinator 跳过重放共用） ─────────────
+
+test("readSessionModelSelection：冷读 host 投影 next ?? lastUsed（不激活会话）", async () => {
+	const { host, client } = makeFakeHost();
+	client.sessionsProjections = async () => ({
+		result: {
+			ok: true,
+			value: { values: { modelSelection: { next: { provider: "magpie", model: "group/auto", reasoningEffort: "max" }, lastUsed: { provider: "magpie", model: "group/free" } } } },
+		},
+	});
+	const manager = new DshAgentManager(host, () => PROJECT);
+	const selection = await manager.readSessionModelSelection("session-x");
+	assert.deepEqual(JSON.parse(JSON.stringify(selection)), { provider: "magpie", model: "group/auto", reasoningEffort: "max" }, "next 是下一次请求的选择，优先 lastUsed");
+});
+
+test("readSessionModelSelection：无 next 时取 lastUsed；都没有返回 undefined", async () => {
+	const { host, client } = makeFakeHost();
+	client.sessionsProjections = async () => ({
+		result: { ok: true, value: { values: { modelSelection: { next: null, lastUsed: { provider: "magpie", model: "group/free" } } } } },
+	});
+	const manager = new DshAgentManager(host, () => PROJECT);
+	assert.deepEqual(JSON.parse(JSON.stringify(await manager.readSessionModelSelection("session-x"))), { provider: "magpie", model: "group/free" });
+
+	client.sessionsProjections = async () => ({ result: { ok: true, value: { values: { modelSelection: { next: null, lastUsed: null } } } } });
+	assert.equal(await manager.readSessionModelSelection("session-x"), undefined);
+	client.sessionsProjections = async () => ({ result: { ok: false, error: { code: "gateway/internal", message: "boom" } } });
+	assert.equal(await manager.readSessionModelSelection("session-x"), undefined);
+});
+
+test("readSessionModelSelection：host 未就绪时不主动拉起，返回 undefined", async () => {
+	const { host, client } = makeFakeHost();
+	let projectionsRead = 0;
+	client.sessionsProjections = async () => {
+		projectionsRead += 1;
+		return { result: { ok: true, value: { values: { modelSelection: { next: null, lastUsed: { provider: "a", model: "b" } } } } } };
+	};
+	host.isHostReady = () => false;
+	const manager = new DshAgentManager(host, () => PROJECT);
+	assert.equal(await manager.readSessionModelSelection("session-x"), undefined);
+	assert.equal(projectionsRead, 0, "仅展示补录不得触发 host 冷读 RPC");
+});
+
+test("getRuntimeModelThinkingState：把 host 投影选择暴露给 Coordinator（无档位时不伪造）", async () => {
+	const { host } = makeFakeHost();
+	const manager = new DshAgentManager(host, () => PROJECT);
+	const tab = await manager.create({ projectId: "project-1", backend: "dsh" });
+	// create 时 refreshModelDirectory 已把模型目录默认值写进 runtime；档位未知。
+	const state = await manager.getRuntimeModelThinkingState(tab.id);
+	assert.equal(state.provider, "test");
+	assert.equal(state.modelId, "default");
+	assert.equal(state.thinkingLevel, undefined);
+});

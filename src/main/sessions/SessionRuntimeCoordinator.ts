@@ -1689,7 +1689,25 @@ export class SessionRuntimeCoordinator {
 		// selectModel 会拒绝。降级为「应用宿主默认模型」并告警，不让整个激活失败
 		// （否则每次重试都新建一个 host 会话 = 孤儿堆积）。pi 保持严格（模型应在 models.json）。
 		const isDsh = entry.backend === "dsh";
-		if (entry.model) {
+		// DSH 的 session/selectModel 除改会话选择外，还会把选择保存成部署默认模型
+		// （host 侧 agentDefaultModel.saveSelection）。Coordinator 每次激活/重启都会重放
+		// catalog 偏好；不加判断时，「打开/切换 DSH 会话」就会悄悄改写全局默认——新建
+		// DSH 会话（以及 dsh CLI/web）继承最后一次打开会话的模型/档位。这里先读 host
+		// 会话当前选择（投影 next ?? lastUsed），已经一致的字段不再下发；真正变化
+		// （草稿期改选、host 里被外部改过）仍照常应用。pi 不读：set_model/set_thinking
+		// 的持久化与幂等由 AgentManager + lastAppliedBySession 既有链路负责。
+		let runtimeSelection: SessionRuntimeModelSelection | undefined;
+		if (isDsh && (entry.model || entry.thinkingLevel)) {
+			try {
+				runtimeSelection = await this.agents.getRuntimeModelThinkingState?.(agentId);
+			} catch {
+				// 读取失败按「未知」处理：宁可照旧应用偏好，也不静默跳过用户选择。
+				runtimeSelection = undefined;
+			}
+		}
+		const modelAlreadyApplied = Boolean(runtimeSelection && entry.model && runtimeSelection.provider === entry.model.provider && runtimeSelection.modelId === entry.model.modelId);
+		const thinkingAlreadyApplied = runtimeSelection?.thinkingLevel !== undefined && runtimeSelection.thinkingLevel === entry.thinkingLevel;
+		if (entry.model && !modelAlreadyApplied) {
 			try {
 				await this.agents.setModel(agentId, entry.model.provider, entry.model.modelId);
 			} catch (error) {
@@ -1718,7 +1736,7 @@ export class SessionRuntimeCoordinator {
 				}
 			}
 		}
-		if (entry.thinkingLevel) {
+		if (entry.thinkingLevel && !thinkingAlreadyApplied) {
 			try {
 				await this.agents.setThinking(agentId, entry.thinkingLevel);
 			} catch (error) {

@@ -46,6 +46,7 @@ import type { BridgeEventInput, BridgeResyncInput } from "../../shared/types/bri
 import { parseSessionProcessEventsFromFile } from "../sessions/sessionProcessEventsFile";
 import type { SessionForkCommands } from "../sessions/sessionForkCommands";
 import { dshUnavailablePageFor } from "../dsh/dshManualStop";
+import { dshSessionModelPatch } from "../dsh/dshSessionModelSync";
 import { missingSessionFilePage } from "../sessions/sessionFileMissingPage";
 import { isSessionSearchFilePath } from "../sessions/sessionSearchPath";
 import { validateNpmSpec } from "../dsh/dshPluginNpmRunner";
@@ -232,6 +233,12 @@ export type DshBackendIpcDeps = {
 	 * 按 24 条/轮换算成 host 的消息预算）；`maxMessages` = 显式消息窗口（Web/工具结果回读）。
 	 */
 	readDshHistoryPage?: (dshSessionId: string, beforeSeq: number | undefined, options: { turnCount?: number; maxMessages?: number }) => Promise<{ messages: import("../../shared/types").ChatMessage[]; total: number; nextBefore: number | null }>;
+	/**
+	 * DSH 会话 host 投影里的当前模型选择（session/projections 的 modelSelection.next ?? lastUsed）。
+	 * 冷读、不激活会话；未装配 / host 未就绪 / 会话无选择时 undefined。
+	 * 用途：打开历史会话读历史时把 host 真值补录回 catalog（底栏模型显示，见 dshSessionModelSync）。
+	 */
+	readDshSessionModel?: (dshSessionId: string) => Promise<{ provider: string; model: string; reasoningEffort?: string } | undefined>;
 	/** ACP 会话消息回读（运行时内存投影；未激活返回空数组）；未装配时返回空数组。 */
 	readAcpMessages?: (acpSessionId: string) => import("../../shared/types").ChatMessage[];
 	/** DSH 轨迹过程事件（运行时会话按 mux/重放收集；历史会话从 host history 推导；未装配时返回空数组）。 */
@@ -489,6 +496,7 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		stopDshHost,
 		startDshHost,
 		readDshHistoryPage,
+		readDshSessionModel,
 		readAcpMessages,
 		readDshProcessEvents,
 		readDshSystemPrompt,
@@ -555,6 +563,46 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			}
 		} catch (error) {
 			void appLogger.warn("session", "Historical session metadata backfill failed", {
+				sessionId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	};
+
+	/**
+	 * DSH 历史会话的模型/档位补录（冷读 host 投影，不激活会话）。
+	 *
+	 * 为什么需要：`SessionRecord.model` 只在用户「通过 PiDeck 改模型」时写入，历史/外部
+	 * DSH 会话的模型只存在 host 会话投影（modelSelection.next ?? lastUsed）里。catalog 缺
+	 * model 时底栏回退「部署默认模型」这个全局单值——线上案例：会话实际 magpie/group/free，
+	 * 底栏却显示部署默认 magpie/group/auto（用户表现为「改了一个会话，其他会话的模型显示
+	 * 也跟着变」）。打开会话读历史时顺带冷读一次补回 catalog，之后底栏/选择器就有真值。
+	 *
+	 * 与 pi 的同名补录同纪律：只补缺失字段、不覆盖用户显式选择（dshSessionModelPatch 保证）；
+	 * updatedAt 沿用当前值，避免「打开会话」把侧栏排序搅乱。运行中会话由 runtime state 展示，
+	 * 不参与补录（host 投影的 next 是临时态，不写入持久记录）。失败只记日志、不影响历史展示。
+	 */
+	const backfillDshSessionModel = async (sessionId: string): Promise<void> => {
+		if (!readDshSessionModel) return;
+		const entry = sessionCatalog.get(sessionId);
+		if (!entry || entry.backend !== "dsh" || !entry.dshSessionId) return;
+		if (sessionRuntimeCoordinator.getTarget(sessionId)) return;
+		if (entry.model && entry.thinkingLevel) return;
+		try {
+			const selection = await readDshSessionModel(entry.dshSessionId);
+			const current = sessionCatalog.get(sessionId);
+			if (!current || current.backend !== "dsh") return;
+			const patch = dshSessionModelPatch(current, selection);
+			if (!patch) return;
+			const updated = await sessionCatalog.update(sessionId, { ...patch, updatedAt: current.updatedAt });
+			const window = getMainWindow();
+			if (window && !window.isDestroyed()) {
+				window.webContents.send(ipcChannels.sessionsCatalogRefreshed, {
+					projectId: updated.projectId,
+				});
+			}
+		} catch (error) {
+			void appLogger.warn("session", "DSH session model backfill failed", {
 				sessionId,
 				error: error instanceof Error ? error.message : String(error),
 			});
@@ -986,6 +1034,8 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		// 与分页路径同源；未装配 readDshHistoryPage 时返回空数组。
 		if (entry?.backend === "dsh" && entry.dshSessionId && readDshHistoryPage) {
 			const page = await readDshHistoryPage(entry.dshSessionId, undefined, { maxMessages: 1000 });
+			// 与分页路径同源：打开会话顺带补录 host 会话模型（冷读，不激活）。
+			void backfillDshSessionModel(sessionId);
 			return page.messages;
 		}
 		// ACP 会话历史只活在 agent 侧 + 运行时内存投影(load 重放):无 runtime
@@ -1099,7 +1149,11 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		// 第三条参数在 pi 路径是「轮数」，所以 DSH 这里按 turnCount 传（main 侧换算消息预算）。
 		if (entry?.backend === "dsh" && entry.dshSessionId && readDshHistoryPage) {
 			try {
-				return await readDshHistoryPage(entry.dshSessionId, before, { turnCount: pageSize });
+				const page = await readDshHistoryPage(entry.dshSessionId, before, { turnCount: pageSize });
+				// 打开会话（首屏/上翻）顺带把 host 会话模型补录回 catalog：
+				// 冷会话真值只在 host 投影里，缺 model 时底栏会错误显示全局部署默认。
+				void backfillDshSessionModel(sessionId);
+				return page;
 			} catch (error) {
 				// 手动停止态下历史读取必然失败且不会自愈（预热/按需兜底/崩溃重启全被门控）：
 				// 转成带原因的空页，让渲染层出「运行时已停止 + 启动 host」专态，而不是把

@@ -73,6 +73,48 @@ test("resolveComposerLiveModel: 引导页没有会话记录时只使用引导页
 	);
 });
 
+test("resolveComposerLiveModel: DSH 会话记录缺模型时用 host 会话当前选择（不是部署默认）", () => {
+	// 线上案例：会话 host 里实际是 magpie/group/free，catalog 没存 model。修前底栏回退
+	// 部署默认（magpie/group/auto-...），看起来像「改了一个会话，别的会话也跟着变」。
+	assertDisplay(
+		resolveComposerLiveModel({
+			runtime: { provider: "magpie", modelId: "group/free", modelName: "group/free" },
+			fallback: { provider: "magpie", modelId: "group/auto-deepseek-v4-1-flash", modelName: "DeepSeek V4.1 Flash · routing group" },
+		}),
+		{ provider: "magpie", modelId: "group/free", modelName: "group/free" },
+	);
+});
+
+test("resolveComposerLiveModel: 会话记录优先于 host 会话当前选择", () => {
+	assertDisplay(
+		resolveComposerLiveModel({
+			record: { provider: "zuiapi", modelId: "deepseek-v4.1-flash", modelName: "DeepSeek V4.1 Flash" },
+			runtime: { provider: "magpie", modelId: "group/free", modelName: "group/free" },
+			fallback: { provider: "dsh-host", modelId: "agent-default" },
+		}),
+		{ provider: "zuiapi", modelId: "deepseek-v4.1-flash", modelName: "DeepSeek V4.1 Flash" },
+	);
+});
+
+test("resolveComposerLiveModel: host 选择也没有时仍回退部署默认", () => {
+	assertDisplay(
+		resolveComposerLiveModel({
+			fallback: { provider: "dsh-host", modelId: "agent-default", modelName: "Agent Default" },
+		}),
+		{ provider: "dsh-host", modelId: "agent-default", modelName: "Agent Default" },
+	);
+});
+
+test("契约: DSH 底栏/选择器把 host 会话投影作为记录缺失时的兜底，pi 不接 runtime", () => {
+	const components = readFileSync("src/renderer/src/components/session/ComposerComponents.tsx", "utf8");
+	const state = readFileSync("src/renderer/src/hooks/useSessionPreferenceState.ts", "utf8");
+	// 只在 DSH 后端接 runtime；pi 仍保持「只认会话记录」（f1d7b7b37 的展示契约）。
+	assert.match(components, /runtime:\s*isDsh\s*&&\s*props\.state\s*\?/);
+	assert.match(state, /runtime:\s*isDshSession\s*&&\s*runtime\?\.state\s*\?/);
+	// 思考档位同源：记录缺档位时 DSH 用 host 投影档位，而不是部署默认档位。
+	assert.match(state, /record:\s*record\?\.thinkingLevel\s*\?\?\s*\(isDshSession\s*\?\s*runtime\?\.state\?\.thinkingLevel\s*:\s*undefined\)/);
+});
+
 test("formatModelRef 带 provider", () => {
 	assert.equal(formatModelRef({ provider: "grok.weishiair.de copy", modelId: "grok-4.6" }), "grok.weishiair.de copy/grok-4.6");
 });

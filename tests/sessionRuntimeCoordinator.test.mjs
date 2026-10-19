@@ -228,7 +228,9 @@ function createHarness(options = {}) {
 		getRuntimeModelThinkingState: async () => {
 			calls.modelThinkingState += 1;
 			calls.preferenceOrder.push("readState");
-			if (options.entry?.backend === "dsh") return undefined;
+			// DSH：真实网关（DshAgentManager）现在暴露 host 投影里的会话当前选择；用例可注入。
+			// 未注入时保持 undefined（旧网关路径），pi 语义不变（读取本次 setThinking 后的状态）。
+			if (options.entry?.backend === "dsh") return options.modelThinkingState;
 			return calls.setThinking > 0 ? (options.thinkingState ?? options.modelThinkingState) : options.modelThinkingState;
 		},
 		setThinking: async () => {
@@ -1509,6 +1511,59 @@ test("DSH activation keeps the thinking preference on non-effort host errors", a
 	await coordinator.restartSession("session-1", "agent-old");
 
 	assert.equal(harness.entry.thinkingLevel, "max", "非档位类 host 错误不得清掉用户偏好");
+});
+
+test("DSH activation skips replaying a preference the host session already has", async () => {
+	// 回归：DSH host 的 session/selectModel 除改会话选择外，还会把选择保存成部署默认模型
+	// （agentDefaultModel.saveSelection）。Coordinator 每次激活/重启都无条件重放 catalog
+	// 偏好时，「打开/切换 DSH 会话」会悄悄改写全局默认——新建 DSH 会话（以及 dsh CLI/web）
+	// 会继承最后一次打开会话的模型/档位。host 当前选择已一致时不得再发 RPC。
+	const { SessionRuntimeCoordinator } = loadCoordinator();
+	const harness = createHarness({
+		entry: {
+			status: "active",
+			backend: "dsh",
+			model: { provider: "magpie", modelId: "group/free" },
+			thinkingLevel: "max",
+		},
+		tabs: [{ id: "agent-old", projectId: "project-1", cwd: "C:/project", title: "Session 1", status: "idle", createdAt: 1 }],
+		modelThinkingState: { provider: "magpie", modelId: "group/free", thinkingLevel: "max" },
+	});
+	harness.agents.backend = "dsh";
+	const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender);
+	coordinator.bindExistingAgent("session-1", "agent-old");
+
+	const restarted = await coordinator.restartSession("session-1", "agent-old");
+
+	assert.ok(restarted, "重启仍须成功");
+	assert.equal(harness.calls.setModel, 0, "host 已是目标模型时不得重放 setModel（避免改写部署默认）");
+	assert.equal(harness.calls.setThinking, 0, "host 已是目标档位时不得重放 setThinking");
+});
+
+test("DSH activation still applies catalog preferences that differ from the host session", async () => {
+	// 另一半边界：草稿期改了模型/档位（或 host 里被外部改过）时必须照常下发，不能为了
+	// 保护部署默认而吞掉真实偏好变更。
+	const { SessionRuntimeCoordinator } = loadCoordinator();
+	const harness = createHarness({
+		entry: {
+			status: "active",
+			backend: "dsh",
+			model: { provider: "magpie", modelId: "group/auto" },
+			thinkingLevel: "max",
+		},
+		tabs: [{ id: "agent-old", projectId: "project-1", cwd: "C:/project", title: "Session 1", status: "idle", createdAt: 1 }],
+		modelThinkingState: { provider: "magpie", modelId: "group/free", thinkingLevel: "low" },
+	});
+	harness.agents.backend = "dsh";
+	const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, harness.sender);
+	coordinator.bindExistingAgent("session-1", "agent-old");
+
+	const restarted = await coordinator.restartSession("session-1", "agent-old");
+
+	assert.ok(restarted);
+	assert.equal(harness.calls.setModel, 1, "模型不同必须应用");
+	assert.equal(harness.calls.setThinking, 1, "档位不同必须应用");
+	assert.deepEqual(harness.calls.setModelArgs[0], { provider: "magpie", modelId: "group/auto" });
 });
 
 test("pi model change keeps the recorded thinking level untouched", async () => {

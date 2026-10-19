@@ -519,9 +519,13 @@ export function ComposerBottomBar(props: {
 		welcomeModel: effectiveWelcomeModel,
 		defaultModel: props.defaultModel,
 	});
-	// 模型仅取会话记录或引导页默认，运行时快照不能覆盖用户已保存的选择。
+	// 模型优先取会话记录或引导页默认。DSH 例外：记录缺 model 时用 host 会话投影的
+	// 当前选择兜底（runtime.state 的 provider/modelId 来自 host modelSelection 投影）——
+	// 否则会显示全局部署默认，看起来像「别的会话的模型也改了」。pi 不接 runtime：
+	// 运行时状态是执行态，不能覆盖用户保存的选择。
 	const liveModel = resolveComposerLiveModel({
 		record: props.record?.model,
+		runtime: isDsh && props.state ? { provider: props.state.provider, modelId: props.state.modelId, modelName: props.state.modelName } : undefined,
 		fallback: guideDefaultModel,
 	});
 	// 用量查询链路随会话后端：DSH 会话走 dsh（$DSH_HOME 配置 + 凭据库），其余走 pi。

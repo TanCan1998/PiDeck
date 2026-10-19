@@ -43,14 +43,21 @@ export type ComposerLiveModelSource = {
 };
 
 /**
- * 底栏/选择器当前模型只读取 PiDeck 的选择偏好。
+ * 底栏/选择器当前模型：会话保存的用户选择优先。
  *
- * 已有会话取 `SessionRecord.model`，尚未创建会话的引导页取 `fallback`。运行时状态
- * 仍用于流式、工具和统计，但绝不能参与名称或当前选择的决策；这样 Agent 启动前后
- * 都展示同一份本地名称快照。
+ * 已有会话取 `SessionRecord.model`，尚未创建会话的引导页取 `fallback`。pi 的运行时
+ * 状态是执行态（get_state），不能参与名称或当前选择的决策；这样 Agent 启动前后都展示
+ * 同一份本地名称快照。
+ *
+ * DSH 例外：`runtime` 是 host 会话投影 `modelSelection.next ?? lastUsed`（宿主持久化的
+ * 会话级选择，不是执行态）。历史/外部 DSH 会话的 catalog 可能从未写过 model，此时若直接
+ * 落到部署默认（全局单值），会把「别的会话的选择」显示成本会话的模型。因此 DSH 调用方
+ * 在 record 缺 model 时传 runtime 兜底；pi 调用方不得传。
  */
-export function resolveComposerLiveModel(input: { record?: { provider?: string; modelId?: string; modelName?: string }; fallback?: ComposerLiveModelSource }): ModelPendingRef {
-	const source = input.record?.provider && input.record.modelId ? input.record : input.fallback;
+export function resolveComposerLiveModel(input: { record?: { provider?: string; modelId?: string; modelName?: string }; runtime?: ComposerLiveModelSource; fallback?: ComposerLiveModelSource }): ModelPendingRef {
+	const record = input.record?.provider && input.record.modelId ? input.record : undefined;
+	const runtime = input.runtime?.provider && input.runtime.modelId ? input.runtime : undefined;
+	const source = record ?? runtime ?? input.fallback;
 	return {
 		provider: source?.provider ?? "",
 		modelId: source?.modelId ?? "",

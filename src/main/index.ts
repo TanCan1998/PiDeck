@@ -3370,6 +3370,9 @@ function registerIpc() {
 				}
 			},
 			readDshHistoryPage: (dshSessionId, beforeSeq, options) => dshAgentManager.readHistoryPage(dshSessionId, beforeSeq, options),
+			// 打开 DSH 历史会话时补录 catalog 模型（host 投影冷读，不激活）：catalog 缺 model
+			// 时底栏会回退全局部署默认，看起来像「别的会话的模型也被改了」。
+			readDshSessionModel: (dshSessionId) => dshAgentManager.readSessionModelSelection(dshSessionId),
 			readAcpMessages: (acpSessionId) => acpAgentManager.readMessagesByAcpSessionId(acpSessionId),
 			readDshProcessEvents: (agentId, dshSessionId) => dshAgentManager.readProcessEvents(agentId, dshSessionId),
 			readDshSystemPrompt: (agentId, dshSessionId) => dshAgentManager.readSystemPrompt(agentId, dshSessionId),

@@ -1,4 +1,23 @@
-import type { AgentBackend, AgentGatewayCapability, AgentRuntimeState, AgentTab, DshPermissionPreset, AvailableModel, ChatMessage, CreateAgentInput, DshQueuedMessage, DshSkillView, ImageContent, PiCommand, Project, SendPromptInput, SendPromptResult, SessionUiResponseInput, TodoItem } from "../../shared/types";
+import type {
+	AgentBackend,
+	AgentGatewayCapability,
+	AgentRuntimeState,
+	AgentTab,
+	DshPermissionPreset,
+	AvailableModel,
+	ChatMessage,
+	CreateAgentInput,
+	DshQueuedMessage,
+	DshSkillView,
+	ImageContent,
+	PiCommand,
+	Project,
+	SendPromptInput,
+	SendPromptResult,
+	SessionRuntimeModelSelection,
+	SessionUiResponseInput,
+	TodoItem,
+} from "../../shared/types";
 import { isDshPermissionPreset } from "../../shared/types/agent";
 import type { SessionProcessEvent } from "../../shared/types/trajectory";
 // DSH 会话 id 品牌类型（零运行时成本，仅类型擦除）
@@ -28,7 +47,7 @@ import {
 	type DshUsageTotals,
 } from "./dshProcessEvents";
 import { applyDshControlEvent, beginDshCancel, type DshControlState } from "./dshRuntimeControl";
-import { isDshModelImageUnsupportedRejection, resolveDshModelDirectory, toDshAvailableModels } from "./dshModels";
+import { isDshModelImageUnsupportedRejection, readDshModelSelection, resolveDshModelDirectory, toDshAvailableModels } from "./dshModels";
 import { approvalUiRequest, buildDshRejectValue, buildDshRespondValue, parseDshApprovalFrame, parseDshQuestionFrame, questionUiRequest, type DshApprovalFrame, type DshQuestionFrame } from "./dshApprovalBridge";
 import { assembleDshHistoryEntries, countDshUserMessages, DSH_HISTORY_DEFAULT_TURN_PAGE_SIZE, normalizeDshTurnPageSize, planDshHistoryRounds, trimToOldestTurnStart } from "./dshHistoryPagePlan";
 import { isContextOverflowError } from "../../shared/contextOverflow";
@@ -956,6 +975,58 @@ export class DshAgentManager implements SessionAgentGateway {
 			cacheHitPercent: cacheHitPercentOf(usage),
 			dshSessionStats: sessionStatsRaw ? deriveDshSessionStats(sessionStatsRaw) : undefined,
 		};
+	}
+
+	/**
+	 * host 会话当前模型/档位（投影 `modelSelection.next ?? lastUsed`，attach/切换时由
+	 * refreshModelDirectory 同步到 runtime）。
+	 *
+	 * 供 SessionRuntimeCoordinator 判断「catalog 偏好是否已在 host 生效」：DSH 的
+	 * session/selectModel 会把选择同时保存成部署默认模型（agentDefaultModel.saveSelection），
+	 * 只要偏好已生效就不该在每次激活/重启时重放，否则「打开/切换 DSH 会话」会改写全局默认。
+	 * 与 pi 的 getRuntimeModelThinkingState 不同：这里不发 get_state（DSH 的状态来自投影）。
+	 */
+	async getRuntimeModelThinkingState(agentId: string): Promise<SessionRuntimeModelSelection | undefined> {
+		const runtime = this.runtimes.get(agentId);
+		if (!runtime?.model) return undefined;
+		return {
+			provider: runtime.model.provider,
+			modelId: runtime.model.model,
+			modelName: runtime.model.model,
+			...(runtime.thinkingLevel !== undefined ? { thinkingLevel: runtime.thinkingLevel } : {}),
+		};
+	}
+
+	/**
+	 * 冷读 host 会话的当前模型选择（session/projections 的 modelSelection.next ?? lastUsed）。
+	 *
+	 * 用途：历史/外部 DSH 会话的模型只存在 host 投影里，PiDeck catalog 可能从未写过
+	 * model；打开会话读历史时补录 catalog，底栏/选择器才不会回退到全局部署默认
+	 * （见 dshSessionModelSync.ts 的线上案例）。只读：不激活会话、不写 host。
+	 * host 未就绪时直接返回 undefined——纯展示补录不得为浏览会话主动拉起 host。
+	 */
+	async readSessionModelSelection(dshSessionId: string): Promise<{ provider: string; model: string; reasoningEffort?: string } | undefined> {
+		if (!dshSessionId || !this.dshHost.isHostReady()) return undefined;
+		const client = this.dshHost.getClient();
+		if (!client) return undefined;
+		try {
+			const projection = await client.sessionsProjections({ sessionId: dshSessionId as SessionId });
+			if (!projection.result.ok) return undefined;
+			const value = projection.result.value;
+			if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+			const values = (value as { values?: unknown }).values;
+			if (!values || typeof values !== "object" || Array.isArray(values)) return undefined;
+			const selection = readDshModelSelection((values as Record<string, unknown>).modelSelection);
+			if (!selection) return undefined;
+			return { provider: selection.provider, model: selection.model, ...(selection.reasoningEffort !== undefined ? { reasoningEffort: selection.reasoningEffort } : {}) };
+		} catch (error) {
+			// 投影版本不兼容/会话不存在等：展示补录失败不能影响会话本身。
+			getAppLogger()?.warn("dsh-agent", "session model selection unavailable", {
+				sessionId: dshSessionId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return undefined;
+		}
 	}
 
 	/**
