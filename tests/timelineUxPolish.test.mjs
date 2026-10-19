@@ -76,6 +76,17 @@ test("auto-collapse survives without completion-reposition; send-time pin is the
 	assert.match(timeline, /lastAgentRunIndex/);
 });
 
+test("auto-collapse re-checks follow and run state when the idle timer fires", () => {
+	// DSH 的「idle 边沿」先于终态 messages flush 到达：安排收起时 latestRunId 可能随后
+	// 因末轮重新分组而变化，autoScroll 也可能在 flush 期间短暂翻 false。旧实现用安排时刻
+	// 的 run id 做相等判断、且把 autoScroll 放进 effect 依赖（一次翻转即 cleanup 清掉定时器），
+	// 结果 DSH 会话结束后执行过程永不自动收起（用户反馈）。
+	assert.doesNotMatch(timeline, /\}\s*,\s*\[controller\.autoScroll,\s*hasLiveRuntime/);
+	assert.doesNotMatch(timeline, /turnSettleIdleLastRunRef\.current !== latestRunId/);
+	assert.match(timeline, /autoScrollRef\.current = controller\.autoScroll/);
+	assert.match(timeline, /isRuntimeBusyRef\.current \|\| !autoScrollRef\.current/);
+});
+
 test("followOutput re-lock uses spring when far from bottom", () => {
 	// 避免回底按钮 setAutoScroll(true) 后被 layout instant 掐死弹簧
 	assert.match(scroller, /reduce \|\| distance <= followThreshold \? "instant" : "smooth"/);

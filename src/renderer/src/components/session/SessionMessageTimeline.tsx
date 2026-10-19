@@ -484,6 +484,13 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 	// 仅存活 Agent 实例在跟底时安排；纯历史浏览不自动改变阅读位置。
 	// 鼠标移动、输入草稿不取消，真实上滚读历史会退出跟随。
 	const wasRuntimeBusyRef = useRef(isRuntimeBusy);
+	// 1.5s 后再复核，而不是沿用安排时刻的快照（见下方定时器注释）。
+	// 这两个值只给定时器读，不进 effect 依赖：autoScroll 若进依赖，终态 flush 期间
+	// 一次短暂离开底部的翻转就会触发 effect 清理，把刚安排的收起定时器清掉。
+	const isRuntimeBusyRef = useRef(isRuntimeBusy);
+	isRuntimeBusyRef.current = isRuntimeBusy;
+	const autoScrollRef = useRef(controller.autoScroll);
+	autoScrollRef.current = controller.autoScroll;
 
 	useEffect(() => {
 		const latestRun = lastAgentRunIndex >= 0 ? displayRuns[lastAgentRunIndex] : undefined;
@@ -507,7 +514,7 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 			}
 			turnSettleIdleLastRunRef.current = undefined;
 		};
-		if (isRuntimeBusy || !hasLiveRuntime || !controller.autoScroll) {
+		if (isRuntimeBusy || !hasLiveRuntime) {
 			clearIdle();
 			return;
 		}
@@ -522,11 +529,18 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 		turnSettleIdleLastRunRef.current = latestRunId;
 		turnSettleIdleTimerRef.current = window.setTimeout(() => {
 			turnSettleIdleTimerRef.current = undefined;
-			if (turnSettleIdleLastRunRef.current !== latestRunId) return;
+			// 触发条件在 1.5s 后复核，而不是沿用安排时刻的快照：
+			// - DSH 的 idle 边沿先于终态 messages flush 到达，末轮会在窗口内重新分组
+			//   （run id 变化）；按安排时 id 相等判断会永久跳过收起（用户反馈
+			//   「DSH 会话结束后执行过程不自动折叠」）；
+			// - 终态 flush 也可能让视口短暂离开底部，1.5s 后已回到底部仍应收起。
+			// 用户真实上滚阅读时 autoScroll 保持 false，这里跳过（不打扰阅读）。
+			if (isRuntimeBusyRef.current || !autoScrollRef.current || !latestRunIdRef.current) return;
+			turnSettleIdleLastRunRef.current = undefined;
 			setLatestTurnAutoCollapseTick((tick) => tick + 1);
 		}, TURN_SETTLE_IDLE_COLLAPSE_MS);
 		return clearIdle;
-	}, [controller.autoScroll, hasLiveRuntime, isRuntimeBusy, runtime?.agentId, runtime?.runtimeGeneration, sessionId]);
+	}, [hasLiveRuntime, isRuntimeBusy, runtime?.agentId, runtime?.runtimeGeneration, sessionId]);
 
 	const turnWindowActive = shouldWindowTimelineTurns(countAgentRunItems(reconciledRuns), turnWindowTurns);
 	// 方案 C（2026-12）渐进扩展：把「窗口是否仍可扩展」同步给 controller 的滚动监听——
