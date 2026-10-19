@@ -954,6 +954,11 @@ export const ipcChannels = {
 	 * （2026-10，同 dshRuntimeInstallLocalDir）。
 	 */
 	hostPluginsInstallDirectory: "host-plugins:install-directory",
+	/**
+	 * 从 GitHub 仓库安装：渲染层只给一个 https://github.com/... 链接，主进程下载源码 tar.gz、
+	 * 定位 pideck-plugin.json 所在包根后走与归档/目录一致的重扫描与授权门（不执行仓库内任何代码）。
+	 */
+	hostPluginsInstallGitHub: "host-plugins:install-github",
 	/** 脚手架：在插件目录里生成 <id>/ 模板（已存在就拒经，不覆盖作者代码）。 */
 	hostPluginsScaffold: "host-plugins:scaffold",
 	hostPluginsSetEnabled: "host-plugins:set-enabled",

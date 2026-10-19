@@ -1,5 +1,6 @@
 /** One permission inventory feeds scaffold choices and consent; destinations must be visible before enabling. */
-import type { HostPluginManifest } from "../../../shared/types/hostPlugin";
+import type { HostPluginManifest, HostPluginPermission } from "../../../shared/types/hostPlugin";
+import type { TranslationKey } from "../i18n";
 import { Alert, AlertDescription } from "../components/ui-shadcn/alert";
 import { Badge } from "../components/ui-shadcn/badge";
 import { t } from "../i18n";
@@ -12,6 +13,16 @@ export const HOST_PLUGIN_PERMISSION_OPTIONS = [
 	["network.local", "hostPlugins.networkLocal", "hostPlugins.networkLocalHint"],
 	["service.local", "hostPlugins.serviceLocal", "hostPlugins.scaffoldServiceLocalHint"],
 ] as const;
+
+/** 列表行用的短标签：与上面的完整选项一一对应，避免行内被长句撑成多行。 */
+export const HOST_PLUGIN_PERMISSION_CHIP_KEYS: Record<HostPluginPermission, TranslationKey> = {
+	"sessions.read": "hostPlugins.chipSessionsRead",
+	"workbench.navigate": "hostPlugins.chipNavigate",
+	"workbench.openExternal": "hostPlugins.chipOpenExternal",
+	"network.https": "hostPlugins.chipHttps",
+	"network.local": "hostPlugins.chipLocal",
+	"service.local": "hostPlugins.chipService",
+};
 
 /** Never collapse grants into “can access the network”: the exact origins and loopback ports are the consent. */
 export function HostPluginPermissionDetails({ manifest, warnings = false }: { manifest: HostPluginManifest; warnings?: boolean }) {
