@@ -74,6 +74,14 @@
 - **实测（本机 889 文件 / ~595MiB）**：首建全量扫 `indexMs = 7224`（端到端 7.26s，快照 221KB）；快照命中二开 `indexMs = 40`/`bootMs = 2`（端到端 65ms）。对照 TS 侧首屏 699ms（只读每文件前 1MiB）——**冷启慢一个量级、复用后快 ~17×**，所以 Wave 2 只能把它接到「重复读」路径（打开会话/读窗口），不能接到首屏清单扫描。
 - 测试：`tests/sessionStoreService.test.mjs`（宿主协议/超时/降级/roots 逐请求/`get-index`/`tablesDir` argv）+ `tests/sessionStoreChain.test.mjs`（装配/构建/CI/开关/`tablesDir`/extraResources 源码契约）+ `tests/sessionStoreIndexParity.test.mjs`（同一文件、native reader vs sidecar reader 的公开 API 输出逐字段相等；残行/坏形状/抛错回退）+ Go 侧 `native/session-store/{store_test.go,table_test.go,tablepersist_test.go,parity_test.go}`（复用/尾扫/残行/变小重建/压缩粘滞/忽略目录/快照损坏/巨型行/条目表镜像/落盘复用与淘汰）。
 
+## Go sidecar 宿主客户端（共享传输层）
+
+- **唯一实现**：`src/main/sidecar/GoSidecarClient.ts`。`SessionIndexService` / `FileIndexService` / `SessionStoreService` / `XueIndexService` 全部继承它；**禁止再复制 NDJSON 行泵、boot 计时器、pending Map 或进程身份核对**。
+- **基类负责**：spawn、boot 超时、ready 协议版本校验、请求 id 配对、请求超时、stdout 单行上限、stderr 尾部、迟到响应丢弃、stdin 管道错误、dispose 结算、`isReady` 同步三态、复用键变化重启。任何失败一律 `{ ok: false, reason }`，不抛异常。
+- **子类只提供差异**：`name`、`resolveBinaryPath`、`spawnFn`（测试注入）、`timeouts` 默认值、`maxLineChars`、`messages`（各服务文案）、`onReady`（日志/诊断字段）、`logStderr` / `writeFailureLogLevel`（保留原行为）。进程复用键与 spawn 参数由子类的 `ensureChild` 传入 `ensureReady(key, args)`：session-index/file-index 用 roots 签名，xue-index 用 dbPath，session-store 用常量键 + 逐请求 roots。
+- **新增 sidecar 的接线**：继承基类 + 在 `ensureChild` 里做业务前置校验（空 roots/path → `not-ready`）+ 只发本服务的命令帧；`ready` 附加字段通过 `onReady` 或 `getReadyFrame()` 读取，不参与生命周期判断。测试至少覆盖：ready 握手、复用键变化、boot/请求超时、协议版本不匹配、进程退出、dispose；共享层边界由 `tests/goSidecarClient.test.mjs` 兜底（非法行、stdout 溢出、stdin 错误、运行期协议漂移、写入抛错）。
+- **结果类型**：各服务的 `*FailureReason` / `*CallResult<T>` 是 `GoSidecarFailureReason` / `GoSidecarCallResult<T>` 的别名；新增失败原因先改基类并在四个服务的测试与调用方确认。
+
 ## 技能商店安装链路（net.fetch 搜索 + spawn 进度 + 代理 env 注入）
 - **主进程联网一律走注入的 `fetchImpl`（= Electron `net.fetch`）**：裸全局 `fetch` 是 undici，既不读系统代理也不读 Electron 桌面 session 代理，代理环境下境外 API 挂到超时且只抛含糊 `AbortError`。`storeIpc.ts` 四个商店 handler（`skillHubSearch` / `skillStoreSearch` / `promptStoreSearch` / `promptStoreGet`）全部经 `deps.fetchImpl`；测试用 `createStoreIpc({ fetchImpl })` 注桩，未注入时才回退全局 fetch（测试沙箱无 fetch，故必须惰性取值）。
 - **搜索入参契约（preload ↔ 主进程）**：`skill-hub:search` 两侧共用 `shared/types` 的 `SkillHubSearchOptions`（`{ query, limit }`，limit 缺省 50）。preload 曾透传 api.skillhub.cn 时代的 `page/pageSize/sortBy/order`，主进程只读 `limit`——面板传的第二个参数落到 `page` 上被静默丢弃；`tests/skillHubSearchContract.test.mjs` 用「preload 捕获真实 payload → 主进程 handler」端到端锁住契约。

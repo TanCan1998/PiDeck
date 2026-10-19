@@ -36,17 +36,24 @@ test("Go 侧协议与快照口径：命令集、版本、忽略目录、行上�
 
 test("宿主服务：argv 只有 statePath（+可选 tablesDir），roots 逐请求，生命周期入口齐全", () => {
 	const source = read("../src/main/sessions/SessionStoreService.ts");
+	const sidecarSource = read("../src/main/sidecar/GoSidecarClient.ts");
 	assert.match(source, /SESSION_STORE_PROTOCOL_VERSION\s*=\s*1/);
-	// 与两个兄弟服务的差异点：roots 不进 spawn 参数，换根不重启进程
+	// 与两个兄弟服务的差异点：roots 不进 spawn 参数，换根不重启进程。
+	// 共享传输层负责 spawn；本服务只把 statePath(+tablesDir) 作为 args 传进去。
 	assert.match(source, /const args = this\.tablesDir \? \[this\.statePath, this\.tablesDir\] : \[this\.statePath\];/);
-	assert.match(source, /spawnFn\(binaryPath, args,/);
+	assert.match(source, /ensureReady\(STORE_PROCESS_KEY, args\)/);
+	assert.match(sidecarSource, /spawnFn\(binaryPath, \[\.\.\.args\],/);
+	assert.doesNotMatch(source, /spawnFn\(binaryPath/);
 	assert.match(source, /cmd:\s*"list-files",\s*roots:/);
 	assert.match(source, /cmd:\s*"refresh",\s*roots:/);
 	assert.match(source, /isReady\(\):\s*boolean/);
 	assert.match(source, /warmup\(\):\s*void/);
-	assert.match(source, /dispose\(\):\s*void/);
-	// fail-open：二进制缺失走 binary-missing（调用方降级到 TS 解析）
-	assert.match(source, /reason:\s*"binary-missing"/);
+	// dispose 收口在共享基类，服务只继承（禁止各服务再写一套杀进程逻辑）
+	assert.match(source, /extends\s+GoSidecarClient/);
+	assert.match(sidecarSource, /dispose\(\):\s*void/);
+	// fail-open：二进制缺失走 binary-missing（调用方降级到 TS 解析）；文案由本服务注入
+	assert.match(sidecarSource, /this\.fail\("binary-missing",\s*this\.messages\.binaryMissing\)/);
+	assert.match(source, /binaryMissing:/);
 });
 
 test("装配：二进制定位（dev 走 resources/session-store/bin）+ statePath 落 userData + quitCleanup", () => {
@@ -113,9 +120,11 @@ test("Wave 2 Go 侧：get-index 命令 + 条目表镜像 + 缓存边界", () => 
 
 test("Wave 2 TS 侧：宿主 getIndex + 读者校验分支 + 装配注入", () => {
 	const service = read("../src/main/sessions/SessionStoreService.ts");
-	assert.match(service, /cmd:\s*"list-files"\s*\|\s*"refresh"\s*\|\s*"get-index"/);
-	assert.match(service, /async getIndex\(hostPath: string\)/);
+	// 命令帧仍由本服务定义（共享基类只负责传输）；三种命令逐条钉住
+	assert.match(service, /cmd:\s*"list-files",\s*roots:/);
+	assert.match(service, /cmd:\s*"refresh",\s*roots:/);
 	assert.match(service, /cmd:\s*"get-index",\s*roots:\s*\[\],\s*path:/);
+	assert.match(service, /async getIndex\(hostPath: string\)/);
 	// 条目表可能到几十 MB：单行上限放宽到 32MiB（仍是有界）
 	assert.match(service, /MAX_SESSION_STORE_LINE_CHARS\s*=\s*32\s*\*\s*1024\s*\*\s*1024/);
 
