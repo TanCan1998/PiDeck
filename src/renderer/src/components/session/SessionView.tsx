@@ -17,7 +17,9 @@ import { SessionTodoStrip } from "./SessionTodoStrip";
 import { SessionTeamStrip } from "./SessionTeamStrip";
 import { SessionQueuedMessagesStrip } from "./SessionQueuedMessagesStrip";
 import { SessionSurfaceStage } from "./SessionSurfaceStage";
+import { SessionRunHoverToolbar } from "./SessionRunHoverToolbar";
 import { ComposerArea } from "./ComposerArea";
+import type { SessionRunControlView } from "../../utils/sessionCommands";
 import { useReplyActions } from "../../hooks/useReplyActions";
 import { useAnimationWindow } from "../../hooks/useAnimationWindow";
 import { chatContentWidthStyle } from "./chatContentWidth";
@@ -61,6 +63,8 @@ export type SessionViewProps = {
 	// ── Header 状态 ──
 	isAgentStarting: boolean;
 	isRestarting: boolean;
+	/** 本栏运行控制快照：会话区悬停工具条用；分屏两栏各算各的。 */
+	runControl?: SessionRunControlView;
 	sessionDuration?: number;
 
 	// ── Timeline interaction ──
@@ -139,6 +143,7 @@ export function SessionView({
 	terminalRowHeight,
 	isAgentStarting,
 	isRestarting,
+	runControl,
 	sessionDuration,
 	showThinking,
 	validCommandNames,
@@ -314,7 +319,7 @@ export function SessionView({
 				resizeTargetMinimumSize={{ fine: 20, coarse: 24 }}
 			>
 				<ResizablePanel id="timeline" minSize={timelineColumnMinSize} className="session-v-timeline flex min-h-0 flex-col" style={timelineColumnStyle}>
-					<div className="session-v-timeline-stage min-h-[var(--session-timeline-min,160px)] flex-1 overflow-hidden">
+					<div className="session-v-timeline-stage group/timeline relative min-h-[var(--session-timeline-min,160px)] flex-1 overflow-hidden">
 						<SessionSurfaceStage
 							sessionId={sessionId}
 							sessionTimeline={sessionTimeline}
@@ -342,6 +347,7 @@ export function SessionView({
 								replyActionsRef: setReplyActionsTarget,
 							}}
 						/>
+						{runControl && !settingsOpen && !environmentDialog ? <SessionRunHoverToolbar control={runControl} className="absolute right-3 top-2 z-20" /> : null}
 					</div>
 					{/* 阻塞式 Ask 底栏（issue #230）：与输入框同级钉在对话区下方，
 					    不再随时间线滚动——用户上翻看历史时提问卡仍常驻可见，不必再往下找。

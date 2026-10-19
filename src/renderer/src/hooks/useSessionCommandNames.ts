@@ -1,6 +1,6 @@
 import { useEffect, useMemo } from "react";
 import { useAtomValue, useSetAtom } from "jotai";
-import { sessionCommandsAtomFamily } from "../atoms/session-commands-atoms";
+import { sessionCommandsAtomFamily, sessionCommandsRefreshTickAtom } from "../atoms/session-commands-atoms";
 import { sessionRuntimeBySessionIdAtomFamily } from "../atoms/session-selectors";
 import { desktopApi } from "../desktopApi";
 import { mergeCommands } from "../components/app/AppUtils";
@@ -21,6 +21,8 @@ export function useSessionCommandNames(sessionId: string | undefined): Set<strin
 	const commands = useAtomValue(sessionCommandsAtomFamily(key));
 	const setCommands = useSetAtom(sessionCommandsAtomFamily(key));
 	const runtime = useAtomValue(sessionRuntimeBySessionIdAtomFamily(key));
+	// 热重载后扩展命令表会变，但 runtime generation 不变；tick 用来强制重新 get_commands。
+	const refreshTick = useAtomValue(sessionCommandsRefreshTickAtom);
 
 	useEffect(() => {
 		const target = toSessionRuntimeTarget(key, runtime);
@@ -40,7 +42,7 @@ export function useSessionCommandNames(sessionId: string | undefined): Set<strin
 		return () => {
 			current = false;
 		};
-	}, [key, runtime, setCommands]);
+	}, [key, runtime, setCommands, refreshTick]);
 
 	return useMemo(() => (commands.length === 0 ? EMPTY_NAMES : new Set(mergeCommands(commands).map((command) => command.name))), [commands]);
 }

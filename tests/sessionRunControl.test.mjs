@@ -142,6 +142,26 @@ test("in-flight queued prompts block restart but not abort", () => {
 	assert.equal(caps.canAbort, true);
 });
 
+test("hot reload is only available for live idle sessions with no queued sends", () => {
+	const idle = sessionRunCapabilities({ state: "idle", hasBinding: true });
+	assert.equal(idle.canHotReload, true);
+	assert.equal(canRunSessionAction(idle, "reloadResources"), true);
+
+	for (const input of [
+		{ state: "starting", hasBinding: true },
+		{ state: "running", hasBinding: true },
+		{ state: "error", hasBinding: true },
+		{ state: "closed", hasBinding: true },
+		{ state: "unstarted", hasBinding: false },
+	]) {
+		assert.equal(sessionRunCapabilities(input).canHotReload, false, `state=${input.state}`);
+	}
+
+	// busy（重启/停止/重载/激活在途）与排队消息都会拆掉正在处理的 handler，必须挡住。
+	assert.equal(sessionRunCapabilities({ state: "idle", hasBinding: true, busy: true }).canHotReload, false);
+	assert.equal(sessionRunCapabilities({ state: "idle", hasBinding: true, hasInFlightQueuedPrompt: true }).canHotReload, false);
+});
+
 test("resolveSessionRunState normalizes runtime snapshots", () => {
 	assert.equal(resolveSessionRunState({ status: "running" }, true), "running");
 	assert.equal(resolveSessionRunState({ status: "error" }, true), "error");

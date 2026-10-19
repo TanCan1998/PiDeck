@@ -86,7 +86,7 @@ import { useComposerStateSessionPrune } from "./hooks/useComposerStateSessionPru
 import { activeAgentIdAtom } from "./hooks/useSessionRuntimeController";
 import { useSessionHistoryMutations } from "./hooks/useSessionHistoryMutations";
 import { useUserMessageEditReplay } from "./hooks/useUserMessageEditReplay";
-import { isLiveRuntimeStatus, sessionCommandFailureToast, type SessionRunCapabilities, type SessionRunAction } from "./utils/sessionCommands";
+import { isLiveRuntimeStatus, sessionCommandFailureToast, type SessionRunAction, type SessionRunCapabilities, type SessionRunControlView } from "./utils/sessionCommands";
 import { GUIDE_BOOTSTRAP_SESSION_ID, readWelcomeAcpToolPreference, readWelcomeBackendPreference, readWelcomeDshModelPreference, readWelcomeModelPreference, readWelcomeThinkingPreference, resolveChatSessionBootstrap, resolveGuidePageBackend } from "./utils/chatSessionBootstrap";
 import { useAppAppearance } from "./hooks/appearance/useAppAppearance";
 import { useAppBootstrapInfo } from "./hooks/app/useAppBootstrapInfo";
@@ -2362,6 +2362,22 @@ export function App() {
 				: undefined,
 		};
 	};
+	// Tab 右键菜单的运行控制：与 ⋯ 菜单共用策略函数，但按被右键的 sessionId 现算，
+	// 后台 Tab 也能直接停止/重启/热重载。热重载只对 pi 后端暴露。
+	const buildTabsRunControl = (sessionId: string): SessionRunControlView | undefined => {
+		const capabilities = getSessionRunCapabilities(sessionId);
+		if (!capabilities) return undefined;
+		const target = getRuntimeTargetForSession(sessionId);
+		const record = store.get(sessionRecordsAtom)[sessionId];
+		return {
+			capabilities,
+			isStopping: Boolean(stoppingAgentId && stoppingAgentId === target?.agentId),
+			isRestarting: Boolean(target?.agentId && restartingAgentId === target.agentId) || activatingSessionId === sessionId,
+			isReloading: reloadingSessionId === sessionId,
+			supportsHotReload: !record?.backend || record.backend === "pi",
+			onAction: (action) => void runSessionControl(sessionId, action),
+		};
+	};
 	// ⋯ 菜单（当前会话）与 Tab 右键菜单（被右键的 Tab）共用同一工厂，闸门语义一致。
 	const tabsSessionActions = currentSessionId ? buildTabsSessionActions(currentSessionId) : undefined;
 
@@ -2414,15 +2430,18 @@ export function App() {
 		runControl: currentSessionId
 			? {
 					capabilities: getSessionRunCapabilities(currentSessionId),
-					isStopping: stoppingAgentId === activeAgentId,
+					isStopping: Boolean(stoppingAgentId && stoppingAgentId === activeAgentId),
 					isRestarting: restartingAgentId === activeAgentId || activatingSessionId === currentSessionId,
 					isReloading: reloadingSessionId === currentSessionId,
+					supportsHotReload: !currentSessionRecord?.backend || currentSessionRecord.backend === "pi",
 					// 「复制 Agent ID」用：与上面的 isStopping 同源判定（activeAgentId 即当前会话绑定的进程实例）
 					agentId: activeAgentId,
 					onCloseAgent: activeAgentId ? () => requestCloseAgentForSession(currentSessionId) : undefined,
 					onAction: (action: SessionRunAction) => void runSessionControl(currentSessionId, action),
 				}
 			: undefined,
+		// Tab 右键：按被右键的 Tab 现算运行控制（后台 Tab 也能停止/重启/热重载）。
+		contextRunControl: buildTabsRunControl,
 		// 会话代理（网络代理）入口：与侧栏会话菜单同源，打开同一个弹框。
 		// 仅在有当前会话时给出；弹框内自行判断 DSH 等宿主差异并给出「下次启动生效」提示。
 		// ACP 隐藏：会话代理只在 pi spawn 时消费（AgentManager.resolveSessionProxy），
@@ -2475,6 +2494,11 @@ export function App() {
 			onPreviewImage: setPreviewImage,
 			abortAgent,
 			restartActiveAgent,
+			getSessionRunCapabilities,
+			runSessionControl,
+			stoppingAgentId,
+			activatingSessionId,
+			reloadingSessionId,
 			openProviderLogin,
 			runCreateSessionDraft: async () => {
 				await createSessionDraftWithTab();
@@ -2554,6 +2578,11 @@ export function App() {
 			queueFlushBySessionRef,
 			restartActiveAgent,
 			restartingAgentId,
+			getSessionRunCapabilities,
+			runSessionControl,
+			stoppingAgentId,
+			activatingSessionId,
+			reloadingSessionId,
 			openProviderLogin,
 			resendUserMessage,
 			sessionDurationByAgent,

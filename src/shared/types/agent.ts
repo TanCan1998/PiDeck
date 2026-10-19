@@ -97,6 +97,7 @@ export type AgentGatewayCapability =
 	| "editMessage" // 编辑历史消息
 	| "deleteMessage" // 删除历史消息
 	| "getCommands" // 会话内命令列表
+	| "reloadResources" // 热重载扩展/技能/提示词/主题/上下文文件（pi 扩展命令 /reload）
 	| "exportHtml" // 导出 HTML
 	| "rewind"; // checkpoint 文件快照/回退（refs/pi-checkpoints，纯 git）
 

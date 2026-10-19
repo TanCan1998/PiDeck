@@ -84,7 +84,7 @@ export class CompositeAgentGateway implements SessionAgentGateway {
 	}
 
 	/** 可选能力存在性检查（不抽方法，避免丢 this）；缺失时抛与旧行为一致的错误，由 Coordinator 转 SESSION_COMMAND_FAILED。 */
-	private requireCapability(gateway: SessionAgentGateway, method: "getCommands" | "exportHtml" | "editMessage" | "deleteMessage" | "setPermission" | "listCheckpoints" | "getCheckpointDiff" | "restoreCheckpoint"): void {
+	private requireCapability(gateway: SessionAgentGateway, method: "getCommands" | "reloadResources" | "exportHtml" | "editMessage" | "deleteMessage" | "setPermission" | "listCheckpoints" | "getCheckpointDiff" | "restoreCheckpoint"): void {
 		if (typeof gateway[method] !== "function") {
 			throw new Error(`CompositeAgentGateway: backend "${gateway.backend}" does not support ${method}`);
 		}
@@ -189,6 +189,12 @@ export class CompositeAgentGateway implements SessionAgentGateway {
 		const gateway = this.owner(agentId);
 		this.requireCapability(gateway, "getCommands");
 		return gateway.getCommands!(agentId);
+	}
+
+	async reloadResources(agentId: string): Promise<PiCommand[]> {
+		const gateway = this.owner(agentId);
+		this.requireCapability(gateway, "reloadResources");
+		return gateway.reloadResources!(agentId);
 	}
 
 	async getAvailableModels(agentId: string): Promise<AvailableModel[]> {

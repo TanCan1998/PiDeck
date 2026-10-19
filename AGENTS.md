@@ -38,6 +38,13 @@ PiDeck 是 Electron 桌面应用，在多个项目目录间管理和运行 pi RP
 - 输入框提示词增强需要直接调 pi SDK 的补全（不走 RPC 会话），主进程经常驻单进程 sidecar 实现：`resources/pi-enhance-host.mjs`（stdout 只放 NDJSON 协议，载入 `PIDECK_PI_SDK_ENTRY` 指向的 pi `dist/index.js` 建 `ModelRuntime`），宿主侧收口在 `src/main/pi/enhance/EnhancePromptService.ts`，启动参数定位复用 `piAuthHostLaunch` 的 `resolvePiAuthHostLaunch`，必须列进 `extraResources`。
 - 常驻单进程多 run：新 run 打断旧 run、显式 cancel、boot/run 超时、进程意外退出都在服务层结算（每 run 回调恰好一次）；渲染层按 scopeKey 隔离，切会话作废进行中的 run，结果只回填发起方输入框。入口 `enhance:run`/`enhance:cancel`/`enhance:on-event` 在 `src/main/ipc/enhanceIpc.ts`（边界校验；provider/modelId 形态校验只挡空白/控制字符/超长，真实目录的 `builtin:` `https://` `a/b` 形态必须放行）与 preload 白名单；hook 为 `src/renderer/src/hooks/usePromptEnhance.ts`。目标模型优先级见 `src/shared/enhanceModelPreference.ts`：设置固定模型（`settings.enhanceModel`，设置页通用 tab）> 会话记录 > 引导页点选 > 部署/主进程默认，默认跟随会话模型。fail-safe 与 pi-auth 一致：sidecar 起不来只是按钮置灰 + toast，不影响 pi 会话与其余功能。禁止扩展成通用模型 API 桥。
 
+**例外五：运行时控制扩展（`pi-deck-runtime.ts`，只允许 `/reload`）**
+
+- RPC 模式不执行 pi 的 builtin `/reload`，也没有原生 reload RPC；pi 只把 `ctx.reload()` 暴露给扩展命令。内部扩展 `resources/extensions/pi-deck-runtime.ts` 只注册一个 `reload` 命令：`ctx.isIdle()` 时调用 `ctx.reload()`，不注册工具、不提供其他宿主控制。
+- 注入走 `INTERNAL_BUILT_IN_EXTENSIONS`（始终随 RPC 注入，`piRpcNoExtensions` 除外；不上设置页、不参与用户移除）。写入 `extensions-manifest.json`，热更新覆盖层按整份快照分发。
+- 宿主唯一入口：`sessions:runtime-reload-resources` → `SessionRuntimeCoordinator.reloadResources` → `AgentManager.reloadResources`。后者先 `get_state`/挂起 UI 请求校验 idle，再按 `sourceInfo.path` 确认命令来自 `pi-deck-runtime.ts`，最后直接发 RPC prompt；**禁止复用 `sendPrompt`**（它会在 RPC 前写乐观用户消息）。重载后重新 `get_commands` 返回新命令表，渲染层刷新 `/` 菜单与时间线命令 chip。
+- 只对 pi 的 live idle 会话开放；running/compacting/有排队消息/挂起 Ask 时拒绝，DSH/ACP 不提供入口。扩展缺失、重载失败、命令未被 `handled` 都返回结构化错误 + toast，不影响会话本身；禁止扩展成通用命令执行桥。
+
 ## 目录结构与跨层契约
 
 本项目只维护项目根这一份 `AGENTS.md`；不要再在子目录生成规则文件。规则冲突时以本文件和实际类型/API 为准。

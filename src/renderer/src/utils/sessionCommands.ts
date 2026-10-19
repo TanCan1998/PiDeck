@@ -101,12 +101,14 @@ export type SessionRunState = "starting" | "idle" | "running" | "error" | "close
  * - `start` / `restart`：启动或重建进程（live 时即「杀掉重启」，会中断当前回答）；
  * - `abort`：只中断当前正在执行的回合，进程与绑定保留、可立即继续对话
  *   （与输入框的「停止」按钮同义）；
+ * - `reloadResources`：热重载 pi 的扩展/技能/提示词/主题/上下文文件（pi 扩展命令 `/reload`）；
+ *   只对 live idle 的 pi 会话开放，不重启进程；
  * - `reload`：无进程时从磁盘刷新消息文件。
  *
  * 「关闭 Agent」（杀进程 + 解绑，会话记录与历史消息保留）不是运行控制动作：
  * 它走独立的 closeAgent 链路，见 App 的 closeAgent / requestCloseAgent。
  */
-export type SessionRunAction = "start" | "restart" | "reload" | "abort";
+export type SessionRunAction = "start" | "restart" | "reloadResources" | "reload" | "abort";
 
 export interface SessionRunCapabilities {
 	/** 归一化后的运行状态（UI 可直接用于文案/徽章） */
@@ -119,12 +121,30 @@ export interface SessionRunCapabilities {
 	/** 中断当前回合（abort）：仅回合正在执行且无互斥操作时可用 */
 	canAbort: boolean;
 	canRestart: boolean;
+	/** 热重载扩展/技能/提示词（`/reload`）：仅 live idle 且无排队消息时可用 */
+	canHotReload: boolean;
+	/** 无进程时从磁盘刷新消息文件 */
 	canReload: boolean;
 	/** 主控动作会杀掉正在执行的对话，UI 必须先确认 */
 	requiresConfirm: boolean;
 	/** 是否处于过渡态（starting / 正在重启），用于置灰与 spinner */
 	pending: boolean;
 }
+
+/**
+ * 运行控制视图快照：Tab 菜单、侧栏菜单、会话悬停工具条共用。
+ * 只携带策略结论与动作回调，不暴露 store/hook；`supportsHotReload` 由装配层按
+ * 会话 backend 计算（DSH/ACP 不显示 `/reload` 入口）。
+ */
+export type SessionRunControlView = {
+	capabilities: SessionRunCapabilities;
+	/** 关闭 Agent 进行中（closeAgent 期间）：菜单项/工具条据此显示进度文案。 */
+	isStopping?: boolean;
+	isRestarting?: boolean;
+	isReloading?: boolean;
+	supportsHotReload?: boolean;
+	onAction: (action: SessionRunAction) => void;
+};
 
 /** 归一化运行状态：把 undefined / detached / 未知值统一成 `unstarted`/`detached`。 */
 export function resolveSessionRunState(runtime: { status?: string | null } | undefined, hasBinding: boolean): SessionRunState {
@@ -169,7 +189,10 @@ export function sessionRunCapabilities(input: {
 	// 没有可中断的回合，卡启动/卡回答的出口是「关闭 Agent」（杀进程 + 解绑，
 	// 不属于本策略）；idle/终态没有在跑的回合，同样不该给出「停止回答」。
 	const canAbort = state === "running" && !busy;
-	// 重载是从磁盘刷新消息文件：live 时内存里有流式消息，强刷会覆盖，
+	// 热重载由 pi 的扩展命令执行，会重建扩展运行时；只在进程存活且没有正在跑的回合 /
+	// 压缩 / 排队消息时开放，避免把运行中的 handler 拆掉。
+	const canHotReload = state === "idle" && !busy && !input.hasInFlightQueuedPrompt;
+	// 从磁盘刷新消息：live 时内存里有流式消息，强刷会覆盖，
 	// 因此只对「无进程」状态开放（终态/未启动/已解绑）。
 	const canReload = !isLive && !busy;
 
@@ -180,6 +203,7 @@ export function sessionRunCapabilities(input: {
 		canStart,
 		canAbort,
 		canRestart: canStart && !input.hasInFlightQueuedPrompt,
+		canHotReload,
 		canReload,
 		// 主控按钮在 live 态是「重启进程」：会中断当前回答，必须先确认。
 		requiresConfirm: isLive,
@@ -195,6 +219,8 @@ export function canRunSessionAction(capabilities: SessionRunCapabilities, action
 			return capabilities.canRestart;
 		case "abort":
 			return capabilities.canAbort;
+		case "reloadResources":
+			return capabilities.canHotReload;
 		case "reload":
 			return capabilities.canReload;
 	}

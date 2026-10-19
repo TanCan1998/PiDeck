@@ -103,16 +103,19 @@ test("hidden built-ins (gui-bridge/ext-points) are never injected, not even when
 	}
 });
 
-test("internal shell proxy adapter is always injected even if user-facing built-ins are removed", () => {
+test("internal adapters are always injected even if user-facing built-ins are removed", () => {
 	const { listActiveBuiltInExtensionPaths, INTERNAL_BUILT_IN_EXTENSIONS } = loadBuiltInExtensionsModule();
 	const root = mkdtempSync(join(tmpdir(), "pideck-internal-ext-"));
 	const extDir = join(root, "resources", "extensions");
 	mkdirSync(extDir, { recursive: true });
 	writeFileSync(join(extDir, "pi-deck-shell-proxy.ts"), "// shell proxy\n", "utf8");
+	writeFileSync(join(extDir, "pi-deck-runtime.ts"), "// runtime control\n", "utf8");
 	try {
 		const paths = listActiveBuiltInExtensionPaths({ appPath: root, resourcesPath: root, isDev: true }, [...INTERNAL_BUILT_IN_EXTENSIONS]);
-		assert.equal(paths.length, 1);
-		assert.ok(String(paths[0]).endsWith("pi-deck-shell-proxy.ts"));
+		assert.equal(paths.length, 2);
+		const names = paths.map((path) => String(path).replace(/^.*[/\\]/, ""));
+		assert.ok(names.includes("pi-deck-shell-proxy.ts"));
+		assert.ok(names.includes("pi-deck-runtime.ts"));
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

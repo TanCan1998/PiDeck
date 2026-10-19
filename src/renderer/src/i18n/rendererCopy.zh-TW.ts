@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: 9a412a3dd420e13a84a2a4b2be613bf430fb487cceec38d22a7118ae7615b153（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: ba3fefe542e86aef41fe1a143e9a29026db8f9079aa50670503f693a7e23d415（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -353,6 +353,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"app.stopping": "停止中…",
 	"app.reloading": "過載中…",
 	"app.sessionReloaded": "會話已重新載入",
+	"app.sessionResourcesReloaded": "擴充套件與技能已重新載入",
 	"app.sessionReloadFailed": "重新載入會話失敗：{error}",
 	"app.scrollToBottom": "移動到最新",
 	"app.search": "搜尋",
@@ -3982,10 +3983,14 @@ export const zhTW: Record<TranslationKey, string> = {
 	"menu.stopAnswerHint": "只中斷正在生成的回答，Agent 程序繼續執行",
 	"app.closing": "關閉中…",
 	"menu.restartSession": "重啟會話",
-	"menu.reloadSession": "重新載入會話",
+	"menu.reloadResources": "重新載入擴充套件與技能",
+	"menu.reloadResourcesHint": "不重啟程序，重新載入擴充套件、技能、提示詞、主題和上下文檔案",
+	"menu.reloadMessages": "從磁碟重新載入訊息",
+	"menu.reloadMessagesHint": "僅無程序會話可用：重新讀取會話檔案並重新整理時間線",
 	"menu.startAgent": "啟動 Agent",
 	"menu.sectionRunControl": "執行控制",
 	"menu.runControlHint": "會話未執行，點此啟動 Agent",
+	"runControl.toolbar": "會話執行控制",
 	"runControl.restartRunningTitle": "重啟會話程序",
 	"runControl.restartRunningBody": "該會話的 Agent 正在執行，重啟會中斷當前回答並重新啟動程序。會話記錄與歷史訊息會保留。",
 	"runControl.startFailedTitle": "啟動 Agent 失敗",

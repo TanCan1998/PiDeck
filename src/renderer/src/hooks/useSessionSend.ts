@@ -27,6 +27,8 @@ import { applyDshGoalSendTransform, buildComposerPromptSubmission, deriveCompose
 import { expandQuoteTokens, stripQuoteTokens } from "../components/session/composer/quoteChip";
 import { t, translateI18nDescriptor } from "../i18n";
 import { DSH_INSTALL_SETTINGS_TARGET, maybeHintMissingDshRunnerNode, showDshRuntimeBlockHint } from "../utils/dshRuntimeHint";
+import { toSessionRuntimeTarget } from "../utils/sessionCommands";
+import { sessionReloadingByIdAtom } from "../atoms/session-commands-atoms";
 import { dshSendBlockReason } from "../../../shared/types/dshRuntime";
 
 export type EnqueuePromptSnapshot = {
@@ -62,6 +64,8 @@ export type UseSessionSendOptions = {
 	createNewSession?: () => Promise<void>;
 	/** `/login [providerId]`：桌面拦截后打开登录供应商弹框（pi 的登录只在它的 CLI 层，走认证例外通道）。 */
 	openProviderLogin?: (providerId?: string) => void;
+	/** `/reload`：桌面拦截后热重载 pi 资源（不写用户气泡、不占发送锁）。 */
+	reloadResources?: (target: SessionRuntimeTarget) => Promise<void>;
 	resetComposerUi?: () => void;
 	recordPromptHistory?: (sessionId: string, message: string) => void;
 	refreshProject?: (projectId: string) => void;
@@ -192,6 +196,11 @@ export function useSessionSend(options: UseSessionSendOptions) {
 		// atom 随 bootstrap 提升且跨 Composer 重挂载保留；局部 ref 只守当前实例。
 		const existingSend = store.get(sessionSendStateByIdAtom)[sourceSessionId];
 		if (sendingSessionIdsRef.current.has(sourceSessionId) || existingSend?.status === "activating" || existingSend?.status === "sending") return;
+		// 热重载会拆掉扩展运行时；期间禁止并发发送（含再次 /reload），避免把 handler 拆掉或让命令排队。
+		if (store.get(sessionReloadingByIdAtom)[sourceSessionId]) {
+			options.showError?.(t("sessionCommand.reloadResourcesBusy"), 3000);
+			return;
+		}
 
 		// overrideText 有值 = 快捷消息直发：正文来自弹框条目而非当前草稿。
 		// 这里固定三条约束（下面所有分支都靠 keepDraft 收口）：草稿/附件不参与本次发送、
@@ -278,6 +287,28 @@ export function useSessionSend(options: UseSessionSendOptions) {
 			resetComposerEphemeralUi(keepDraft);
 			sendingSessionIdsRef.current.delete(sourceSessionId);
 			store.set(openSettingsAtom, { tab: "shortcuts" });
+			return;
+		}
+		if (slashCommand.kind === "reload") {
+			// `/reload` 由桌面转成专用 IPC：主进程用内部扩展命令热重载 pi 资源，
+			// 不写乐观用户气泡、不进模型消息流。
+			clearComposerSnapshot(sourceSessionId, keepDraft);
+			resetComposerEphemeralUi(keepDraft);
+			sendingSessionIdsRef.current.delete(sourceSessionId);
+			const target = toSessionRuntimeTarget(sourceSessionId, runtimeAtEntry);
+			if (!target) {
+				options.showError?.(t("sessionCommand.runtimeUnavailable"), 4000);
+				return;
+			}
+			if (!options.reloadResources) {
+				options.showError?.(t("sessionCommand.reloadResourcesUnsupported"), 4000);
+				return;
+			}
+			try {
+				await options.reloadResources(target);
+			} catch (error) {
+				options.showError?.(error instanceof Error ? error.message : String(error), 5000);
+			}
 			return;
 		}
 		const isNewCommand = slashCommand.kind === "new";

@@ -9,6 +9,7 @@ import { findImageGenProvider } from "../../../shared/imageGenConfig";
 import { findVideoGenProvider } from "../../../shared/videoGenConfig";
 import { resolveEnhanceTargetModel } from "../../../shared/enhanceModelPreference";
 import { collectPromptEnhanceContext } from "../utils/promptEnhanceContext";
+import { sessionCommandsRefreshTickAtom } from "../atoms/session-commands-atoms";
 import type { ImageGenMeta } from "../../../shared/types/imagegen";
 import type { VideoGenMeta } from "../../../shared/types/videogen";
 import {
@@ -165,6 +166,8 @@ export type UseSessionComposerControllerOptions = {
 	onCreateSession?: () => Promise<void>;
 	/** `/login` 拦截后打开登录供应商弹框；来自 SessionPaneServices。 */
 	onProviderLogin?: (providerId?: string) => void;
+	/** `/reload` 拦截后热重载 pi 资源（不写用户气泡）；来自 SessionPaneServices。 */
+	onReloadResources?: (target: SessionRuntimeTarget) => Promise<void>;
 	/** Passed through to useSessionSend.enqueue. */
 	enqueue?: (sessionId: string, snapshot: EnqueuePromptSnapshot) => boolean;
 	/** 「停止响应」时抑制排队消息自动投递；由 SessionPaneServices 注入 queue.suppressSessionQueueAutoDrain。 */
@@ -480,6 +483,8 @@ export function useSessionComposerController(options: UseSessionComposerControll
 	const [imageGenOutputFormat, setImageGenOutputFormatState] = useState(DEFAULT_IMAGE_GEN_OUTPUT_FORMAT);
 	const [picker, setPicker] = useState<ComposerPickerKind | null>(null);
 	const [commands, setCommands] = useState<PiCommand[]>([]);
+	// 热重载后扩展/技能/提示词可能变化，但 runtime 身份不变；tick 强制重拉命令表。
+	const commandsRefreshTick = useAtomValue(sessionCommandsRefreshTickAtom);
 	const [draftResourceCommandSnapshot, setDraftResourceCommandSnapshot] = useState<DraftResourceCommandSnapshot>({ projectId: undefined, commands: [] });
 	const [standbyPreviewCommandSnapshot, setStandbyPreviewCommandSnapshot] = useState<StandbyPreviewCommandSnapshot>({ projectId: undefined, commands: [] });
 	const [files, setFiles] = useState<FileTreeNode[]>([]);
@@ -831,7 +836,7 @@ export function useSessionComposerController(options: UseSessionComposerControll
 		return () => {
 			current = false;
 		};
-	}, [isDshBackend, runtime?.agentId, runtime?.runtimeGeneration, sessionId]);
+	}, [isDshBackend, runtime?.agentId, runtime?.runtimeGeneration, sessionId, commandsRefreshTick]);
 
 	// Draft sessions have no Pi process to ask for get_commands. Discover the same local
 	// skills/prompts Pi will load; as soon as a runtime exists, its RPC list is authoritative.
@@ -1104,6 +1109,7 @@ export function useSessionComposerController(options: UseSessionComposerControll
 		onDraftMutation: markDraftMutation,
 		createNewSession: options.onCreateSession,
 		openProviderLogin: options.onProviderLogin,
+		reloadResources: options.onReloadResources,
 		compact: async (target, prompt) => {
 			await runManualCompact(target, prompt);
 		},

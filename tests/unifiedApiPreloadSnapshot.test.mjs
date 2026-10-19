@@ -7,7 +7,8 @@
  * 摘要来源：T7 只读探针实测（2026-10-14；2026-10-16 合并刷新随 dev 演进重算：
  * yaoPrompts 方法与 sessions.searchContent、skillHub.onInstallProgress 入场，命名空间数不变；
  * 2026-10-17 再刷新：files.searchContent（file-index 工作区文件内容检索）入场，命名空间/方法数锚点不变；
- * 2026-10-18 再刷新：sessions.searchInSession（会话内查找）入场，sessions 111→112，命名空间数不变）。
+ * 2026-10-18 再刷新：sessions.searchInSession（会话内查找）入场，sessions 111→112，命名空间数不变；
+ * 2026-10-19 再刷新：sessions.reloadResources（pi 热重载扩展/技能）入场，sessions 112→113）。
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -15,7 +16,7 @@ import { test } from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
 const NS_LIST_SHA256 = "5f3768123e04385116d679b8b3e6f16b638a84657c46d036d18faa9fb57ae804";
-const FULL_METHODS_SHA256 = "26ccce5aa430ed5ff3a43a3c78ba01ef37ba372e11fe4e1a327987992b375952";
+const FULL_METHODS_SHA256 = "4c460208beec2eeff95d3da0b4d5a96247472aeddc775096e02be04a36697f9b";
 const NAMESPACE_COUNT = 70;
 
 /** 捕获 preload 暴露的 piDesktop；null/undefined/形态不符时显式红并给诊断（F8-6 共用）。 */
@@ -57,8 +58,8 @@ test("F8-2 每命名空间排序方法清单摘要零漂移", () => {
 	assert.equal(sha256(methodLines.join(";")), FULL_METHODS_SHA256, "方法清单摘要漂移：任一命名空间的方法暴露面发生变化（A10 红线）");
 });
 
-test("F8-3 数量锚点：sessions 112 / config 48 / git 38 / app 32", () => {
-	assert.equal(Object.keys(api.sessions).length, 112, "sessions 方法数漂移");
+test("F8-3 数量锚点：sessions 113 / config 48 / git 38 / app 32", () => {
+	assert.equal(Object.keys(api.sessions).length, 113, "sessions 方法数漂移");
 	assert.equal(Object.keys(api.config).length, 48, "config 方法数漂移");
 	assert.equal(Object.keys(api.git).length, 38, "git 方法数漂移");
 	assert.equal(Object.keys(api.app).length, 32, "app 方法数漂移");

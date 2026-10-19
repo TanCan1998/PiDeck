@@ -4,7 +4,8 @@ import { applySessionRuntimeEventAtom, cacheSessionMessagesAtom, sessionHistoryM
 import { sessionIdByRuntimeAgentIdAtomFamily, sessionRuntimeBySessionIdAtomFamily } from "../../atoms/session-selectors";
 import { dshRuntimeStatusAtom } from "../../atoms/dsh-atoms";
 import { openSettingsAtom } from "../../atoms/app-ui-atoms";
-import { canRunSessionAction, isLiveRuntimeStatus, requireSessionCommand, resolveSessionRunState, sessionRunCapabilities, SessionCommandFailure, toSessionRuntimeTarget, type SessionRunCapabilities, type SessionRunAction } from "../../utils/sessionCommands";
+import { sessionCommandsAtomFamily, sessionCommandsRefreshTickAtom, sessionReloadingByIdAtom } from "../../atoms/session-commands-atoms";
+import { canRunSessionAction, isLiveRuntimeStatus, requireSessionCommand, resolveSessionRunState, sessionCommandFailureToast, sessionRunCapabilities, SessionCommandFailure, toSessionRuntimeTarget, type SessionRunCapabilities, type SessionRunAction } from "../../utils/sessionCommands";
 import { sessionHistoryUnavailableState } from "../../utils/sessionHistoryAvailability";
 import { DSH_INSTALL_SETTINGS_TARGET, maybeHintMissingDshRunnerNode, showDshRuntimeBlockHint } from "../../utils/dshRuntimeHint";
 import { dshSendBlockReason } from "../../../../shared/types/dshRuntime";
@@ -221,6 +222,58 @@ export function useSessionRunControl({
 				return next;
 			});
 			if (store.get(sessionHistoryMutationOverlayByIdAtom)[sessionId] === "reloading") setMutationOverlay({ sessionId, kind: null });
+		}
+	}
+
+	/**
+	 * 热重载 pi 资源（扩展/技能/提示词/主题/上下文文件）。
+	 *
+	 * 只对 live idle 的 pi 会话开放；DSH/ACP 没有这个能力（UI 按 backend 隐藏入口）。
+	 * 与 `reloadSessionMessages` 共用 `replacingSessionIdsRef` 互斥：热重载会重建扩展
+	 * 运行时，期间不允许重启/克隆/磁盘重载并发抢绑定。
+	 */
+	async function reloadResources(sessionId: string): Promise<void> {
+		if (!sessionId) return;
+		const capabilities = getSessionRunCapabilities(sessionId);
+		if (!capabilities || !canRunSessionAction(capabilities, "reloadResources")) {
+			showToast(t("sessionCommand.reloadResourcesBusy"), 3000);
+			return;
+		}
+		const record = store.get(sessionRecordsAtom)[sessionId];
+		if (record?.backend && record.backend !== "pi") {
+			showToast(t("sessionCommand.reloadResourcesUnsupported"), 3000);
+			return;
+		}
+		const target = getRuntimeTargetForSession(sessionId);
+		if (!target) {
+			showToast(t("sessionCommand.runtimeUnavailable"), 3000);
+			return;
+		}
+		if (replacingSessionIdsRef.current.has(sessionId)) return;
+		replacingSessionIdsRef.current.add(sessionId);
+		setReloadingSessionId(sessionId);
+		// 关闭 composer 发送闸门：reload 期间不允许再发 prompt。
+		store.set(sessionReloadingByIdAtom, (current) => ({ ...current, [sessionId]: true }));
+		try {
+			const result = requireSessionCommand(await api.sessions.reloadResources(target));
+			// 主进程在 reload 完成后重新 get_commands；一次写回让时间线命令 chip 立即更新，
+			// tick 再驱动 composer 的 `/` 菜单重新拉取（runtime generation 没变，普通依赖不会触发）。
+			store.set(sessionCommandsAtomFamily(sessionId), result.value);
+			store.set(sessionCommandsRefreshTickAtom, (tick) => tick + 1);
+			showToast(t("app.sessionResourcesReloaded"), 2000);
+		} catch (error) {
+			// 主进程把具体原因放在 debugDetails（扩展未加载 / 运行时变化等）；只显示通用
+			// 「会话操作失败」会丢失定位信息。
+			showToast(sessionCommandFailureToast(error), 5000);
+		} finally {
+			replacingSessionIdsRef.current.delete(sessionId);
+			setReloadingSessionId((current) => (current === sessionId ? null : current));
+			store.set(sessionReloadingByIdAtom, (current) => {
+				if (!current[sessionId]) return current;
+				const next = { ...current };
+				delete next[sessionId];
+				return next;
+			});
 		}
 	}
 
@@ -526,12 +579,18 @@ export function useSessionRunControl({
 	 * - abort：只中断当前正在执行的回合（abort），进程与绑定保留、可立即继续对话；
 	 *   与输入框的「停止」同义——要杀进程请走「关闭 Agent」（closeAgent）。
 	 * - restart：与 start 同路径（对 live 语义即重启）；running 时先弹确认，避免误杀正在输出的回答。
+	 * - reloadResources：热重载 pi 扩展/技能/提示词（不重启进程，见 reloadResources）。
 	 * - reload：无进程时从磁盘刷新消息文件。
 	 */
 	async function runSessionControl(sessionId: string, action: SessionRunAction): Promise<void> {
 		if (!sessionId) return;
 		const capabilities = getSessionRunCapabilities(sessionId);
 		if (!capabilities || !canRunSessionAction(capabilities, action)) return;
+
+		if (action === "reloadResources") {
+			await reloadResources(sessionId);
+			return;
+		}
 
 		if (action === "reload") {
 			await reloadSessionMessages(sessionId);
@@ -580,6 +639,7 @@ export function useSessionRunControl({
 		applyAgentRuntimeState,
 		refreshRuntimeState,
 		reloadSessionMessages,
+		reloadResources,
 		closeAgent,
 		requestCloseAgent,
 		requestCloseAgentForSession,

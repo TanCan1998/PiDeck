@@ -6,7 +6,7 @@
 import type { ReactNode } from "react";
 import type { ChatMessage, FileTreeNode, PiCommand } from "../../../../shared/types";
 import { isRetryStatusMessage } from "../session/timelineFailureNotice";
-import type { TranslationKey } from "../../i18n";
+import { t, type TranslationKey } from "../../i18n";
 import { formatFilePathRef } from "../session/composer/chips";
 import { replaceExpandedRefBlocksWithLabels } from "../session/composer/quoteChip";
 
@@ -804,6 +804,20 @@ const PINNED_COMMAND_NAMES = new Set<string>();
 // `/hotkeys` 无等价按钮，靠 classifyComposerSlashCommand 接管到设置里的快捷键页。
 const HIDDEN_DESKTOP_BUILTIN_COMMAND_NAMES = new Set(["model", "resume", "fork", "name", "logout", "goal", "tree", "reload", "copy", "export", "share", "session", "settings", "clone"]);
 
+/**
+ * 内置扩展命令的菜单描述：pi 进程没有渲染层词典，扩展只能给英文 fallback；
+ * 渲染层对这些已知命令补 i18n 描述（不覆盖用户扩展自带 description）。
+ */
+const COMMAND_DESCRIPTION_KEYS: Record<string, TranslationKey> = {
+	reload: "prompt.command.reload.description",
+};
+
+function localizedCommandDescription(command: PiCommand): string {
+	const key = COMMAND_DESCRIPTION_KEYS[command.name];
+	if (key) return t(key);
+	return command.description ?? "";
+}
+
 function isBuiltinDesktopCommand(command: PiCommand) {
 	return command.source == null || command.source === "builtin";
 }
@@ -980,7 +994,7 @@ export function buildSuggestionItems(prompt: string, cursor: number, commands: P
 			.map(({ command }) => ({
 				key: command.name,
 				label: `/${command.name}`,
-				description: command.description ?? "",
+				description: localizedCommandDescription(command),
 				value: `/${command.name}`,
 			}));
 	}

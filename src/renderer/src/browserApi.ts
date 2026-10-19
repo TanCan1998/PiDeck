@@ -306,6 +306,11 @@ export function createBrowserApi(): PiDesktopApi {
 			compactRuntime: (target, prompt) => sessionRuntimeCommand(target, "compact", { prompt }),
 			getRuntimeState: (target) => sessionRuntimeCommand(target, "state"),
 			listRuntimeCommands: (target) => sessionRuntimeCommand(target, "commands"),
+			// LAN Web 没有桌面端的内部 reload 扩展注入链路；入口按 backend/能力隐藏。
+			reloadResources: async () => ({
+				ok: false,
+				error: { code: "SESSION_COMMAND_FAILED", debugDetails: "reload resources is not supported over LAN Web" },
+			}),
 			// 浏览器模式无 standby 池访问能力，草稿命令预览回退本地发现。
 			draftCommands: async () => null,
 			listRuntimeModels: (target) => sessionRuntimeCommand(target, "models"),

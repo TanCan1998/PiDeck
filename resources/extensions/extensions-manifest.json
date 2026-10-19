@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "version": "1.0.1",
-  "bundleSha256": "b69a4f22455368ab2b3b26d99b0bbd16b67fe8f5a3499dd938a0eb903dd030c5",
-  "fileCount": 26,
+  "bundleSha256": "924794999043e22b9b2db8bdbde14e0b78cb1f63f31074f3d775f72f39d2794d",
+  "fileCount": 27,
   "files": [
     {
       "name": "pi-deck-ask-question.ts",
@@ -93,6 +93,11 @@
       "name": "pi-deck-retry-no-body.ts",
       "sha256": "0e2edc4dc4ff1b32c3a1f553362804d8ae8d60657f741d011b6e94642cf4ccae",
       "bytes": 15606
+    },
+    {
+      "name": "pi-deck-runtime.ts",
+      "sha256": "67df35a6aaeca7c57d65c057af010b799d902e151b0f8053a79496ef496db8b4",
+      "bytes": 1218
     },
     {
       "name": "pi-deck-security-gate.ts",

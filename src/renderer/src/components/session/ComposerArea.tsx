@@ -117,6 +117,7 @@ function ComposerMeasuredExtras(props: ComposerExtrasProps) {
 }
 
 export const ComposerArea = forwardRef<HTMLElement, ComposerAreaProps>(function ComposerArea(props, footerRef) {
+	const paneServices = useSessionPaneServices();
 	const composer = useSessionComposerController({
 		sessionId: props.sessionId,
 		enqueue: props.enqueue,
@@ -125,12 +126,14 @@ export const ComposerArea = forwardRef<HTMLElement, ComposerAreaProps>(function 
 		// @ 引用文件树；真实会话忽略该字段（record.projectId 优先）。
 		bootstrapProjectId: props.bootstrapProjectId,
 		// 预览 Tab 里发消息 → 自动晋升常驻（由 App 装配的 SessionPaneServices 提供）
-		onPromoteSession: useSessionPaneServices().promoteSessionToPermanent,
-		onCreateSession: useSessionPaneServices().runCreateSessionDraft,
+		onPromoteSession: paneServices.promoteSessionToPermanent,
+		onCreateSession: paneServices.runCreateSessionDraft,
 		// 输入框 `/login`：桌面接管后打开登录供应商弹框（pi 的登录只在它的 CLI 层）
-		onProviderLogin: useSessionPaneServices().openProviderLogin,
+		onProviderLogin: paneServices.openProviderLogin,
+		// `/reload`：桌面拦截后热重载 pi 资源，不写用户气泡
+		onReloadResources: (target) => paneServices.runSessionControl(target.sessionId, "reloadResources"),
 		// 「停止响应」后暂停排队消息自动投递（App 注入 queue.suppressSessionQueueAutoDrain）
-		suppressQueuedDrain: useSessionPaneServices().queueSuppressAutoDrain,
+		suppressQueuedDrain: paneServices.queueSuppressAutoDrain,
 	});
 	// ACP 会话配置(configOptions):枚举由 agent 回传,选择经 session/set_config_option 下发。
 	// agentId 未就绪/后端不符时 hook 内部自挂空,无额外成本。
@@ -139,7 +142,7 @@ export const ComposerArea = forwardRef<HTMLElement, ComposerAreaProps>(function 
 	const modelPendingMap = useAtomValue(modelPendingByIdAtom);
 	const sessionRecords = useAtomValue(sessionRecordsAtom);
 	// 输入框功能显示开关（外观设置）：只隐藏底栏入口，不停功能与快捷键（shared/composerFeatures.ts）
-	const hiddenComposerFeatures = useSessionPaneServices().hiddenComposerFeatures;
+	const hiddenComposerFeatures = paneServices.hiddenComposerFeatures;
 	const composerFeatureVisible = (feature: HideableComposerFeatureId): boolean => !isComposerFeatureHidden(hiddenComposerFeatures, feature);
 
 	const prewarmStartedForSessionRef = useRef<string | undefined>(undefined);

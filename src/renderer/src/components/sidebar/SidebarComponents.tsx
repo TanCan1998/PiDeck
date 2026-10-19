@@ -760,6 +760,8 @@ export type SidebarRunControl = {
 	isStopping?: boolean;
 	isRestarting?: boolean;
 	isReloading?: boolean;
+	/** pi 后端才提供热重载；DSH/ACP 不渲染 `/reload` 菜单项。 */
+	supportsHotReload?: boolean;
 	/**
 	 * 当前绑定运行实例的 agentId（pi 每次 spawn 随机生成）。
 	 * 只服务于「复制 Agent ID」：排查问题时要把它贴进日志/工单，而它与会话记录 id
@@ -786,7 +788,8 @@ function SidebarRunControlItems(props: { runControl: SidebarRunControl }) {
 
 	const primaryDisabled = disabled || !canRunSessionAction(capabilities, "start");
 	const abortDisabled = disabled || !canRunSessionAction(capabilities, "abort");
-	const reloadDisabled = disabled || !canRunSessionAction(capabilities, "reload");
+	const hotReloadDisabled = disabled || !canRunSessionAction(capabilities, "reloadResources") || Boolean(runControl.isReloading);
+	const reloadDisabled = disabled || !canRunSessionAction(capabilities, "reload") || Boolean(runControl.isReloading);
 
 	const primaryLabel = runControl.isRestarting ? t("app.restarting") : capabilities.primaryAction === "start" ? t("menu.startAgent") : t("menu.restartSession");
 
@@ -815,10 +818,18 @@ function SidebarRunControlItems(props: { runControl: SidebarRunControl }) {
 					{t("menu.stopAnswer")}
 				</span>
 			</DropdownMenuItem>
-			<DropdownMenuItem disabled={reloadDisabled} style={reloadDisabled ? { opacity: 0.4 } : undefined} onSelect={() => runControl.onAction("reload")}>
+			{runControl.supportsHotReload ? (
+				<DropdownMenuItem disabled={hotReloadDisabled} style={hotReloadDisabled ? { opacity: 0.4 } : undefined} title={t("menu.reloadResourcesHint")} onSelect={() => runControl.onAction("reloadResources")}>
+					<span className="inline-flex items-center gap-2">
+						<RefreshCw className={cn("size-3.5", runControl.isReloading && "animate-pideck-spin")} aria-hidden="true" />
+						{runControl.isReloading ? t("app.reloading") : t("menu.reloadResources")}
+					</span>
+				</DropdownMenuItem>
+			) : null}
+			<DropdownMenuItem disabled={reloadDisabled} style={reloadDisabled ? { opacity: 0.4 } : undefined} title={t("menu.reloadMessagesHint")} onSelect={() => runControl.onAction("reload")}>
 				<span className="inline-flex items-center gap-2">
-					<RefreshCw className="size-3.5" aria-hidden="true" />
-					{t("menu.reloadSession")}
+					<RotateCw className={cn("size-3.5", runControl.isReloading && "animate-pideck-spin")} aria-hidden="true" />
+					{runControl.isReloading ? t("app.reloading") : t("menu.reloadMessages")}
 				</span>
 			</DropdownMenuItem>
 			{/* 复制 Agent ID：与运行控制同组——它标识的就是「当前绑定的那个进程实例」，

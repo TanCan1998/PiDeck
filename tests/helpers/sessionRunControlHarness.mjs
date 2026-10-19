@@ -49,6 +49,8 @@ export function harness(options = {}) {
 	const overlays = [];
 	const cacheWrites = [];
 	const loadStates = [];
+	const commandWrites = [];
+	const tickWrites = [];
 	const cache = {};
 	const loads = {};
 	const overlayKinds = {};
@@ -68,6 +70,7 @@ export function harness(options = {}) {
 	};
 	const runtimes = new Map([["source-a", { ...runtimeInfo({ status: options.status ?? "idle" }), state: { modelId: "current-model" } }]]);
 	const records = { "source-a": sessionRecord() };
+	const sessionCommandsRefreshTickAtom = { kind: "commands-tick" };
 	const store = {
 		get: (atom) => {
 			if (atom === atoms.sessionRecordsAtom) return records;
@@ -79,6 +82,14 @@ export function harness(options = {}) {
 			return undefined;
 		},
 		set: (atom, update) => {
+			if (atom.kind === "commands") {
+				commandWrites.push({ sessionId: atom.id, commands: update });
+				return;
+			}
+			if (atom === sessionCommandsRefreshTickAtom) {
+				tickWrites.push(update);
+				return;
+			}
 			if (atom !== atoms.sessionMessageLoadStateAtom) return;
 			const next = typeof update === "function" ? update(loads) : update;
 			if (next === loads) return;
@@ -110,6 +121,10 @@ export function harness(options = {}) {
 		readRecordMessagePage: async (...args) => {
 			calls.push(["reload", ...args]);
 			return messagePage();
+		},
+		reloadResources: async (target) => {
+			calls.push(["reload-resources", plain(target)]);
+			return { ok: true, value: { target, value: [{ name: "reload", source: "extension" }] } };
 		},
 	};
 	const load = createTsSandbox({
@@ -153,6 +168,11 @@ export function harness(options = {}) {
 				},
 			},
 			"../../atoms/session-atoms": atoms,
+			"../../atoms/session-commands-atoms": {
+				sessionCommandsAtomFamily: (id) => ({ kind: "commands", id }),
+				sessionCommandsRefreshTickAtom,
+				sessionReloadingByIdAtom: { kind: "reloading" },
+			},
 			"../../atoms/session-selectors": {
 				sessionRuntimeBySessionIdAtomFamily: (id) => ({ kind: "runtime", id }),
 				sessionIdByRuntimeAgentIdAtomFamily: (id) => ({ kind: "agent-session", id }),
@@ -189,5 +209,5 @@ export function harness(options = {}) {
 		stateCursor = 0;
 		return useHook(deps);
 	};
-	return { hook: render(), render, deps, sessions, runtimes, records, calls, toasts, confirmations, runtimeEvents, overlays, cacheWrites, loadStates, cache, loads, overlayKinds };
+	return { hook: render(), render, deps, sessions, runtimes, records, calls, toasts, confirmations, runtimeEvents, overlays, cacheWrites, loadStates, commandWrites, tickWrites, cache, loads, overlayKinds };
 }

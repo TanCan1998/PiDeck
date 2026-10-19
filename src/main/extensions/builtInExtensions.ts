@@ -47,8 +47,16 @@ export const BUILT_IN_EXTENSIONS = [
 	"pi-deck-vision.ts",
 ] as const;
 
-/** Internal adapter loaded after user-facing tool policies; not listed in settings UI. */
-export const INTERNAL_BUILT_IN_EXTENSIONS = ["pi-deck-shell-proxy.ts"] as const;
+/**
+ * Internal adapters loaded after user-facing tool policies; not listed in settings UI.
+ *
+ * - `pi-deck-runtime.ts`：RPC 模式没有原生 `/reload`，该扩展只注册一个 `reload`
+ *   命令并调用 pi 的 `ctx.reload()`；宿主经专用 IPC 发送，不写会话消息。
+ * - `pi-deck-shell-proxy.ts`：把模型代理与 agent shell 命令的代理作用域隔开。
+ *
+ * 内部适配器始终随 RPC 注入（除非 `piRpcNoExtensions`），不受用户移除列表影响。
+ */
+export const INTERNAL_BUILT_IN_EXTENSIONS = ["pi-deck-runtime.ts", "pi-deck-shell-proxy.ts"] as const;
 const ALL_BUILT_IN_EXTENSIONS = [...BUILT_IN_EXTENSIONS, ...INTERNAL_BUILT_IN_EXTENSIONS] as const;
 
 /**
@@ -202,7 +210,9 @@ export function listActiveBuiltInExtensionPaths(roots: BuiltInExtensionPathRoots
 	const optIn = new Set(optInBuiltInExtensions.map((item) => basename(item.trim())).filter(Boolean));
 	const paths: string[] = [];
 	for (const name of ALL_BUILT_IN_EXTENSIONS) {
-		if (name !== "pi-deck-shell-proxy.ts" && removed.has(name)) continue;
+		const isInternal = (INTERNAL_BUILT_IN_EXTENSIONS as readonly string[]).includes(name);
+		// 内部适配器不是用户可见扩展：始终注入，不参与 removedBuiltInExtensions。
+		if (!isInternal && removed.has(name)) continue;
 		// 已隐藏的内置扩展：先于 opt-in 判定跳过，保证历史 opt-in 残留也无法把它注回命令行
 		if (isHiddenBuiltInExtension(name)) continue;
 		// 默认关闭的内置扩展：不在显式 opt-in 列表里就不注入（内部适配器不在该集合，不受影响）

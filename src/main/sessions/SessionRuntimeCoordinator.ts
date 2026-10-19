@@ -99,6 +99,11 @@ export interface SessionAgentGateway {
 	reviveIfProcessAlive?(agentId: string): boolean;
 	/** 可选能力：会话内命令列表（pi 经 get_commands RPC；dsh 经 host 命令注册表枚举桥 D15）。 */
 	getCommands?(agentId: string): Promise<unknown[]>;
+	/**
+	 * 可选能力：热重载 pi 的扩展/技能/提示词/主题/上下文文件（内部 `reload` 扩展命令）。
+	 * 只对 live idle 进程开放；返回重载后的命令表，供渲染层刷新 `/` 菜单。
+	 */
+	reloadResources?(agentId: string): Promise<PiCommand[]>;
 	getAvailableModels(agentId: string): Promise<AvailableModel[]>;
 	/** 可选能力：Pi 按当前模型返回可用 thinking levels；旧 Pi 返回 undefined 走 UI 兼容回退。 */
 	getAvailableThinkingLevels?(agentId: string): Promise<string[] | undefined>;
@@ -645,6 +650,20 @@ export class SessionRuntimeCoordinator {
 				throw new SessionRuntimeCommandError("SESSION_COMMAND_FAILED", `backend "${this.agents.backend}" does not support getCommands`);
 			}
 			return (await this.agents.getCommands(agentId)) as PiCommand[];
+		});
+	}
+
+	/**
+	 * 热重载 pi 资源（扩展/技能/提示词/主题/上下文文件）。
+	 * 与 `listRuntimeCommands` 同为会话内命令，但会改动扩展运行时，因此只对 live idle
+	 * 进程开放；DSH/ACP 没有对应能力，UI 按 backend 隐藏入口。
+	 */
+	reloadResources(target: SessionRuntimeTarget): Promise<SessionCommandResult<SessionTargetedValue<PiCommand[]>>> {
+		return this.runTargetCommand(target, async (agentId) => {
+			if (typeof this.agents.reloadResources !== "function") {
+				throw new SessionRuntimeCommandError("SESSION_COMMAND_FAILED", `backend "${this.agents.backend}" does not support reloadResources`);
+			}
+			return this.agents.reloadResources(agentId);
 		});
 	}
 

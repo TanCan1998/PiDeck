@@ -3,6 +3,7 @@ import type { AgentTab, AgentUiResponse, ChatMessage, GitBranchInfo, ImageConten
 import type { HideableComposerFeatureId } from "../../../../shared/composerFeatures";
 import type { QueuedPrompt } from "../../hooks/useQueuedPrompt";
 import type { NoticeId, NoticeKind } from "../../utils/notice";
+import type { SessionRunAction, SessionRunCapabilities } from "../../utils/sessionCommands";
 import type { TerminalDockStateByOwner } from "../../terminalDockState";
 import type { TerminalDockSettings } from "../terminal/TerminalDock";
 
@@ -30,6 +31,12 @@ export type SessionPaneServices = {
 	onPreviewImage: (img: ImageContent | null) => void;
 	abortAgent: (agentId?: string) => Promise<void>;
 	restartActiveAgent: (agentId?: string) => Promise<void>;
+	/** 本栏会话运行控制：悬停工具条/菜单按 sessionId 取能力与动作（分屏各栏隔离）。 */
+	getSessionRunCapabilities: (sessionId: string | undefined) => SessionRunCapabilities | undefined;
+	runSessionControl: (sessionId: string, action: SessionRunAction) => Promise<void>;
+	stoppingAgentId?: string | null;
+	activatingSessionId?: string | null;
+	reloadingSessionId?: string | null;
 	runCreateSessionDraft: () => Promise<void>;
 	/** 输入框 `/login`：打开登录供应商弹框（App 级装配，弹框订阅 atom 自己渲染） */
 	openProviderLogin?: (providerId?: string) => void;

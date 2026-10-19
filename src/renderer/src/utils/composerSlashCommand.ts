@@ -29,6 +29,8 @@ export type ComposerSlashCommand =
 	| { kind: "login"; providerId?: string }
 	/** `/hotkeys`：打开设置里的快捷键页（pi 的 builtin 在 RPC 模式下不执行）。 */
 	| { kind: "hotkeys" }
+	/** `/reload`：热重载 pi 扩展/技能/提示词/主题/上下文文件（不发给模型）。 */
+	| { kind: "reload" }
 	/** 普通消息：照旧发给 pi（含 pi 自己实现的其他斜杠命令）。 */
 	| { kind: "text" };
 
@@ -57,5 +59,9 @@ export function classifyComposerSlashCommand(message: string): ComposerSlashComm
 		return PROVIDER_ID_PATTERN.test(argument) ? { kind: "login", providerId: argument } : { kind: "login" };
 	}
 	if (/^\/hotkeys\s*$/.test(trimmed)) return { kind: "hotkeys" };
+	// `/reload` 不接受参数，但 `pi` 的扩展命令会忽略多余参数；这里同样把 `/reload ...`
+	// 归到 reload，避免带参数时掉回普通 prompt 而写出一条乐观用户气泡。`/reloadx`
+	// 这类名字相近的正文仍按普通文本处理。
+	if (/^\/reload(?:\s|$)/.test(trimmed)) return { kind: "reload" };
 	return { kind: "text" };
 }

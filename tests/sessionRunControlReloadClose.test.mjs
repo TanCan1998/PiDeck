@@ -132,6 +132,47 @@ test("reload failure is visible and allows a successful manual retry", async () 
 	assert.deepEqual(plain(h.loads["source-a"]), { status: "ready" });
 });
 
+test("hot reload writes the refreshed command table and bumps the composer refresh tick", async () => {
+	const h = harness({ status: "idle" });
+	await h.hook.reloadResources("source-a");
+	assert.deepEqual(
+		h.calls.filter(([op]) => op === "reload-resources"),
+		[["reload-resources", sourceTarget]],
+	);
+	assert.equal(h.commandWrites.length, 1);
+	assert.deepEqual(plain(h.commandWrites[0].commands), [{ name: "reload", source: "extension" }]);
+	assert.equal(h.tickWrites.length, 1);
+	assert.deepEqual(h.toasts, ["app.sessionResourcesReloaded"]);
+	assert.equal(h.render().reloadingSessionId, null);
+	assert.equal(h.render().getSessionRunCapabilities("source-a").pending, false);
+});
+
+for (const status of ["starting", "running", "error", "closed"]) {
+	test(`hot reload is refused while the runtime is ${status}`, async () => {
+		const h = harness({ status });
+		await h.hook.reloadResources("source-a");
+		assert.deepEqual(
+			h.calls.filter(([op]) => op === "reload-resources"),
+			[],
+		);
+		assert.equal(h.commandWrites.length, 0);
+		assert.equal(h.tickWrites.length, 0);
+		assert.deepEqual(h.toasts, ["sessionCommand.reloadResourcesBusy"]);
+	});
+}
+
+test("hot reload failure is visible and releases the busy state", async () => {
+	const h = harness({ status: "idle" });
+	h.sessions.reloadResources = async () => ({ ok: false, error: { code: "SESSION_COMMAND_FAILED", debugDetails: "reload failed" } });
+	await h.hook.reloadResources("source-a");
+	assert.deepEqual(h.commandWrites, []);
+	assert.equal(h.tickWrites.length, 0);
+	assert.equal(h.toasts.length, 1);
+	assert.match(h.toasts[0], /commandFailed/);
+	assert.equal(h.render().reloadingSessionId, null);
+	assert.equal(h.render().getSessionRunCapabilities("source-a").pending, false);
+});
+
 test("same-turn closes are deduplicated and exclude replacement until stop settles", async () => {
 	const h = harness();
 	const response = deferred();

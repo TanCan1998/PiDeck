@@ -156,7 +156,7 @@ export class AgentManager {
 	/** 本网关的运行时后端身份：pi。 */
 	readonly backend: AgentBackend = "pi";
 	/** pi 后端支持全部可选能力。 */
-	readonly capabilities: ReadonlySet<AgentGatewayCapability> = new Set(["compact", "fork", "getForkMessages", "editMessage", "deleteMessage", "getCommands", "exportHtml"]);
+	readonly capabilities: ReadonlySet<AgentGatewayCapability> = new Set(["compact", "fork", "getForkMessages", "editMessage", "deleteMessage", "getCommands", "reloadResources", "exportHtml"]);
 	private readonly agents = new Map<string, AgentRuntime>();
 	/** 桥原生服务是否已注入（幂等标记，见 registerBridgeSession）。 */
 	private bridgeServicesInstalled = false;
@@ -3794,6 +3794,43 @@ export class AgentManager {
 		// 超时 reject → Coordinator 转 SESSION_COMMAND_FAILED → 渲染层回退静态建议。
 		const response = await runtime.process.client.request({ type: "get_commands" }, 10_000);
 		return (response.data as { commands?: unknown[] } | undefined)?.commands ?? [];
+	}
+
+	/**
+	 * 热重载 pi 资源（扩展/技能/提示词/主题/上下文文件）。
+	 *
+	 * 为什么直接发 RPC prompt：pi 的 builtin `/reload` 只在 TUI 中执行，RPC 没有原生
+	 * reload 命令；PiDeck 内部扩展 `pi-deck-runtime.ts` 把它注册成扩展命令。这里直接
+	 * 走 `prompt`，不能复用 `sendPrompt`——后者会先写一条乐观用户消息，`/reload` 会
+	 * 污染会话时间线。
+	 *
+	 * 为什么先查命令表：若扩展未加载（`piRpcNoExtensions`、旧覆盖层、异常回退），把
+	 * `/reload` 当普通 prompt 发下去会让模型把命令文本当问题回答。按 `sourceInfo.path`
+	 * 的 basename 确认命令来自本扩展，并用 pi 实际分配的 invocationName 发送（重名时
+	 * pi 会给后缀，避免误执行用户扩展的同名命令）。
+	 */
+	async reloadResources(agentId: string): Promise<PiCommand[]> {
+		const runtime = this.requireRuntime(agentId);
+		if (!runtime.process.isRunning()) throw new Error("Agent process is not running");
+		if (runtime.tab.status !== "idle") throw new Error("Wait for the current response to finish before reloading.");
+		// 挂起的 Ask/UI 请求正在等用户回答；reload 会拆掉扩展 runtime，先让用户处理完。
+		if (this.uiGate.hasPendingUIRequests(agentId)) throw new Error("Answer or dismiss the pending question before reloading.");
+		const stateResponse = await runtime.process.client.request({ type: "get_state" }, 10_000).catch(() => undefined);
+		if (!stateResponse?.success) throw new Error("Unable to verify that the session is idle before reloading.");
+		const state = stateResponse.data as { isStreaming?: boolean; isCompacting?: boolean } | undefined;
+		if (state?.isStreaming || state?.isCompacting) throw new Error("Wait for the current response to finish before reloading.");
+
+		const registered = await this.listRegisteredCommands(runtime);
+		const reloadCommand = registered?.find((command) => basename(command.sourcePath ?? "") === "pi-deck-runtime.ts");
+		if (!reloadCommand) throw new Error("The reload extension is not loaded in this session");
+
+		const response = await runtime.process.client.request({ type: "prompt", message: `/${reloadCommand.name}` }, 120_000);
+		if (this.agents.get(agentId) !== runtime || !runtime.process.isRunning()) throw new Error("Session runtime changed during reload");
+		if (!response.success) throw new Error(response.error ?? "reload failed");
+		// pi 0.99+ 的权威信号；老版本没有该字段时按「扩展命令已注册」接受（上面已校验来源）。
+		const disposition = readPromptDisposition(response.data);
+		if (disposition !== undefined && disposition !== "handled") throw new Error("The reload command was not handled by pi");
+		return (await this.getCommands(agentId)) as PiCommand[];
 	}
 
 	/**

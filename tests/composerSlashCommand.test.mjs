@@ -33,13 +33,20 @@ test("识别 /hotkeys：跳设置里的快捷键页，不发给 pi", () => {
 	assert.deepEqual(classifyComposerSlashCommand("  /hotkeys  "), { kind: "hotkeys" });
 });
 
+test("识别 /reload：桌面拦截后热重载 pi 资源，不发给模型", () => {
+	assert.deepEqual(classifyComposerSlashCommand("/reload"), { kind: "reload" });
+	assert.deepEqual(classifyComposerSlashCommand("  /reload  "), { kind: "reload" });
+	// 参数被 pi 的扩展命令忽略；桌面同样接管，避免掉回普通 prompt 写用户气泡。
+	assert.deepEqual(classifyComposerSlashCommand("/reload now"), { kind: "reload" });
+});
+
 test("不合法或带路径感的 id 退回手选，不把垃圾值传下去", () => {
 	assert.deepEqual(classifyComposerSlashCommand("/login ../etc/passwd"), { kind: "login" });
 	assert.deepEqual(classifyComposerSlashCommand("/login -x"), { kind: "login" });
 });
 
 test("名字相近的命令与普通文本仍然发给 pi", () => {
-	for (const text of ["/loginx", "/logins", "/newx", "/compactx", "/logout", "/hotkeysx", "/hotkeys now", "请帮我 /login 一下", ""]) {
+	for (const text of ["/loginx", "/logins", "/newx", "/compactx", "/logout", "/hotkeysx", "/hotkeys now", "/reloadx", "请帮我 /login 一下", ""]) {
 		assert.deepEqual(classifyComposerSlashCommand(text), { kind: "text" }, text);
 	}
 });
@@ -60,6 +67,12 @@ test("useSessionSend 拦截 /hotkeys 并落到设置快捷键页", () => {
 	const source = readFileSync(new URL("../src/renderer/src/hooks/useSessionSend.ts", import.meta.url), "utf8");
 	assert.match(source, /slashCommand\.kind\s*===\s*"hotkeys"/, "useSessionSend 应有 /hotkeys 分支");
 	assert.match(source, /openSettingsAtom,\s*\{\s*tab:\s*"shortcuts"\s*\}/, "/hotkeys 应打开设置里的快捷键页");
+});
+
+test("useSessionSend 拦截 /reload 并走专用热重载回调", () => {
+	const source = readFileSync(new URL("../src/renderer/src/hooks/useSessionSend.ts", import.meta.url), "utf8");
+	assert.match(source, /slashCommand\.kind\s*===\s*"reload"/, "useSessionSend 应有 /reload 分支");
+	assert.match(source, /options\.reloadResources\s*\(\s*target\s*\)/, "/reload 应调用专用 reloadResources，而不是普通 sendPrompt");
 });
 
 /** 契约守卫：`/login` 的入口接线（App → SessionPaneServices → ComposerArea → 控制器）不能断。 */
