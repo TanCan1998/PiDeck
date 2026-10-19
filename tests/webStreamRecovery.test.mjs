@@ -3,6 +3,7 @@
  * 页面不可见/离线/ready 态不恢复；error 态立即恢复并提示；防抖窗口内不重复。
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
@@ -58,4 +59,17 @@ test(`防抖：${WEB_RECOVERY_DEBOUNCE_MS}ms 内不重复恢复`, () => {
 	assert.equal(again.recover, false);
 	const later = decideStreamRecovery({ ...base, lastAttemptAt: base.now - WEB_RECOVERY_DEBOUNCE_MS - 1 });
 	assert.equal(later.recover, true);
+});
+
+// 回归（用户反馈「手机切后台再回来弹 Network 网络错误」）：断流错误不能常驻。
+// 传输层断流只说明本端那条 SSE 断了，不代表这轮失败：磁盘追赶拿到权威内容后必须清掉，
+// 外部流接管同一轮期间也不能同时挂红条。
+test("回前台/断流恢复会清掉传输层错误条，且外部流接管期间不挂红条", () => {
+	const source = readFileSync("src/renderer/src/web/WebChatApp.tsx", "utf8");
+	// 磁盘追赶落地（setMessages(history)）之后必须紧跟 clearError：断流 ≠ 这轮失败
+	assert.match(source, /setMessages\(history\)[\s\S]{0,400}?clearError\(\)/, "落地权威内容后必须清掉 Network error");
+	assert.match(source, /const transportError = error && !externalStreaming && !liveMessage/, "外部流接管时抑制传输层错误条");
+	// 回前台停掉已经不可能续上的 POST 流，交给外部流回放接管（只处理 streaming，避免丢掉未投递的 prompt）
+	assert.match(source, /hiddenFor > 1000 && statusRef\.current === "streaming"/);
+	assert.match(source, /void stop\(\)/);
 });

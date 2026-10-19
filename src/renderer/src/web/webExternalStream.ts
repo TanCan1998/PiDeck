@@ -221,11 +221,14 @@ export function externalStreamUrl(sessionId: string): string {
  * - 开流条件：enabled（= 有活跃会话且 useChat 空闲）且页面可见；切会话/不可见/禁用时关流；
  * - 帧到达 → 合并器更新 → liveMessage 状态驱动时间线打字机渲染；
  * - 收尾三路：finish 帧 + [DONE]（正常）、EventSource error（网络断，浏览器自动重连，
- *   合并器保留已收内容继续追加）、runtimeBusy=false 兜底（收尾帧丢失时由状态通道收口）；
- * - 跨轮保活（对齐服务端 keepAlive）：一轮 [DONE] 后不再关流——服务端已把本连接的
- *   翻译器重置为全新实例，下一轮（Ask 续答/桌面再发起）的 start 帧到达时重置合并器
- *   继续打字机。旧实现 settle 即 closeStream 且 effect 依赖不变永不重开，导致第一轮
- *   外部回复之后的所有后续轮次全部丢帧（用户反馈「Ask 回答之后看不到渲染」）；
+ *   重连后由服务端回放重建已渲染内容）、runtimeBusy=false 兜底（收尾帧丢失时由状态通道收口）；
+ * - 跨轮保活（对齐服务端 keepAlive）：一轮 [DONE] 后不再关流——服务端已把会话级
+ *   翻译器换成新实例，下一轮的 start 帧到达时重置合并器继续打字机。旧实现 settle 即
+ *   closeStream 且 effect 依赖不变永不重开，导致第一轮外部回复之后的所有后续轮次
+ *   全部丢帧（用户反馈「Ask 回答之后看不到渲染」）；
+ * - 中途接入/重连：服务端在订阅时回放本轮已产出的帧（工具/正文全量），因此每次
+ *   onopen 都重置合并器从零重建——修「手机点开正在跑的会话只看到本轮尾巴、工具卡
+ *   数量从 1 重算」与「切后台回来已渲染内容消失」；
  * - 页面可见性：切后台关流省电，回前台立即重开（旧实现只关不开，后台切回后永久断流）。
  *
  * @param onSettled 一轮外部回复结束（含兜底收口）后回调；调用方负责磁盘重拉权威终态。
@@ -289,12 +292,12 @@ export function useExternalSessionStream(options: { sessionId: string; enabled: 
 		const es = new EventSource(externalStreamUrl(sessionId));
 		esRef.current = es;
 		es.onopen = () => {
-			// 重连场景：上一轮已收尾但收尾帧丢失时，新连接帧属于新一轮 → 重置合并。
+			// 每条连接的服务端流都从「本轮开头」开始：外部流是 keepAlive 订阅，中途接入/断线重连时
+			// 服务端先整段回放本轮已产出的帧（见 WebEventStreamRouter.replayRun）。所以连接建立一律
+			// 重置本地合并器，让回放从零重建；保留 liveMessage 直到第一帧到达，避免闪断。
+			// 不重置的话重连后新旧内容会叠加（工具卡重复、正文翻倍）。
 			settledFiredRef.current = false;
-			if (mergerRef.current?.isFinished()) {
-				mergerRef.current.reset();
-				setLiveMessage(null);
-			}
+			mergerRef.current?.reset();
 		};
 		es.onmessage = (event: MessageEvent<string>) => {
 			const merger = mergerRef.current;

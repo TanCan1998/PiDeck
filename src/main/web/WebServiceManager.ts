@@ -322,7 +322,8 @@ export class WebServiceManager {
 	}
 
 	private async start(host: string, port: number, requiresAuth = true, tokenPolicy: WebTokenPolicy = {}) {
-		// 启动时绑定 pi 事件源；路由器只在存在活跃 SSE 连接时转发，空闲时零开销。
+		// 启动时绑定 pi 事件源；路由器无订阅者时也维护会话级回放源（内存有界），
+		// 外部流中途接入时才能补齐本轮已渲染内容；帧写出仍只对活跃 SSE 连接发生。
 		// 状态推送：pi 事件是 runtime 状态翻转 / ask 待确认的源头，到达时去抖比对一次快照
 		// （/api/events 订阅者从中拿到即时推送，不再依赖 Web 端轮询发现）。
 		this.eventStreamRouter.bindPiSource(

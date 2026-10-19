@@ -218,7 +218,7 @@ test("Web backend switcher stays draft-only; historical sessions are locked", ()
 });
 
 // 回归（W2 渲染修复）：外部流跨轮保活——一轮 [DONE] 后不关连接，下一轮 start 帧到达时
-// 客户端自行重置合并器；服务端 keepAlive 换新翻译器。旧实现 settle 即 closeStream 且
+// 客户端自行重置合并器；服务端收口时清回放源并换新会话级翻译器。旧实现 settle 即 closeStream 且
 // effect 依赖不变永不重开，导致 Ask 续答等后续轮次全部丢帧（用户反馈「Ask 回答之后看不到渲染」）。
 test("External stream stays alive across turns; visibility gates the connection", () => {
 	const webExternalStream = readFileSync("src/renderer/src/web/webExternalStream.ts", "utf8");
@@ -234,9 +234,13 @@ test("External stream stays alive across turns; visibility gates the connection"
 	// 客户端：可见性作为开流条件（后台关、回前台重开），不再只关不开。
 	assert.match(webExternalStream, /!visible\) \{/);
 	assert.match(webExternalStream, /setVisible\(document\.visibilityState === "visible"\)/);
-	// 服务端：keepAlive 选项存在并在 [DONE] 后保留连接。
+	// 服务端：keepAlive 选项存在并在 [DONE] 后保留连接（翻译器/回放源是会话级，收口时重置）。
 	assert.match(webEventStream, /keepAlive\?: boolean/);
-	assert.match(webEventStream, /if \(entry\.keepAlive\) \{/);
+	assert.match(webEventStream, /if \(entry\.keepAlive\) return;/);
+	assert.match(webEventStream, /private endRun\(/, "收口时统一清回放源并换新翻译器");
+	// 服务端：新连接先回放本轮已产出的帧，客户端 onopen 重建合并器（中途接入/断线重连不丢内容）。
+	assert.match(webEventStream, /private replayRun\(/);
+	assert.match(webExternalStream, /es\.onopen[\s\S]*?mergerRef\.current\?\.reset\(\)/);
 	// 渲染层：流式标志贯通分组（末段正文挂 liveTextId 常显、不提升为 finalText）。
 	assert.match(webTimeline, /groupTimelineEntries\(messages, \{ isStreaming: props\.streaming \}\)/);
 });

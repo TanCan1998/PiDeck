@@ -260,6 +260,49 @@ test("keepAlive（外部流）在 finish 后保留连接，下一轮仍能收帧
 	router.unbindChannelSource();
 });
 
+test("DSH 无订阅者时也累积本轮：手机中途接入整段回放，工具卡不从头计", () => {
+	let handler = null;
+	const late = [];
+	const router = new WebEventStreamRouter(() => "session-1");
+	router.bindChannelSource((next) => {
+		handler = next;
+		return () => {};
+	});
+	const toolMessage = (status, extra = {}) => ({
+		agentId: "dsh:session-1",
+		messages: [{ role: "tool", text: "bash: ok", meta: { toolCallId: "call_1", toolName: "bash", status, args: { command: "ls" }, fullText: "ok", ...extra } }],
+	});
+
+	// 本轮在没有任何 Web 连接时就开始（桌面端在跑）：路由层仍要累积回放源
+	handler("dsh:session-1", TEXT_STREAM, { agentId: "dsh:session-1", text: "第一段", done: false });
+	handler("dsh:session-1", MESSAGE, toolMessage("running"));
+
+	// 手机中途点进来：先整段回放本轮已产出的正文与工具卡
+	router.add(
+		"session-1",
+		(wire) => {
+			late.push(wire);
+			return true;
+		},
+		() => {},
+		undefined,
+		{ keepAlive: true },
+	);
+	const replayed = late.join("");
+	assert.match(replayed, /"type":"start"/);
+	assert.match(replayed, /"delta":"第一段"/);
+	assert.match(replayed, /"type":"tool-input-available"/);
+	assert.equal(replayed.split('"toolCallId":"call_1"').length - 1, 2, "回放只补 input-start/input-available，不重复计次");
+
+	// 回放后继续吃实时增量：在跑的工具能正常收口（适配器状态与已发帧对齐）
+	handler("dsh:session-1", MESSAGE, toolMessage("completed"));
+	handler("dsh:session-1", TEXT_STREAM, { agentId: "dsh:session-1", text: "第一段", done: true, turnEnded: true });
+	const wires = late.join("");
+	assert.match(wires, /"type":"tool-output-available"/);
+	assert.equal(late.at(-1), "data: [DONE]\n\n");
+	router.unbindChannelSource();
+});
+
 test("DSH 通道事件按 agentId 路由：没有连接的会话不翻译、不报错", () => {
 	let handler;
 	const router = new WebEventStreamRouter((agentId) => (agentId === "dsh:session-1" ? "session-1" : undefined));

@@ -308,6 +308,63 @@ test("WebEventStreamRouter routes agent events to per-session entries only", () 
 	router.unbindPiSource();
 });
 
+test("WebEventStreamRouter replays the in-flight run to a late subscriber", () => {
+	let piHandler = null;
+	const early = [];
+	const late = [];
+	const router = new WebEventStreamRouter(() => "session-1");
+	const sink = (target) => (wire) => {
+		target.push(wire);
+		return true;
+	};
+	router.add("session-1", sink(early), () => {}, undefined, { keepAlive: true });
+	router.bindPiSource((handler) => {
+		piHandler = handler;
+		return () => {};
+	});
+
+	// 桌面端从头看着的这一轮：正文 + 一次已收口的工具调用
+	piHandler("agent-a", { type: "message_start", message: { role: "assistant", id: "m1" } });
+	piHandler("agent-a", { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "hello" } });
+	piHandler("agent-a", { type: "tool_execution_start", toolCallId: "call_1", toolName: "bash", args: { cmd: "ls" } });
+	piHandler("agent-a", { type: "tool_execution_end", toolCallId: "call_1", isError: false, result: { ok: true } });
+	assert.ok(early.length > 0);
+
+	// 手机中途点进来（keepAlive 新连接）：先整段回放本轮已产出的帧，而不是只等后续增量
+	router.add("session-1", sink(late), () => {}, undefined, { keepAlive: true });
+	const replayed = late.join("");
+	assert.match(replayed, /"type":"start"/);
+	assert.match(replayed, /"type":"text-delta"[^\n]*hello/);
+	assert.match(replayed, /"type":"tool-input-available"/);
+	assert.match(replayed, /"type":"tool-output-available"/);
+	// 回放不会把工具重复计次：同一个 toolCallId 只有 input-start/input-available/output-available 三帧
+	assert.equal(replayed.split('"toolCallId":"call_1"').length - 1, 3);
+
+	// 回放之后继续吃实时增量（翻译器状态已与已发帧对齐，收口事件不会变成孤儿）
+	const lateBeforeLive = late.length;
+	piHandler("agent-a", { type: "tool_execution_start", toolCallId: "call_2", toolName: "read", args: { path: "a" } });
+	piHandler("agent-a", { type: "tool_execution_end", toolCallId: "call_2", isError: false, result: { ok: 1 } });
+	const liveTail = late.slice(lateBeforeLive).join("");
+	assert.match(liveTail, /"toolCallId":"call_2"/);
+	assert.match(liveTail, /"type":"tool-output-available"/);
+
+	// 本轮收口后回放源清空：新订阅者不应再收到上一轮内容
+	piHandler("agent-a", { type: "agent_settled" });
+	assert.equal(late.at(-1), "data: [DONE]\n\n");
+	const afterFinish = [];
+	router.add("session-1", sink(afterFinish), () => {}, undefined, { keepAlive: true });
+	assert.equal(afterFinish.length, 0);
+
+	// 下一轮首个帧处重置回放源，旧一轮的工具不会混进新回放
+	piHandler("agent-a", { type: "message_start", message: { role: "assistant", id: "m2" } });
+	const nextRun = [];
+	router.add("session-1", sink(nextRun), () => {}, undefined, { keepAlive: true });
+	const replay2 = nextRun.join("");
+	assert.match(replay2, /"messageId":"m2"/);
+	assert.doesNotMatch(replay2, /call_1/);
+	router.unbindPiSource();
+});
+
 test("WebServiceManager registers /stream SSE endpoint with protocol header", () => {
 	// 路由解析迁到路由表（Wave 5），SSE 头迁到 WebSessionStream（Wave 6）。
 	assert.match(webApiRoutesSource, /streamMatch = url\.pathname\.match\([^\n]*\/stream/);

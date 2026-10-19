@@ -128,7 +128,7 @@ export function WebChatApp() {
 	const pendingSendRef = useRef<{ sessionId: string; text: string; images?: string[]; agentMessage?: string } | null>(null);
 
 	// useChat：sessionId 作为 chat id；切会话时 id 变化重建 Chat 实例
-	const { messages, sendMessage, status, stop, setMessages, error } = useChat({
+	const { messages, sendMessage, status, stop, setMessages, error, clearError } = useChat({
 		id: activeSessionId,
 		transport: new DefaultChatTransport({
 			api: "/api/chat",
@@ -228,6 +228,9 @@ export function WebChatApp() {
 			messagesBySessionRef.current[sessionId] = history;
 			historyMetaRef.current[sessionId] = { total: page.total, nextBefore: page.nextBefore };
 			if (activeSessionIdRef.current === sessionId) setMessages(history);
+			// 传输层错误（Network error / 断流）只代表「本端那条 SSE 断了」，不代表这轮失败：
+			// 磁盘追赶拿到权威内容后必须清掉，否则手机切后台再回来会一直挂着红条。
+			clearError();
 			if (notify) {
 				setRecoveryNotice(t("web.streamRecovered"));
 				setTimeout(() => setRecoveryNotice(null), 4000);
@@ -262,6 +265,26 @@ export function WebChatApp() {
 			window.removeEventListener("online", maybeRecover);
 		};
 	}, [status]);
+
+	// 回前台主动收掉死流：本端 /api/chat 的 SSE 是 POST 响应，后台断流后浏览器不会重放它，
+	// 页面只能看到半截内容（或等到 error 态）。这里把这条死流停掉，交给外部流订阅接管——
+	// 服务端回放本轮已产出的帧（见 WebEventStreamRouter.replayRun），页面从零重建完整一轮，
+	// 与桌面端看到的工具卡/正文一致。只处理 streaming：响应已开始 = prompt 已投递；
+	// submitted 阶段停掉可能把还没发出去的消息弄丢。隐藏时长门槛避开瞬时切窗。
+	useEffect(() => {
+		let hiddenAt = 0;
+		const onVisibility = () => {
+			if (document.visibilityState === "hidden") {
+				hiddenAt = Date.now();
+				return;
+			}
+			const hiddenFor = hiddenAt ? Date.now() - hiddenAt : 0;
+			hiddenAt = 0;
+			if (hiddenFor > 1000 && statusRef.current === "streaming") void stop();
+		};
+		document.addEventListener("visibilitychange", onVisibility);
+		return () => document.removeEventListener("visibilitychange", onVisibility);
+	}, [stop]);
 
 	// Ctrl/Cmd+K：会话内搜索
 	useEffect(() => {
@@ -1049,6 +1072,9 @@ export function WebChatApp() {
 	// 极端场景可能与窗口内旧尾巴短暂并存，收尾磁盘重拉后自然收敛。
 	const lastUserIndex = liveMessage ? messages.map((message) => message.role).lastIndexOf("user") : -1;
 	const timelineMessages = liveMessage && lastUserIndex >= 0 ? [...messages.slice(0, lastUserIndex + 1), liveMessage] : liveMessage ? [...messages, liveMessage] : messages;
+	// 外部流已在渲染同一轮时不挂传输层错误条：断流后由外部流回放接管，
+	// 两边同时显示会出现「Network error + 正文在输出」的错乱观感。
+	const transportError = error && !externalStreaming && !liveMessage ? error.message : null;
 	const combinedStreaming = streaming || externalStreaming;
 	const composerHidden = resolveComposerHidden({ headerHidden, nearBottom, streaming: combinedStreaming, engaged: composerEngaged });
 
@@ -1121,7 +1147,7 @@ export function WebChatApp() {
 					moreCount={moreCount}
 					loadingMore={loadingMore}
 					streaming={combinedStreaming}
-					error={error?.message ?? commandError}
+					error={transportError ?? commandError}
 					pendingUiRequest={(state.pendingUiRequests ?? []).find((item) => item.sessionId === activeSessionId)}
 					uiResponding={uiResponding}
 					onRespondUi={(response) => void handleRespondUi(response)}

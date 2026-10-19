@@ -31,6 +31,15 @@ export type SseWriter = (frame: UiMessageStreamFrame) => boolean;
 /** 会话级收口基准的保留条数上限（只服务重连窗口，不需要长期记忆）。 */
 const CLOSED_RUN_SESSIONS_MAX = 64;
 
+/** 会话级实时状态的保留条数上限（回放源；活跃会话数量远小于此）。 */
+const SESSION_STATES_MAX = 64;
+
+/**
+ * 单轮回放帧上限：文本/思考增量已就近合并，正常一轮只有几十到几百帧；
+ * 超限说明这一轮异常庞大（或事件风暴），放弃回放（降级成「只看后续增量」）而不是吃满内存。
+ */
+const RUN_REPLAY_MAX_FRAMES = 2000;
+
 /** 单个 pi 事件（与 AgentManager.handlePiEvent 收到的结构一致）。 */
 export type PiEvent = {
 	type?: string;
@@ -306,31 +315,52 @@ export function serializeSseFrame(frame: UiMessageStreamFrame): string {
 export const SSE_DONE = "data: [DONE]\n\n";
 
 /**
- * 每个 session 一条活跃流的连接状态。
- * 持有翻译器 + 写出函数，连接关闭后标记 dead 并停止写出。
+ * 每个 session 一条活跃流的连接状态（只带连接自身的东西）。
+ * 翻译器与回放帧是**会话级**的（见 SessionRunState）：同一会话的多条连接收到完全相同的帧，
+ * 这样中途接入的连接回放历史 + 继续收增量不会和别的连接错位。
  * keepAlive：外部流（GET /stream，EventSource 常驻订阅）在一轮 finish+[DONE] 后
- * 不关连接，而是换一个全新翻译器等待下一轮——消除轮与轮之间的重连空窗
- * （Ask 续答/桌面发起的下一轮若落在重连窗口内，事件金部落盒、前端只能等磁盘追赶）。
+ * 不关连接，而是等下一轮——消除轮与轮之间的重连空窗
+ * （Ask 续答/桌面发起的下一轮若落在重连窗口内，事件全部丢失、前端只能等磁盘追赶）。
  * /api/chat（useChat 一次性 fetch）不用 keepAlive：AI SDK 语义要求流随 [DONE] 结束。
  */
 export type SessionStreamEntry = {
 	sessionId: string;
-	adapter: PiEventToUiMessageStream;
-	/** 非 pi 后端（DSH）通道载荷 → pi 事件 的翻译器；连接建立时创建，随连接销毁。 */
-	channels: DshChannelToPiEvents;
 	/** 写出原始 wire 文本（含 data: 前缀）；返回是否成功。 */
 	writeRaw: (wire: string) => boolean;
 	closed: boolean;
-	/** 一轮结束后保活重置（外部流），不结束响应。 */
+	/** 一轮结束后不结束响应，继续等下一轮（外部流）。 */
 	keepAlive?: boolean;
 	onFinish?: () => void;
 };
 
 /**
+ * 会话级实时状态：一个会话一份翻译器 + 本轮已产出的帧（回放源）。
+ *
+ * 为什么要有这一层：外部流是「中途接入」的（手机点开一个桌面端正在跑的会话、
+ * 切后台断流后回来重连）。只转发订阅之后的增量，前端就只能看到本轮尾巴——
+ * 工具卡数量从 1 重算、已渲染内容消失（用户反馈的实际故障）。
+ * 这里无条件翻译（即使没有订阅者），新连接接入时把本轮帧整段回放，前端从零重建即可对齐。
+ */
+type SessionRunState = {
+	/** pi 事件 → 帧 的会话级翻译器（跨连接共享，收口时替换）。 */
+	adapter: PiEventToUiMessageStream;
+	/** 非 pi 后端（DSH）通道载荷 → pi 事件 的会话级翻译器。 */
+	channels: DshChannelToPiEvents;
+	/** 本轮回放帧（text/reasoning 增量已合并）。 */
+	runFrames: UiMessageStreamFrame[];
+	/** 本轮已收口（收口后不回放，等下一轮 start 重建）。 */
+	runClosed: boolean;
+	/** 回放帧超上限：放弃回放。 */
+	runOverflow: boolean;
+};
+
+/**
  * WebEventStreamRouter — 管理「sessionId → SSE 连接」并接收全量 pi 事件按 agentId 路由。
  * 用法：
- *   1. subscribe 时创建 entry，写响应头并注册到 sessionStreams
- *   2. 全局只订阅一次 pi 事件源，事件到达后按 agentId→sessionId 路由到对应 entry
+ *   1. subscribe 时创建 entry，写响应头并注册到 sessionStreams；外部流（keepAlive）
+ *      额外整段回放本轮已产出的帧（中途接入也能拿到完整一轮）
+ *   2. 全局只订阅一次 pi 事件源，事件到达后按 agentId→sessionId 路由：会话级翻译器产出帧
+ *      → 存入本轮回放源 → 写给该会话的所有连接
  *   3. 连接断开（response close）时 remove，最后一个连接断开时取消全局订阅
  */
 export class WebEventStreamRouter {
@@ -344,6 +374,8 @@ export class WebEventStreamRouter {
 	 * key 按会话保留，值在下一轮 turn/start（reset）时被翻译器清空。
 	 */
 	private readonly closedRunTextBySession = new Map<string, string>();
+	/** 会话级实时状态（翻译器 + 本轮回放帧）；无订阅者也维护，见 SessionRunState。 */
+	private readonly sessionStates = new Map<string, SessionRunState>();
 
 	constructor(private readonly resolveSession: AgentToSessionRouter) {}
 
@@ -351,8 +383,6 @@ export class WebEventStreamRouter {
 	add(sessionId: string, writeRaw: (wire: string) => boolean, onClose: () => void, onFinish?: () => void, options?: { keepAlive?: boolean }): () => void {
 		const entry: SessionStreamEntry = {
 			sessionId,
-			adapter: new PiEventToUiMessageStream(),
-			channels: new DshChannelToPiEvents(this.closedRunTextBySession.get(sessionId) ?? null),
 			writeRaw,
 			closed: false,
 			keepAlive: options?.keepAlive === true,
@@ -372,6 +402,9 @@ export class WebEventStreamRouter {
 			if (set && set.size === 0) this.sessionStreams.delete(sessionId);
 			onClose();
 		};
+		// 外部流中途接入（手机点开桌面端正在跑的会话 / 切后台回来重连）：先整段回放本轮已产出的帧，
+		// 再继续收增量。同步执行，事件循环不会插进新的 pi 事件，所以不会重复也不会漏。
+		if (entry.keepAlive) this.replayRun(sessionId, entry, set);
 		return close;
 	}
 
@@ -386,10 +419,11 @@ export class WebEventStreamRouter {
 		this.unsubscribePi = subscribe((agentId, event) => this.onPiEvent(agentId, event));
 	}
 
-	/** 解绑 pi 事件源（服务停止时调用）。 */
+	/** 解绑 pi 事件源（服务停止时调用）；会话级回放源一并丢弃，避免重启后回放上一轮的幽灵内容。 */
 	unbindPiSource(): void {
 		this.unsubscribePi?.();
 		this.unsubscribePi = null;
+		this.sessionStates.clear();
 	}
 
 	/**
@@ -415,42 +449,137 @@ export class WebEventStreamRouter {
 	private onPiEvent(agentId: string, event: PiEvent): void {
 		const sessionId = this.resolveSession(agentId);
 		if (!sessionId) return;
-		const set = this.sessionStreams.get(sessionId);
-		if (!set || set.size === 0) return;
-
-		for (const entry of set) {
-			if (entry.closed) continue;
-			this.emitFrames(entry, set, entry.adapter.push(event));
-		}
-		if (set.size === 0) this.sessionStreams.delete(sessionId);
+		// 即使没有任何订阅者也要翻译：这里的帧就是新连接接入时的回放源（见 SessionRunState）。
+		const state = this.sessionStateFor(sessionId);
+		const frames = state.adapter.push(event);
+		this.recordRunFrames(state, frames);
+		this.emitToSession(sessionId, frames);
+		// 收口放在写出之后：finish/[DONE] 要先送到现有连接，再清空回放源、换新翻译器。
+		if (frames.some((frame) => frame.type === "finish")) this.endRun(state);
 	}
 
 	/**
 	 * 非 pi 后端的通道事件：先翻译成 pi 事件形状，再走同一个适配器产出 UI 帧。
-	 * 没有订阅者时直接返回（不翻译 = 零开销，事件风暴期不给主进程添负担）。
+	 * 与 pi 事件一致，无订阅者也翻译——回放源必须连续，否则中途接入的连接看不到本轮前半段。
 	 */
 	private onChannelEvent(agentId: string, channel: string, payload: unknown): void {
-		if (this.sessionStreams.size === 0) return;
 		const sessionId = this.resolveSession(agentId);
 		if (!sessionId) return;
+		const state = this.sessionStateFor(sessionId);
+
+		const frames: UiMessageStreamFrame[] = [];
+		for (const event of state.channels.push(channel, payload)) {
+			frames.push(...state.adapter.push(event));
+		}
+		// 会话级记住收口基准，供状态被淘汰后重建的翻译器 seed（见字段注释）。
+		const baseline = state.channels.baseline();
+		if (baseline === null) this.closedRunTextBySession.delete(sessionId);
+		else this.rememberClosedRun(sessionId, baseline);
+
+		this.recordRunFrames(state, frames);
+		this.emitToSession(sessionId, frames);
+		if (frames.some((frame) => frame.type === "finish")) this.endRun(state);
+	}
+
+	/**
+	 * 取（或创建）会话级实时状态；超上限时优先淘汰没有活跃连接的最旧会话。
+	 * 命中即刷新顺序（LRU）：长时间在跑的会话不能被新会话挤掉，否则翻译器状态丢失，
+	 * 在跑的工具会变成孤儿事件被丢掉、卡片卡在 running。
+	 */
+	private sessionStateFor(sessionId: string): SessionRunState {
+		const existing = this.sessionStates.get(sessionId);
+		if (existing) {
+			this.sessionStates.delete(sessionId);
+			this.sessionStates.set(sessionId, existing);
+			return existing;
+		}
+		if (this.sessionStates.size >= SESSION_STATES_MAX) this.evictIdleSessionState();
+		const state: SessionRunState = {
+			adapter: new PiEventToUiMessageStream(),
+			channels: new DshChannelToPiEvents(this.closedRunTextBySession.get(sessionId) ?? null),
+			runFrames: [],
+			runClosed: true,
+			runOverflow: false,
+		};
+		this.sessionStates.set(sessionId, state);
+		return state;
+	}
+
+	/** 淘汰一个没有活跃连接的状态；全都有连接时退化为淘汰最旧的。 */
+	private evictIdleSessionState(): void {
+		let oldest: string | undefined;
+		for (const key of this.sessionStates.keys()) {
+			if (oldest === undefined) oldest = key;
+			const streams = this.sessionStreams.get(key);
+			if (!streams || streams.size === 0) {
+				this.sessionStates.delete(key);
+				return;
+			}
+		}
+		if (oldest !== undefined) this.sessionStates.delete(oldest);
+	}
+
+	/**
+	 * 累积本轮回放帧。新的一轮（上一轮已收口后的第一批帧）先清空再累积；
+	 * 文本/思考增量就近合并成一段 delta，避免长回复把回放源撑成几千条。
+	 */
+	private recordRunFrames(state: SessionRunState, frames: UiMessageStreamFrame[]): void {
+		if (frames.length === 0) return;
+		if (state.runClosed) {
+			state.runFrames = [];
+			state.runOverflow = false;
+			state.runClosed = false;
+		}
+		if (state.runOverflow) return;
+		for (const frame of frames) {
+			const type = frame.type;
+			if (type === "text-delta" || type === "reasoning-delta") {
+				const last = state.runFrames.at(-1);
+				if (last && last.type === type && last.id === frame.id) {
+					last.delta = `${String(last.delta ?? "")}${String(frame.delta ?? "")}`;
+					continue;
+				}
+			}
+			state.runFrames.push(frame);
+			if (state.runFrames.length > RUN_REPLAY_MAX_FRAMES) {
+				state.runOverflow = true;
+				state.runFrames = [];
+				return;
+			}
+		}
+	}
+
+	/** 本轮收口：清空回放帧（已结束的一轮不再回放），换新翻译器等下一轮。 */
+	private endRun(state: SessionRunState): void {
+		state.runFrames = [];
+		state.runOverflow = false;
+		state.runClosed = true;
+		state.adapter = new PiEventToUiMessageStream();
+	}
+
+	/** 新连接的回放：把本轮已产出的帧整段写给它，之后继续收增量。 */
+	private replayRun(sessionId: string, entry: SessionStreamEntry, set: Set<SessionStreamEntry>): void {
+		const state = this.sessionStates.get(sessionId);
+		if (!state || state.runClosed || state.runOverflow || state.runFrames.length === 0) return;
+		for (const frame of state.runFrames) {
+			if (entry.writeRaw(serializeSseFrame(frame))) continue;
+			// 写出失败（对方已断开）：与 emitFrames 同口径，标记关闭并摘掉。
+			entry.closed = true;
+			set.delete(entry);
+			if (set.size === 0) this.sessionStreams.delete(sessionId);
+			return;
+		}
+	}
+
+	/** 把一批帧写到该会话的所有存活连接。 */
+	private emitToSession(sessionId: string, frames: UiMessageStreamFrame[]): void {
+		if (frames.length === 0) return;
 		const set = this.sessionStreams.get(sessionId);
 		if (!set || set.size === 0) return;
-
-		let baseline: string | null = null;
-		let connected = false;
-		for (const entry of set) {
+		// 复制一份再遍历：emitFrames 会从原集合里删掉已断开的连接。
+		for (const entry of [...set]) {
 			if (entry.closed) continue;
-			connected = true;
-			for (const event of entry.channels.push(channel, payload)) {
-				if (entry.closed) break;
-				this.emitFrames(entry, set, entry.adapter.push(event));
-			}
-			baseline = entry.channels.baseline();
-		}
-		// 会话级记住收口基准，供重连后的新翻译器 seed（见字段注释）。
-		if (connected) {
-			if (baseline === null) this.closedRunTextBySession.delete(sessionId);
-			else this.rememberClosedRun(sessionId, baseline);
+			this.emitFrames(entry, set, frames);
 		}
 		if (set.size === 0) this.sessionStreams.delete(sessionId);
 	}
@@ -464,7 +593,7 @@ export class WebEventStreamRouter {
 		this.closedRunTextBySession.set(sessionId, text);
 	}
 
-	/** 把一批 UI 帧写到连接上；finish 帧按 keepAlive 语义收尾或保活。 */
+	/** 把一批 UI 帧写到单条连接上；finish 帧按 keepAlive 语义收尾或保活。 */
 	private emitFrames(entry: SessionStreamEntry, set: Set<SessionStreamEntry>, frames: UiMessageStreamFrame[]): void {
 		for (const frame of frames) {
 			if (!entry.writeRaw(serializeSseFrame(frame))) {
@@ -480,13 +609,11 @@ export class WebEventStreamRouter {
 				set.delete(entry);
 				return;
 			}
-			// keepAlive（外部流）：连接保留，换新翻译器等下一轮；客户端在下一轮的
-			// start 帧上自行重置合并器。非 keepAlive（/api/chat）：[DONE] 后显式 end，
-			// 否则 useChat 可能继续等待 HTTP body 关闭，界面会一直显示运行中。
-			if (entry.keepAlive) {
-				entry.adapter = new PiEventToUiMessageStream();
-				return;
-			}
+			// keepAlive（外部流）：连接保留，等下一轮；客户端在下一轮的 start 帧上自行重置合并器。
+			// 会话级翻译器已由调用方（onPiEvent/onChannelEvent）在收口时替换，这里不动它。
+			// 非 keepAlive（/api/chat）：[DONE] 后显式 end，否则 useChat 可能继续等待 HTTP body
+			// 关闭，界面会一直显示运行中。
+			if (entry.keepAlive) return;
 			entry.closed = true;
 			set.delete(entry);
 			entry.onFinish?.();
