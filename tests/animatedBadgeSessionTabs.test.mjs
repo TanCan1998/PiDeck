@@ -118,9 +118,13 @@ test("session menu (moved out of the tab bar) keeps state-based disable with vis
 	assert.match(control, /ChevronDown/);
 	assert.match(control, /SessionMenuItems/);
 	assert.match(control, /menu\.reloadResources/);
-	// 「重启」与「重载」图标必须不同（用户反馈两个旋转箭头并排分不清）
-	assert.match(control, /<Power\b/);
-	assert.match(control, /<RefreshCw\b/);
+	// 「重启」与「重载」图标必须语义正确且互相可辨：
+	// 重启=顺时针圆周箭头（RotateCw），重载=逆时针双箭头（RefreshCcw）；
+	// 电源符号语义是关机，不能用在这里。
+	assert.match(control, /<RotateCw\b/);
+	assert.match(control, /<RefreshCcw\b/);
+	assert.doesNotMatch(control, /<Power\b/);
+	assert.doesNotMatch(control, /<Puzzle\b/);
 	// Tab 级菜单为右键 ContextMenu（固定/关闭等），下拉触发按钮已移除
 	assert.match(source, /ContextMenuTrigger asChild/);
 	assert.doesNotMatch(source, /role="tab-menu"/);

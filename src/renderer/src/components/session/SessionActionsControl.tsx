@@ -1,4 +1,4 @@
-import { ChevronDown, LoaderCircle, Play, Power, RefreshCw, Square } from "lucide-react";
+import { ChevronDown, LoaderCircle, Play, RefreshCcw, RotateCw, Square } from "lucide-react";
 import { t } from "../../i18n";
 import { cn } from "../../lib/utils";
 import { canRunSessionAction } from "../../utils/sessionCommands";
@@ -39,9 +39,9 @@ export function SessionActionsControl(props: { runControl?: SessionMenuRunContro
 	) : capabilities?.primaryAction === "start" ? (
 		<Play className="size-4" aria-hidden="true" />
 	) : (
-		// 重启用电源符号而不是旋转箭头：旋转箭头与旁边「重载」的 RefreshCw 在 14px 下几乎一样，
-		// 两个并排会分不清（用户反馈「重启、重载 logo 重复」）。
-		<Power className="size-4" aria-hidden="true" />
+		// 重启用顺时针圆周箭头；「重载」用逆时针双箭头（RefreshCcw）——方向相反，并排不混淆。
+		// 电源符号语义是关机，放这里会被读成「关闭」。
+		<RotateCw className="size-4" aria-hidden="true" />
 	);
 
 	return (
@@ -73,11 +73,12 @@ export function SessionActionsControl(props: { runControl?: SessionMenuRunContro
 					size="icon-sm"
 					className="h-7 w-7 min-w-0 rounded-none border-0 bg-transparent px-0 text-muted-foreground hover:bg-accent hover:text-foreground"
 					disabled={reloadDisabled}
-					title={t("menu.reloadResourcesHint")}
+					// 悬停提示只用短文案「重载」：长句说明放在菜单项里，工具条上不铺一长串。
+					title={reloadLabel}
 					aria-label={reloadLabel}
 					onClick={() => runControl?.onAction("reloadResources")}
 				>
-					{runControl?.isReloading ? <LoaderCircle className="size-4 animate-pideck-spin" aria-hidden="true" /> : <RefreshCw className="size-4" aria-hidden="true" />}
+					{runControl?.isReloading ? <LoaderCircle className="size-4 animate-pideck-spin" aria-hidden="true" /> : <RefreshCcw className="size-4" aria-hidden="true" />}
 				</Button>
 			) : null}
 			<DropdownMenu>

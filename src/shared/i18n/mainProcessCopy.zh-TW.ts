@@ -42,7 +42,7 @@ export const mainProcessZhTW: Record<MainProcessTranslationKey, string> = {
 	"sessionCommand.runtimeChanged": "會話執行例項已發生變化，請重試剛才的操作。",
 	"sessionCommand.runtimeBusy": "會話正在處理其他操作，請稍後重試。",
 	"sessionCommand.reloadResourcesBusy": "請先停止當前回答或等待壓縮完成，再重新載入擴充套件與技能。",
-	"sessionCommand.reloadResourcesUnsupported": "當前會話不支援熱過載擴充套件與技能。",
+	"sessionCommand.reloadResourcesUnsupported": "當前會話不支援熱重載擴充套件與技能。",
 	"sessionCommand.commandFailed": "會話操作失敗，請重試。",
 	"sessionCommand.modelNotFound": "模型未找到：{model}。該模型可能尚未在本地 models.json 中配置。",
 	"sessionCommand.fileTooLarge": "會話檔案過大（{sizeMb}MB，上限 {limitMb}MB），無法編輯訊息。請改用其他會話，或先匯出後歸檔該會話。",

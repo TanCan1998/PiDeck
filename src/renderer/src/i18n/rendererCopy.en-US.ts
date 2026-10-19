@@ -3996,7 +3996,7 @@ export const enUS: Record<TranslationKey, string> = {
 	"menu.stopAnswerHint": "Interrupt only the in-flight response; the agent process keeps running",
 	"app.closing": "Closing…",
 	"menu.restartSession": "Restart Session",
-	"menu.reloadResources": "Reload extensions & skills",
+	"menu.reloadResources": "Reload",
 	"menu.reloadResourcesHint": "Reload extensions, skills, prompts, themes, and context files without restarting the process",
 	"menu.reloadMessages": "Reload messages from disk",
 	"menu.reloadMessagesHint": "Only for sessions without a process: re-read the session file and refresh the timeline",

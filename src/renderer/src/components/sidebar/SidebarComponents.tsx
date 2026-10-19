@@ -28,7 +28,8 @@ import {
 	Play,
 	Plus,
 	PanelRight,
-	Power,
+	ListRestart,
+	RefreshCcw,
 	Radio,
 	RefreshCw,
 	RotateCw,
@@ -802,7 +803,7 @@ function SidebarRunControlItems(props: { runControl: SidebarRunControl }) {
 			<DropdownMenuSeparator />
 			<DropdownMenuItem disabled={primaryDisabled} style={primaryDisabled ? { opacity: 0.4 } : undefined} onSelect={() => runControl.onAction(capabilities.primaryAction)}>
 				<span className="inline-flex items-center gap-2">
-					{capabilities.primaryAction === "start" ? <Play className="size-3.5" aria-hidden="true" /> : <Power className="size-3.5" aria-hidden="true" />}
+					{capabilities.primaryAction === "start" ? <Play className="size-3.5" aria-hidden="true" /> : <RotateCw className="size-3.5" aria-hidden="true" />}
 					{primaryLabel}
 				</span>
 			</DropdownMenuItem>
@@ -822,14 +823,14 @@ function SidebarRunControlItems(props: { runControl: SidebarRunControl }) {
 			{reloadMode === "resources" ? (
 				<DropdownMenuItem disabled={reloadEntryDisabled} style={reloadEntryDisabled ? { opacity: 0.4 } : undefined} title={t("menu.reloadResourcesHint")} onSelect={() => runControl.onAction("reloadResources")}>
 					<span className="inline-flex items-center gap-2">
-						<RefreshCw className={cn("size-3.5", runControl.isReloading && "animate-pideck-spin")} aria-hidden="true" />
+						<RefreshCcw className={cn("size-3.5", runControl.isReloading && "animate-pideck-spin")} aria-hidden="true" />
 						{runControl.isReloading ? t("app.reloading") : t("menu.reloadResources")}
 					</span>
 				</DropdownMenuItem>
 			) : null}
 			<DropdownMenuItem disabled={reloadDisabled} style={reloadDisabled ? { opacity: 0.4 } : undefined} title={t("menu.reloadMessagesHint")} onSelect={() => runControl.onAction("reload")}>
 				<span className="inline-flex items-center gap-2">
-					<RotateCw className={cn("size-3.5", runControl.isReloading && "animate-pideck-spin")} aria-hidden="true" />
+					<ListRestart className={cn("size-3.5", runControl.isReloading && "animate-pulse")} aria-hidden="true" />
 					{runControl.isReloading ? t("app.reloading") : t("menu.reloadMessages")}
 				</span>
 			</DropdownMenuItem>

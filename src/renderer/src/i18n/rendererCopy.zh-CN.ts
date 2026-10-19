@@ -3981,7 +3981,7 @@ export const zhCN = {
 	"menu.stopAnswerHint": "只中断正在生成的回答，Agent 进程继续运行",
 	"app.closing": "关闭中…",
 	"menu.restartSession": "重启会话",
-	"menu.reloadResources": "重新加载扩展与技能",
+	"menu.reloadResources": "重载",
 	"menu.reloadResourcesHint": "不重启进程，重新加载扩展、技能、提示词、主题和上下文文件",
 	"menu.reloadMessages": "从磁盘重新加载消息",
 	"menu.reloadMessagesHint": "仅无进程会话可用：重新读取会话文件并刷新时间线",

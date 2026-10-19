@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: 4cfbebc026e34825f50d6b5afc9954ae1c74882c0592412033a6bb0a9f5ace4d（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: 57f4015c2ef1de21372c98353321b7386f971ad953a6df97f6d1913f9a1038ae（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -351,7 +351,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"app.restart": "重啟",
 	"app.restarting": "重啟中…",
 	"app.stopping": "停止中…",
-	"app.reloading": "過載中…",
+	"app.reloading": "重載中…",
 	"app.sessionReloaded": "會話已重新載入",
 	"app.sessionResourcesReloaded": "擴充套件與技能已重新載入",
 	"app.sessionReloadFailed": "重新載入會話失敗：{error}",
@@ -3988,7 +3988,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"menu.stopAnswerHint": "只中斷正在生成的回答，Agent 程序繼續執行",
 	"app.closing": "關閉中…",
 	"menu.restartSession": "重啟會話",
-	"menu.reloadResources": "重新載入擴充套件與技能",
+	"menu.reloadResources": "重載",
 	"menu.reloadResourcesHint": "不重啟程序，重新載入擴充套件、技能、提示詞、主題和上下文檔案",
 	"menu.reloadMessages": "從磁碟重新載入訊息",
 	"menu.reloadMessagesHint": "僅無程序會話可用：重新讀取會話檔案並重新整理時間線",
@@ -4076,7 +4076,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"prompt.command.hotkeys.description": "顯示所有快捷鍵",
 	"prompt.command.login.description": "管理 OAuth 或 API key 認證",
 	"prompt.command.logout.description": "退出登入",
-	"prompt.command.reload.description": "過載擴充套件、技能和配置",
+	"prompt.command.reload.description": "重載擴充套件、技能和配置",
 	"prompt.command.session.description": "顯示會話檔案、ID、訊息數、token 和費用",
 	"prompt.command.settings.description": "開啟 Pi 設定",
 	"prompt.command.share.description": "上傳為 GitHub Gist 私密連結",

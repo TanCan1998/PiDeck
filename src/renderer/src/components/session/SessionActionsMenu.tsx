@@ -1,4 +1,4 @@
-import { Check, CircleStop, Copy, FileDown, FileText, Fingerprint, Globe, Link2, PanelRight, Pencil, Play, Power, RefreshCw, RotateCw, X } from "lucide-react";
+import { Check, CircleStop, Copy, FileDown, FileText, Fingerprint, Globe, Link2, ListRestart, PanelRight, Pencil, Play, RefreshCcw, RotateCw, X } from "lucide-react";
 import { t } from "../../i18n";
 import { cn } from "../../lib/utils";
 import { copyTextWithCopiedNotice } from "../../utils/clipboardNotice";
@@ -65,7 +65,7 @@ function SessionRunMenuItems(props: { control: SessionMenuRunControl }) {
 		<>
 			<DropdownMenuItem disabled={startOrRestartDisabled} style={startOrRestartDisabled ? { opacity: 0.4 } : undefined} onSelect={() => control.onAction(capabilities.primaryAction)}>
 				<span className="inline-flex items-center gap-2">
-					{capabilities.primaryAction === "start" ? <Play className={cn("size-3.5", control.isRestarting && "animate-pulse")} aria-hidden="true" /> : <Power className={cn("size-3.5", control.isRestarting && "animate-pulse")} aria-hidden="true" />}
+					{capabilities.primaryAction === "start" ? <Play className={cn("size-3.5", control.isRestarting && "animate-pulse")} aria-hidden="true" /> : <RotateCw className={cn("size-3.5", control.isRestarting && "animate-pideck-spin")} aria-hidden="true" />}
 					{primaryLabel}
 				</span>
 			</DropdownMenuItem>
@@ -85,14 +85,14 @@ function SessionRunMenuItems(props: { control: SessionMenuRunControl }) {
 			{reloadMode === "resources" ? (
 				<DropdownMenuItem disabled={reloadEntryDisabled} style={reloadEntryDisabled ? { opacity: 0.4 } : undefined} title={t("menu.reloadResourcesHint")} onSelect={() => control.onAction("reloadResources")}>
 					<span className="inline-flex items-center gap-2">
-						<RefreshCw className={cn("size-3.5", control.isReloading && "animate-pideck-spin")} aria-hidden="true" />
+						<RefreshCcw className={cn("size-3.5", control.isReloading && "animate-pideck-spin")} aria-hidden="true" />
 						{control.isReloading ? t("app.reloading") : t("menu.reloadResources")}
 					</span>
 				</DropdownMenuItem>
 			) : null}
 			<DropdownMenuItem disabled={reloadDisabled} style={reloadDisabled ? { opacity: 0.4 } : undefined} title={t("menu.reloadMessagesHint")} onSelect={() => control.onAction("reload")}>
 				<span className="inline-flex items-center gap-2">
-					<RotateCw className={cn("size-3.5", control.isReloading && "animate-pideck-spin")} aria-hidden="true" />
+					<ListRestart className={cn("size-3.5", control.isReloading && "animate-pulse")} aria-hidden="true" />
 					{control.isReloading ? t("app.reloading") : t("menu.reloadMessages")}
 				</span>
 			</DropdownMenuItem>
