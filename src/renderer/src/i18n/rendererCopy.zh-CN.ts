@@ -792,6 +792,8 @@ export const zhCN = {
 	"app.visionRequestItem": "图片 #{index} · {duration}{tokens}{status}",
 	"app.imagePreviewClose": "关闭图片预览",
 	"app.imagePreviewAlt": "图片预览",
+	"markdown.imageLoadFailed": "图片加载失败",
+	"markdown.imageOpen": "预览图片",
 	"app.imageRemove": "移除图片",
 	"app.imageTooLarge": "图片过大，最大支持 10MB",
 	"app.imageUnsupported": "不支持的图片格式，请使用 PNG/JPEG/GIF/WebP",

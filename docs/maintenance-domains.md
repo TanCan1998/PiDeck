@@ -162,7 +162,10 @@
 - **路径规范化要与协议同步做**：盘符/绝对路径按本地路径处理、相对路径按会话 cwd 解析，否则模型默认写法（`C:\…`、`./out/chart.png`）仍然破图。失败兜底 UI 至少给 alt + 原路径 + 可点击打开，比任何视觉打磨都省排查时间。
 - **工具结果里的 image block 目前不可见**：交互动线只渲染类别文案「已读取图片」（`src/renderer/src/components/session/timeline/toolCategory.ts`），主进程 `AgentManager` 的 `formatToolDetail` / `extractToolResultText` 只产出文本；assistant 消息里的 image block 在 `src/main/pi/messageContent.ts` 的 `extractMessageText` 被 `if (type === "image") continue` 丢弃。做可视化等于改工具投影契约（消息带 `images` 或写 blob 存 ref），**单独立 issue**，别混进渲染层改动。
 - **边界**：PiDeck 不提供「截图/贴图到会话」的工具 API——agent 行为归 pi；PiDeck 的职责只有「任何指向本地图片的 Markdown 都能稳定渲染」。
-- **实施计划**：三阶段（渲染层 `MarkdownImage` + 路径容错 → `pideck-file://` 只读协议替换裸 `file://` → 工具结果 image block 可视化）见 `docs/markdown-image-rendering-plan.md`；阶段 3 有前置探针（pi 的 `tool_execution_end.result` 到不到图片字节）。设计参照 dsh 的“双通道”（进会话的图入库做 ref，被引用的图借看），但白名单根目录与上限是 PiDeck 自建（dsh 靠 fs sandbox，PiDeck 没有那一层）。
+- **已落地（2026-10，阶段 1+2）**：本地图不再走裸 `file://`，统一 `pideck-file://local/?path=<绝对路径>`（`src/shared/localImage.ts` 是线格式唯一来源）。白名单根 = userData + `<tmp>/pideck-shots` + 聊天工作区 + 全部项目路径；**realpath 后复检**（防符号链接逃逸）、≤32MiB、`no-store` + `nosniff` + CSP sandbox，判定在 `src/main/media/localImageAccess.ts`（纯函数、可单测）。不要退回 `file://`：dev 页源是 `http://localhost`，Chromium 直接拒 `file://` 子资源，等于同一段 Markdown 在 dev 白图。
+- **渲染侧硬约束**：Markdown 图片唯一入口是 `MarkdownImage`（`MarkdownStream` 的 `components.img` 注入）——懒加载、限高 420px、点击放大、失败降级成「失败文案 · alt/原路径」，**任何分支都不得产出空 `src` 的白图**。预览浮层唯一实现是 `ImageLightbox`（`ImagePreviewModal` 只剩“注入复制/保存动作条”的薄壳，Markdown 图与附件图共用）。`remarkRecoverLocalImages` 只在「段落仅一个未转义 text 节点 + `/`、`./`、盘符前缀 + 图片扩展名 + 路径含空格」时动手，放宽它会改写正文里的语法示例。
+- **两个真机坑（2026-10-19 dev 实例 smoke 暴露，单测看不见）**：① Windows `app.getPath("temp")` 返回 **8.3 短名**（`C:\Users\ADMINI~1\…`），消息里是长名 → 白名单比较字面不等，白名单内的图全判 403；必须用 `realpath.native`（`main/media/nativeRealpath.ts`），**普通 `fs.realpath` 不展开中间段短名**。② `mdast-util-to-hast` 把反斜杠编码成 `%5C`（`C:\Users\a` → `C:%5CUsers%5Ca`），图片目标必须先百分号解码再判盘符/协议，否则被当未知协议丢弃、图静默变 alt。**测试要喂 hast 形态的 src**，只测 mdast url 会漏掉这两层。
+- **后续计划**：阶段 3（工具结果 image block 可视化）与取舍依据见 `docs/markdown-image-rendering-plan.md`；阶段 3 有前置探针（pi 的 `tool_execution_end.result` 到不到图片字节）。设计参照 dsh 的“双通道”（进会话的图入库做 ref，被引用的图借看），但白名单与上限是 PiDeck 自建（dsh 靠 fs sandbox，PiDeck 没有那一层）。
 
 ## 自定义主题包（userData/custom-themes + shared/customThemes）
 

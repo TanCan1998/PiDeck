@@ -81,7 +81,6 @@ import {
 	Terminal,
 	UploadCloud,
 	Wrench,
-	X,
 	Star,
 	FolderOpen,
 	Copy,
@@ -105,6 +104,7 @@ import { cn } from "../../lib/utils";
 import { showNotice } from "../../utils/notice";
 import { desktopApi } from "../../desktopApi";
 import { ImageActionButtons } from "./imageActions";
+import { ImageLightbox } from "./ImageLightbox";
 import { Button } from "../ui-shadcn/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../ui-shadcn/dropdown-menu";
 import type {
@@ -1154,28 +1154,11 @@ export const UserBubble = memo(function UserBubble(props: {
 });
 
 export function ImagePreviewModal(props: { image: ImageContent; onClose: () => void }) {
-	// 模态惯例：Escape 可关（右上角关闭钮可聚焦，但键盘用户不应被迫 Tab 寻找）
-	useEffect(() => {
-		const onKeyDown = (event: KeyboardEvent) => {
-			if (event.key === "Escape") props.onClose();
-		};
-		window.addEventListener("keydown", onKeyDown);
-		return () => window.removeEventListener("keydown", onKeyDown);
-	}, [props.onClose]);
 	const src = imageContentSrc(props.image);
 	if (!src) return null;
-	return (
-		<div className="image-preview-modal" onClick={props.onClose}>
-			<button className="image-preview-close" onClick={props.onClose} aria-label={t("app.imagePreviewClose")}>
-				<X size={20} strokeWidth={2.4} />
-			</button>
-			<img src={src} alt={t("app.imagePreviewAlt")} onClick={(event) => event.stopPropagation()} />
-			{/* 预览态动作条：全尺寸查看时直接复制/保存（缩略图 hover 之外的第二个入口，两条路共用同一组件） */}
-			<div className="absolute bottom-6 left-1/2 z-10 -translate-x-1/2" onClick={(event) => event.stopPropagation()}>
-				<ImageActionButtons image={props.image} />
-			</div>
-		</div>
-	);
+	// 浮层本体在 ImageLightbox（Markdown 正文图片也走同一个组件）：动作条「复制/保存」
+	// 只对能拿到真实字节的 ImageContent 有意义，所以由这里注入。
+	return <ImageLightbox src={src} alt={t("app.imagePreviewAlt")} onClose={props.onClose} actions={<ImageActionButtons image={props.image} />} />;
 }
 
 // ANSI 转义码正则:匹配 \x1b[...m 等终端颜色/样式序列

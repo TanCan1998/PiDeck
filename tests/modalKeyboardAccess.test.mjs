@@ -25,8 +25,10 @@ test("BrowserSurface 全屏模态：Escape 接 onClose", () => {
 });
 
 test("图片预览模态：Escape 接 onClose", () => {
-	const src = read("src/renderer/src/components/session/SurfaceComponents.tsx");
-	const modal = src.slice(Math.max(0, src.indexOf("ImagePreviewModal") - 200), src.indexOf("ImagePreviewModal") + 1600);
+	// 浮层本体已抽到 ImageLightbox（Markdown 正文图片复用同一组件），
+	// 模态壳 ImagePreviewModal 仍由 SurfaceComponents 提供。
+	const src = read("src/renderer/src/components/session/ImageLightbox.tsx");
+	const modal = src.slice(Math.max(0, src.indexOf("export function ImageLightbox") - 200), src.indexOf("export function ImageLightbox") + 1600);
 	assertMatches(modal, /Escape[\s\S]{0,200}props\.onClose\(\)/, "Escape 分支调用 props.onClose()");
 });
 

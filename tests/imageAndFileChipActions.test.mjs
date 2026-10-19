@@ -12,6 +12,7 @@ import test from "node:test";
  */
 
 const surface = readFileSync("src/renderer/src/components/session/SurfaceComponents.tsx", "utf8");
+const lightbox = readFileSync("src/renderer/src/components/session/ImageLightbox.tsx", "utf8");
 const panels = readFileSync("src/renderer/src/components/session/ComposerPanels.tsx", "utf8");
 const imageActions = readFileSync("src/renderer/src/components/session/imageActions.tsx", "utf8");
 const zhCopy = readFileSync("src/renderer/src/i18n/rendererCopy.zh-CN.ts", "utf8");
@@ -25,9 +26,11 @@ test("ImageActionButtons shares one copy/save implementation for thumbnails and 
 	assert.match(imageActions, /writeClipboardImage\(/);
 	// 保存用 <a download> 下载，禁止把 base64 写回任何 JSONL/状态
 	assert.match(imageActions, /link\.download\s*=/);
-	// 缩略图 hover 覆盖层与预览弹层都要挂同一个组件
+	// 缩略图 hover 覆盖层与预览弹层都要挂同一个组件（预览浮层本体已抽到 ImageLightbox，
+	// Markdown 正文图片复用同一份关闭/Esc 逻辑；模态壳留在 ImagePreviewModal 里注入动作条）
 	assert.match(surface, /group-hover\/img:opacity-100[\s\S]{0,300}ImageActionButtons\s+image=\{img\}/);
-	assert.match(surface, /image-preview-modal[\s\S]{0,600}ImageActionButtons\s+image=\{props\.image\}/);
+	assert.match(lightbox, /image-preview-modal/);
+	assert.match(surface, /ImagePreviewModal[\s\S]{0,400}actions=\{<ImageActionButtons\s+image=\{props\.image\}/);
 });
 
 test("user bubble file chips open a coordinate context menu with open/reveal/copy-path", () => {

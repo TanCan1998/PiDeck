@@ -793,6 +793,8 @@ export const enUS: Record<TranslationKey, string> = {
 	"app.visionRequestItem": "Image #{index} · {duration}{tokens}{status}",
 	"app.imagePreviewClose": "Close image preview",
 	"app.imagePreviewAlt": "Image preview",
+	"markdown.imageLoadFailed": "Image failed to load",
+	"markdown.imageOpen": "Preview image",
 	"app.imageRemove": "Remove image",
 	"app.imageTooLarge": "Image is too large. Maximum size is 10MB.",
 	"app.imageUnsupported": "Unsupported image format. Use PNG/JPEG/GIF/WebP.",

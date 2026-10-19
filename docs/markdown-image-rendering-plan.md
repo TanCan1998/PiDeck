@@ -1,6 +1,7 @@
 # 对话内图片渲染改造计划（Markdown 图 / 本地路径 / 工具结果图）
 
-状态：规划中（未实施）。立项 2026-10-19，结论依据见文末「决策记录」。
+状态：阶段 1（渲染层）、阶段 2（`pideck-file://` 只读协议）已落地（2026-10-19）；阶段 3（工具结果图）待前置探针。
+立项 2026-10-19，结论依据见文末「决策记录」，落地清单见「落地记录」。
 起点：`docs/maintenance-domains.md` →「对话内图片渲染（Markdown img / 本地路径 / 协议取舍）」小节的现状盘点。
 参照实现：dsh（本机 `F:\deepseek-harness`，只作设计参照，不引入任何依赖）。
 目标：让「agent 把图贴给我看」在 **dev 与打包版行为一致**、**失败可诊断**、**历史不再白块**；不改会话 JSONL 结构。
@@ -152,3 +153,41 @@ dsh 参照文件（需要复核时直接读）：`packages/client/ui-primitives/
 
 - 2026-10-19：确认「两条通道」而非单一方案；放弃「事后把路径图复制进内容寻址 store」的设想（等价于给会话打补丁，dsh 证明正解是**产生时入库**）。
 - 2026-10-19：确认不做消息内 ref 改造，协议直读优先，缓存按抱怨再加。
+
+## 落地记录
+
+阶段 1 + 2（2026-10-19）——可加载 URL 从「裸 `file://`」换成协议直读，渲染层补齐降级/预览/路径容错。
+
+| 文件 | 作用 |
+| --- | --- |
+| `src/shared/localImage.ts` | 协议名/体积上限/MIME 白名单/URL 生成与解析（主进程与渲染层唯一来源） |
+| `src/main/media/localImageAccess.ts` | 纯判定：形态闸 400、边界闸 403、体积闸 413、`isInsideRoot` |
+| `src/main/media/LocalImageProtocol.ts` | `protocol.handle` 注册、realpath 逃逸复检、响应头（`no-store`/`nosniff`/CSP sandbox） |
+| `src/main/index.ts` | scheme 特权声明 + ready 后注册 + 白名单根（userData / `<tmp>/pideck-shots` / 聊天工作区 / 全部项目路径） |
+| `src/renderer/index.html` | CSP `img-src` 增 `pideck-file:` |
+| `src/renderer/src/components/session/markdownImageSrc.ts` | 目标 → URL 的解析规则（盘符/`file://`/相对 cwd/百分号解码/UNC 与 `~` 降级） |
+| `src/renderer/src/components/session/MarkdownImage.tsx` | 懒加载、限高 420px、点击放大、失败降级「失败文案 · alt/原路径」 |
+| `src/renderer/src/components/session/ImageLightbox.tsx` | 从 `ImagePreviewModal` 抽出的 `src` 形态浮层（portal 到 body；Markdown 图与附件图共用） |
+| `src/renderer/src/utils/markdownPlugins.ts` | `remarkRecoverLocalImages`：救带空格路径被解析器拆坏的段落 |
+| 测试 | `tests/markdownImageSrc.test.mjs`、`tests/markdownLocalImageRecovery.test.mjs`、`tests/localImageProtocol.test.mjs` |
+
+与计划的偏差（有意）：
+
+- 阶段 1 不再产出 `file://`，`fileUrlFromAbsolutePath` 直接删掉而不是留作阶段 2 的过渡——两个阶段同批交付，留过渡函数等于留死代码。
+- Markdown 图未用 `<button>` 包裹（dsh 的做法）：没有 `inLink` 上下文时按钮可能与 `<a>` 嵌套产生非法 DOM，改为 `img` + `role="button"` + Enter/Space 打开预览。
+- `ImageLightbox` 用 `createPortal(…, document.body)`：`image-preview-modal` 是 `absolute; inset: 0`，挂在时间线里只会覆盖会话栏。
+
+验证到哪一步：
+
+- `npm run typecheck` 通过；`npx biome format` 无改动。
+- 单测：`markdownImageSrc` 12 项、`markdownLocalImageRecovery` 9 项、`localImageProtocol` 7 项，连同受影响的契约测试（`imageAndFileChipActions`、`modalKeyboardAccess`）与既有 markdown 套件共 79 + 78 项全绿。
+- **未做** dev / 打包双态人工 smoke：需要重启宿主进程（当前会话即由它托管），按约定留给用户在下一轮启动后验证；协议失败时表现为「失败文案 + 原路径」，不会白块。
+
+真机 smoke（dev 实例，2026-10-19）又暴露并修了两个单测看不见的坑：
+
+1. **Windows 8.3 短名**：`app.getPath("temp")` 返回 `C:\Users\ADMINI~1\…`，消息里写的是 `C:\Users\Administrator\…`，`path.relative` 认为两者无关 → 白名单内的临时图片全判 403（现象：只有项目内的图能显示）。普通 `fs.realpath` **不展开中间段短名**，必须用 `realpath.native`（`src/main/media/nativeRealpath.ts`）。
+2. **hast 层的百分号编码**：`mdast-util-to-hast` 把 `\` 编码成 `%5C`（`C:\Users\a` → `C:%5CUsers%5Ca`），而解析器先判形态后解码 → 盘符前缀不匹配，被当未知协议丢弃 → 图静默变 alt（现象：灰字 alt，无报错）。修复：本地目标先百分号解码再判形态。
+
+教训：图片链路的测试必须喂 **hast 形态的 src**（或直接跑 `toHast`）；只测 mdast url 会漏掉编码层。另外失败态要绑定到具体 `src`（而不是布尔），否则流式期间的半截路径会把图片永久粘在失败态。
+
+再次验证：真机四条正例（盘符 / `file://` / 相对 / 带空格）全部出图，`%TEMP%` 根目录的反例按预期 403 降级为「失败文案 + 原路径」。

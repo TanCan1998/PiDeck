@@ -394,6 +394,7 @@ import { ImageGenService } from "./imagegen/ImageGenService";
 import { ImageSessionStore } from "./imagegen/ImageSessionStore";
 import { ImageBlobStore } from "./imagegen/ImageBlobStore";
 import { registerImageGenImageProtocol } from "./imagegen/ImageGenImageProtocol";
+import { registerLocalImageProtocol } from "./media/LocalImageProtocol";
 import { ImageGenConfigStore } from "./imagegen/ImageGenConfigStore";
 import { registerVideoGenIpc } from "./ipc/videogenIpc";
 import { VideoGenConfigStore } from "./videogen/VideoGenConfigStore";
@@ -3047,6 +3048,15 @@ function registerIpc() {
 	});
 	// pideck-img:// 必须在 app ready 后注册（scheme 特权声明在文件底部 ready 前完成）
 	registerImageGenImageProtocol(imageBlobStore);
+	// pideck-file://：对话内本地图片只读通道。白名单根=项目目录（含 worktree）+ 聊天工作区
+	// + userData + 专属临时图片目录。**不放行整个 %TEMP%**：安装器/解压/其它程序的临时文件
+	// 不该被消息内容当图床读（取舍见 docs/markdown-image-rendering-plan.md）。
+	registerLocalImageProtocol(() => [
+		app.getPath("userData"),
+		join(app.getPath("temp"), "pideck-shots"),
+		projectStore.getChatProjectPath(),
+		...projectStore.list().map((project) => project.path),
+	]);
 	registerImageGenIpc({
 		imageGen: new ImageGenService({
 			getProviderCredentials: async (provider) => {
@@ -3997,6 +4007,8 @@ protocol.registerSchemesAsPrivileged([
 	{ scheme: "pideck-sound", privileges: { secure: true, standard: true, corsEnabled: false, supportFetchAPI: true, stream: true } },
 	// 生图历史图片：渲染层 <img> 直接加载落盘 blob，避免把 base64 搬回渲染进程堆
 	{ scheme: "pideck-img", privileges: { secure: true, standard: true, corsEnabled: false, supportFetchAPI: true, stream: true } },
+	// 对话内本地图片（Markdown 正文引用白名单目录内的图片）：替代 file://，dev 与打包行为一致
+	{ scheme: "pideck-file", privileges: { secure: true, standard: true, corsEnabled: false, supportFetchAPI: true, stream: true } },
 ]);
 
 app
