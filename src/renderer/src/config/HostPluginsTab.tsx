@@ -239,7 +239,9 @@ export function HostPluginsTab() {
 									</Button>
 									<DropdownMenu>
 										<DropdownMenuTrigger asChild>
-											<Button variant="outline" size="icon-sm" disabled={busy} aria-label={t("hostPlugins.moreActions")} title={t("hostPlugins.moreActions")}>
+											{/* 高度必须与主钮的 sm(h-8) 对齐：icon-sm 是 size-7（28px），ButtonGroup 的 items-stretch 压不过显式高度，
+											    不覆盖会顶端对齐、右侧下拉段矮一截（拆分按钮也就断了）。 */}
+											<Button variant="outline" size="icon-sm" className="h-8 w-7" disabled={busy} aria-label={t("hostPlugins.moreActions")} title={t("hostPlugins.moreActions")}>
 												<ChevronDown size={14} aria-hidden="true" />
 											</Button>
 										</DropdownMenuTrigger>

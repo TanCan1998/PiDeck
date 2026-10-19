@@ -2832,7 +2832,11 @@ export const enUS: Record<TranslationKey, string> = {
 	"config.usageProbe.sub2apiPanelJwt": "Panel JWT (optional)",
 	"config.usageProbe.sub2apiPanelJwtPlaceholder": "Web dashboard login JWT, used to additionally query the account wallet balance",
 	"config.usageProbe.sub2apiPanelJwtHint": "How to get: web dashboard → F12 → Network → any /api/v1 request's Authorization header (strip the Bearer prefix). When the token expires the balance row disappears — just paste a fresh one; usage/limits are unaffected",
-	"config.usageProbe.sub2apiPanelJwtExpired": "Panel JWT expired or invalid — the balance segment is hidden; paste a fresh token to restore it",
+	"config.usageProbe.sub2apiPanelRefreshToken": "Panel refresh token (optional)",
+	"config.usageProbe.sub2apiPanelRefreshTokenPlaceholder": "refresh_token returned by the login endpoint; enables automatic renewal when the JWT expires",
+	"config.usageProbe.sub2apiPanelRefreshTokenHint":
+		"How to get: web dashboard → F12 → Network → data.refresh_token in the /api/v1/auth/login (or /auth/refresh) response JSON. Once set, an expired JWT (or a 401 from the balance query) is renewed automatically and written back — the upstream rotates this value on every renewal. Leave it empty and you must paste a fresh JWT after expiry",
+	"config.usageProbe.sub2apiPanelJwtExpired": "Panel JWT expired or invalid — the balance segment is hidden; add a refresh token to renew automatically, or paste a fresh JWT",
 	"config.usageProbe.sub2apiPanelJwtFailed": "Panel balance query failed (network or server error) — the balance segment is hidden",
 	"config.usageProbe.legacyDetected": "Legacy probe detected ({name}, {count} total): Cookie template fields pre-filled — just save to migrate to the new format",
 	"config.usageProbe.legacyUnnamed": "unnamed probe",

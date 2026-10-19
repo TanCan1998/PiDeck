@@ -50,6 +50,7 @@ function stubsFor(specifier) {
 }
 
 const askPanelSource = () => readFileSync("src/renderer/src/hooks/useAskPanel.ts", "utf8");
+const composerSource = () => readFileSync("src/renderer/src/hooks/useSessionComposerController.ts", "utf8");
 const overlaySource = () => readFileSync("src/renderer/src/components/overlays/AskPanelOverlay.tsx", "utf8");
 const contextSource = () => readFileSync("src/renderer/src/utils/askPanelContext.ts", "utf8");
 const atomsSource = () => readFileSync("src/renderer/src/atoms/ask-panel-atoms.ts", "utf8");
@@ -66,6 +67,17 @@ test("sendAsk passes context and originSessionId to the panel", () => {
 	// 公共 API：sendToAsk(projectId, text, { context?, originSessionId? })
 	assert.match(source, /context\?: string; originSessionId\?: string/);
 	assert.match(source, /if \(options\?\.originSessionId\) setOriginSessionId/);
+});
+
+test("调用方未显式传 context 时，按 originSessionId 自动生成主会话上下文", () => {
+	const source = askPanelSource();
+	// 输入框「并行发送」只传 originSessionId；自动兜底放在 hook 内，避免各入口各写一份
+	assert.match(source, /options\?\.context\s*\?\?\s*buildAskContextForSession\(store, options\?\.originSessionId\)/);
+});
+
+test("输入框并行发送只传 originSessionId，不另建一份 context", () => {
+	const source = composerSource();
+	assert.match(source, /sendToAsk\(effectiveProjectId, text, \{\s*originSessionId: sessionId,?\s*\}\)/);
 });
 
 test("follow-up reuses the existing anonymous session without creating a new one", () => {

@@ -124,6 +124,13 @@ export type UsageProbeProviderConfig = {
 	secretAccessKey?: string;
 	/** Sub2API 模板：网页后台登录态 JWT（可选）；填了追加 /api/v1/auth/me 查账户钱包余额，与已用并列展示。 */
 	panelJwt?: string;
+	/**
+	 * Sub2API 模板：网页后台登录态 refresh token（可选）。配上它之后 PiDeck 会在 JWT 过期
+	 * （本地 exp 判定）或 /auth/me 返回 401 时自动调 POST /api/v1/auth/refresh 续期并把新的
+	 * token 对写回本文件——省掉过期后手动重贴 JWT。上游 refresh token 是**单次轮转**的
+	 * （用过即失效），所以拿到新对必须立刻落盘，否则下次续期必然失败。
+	 */
+	panelRefreshToken?: string;
 	/** 超时（秒），默认 10。 */
 	timeoutSecs?: number;
 	/** 自动查询间隔（分钟），默认 5；0 = 不自动。 */
@@ -208,6 +215,8 @@ export type UsageProbeTestInput = {
 	secretAccessKey?: string;
 	/** Sub2API 模板：网页后台 JWT（可选，追加查账户钱包余额）。 */
 	panelJwt?: string;
+	/** Sub2API 模板：refresh token（可选，用于自动续期；弹窗测试不落盘）。 */
+	panelRefreshToken?: string;
 	/** 测试用超时（秒）；缺省 10。 */
 	timeoutSecs?: number;
 };
@@ -306,8 +315,8 @@ export type ProviderUsageResult = {
 	booster?: ProviderUsageBooster;
 	/**
 	 * Sub2API 面板 JWT 余额追加失败原因：unauthorized = /api/v1/auth/me 返回 401
-	 * （JWT 过期/无效），failed = 网络/服务端/结构等其他错误。存在时余额段被丢弃
-	 * （主结果照常），UI 显式提示「余额段为何消失」而不是无感隐藏。
+	 * （JWT 过期/无效且无 refresh token 或续期也被拒），failed = 网络/服务端/结构等其他错误。
+	 * 存在时余额段被丢弃（主结果照常），UI 显式提示「余额段为何消失」而不是无感隐藏。
 	 */
 	panelBalanceError?: "unauthorized" | "failed";
 	/**

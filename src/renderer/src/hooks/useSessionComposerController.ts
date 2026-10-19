@@ -2344,6 +2344,8 @@ export function useSessionComposerController(options: UseSessionComposerControll
 			 */
 			canSendQuickMessage: !isStarting && !generatingImage && (!isDshBackend || runtime?.state?.modelRoutable !== false),
 			// 并行发送（拆分菜单）：当前草稿文本进独立 Ask 会话后台处理，成功后清空草稿。
+			// 上下文由 useAskPanel 按 originSessionId 自动生成（与队列面板共用同一口径），
+			// 这里只负责把来源会话传下去；不要在本入口另建一份 context，否则会再次分叉。
 			// 仅投递纯文本：并行问询不支持图片附件（与队列面板 onSendAsk 的 canAsk 判据一致），
 			// 带图时 ComposerSendControls 端按 canSendParallel=false 置灰。
 			canSendParallel: Boolean(draft.trim()) && attachments.length === 0 && !isStarting && !generatingImage && Boolean(effectiveProjectId),

@@ -155,6 +155,8 @@ export function UsageProbeConfigDialog(props: {
 	const [secretAccessKey, setSecretAccessKey] = useState("");
 	// Sub2API 面板 JWT：默认掩码（同一套显隐切换）；可选字段，填了才追加查账户钱包余额。
 	const [panelJwt, setPanelJwt] = useState("");
+	// 面板 refresh token（可选）：填了才能在 JWT 过期时自动续期；上游轮转后会回写新值。
+	const [panelRefreshToken, setPanelRefreshToken] = useState("");
 	const [showToken, setShowToken] = useState(false);
 	const [timeoutSecs, setTimeoutSecs] = useState(10);
 	const [intervalMinutes, setIntervalMinutes] = useState(5);
@@ -194,6 +196,7 @@ export function UsageProbeConfigDialog(props: {
 				setAccessKeyId(config?.accessKeyId ?? "");
 				setSecretAccessKey(config?.secretAccessKey ?? "");
 				setPanelJwt(config?.panelJwt ?? "");
+				setPanelRefreshToken(config?.panelRefreshToken ?? "");
 				setTimeoutSecs(config?.timeoutSecs ?? 10);
 				setIntervalMinutes(config?.intervalMinutes ?? 5);
 				setLoadErrors(result.errors);
@@ -291,6 +294,7 @@ export function UsageProbeConfigDialog(props: {
 				...(accessKeyId.trim() ? { accessKeyId: accessKeyId.trim() } : {}),
 				...(secretAccessKey.trim() ? { secretAccessKey: secretAccessKey.trim() } : {}),
 				...(panelJwt.trim() ? { panelJwt: panelJwt.trim() } : {}),
+				...(panelRefreshToken.trim() ? { panelRefreshToken: panelRefreshToken.trim() } : {}),
 				...(timeoutSecs !== 10 ? { timeoutSecs } : {}),
 			});
 			setTestResult(result);
@@ -339,6 +343,8 @@ export function UsageProbeConfigDialog(props: {
 				if (baseUrl.trim()) config.baseUrl = baseUrl.trim();
 				// Sub2API 面板 JWT（可选）：填了才写，清空即回到纯 /v1/usage 模式。
 				if (current.id === "sub2api" && panelJwt.trim()) config.panelJwt = panelJwt.trim();
+				// refresh token（可选）：过期自动续期靠它；清空即取消自动续期（余额段过期后不再自动恢复）。
+				if (current.id === "sub2api" && panelRefreshToken.trim()) config.panelRefreshToken = panelRefreshToken.trim();
 			} else if (current.id === "newapi") {
 				if (baseUrl.trim()) config.baseUrl = baseUrl.trim();
 				if (!accessToken.trim() || !userId.trim()) {
@@ -523,7 +529,7 @@ export function UsageProbeConfigDialog(props: {
 									</div>
 								</section>
 							)}
-							{/* Sub2API：凭据直接取供应商 apiKey（不暴露覆盖输入框），只有端点覆盖 + 面板 JWT 两个字段 */}
+							{/* Sub2API：凭据直接取供应商 apiKey（不暴露覆盖输入框），只有端点覆盖 + 面板 JWT + refresh token 三个字段 */}
 							{currentTemplate?.id === "sub2api" && (
 								<section className="space-y-3">
 									<OptionalField label={t("config.usageProbe.credentialBaseUrl")} placeholder={t("config.usageProbe.credentialBaseUrlPlaceholder")} value={baseUrl} onChange={setBaseUrl} />
@@ -538,6 +544,12 @@ export function UsageProbeConfigDialog(props: {
 										{/* JWT 默认掩码（防截图泄密）；过期后余额段消失，重新粘贴新令牌即可 */}
 										<Input type={showToken ? "text" : "password"} value={panelJwt} onChange={(event) => setPanelJwt(event.target.value)} placeholder={t("config.usageProbe.sub2apiPanelJwtPlaceholder")} className="h-9" data-testid="usage-probe-sub2api-jwt" />
 										<p className="text-caption leading-relaxed text-text-tertiary">{t("config.usageProbe.sub2apiPanelJwtHint")}</p>
+									</div>
+									<div className="space-y-1.5">
+										<Label className="text-xs font-medium text-foreground">{t("config.usageProbe.sub2apiPanelRefreshToken")}</Label>
+										{/* 可选字段：留空则 JWT 过期后只能手动重贴；填了主进程会在过期或 401 时就地续期并回写轮转后的新值 */}
+										<Input type={showToken ? "text" : "password"} value={panelRefreshToken} onChange={(event) => setPanelRefreshToken(event.target.value)} placeholder={t("config.usageProbe.sub2apiPanelRefreshTokenPlaceholder")} className="h-9" data-testid="usage-probe-sub2api-refresh-token" />
+										<p className="text-caption leading-relaxed text-text-tertiary">{t("config.usageProbe.sub2apiPanelRefreshTokenHint")}</p>
 									</div>
 								</section>
 							)}

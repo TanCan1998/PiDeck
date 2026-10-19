@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: 2bda39e70db076dff44e1de5bdfba12f71757ecd3c90280d3bfb1ddb77e81839（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: eea91cebb95a510129d7c64c4da369172007e25d2710155721d6ce98e6929f3e（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -2828,7 +2828,10 @@ export const zhTW: Record<TranslationKey, string> = {
 	"config.usageProbe.sub2apiPanelJwt": "面板 JWT（可選）",
 	"config.usageProbe.sub2apiPanelJwtPlaceholder": "網頁後臺登入態 JWT，用於追加查詢帳戶錢包餘額",
 	"config.usageProbe.sub2apiPanelJwtHint": "獲取：網頁後臺 F12 → Network → 任一 /api/v1 請求的 Authorization 頭（去掉 Bearer 字首）。令牌過期後餘額段消失，重新貼上新令牌即可；已用/限額不受影響",
-	"config.usageProbe.sub2apiPanelJwtExpired": "面板 JWT 已過期或無效，餘額段已隱藏；重新貼上新令牌即可恢復",
+	"config.usageProbe.sub2apiPanelRefreshToken": "面板 refresh token（可選）",
+	"config.usageProbe.sub2apiPanelRefreshTokenPlaceholder": "登入介面返回的 refresh_token，填了會在 JWT 過期後自動續期",
+	"config.usageProbe.sub2apiPanelRefreshTokenHint": "獲取：網頁後臺 F12 → Network → /api/v1/auth/login（或 /auth/refresh）響應 JSON 裡的 data.refresh_token。填了之後 JWT 過期或查詢返回 401 時會自動換新令牌並回寫（上游每次續期會輪轉該值）；留空則過期後需手動重貼 JWT",
+	"config.usageProbe.sub2apiPanelJwtExpired": "面板 JWT 已過期或無效，餘額段已隱藏；填入 refresh token 可自動續期，或重新貼上新令牌",
 	"config.usageProbe.sub2apiPanelJwtFailed": "面板餘額查詢失敗（網路或服務端異常），餘額段已隱藏",
 	"config.usageProbe.legacyDetected": "檢測到舊版探針配置（{name}，共 {count} 條）：已自動填入 Cookie 模板欄位，直接儲存即可遷移為新格式",
 	"config.usageProbe.legacyUnnamed": "未命名探針",

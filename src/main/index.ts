@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { homedir, release as osRelease } from "node:os";
 import { createWriteStream, existsSync } from "node:fs";
-import { copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, readFile, readdir, rm, stat } from "node:fs/promises";
 import { is } from "@electron-toolkit/utils";
 import { PetSystem, type PetSystemDeps } from "./pet";
 import { downgradeRunningStartedBefore, downgradeStaleRunning } from "./pi/derivedSubagents";
@@ -35,6 +35,7 @@ import { runPackageRootRuleRepair, type PackageRootRuleRepairDeps } from "./conf
 import { projectResourceEnabled } from "./config/piResourceRules";
 import { PiResourceStateStore } from "./config/PiResourceStateStore";
 import { readPiConfigFile } from "./config/piConfigFileStore";
+import { ensurePiSettingsDefaults } from "./config/piSettingsDefaults";
 import { runGlobalResourceMigration, runProjectResourceMigration } from "./config/piResourceMigrationRunner";
 import type { ResolvedMigrationResource } from "./config/piResourceMigration";
 import type { PiResourceScope } from "../shared/types/piResources";
@@ -6549,50 +6550,9 @@ async function migrateLegacyBuiltInExtensions(): Promise<void> {
 }
 
 /**
- * 补齐 pi 全局 settings.json 的推荐默认项。
- * 仅添加缺失的 key，不覆盖用户已有配置。
- * 适用于新安装 pi 或配置精简的用户。
+ * 对当前环境和 WSL 环境（如果启用）都补齐 settings.json 默认项。
+ * 具体边界（不覆盖不可解析文件、只补缺失键、锁内原子写）在 config/piSettingsDefaults.ts。
  */
-/** 补齐指定 configDir 下 settings.json 的缺失默认项 */
-async function ensurePiSettingsDefaults(configDir: string, piVersionHint?: string): Promise<void> {
-	const filePath = join(configDir, "settings.json");
-	let current: Record<string, unknown> = {};
-	try {
-		const raw = await readFile(filePath, "utf8");
-		current = JSON.parse(raw) as Record<string, unknown>;
-	} catch {
-		/* 文件不存在或解析失败，使用空对象 */
-	}
-
-	let changed = false;
-	const defaults: Record<string, unknown> = {
-		theme: "dark",
-		hideThinkingBlock: false,
-		defaultProjectTrust: "ask",
-		compaction: { enabled: true, reserveTokens: 16384, keepRecentTokens: 20000 },
-		retry: { enabled: true, maxRetries: 3 },
-	};
-
-	if (piVersionHint && !current.lastChangelogVersion) {
-		current.lastChangelogVersion = piVersionHint;
-		changed = true;
-	}
-
-	for (const [key, defaultValue] of Object.entries(defaults)) {
-		if (!(key in current)) {
-			current[key] = defaultValue;
-			changed = true;
-		}
-	}
-
-	if (changed) {
-		await mkdir(configDir, { recursive: true });
-		await writeFile(filePath, JSON.stringify(current, null, 2), "utf8");
-		void appLogger?.info("settings", "Ensured pi settings defaults", { filePath });
-	}
-}
-
-/** 对当前环境和 WSL 环境（如果启用）都补齐 settings.json 默认项 */
 async function ensureAllPiSettingsDefaults(): Promise<void> {
 	const s = settingsStore.get();
 	let piVersion = "";
@@ -6602,12 +6562,12 @@ async function ensureAllPiSettingsDefaults(): Promise<void> {
 
 	// Windows 本地
 	const winDir = join(app.getPath("home"), ".pi", "agent");
-	await ensurePiSettingsDefaults(winDir, piVersion).catch(() => {});
+	await ensurePiSettingsDefaults(winDir, piVersion).catch(() => undefined);
 
 	// WSL（如果已配置）
 	if (s.wslEnabled && s.wslDistro && s.wslUser) {
 		const wslDir = join(`\\\\wsl$\\${s.wslDistro}\\home\\${s.wslUser}`, ".pi", "agent");
-		await ensurePiSettingsDefaults(wslDir, piVersion).catch(() => {});
+		await ensurePiSettingsDefaults(wslDir, piVersion).catch(() => undefined);
 	}
 }
 

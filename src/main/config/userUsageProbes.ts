@@ -401,6 +401,10 @@ export function normalizeProviderConfig(input: unknown): { config: UsageProbePro
 	// Sub2API 面板 JWT：登录态令牌无格式可校验（非空即可）；会过期，仅用于追加查账户钱包余额。
 	const panelJwt = optionalString(input.panelJwt);
 	if (panelJwt) config.panelJwt = panelJwt;
+	// Sub2API refresh token：上游形如 rt_xxx（只校验非空），仅用于续期；轮转后的新对由
+	// updateUsageProbeSub2ApiTokens 回写。
+	const panelRefreshToken = optionalString(input.panelRefreshToken);
+	if (panelRefreshToken) config.panelRefreshToken = panelRefreshToken;
 
 	if (input.timeoutSecs !== undefined) {
 		if (typeof input.timeoutSecs !== "number" || !Number.isInteger(input.timeoutSecs) || input.timeoutSecs < 1 || input.timeoutSecs > 300) {
@@ -510,6 +514,39 @@ export async function saveUsageProbeForProvider(configDir: string, provider: str
 		nextFile.probes = existing.probes;
 	}
 
+	try {
+		await mkdir(configDir, { recursive: true });
+		await writeFile(join(configDir, USER_USAGE_PROBES_FILE), JSON.stringify(nextFile, null, 2), "utf8");
+		return { ok: true };
+	} catch (error) {
+		return { ok: false, error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+/**
+ * 回写 Sub2API 面板登录态（JWT + refresh token）。
+ *
+ * 只改这两个字段、不整条重写：上游 refresh token 是单次轮转的（用过即失效、同时返回新的一对），
+ * 续期成功后必须立刻落盘，否则下次续期用的是已失效的旧 token；而 providers 条目里其它字段
+ * （以及用户/AI 手写的未知字段、其它 provider、旧 probes 数组）一律按磁盘原样保留。
+ * 条目不存在时视为失败——用量查询必须以已保存的配置为基准（免得把弹窗里未保存的草稿写进配置）。
+ */
+export async function updateUsageProbeSub2ApiTokens(configDir: string, provider: string, tokens: { panelJwt?: string; panelRefreshToken?: string }): Promise<{ ok: boolean; error?: string }> {
+	if (!provider || provider.length > 128) {
+		return { ok: false, error: "Invalid provider name" };
+	}
+	const existing = await readUsageProbeRawFile(configDir);
+	const entry = existing.providers[provider];
+	if (!isRecord(entry)) {
+		return { ok: false, error: `No usage probe config for ${provider}` };
+	}
+	const nextEntry: Record<string, unknown> = { ...entry };
+	if (tokens.panelJwt) nextEntry.panelJwt = tokens.panelJwt;
+	if (tokens.panelRefreshToken) nextEntry.panelRefreshToken = tokens.panelRefreshToken;
+	const nextFile: Record<string, unknown> = { providers: { ...existing.providers, [provider]: nextEntry } };
+	if (Object.keys(existing.probes).length > 0) {
+		nextFile.probes = existing.probes;
+	}
 	try {
 		await mkdir(configDir, { recursive: true });
 		await writeFile(join(configDir, USER_USAGE_PROBES_FILE), JSON.stringify(nextFile, null, 2), "utf8");
