@@ -1,6 +1,6 @@
 import { AlertTriangle, ArrowUp, ChevronDown, ChevronUp, Clock, Copy, FileText, FolderOpen, ListOrdered, LoaderCircle, Pause, Pencil, Split, Square, X, XCircle } from "lucide-react";
 import { useId, type RefObject } from "react";
-import { useAtomValue, useStore } from "jotai";
+import { useAtomValue } from "jotai";
 import type { ImageContent } from "../../../../shared/types";
 import { imageContentSrc } from "../../../../shared/imageContentSrc";
 import { formatBytes } from "../../../../shared/formatBytes";
@@ -8,7 +8,6 @@ import { replaceExpandedRefBlocksWithLabels } from "./composer/quoteChip";
 import type { PastedTextFile } from "../../atoms";
 import type { QueuedPromptSnapshot } from "../../utils/queuedPromptQueue";
 import { resolveComposerSendButtonState } from "../../utils/composerSendButton";
-import { buildAskContextBlock } from "../../utils/askPanelContext";
 import { canChangeQueuedPromptBehavior, canDiscardQueuedPrompt, canRetractQueuedPromptToInput, discardControlHint, retractControlHint } from "../../utils/queuedPromptQueue";
 import { t } from "../../i18n";
 import { desktopApi } from "../../desktopApi";
@@ -20,7 +19,6 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { sessionRecordByIdAtomFamily } from "../../atoms";
 import { sessionRuntimeBySessionIdAtomFamily } from "../../atoms/session-selectors";
 import { useAskPanel } from "../../hooks/useAskPanel";
-import { sessionMessageCacheBySessionIdAtomFamily } from "../../atoms/session-atoms";
 import { queueDrainSuppressedByIdAtom } from "../../atoms/composer-atoms";
 import { isSessionRuntimeBusy } from "../../hooks/useSessionTimelineController";
 import { ExtensionWidgetCard } from "./ComposerParts";
@@ -257,7 +255,6 @@ export function QueuedPromptPanel(props: {
 	// 停止响应后的队列抑制（toast 瞬时易逝）：面板常驻提示用户队列不会自动发送，需再发一条消息恢复。
 	const drainSuspended = useAtomValue(queueDrainSuppressedByIdAtom)[sessionId ?? ""] === true;
 	const askPanel = useAskPanel();
-	const store = useStore();
 	const agentBusy = isSessionRuntimeBusy(runtime?.status, runtime?.state);
 	// runtime 优先于 record（record 未及回写时 runtime 已生效）；ACP 无 steer 通道。
 	const steerSupported = (runtime?.backend ?? sessionRecord?.backend) !== "acp";
@@ -270,20 +267,11 @@ export function QueuedPromptPanel(props: {
 		const projectId = sessionRecord?.projectId;
 		const text = prompt.message.trim() || prompt.displayText.trim();
 		if (!projectId || !text) return;
-		// 上下文继承：把发起排队的主会话最近对话（纯函数生成，见 askPanelContext.ts）
-		// 随并行问询一并带上（经 agentMessage 注入，只有模型可见），让独立会话
-		// 能回答需要主会话前因后果的问题（对齐 pi-btw 的 side thread 上下文继承）。
-		const mainMessages = store.get(sessionMessageCacheBySessionIdAtomFamily(sessionId))?.messages ?? [];
-		const context = buildAskContextBlock(mainMessages, {
-			title: t("askPanel.contextTitle"),
-			userLabel: t("askPanel.contextUser"),
-			assistantLabel: t("askPanel.contextAssistant"),
-		});
+		// 上下文继承由 useAskPanel 按 originSessionId 统一生成（见 utils/askPanelContextSource.ts），
+		// 队列面板与输入框「并行发送」共用同一口径，避免某条入口漏传 context。
 		// 并行是立刻开独立会话，不再占着当前会话队列；成功后再从排队区拿掉。
 		void askPanel
 			.sendToAsk(projectId, text, {
-				// 携带主会话上下文：并行会话能理解前因后果（null 表示无上下文可带，自动跳过）
-				...(context ? { context } : {}),
 				// 记录来源主会话：详情浮层「插入主会话 composer」时把回答送回这个会话
 				originSessionId: sessionId,
 			})
