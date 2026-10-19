@@ -293,8 +293,43 @@ export type FeedbackEnvironment = {
 /** 应用更新生命周期阶段（由 electron-updater 事件映射）。 */
 export type AppUpdatePhase = "idle" | "checking" | "available" | "downloading" | "ready" | "installing" | "error";
 
-/** 更新交付能力：automatic=应用内下载/安装；manual=仅检测并引导至 Release。 */
+/** 更新交付能力：automatic=应用内下载/安装；manual=仅检测并提供设备匹配的安装包下载。 */
 export type AppUpdateDeliveryMode = "automatic" | "manual";
+
+/**
+ * 无法应用内更新时的具体原因（UI 用它选择说明文案）：
+ * - mac-unsigned：macOS 无 Developer ID 签名；
+ * - linux-arm64：Linux arm64 没有可用的 latest-linux.yml；
+ * - linux-package-format：deb / tar.gz 等非 AppImage 安装形态无法自更新；
+ * - unsupported：未识别的平台/架构。
+ */
+export type AppUpdateDeliveryReason = "automatic" | "mac-unsigned" | "linux-arm64" | "linux-package-format" | "unsupported";
+
+/** 手动更新推荐安装包的格式（按设备匹配后的类型）。 */
+export type AppManualUpdateAssetKind = "dmg" | "zip" | "nsis" | "portable" | "appimage" | "deb" | "tar.gz";
+
+/**
+ * 手动更新交付时按当前设备匹配到的安装包。
+ * 检查更新阶段由主进程从 Release 资产中选出，渲染层据此展示「一键下载」。
+ */
+export interface AppManualUpdateRelease {
+	version: string;
+	/** 安装包文件名（展示 + 下载落盘名）。 */
+	assetName: string;
+	/** 安装包 https 直链。 */
+	assetUrl: string;
+	/** 字节大小（发布源提供时）。 */
+	assetSize?: number;
+	/** GitHub 资产 digest（形如 "sha256:hex"，可选字段；缺失则跳过校验）。 */
+	digestSha256?: string;
+	kind: AppManualUpdateAssetKind;
+	platform: "darwin" | "win32" | "linux";
+	arch: "x64" | "arm64";
+	/** 当前进程跑在 ARM64 转译层（macOS Rosetta）下，推荐原生 arm64 包。 */
+	translated?: boolean;
+	/** 发布页（查看全部下载 / 无匹配时的兜底入口）。 */
+	releasePageUrl: string;
+}
 
 /**
  * 应用更新下载/安装状态（随 app:update-status-changed 快照推送）。
@@ -376,8 +411,10 @@ export type ChannelSwitchActionResult = { ok: true; release?: TargetChannelRelea
 export type AppUpdateStatusSnapshot = {
 	/** 最后一次后台检查完成时间（毫秒时间戳）；缺省 = 尚未检查。 */
 	lastCheckAt?: number;
-	/** 当前平台的更新交付能力。macOS 无 Developer ID 签名时为 manual。 */
+	/** 当前平台的更新交付能力。macOS 无 Developer ID 签名、Linux arm64 / deb / tar.gz 为 manual。 */
 	deliveryMode: AppUpdateDeliveryMode;
+	/** 手动交付的具体原因；automatic 时为 automatic。 */
+	deliveryReason?: AppUpdateDeliveryReason;
 	/** 自动下载偏好；manual 交付模式为 null（该开关不适用）。 */
 	autoDownload?: boolean | null;
 	/** PiDeck 应用更新状态；null = 尚未触发检查且无活动状态。 */
@@ -388,8 +425,10 @@ export type AppUpdateStatusSnapshot = {
 		skippedVersion?: string;
 		/** 最近一次已提示过的版本（“每版本只提示一次”判定）。 */
 		notifiedVersion?: string;
-		/** 下载/安装状态机（electron-updater 事件驱动）。 */
+		/** 下载/安装状态机（electron-updater 事件驱动；manual 交付时为本地下载状态机）。 */
 		download: AppUpdateDownloadState;
+		/** manual 交付：按当前设备匹配到的推荐安装包；null/缺省 = 无匹配，退化到发布页。 */
+		recommendedDownload?: AppManualUpdateRelease | null;
 	} | null;
 	/** Pi CLI 更新状态；null = 尚未成功检查过。 */
 	piCli: {

@@ -53,7 +53,7 @@ No. PiDeck does not collect any usage data or telemetry. All data stays on your 
 
 ### How do I update PiDeck?
 
-When a new version is released on GitHub, PiDeck will show an in-app notification. You can download the latest version from the notification or from the GitHub Releases page.
+When a new version is released on GitHub, PiDeck shows an in-app notification. On platforms that support in-app updates, Settings offers **Restart and install** after the download. On macOS (unsigned builds), Linux arm64, and deb/tar.gz installs, Settings recommends the installer that matches this device for one-click download, so you do not need to pick from the Release asset list.
 
 ## Troubleshooting
 

@@ -36,6 +36,7 @@ export function SettingsFeatureRoot(props: SettingsFeatureRootProps) {
 	const setOpen = useSetAtom(settingsOpenAtom);
 	const setFocus = useSetAtom(settingsFocusAtom);
 	const setUpdateStatus = useSetAtom(updateStatusAtom);
+	const updateStatus = useAtomValue(updateStatusAtom);
 	const updateInstallPreflightTasks = useAtomValue(updateInstallPreflightTasksAtom);
 	const updateInstallInFlightRef = useRef(false);
 	// 设置弹窗是**挂载/卸载**式（关闭时整个弹窗 return null），所以这里每次打开
@@ -74,6 +75,11 @@ export function SettingsFeatureRoot(props: SettingsFeatureRootProps) {
 		if (updateInstallInFlightRef.current) return;
 		updateInstallInFlightRef.current = true;
 		try {
+			// manual 交付只是打开已下载的安装包，不退出应用，不需要编辑器落盘闸门。
+			if (updateStatus?.deliveryMode === "manual") {
+				await api.app.installUpdate();
+				return;
+			}
 			const allSaved = await flushUpdateInstallPreflight(updateInstallPreflightTasks.values());
 			if (!allSaved) {
 				showNotice(t("update.saveBeforeInstallDetail"), 0, "error", t("update.saveBeforeInstallTitle"));
@@ -92,7 +98,7 @@ export function SettingsFeatureRoot(props: SettingsFeatureRootProps) {
 		} finally {
 			updateInstallInFlightRef.current = false;
 		}
-	}, [updateInstallPreflightTasks]);
+	}, [updateInstallPreflightTasks, updateStatus?.deliveryMode]);
 
 	// 按字段级 useMemo 稳定弹窗 props：App 根组件重渲染（低频）不会连带
 	// 重渲染 SettingsModal（memo）。piUpdate 内部函数均为 useCallback，

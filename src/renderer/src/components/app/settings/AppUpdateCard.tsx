@@ -1,4 +1,4 @@
-import { ExternalLink, ScrollText } from "lucide-react";
+import { Download, ExternalLink, ScrollText } from "lucide-react";
 import { useState } from "react";
 import type { AppInfo, UpdateChannel } from "../../../../../shared/types";
 import type { UpdateSourceId } from "../../../../../shared/types/settings";
@@ -7,6 +7,7 @@ import { desktopApi } from "../../../desktopApi";
 import { useAtomValue } from "jotai";
 import { updateStatusAtom } from "../../../atoms/update-atoms";
 import { cn } from "../../../lib/utils";
+import { manualUpdateTargetLabel } from "../../../utils/updateTargetLabel";
 import { Button } from "../../ui-shadcn/button";
 import { Progress } from "../../ui-shadcn/progress";
 import { ChangelogDialog } from "./ChangelogDialog";
@@ -51,9 +52,12 @@ function formatSpeed(bytesPerSecond?: number): string {
  * 版本与更新卡片（快照驱动，无本地状态副本）。
  *
  * 状态优先级（对齐 Netcatty 设置卡片）：
- *   downloading（进度条）> installing（等待退出）> ready（重启并安装）> error（重试/打开 Release）
- *   > checking（loading）> available（自动下载关闭时手动下载）
+ *   downloading（进度条）> installing（等待退出）> ready（重启并安装 / 打开安装包）
+ *   > error（重试/打开 Release）> checking（loading）> available（下载）
  *   > idle + hasUpdate（发现新版本）> idle + 已检查（已是最新）。
+ *
+ * manual 交付（macOS 无签名 / Linux arm64 / deb / tar.gz）不再把用户丢到 Release 页：
+ * 主进程检查阶段已按设备匹配好安装包，卡片直接展示推荐包 + 一键下载。
  */
 export function AppUpdateCard(props: AppUpdateCardProps) {
 	const updateStatus = useAtomValue(updateStatusAtom);
@@ -62,6 +66,9 @@ export function AppUpdateCard(props: AppUpdateCardProps) {
 	const phase = download?.phase ?? "idle";
 	const autoDownload = updateStatus?.autoDownload !== false;
 	const isManualDelivery = updateStatus?.deliveryMode === "manual" || props.platform === "darwin";
+	const recommended = app?.recommendedDownload ?? null;
+	const recommendedTarget = recommended ? manualUpdateTargetLabel(recommended) : null;
+	const recommendedTargetText = recommendedTarget ? t(recommendedTarget.key, recommendedTarget.params) : "";
 	// 「查看更新日志」弹窗受控状态：发现新版本时最需要知道「这版改了什么」，
 	// 这是用户的决策点，所以入口放在这里有更新提示的分支里，而不是只留在关于弹框。
 	const [changelogOpen, setChangelogOpen] = useState(false);
@@ -69,11 +76,17 @@ export function AppUpdateCard(props: AppUpdateCardProps) {
 	const [switchOpen, setSwitchOpen] = useState(false);
 
 	const openRelease = () => {
+		if (recommended?.releasePageUrl) {
+			void desktopApi.app.openExternal(recommended.releasePageUrl, true);
+			return;
+		}
 		const releaseBaseUrl = props.releasesUrl.replace(/\/$/, "");
 		const version = app?.latestVersion?.replace(/^v/i, "");
 		const releaseUrl = version ? `${releaseBaseUrl}/tag/v${encodeURIComponent(version)}` : releaseBaseUrl;
 		void desktopApi.app.openExternal(releaseUrl, true);
 	};
+
+	const manualReadyLabel = props.platform === "darwin" ? t("settings.updateOpenInstaller") : t("settings.updateShowInstaller");
 
 	return (
 		/* 内容直接铺在 SettingsSection 的淡色外框里，不再自套边框（避免内外双框）。 */
@@ -90,8 +103,8 @@ export function AppUpdateCard(props: AppUpdateCardProps) {
 				</Button>
 			</div>
 
-			{/* Win 便携版仍走 NSIS setup：会变成安装版；想保持便携只能去 GitHub 手动下 portable。 */}
-			{props.installationType === "portable" && props.platform === "win32" && (
+			{/* Win 便携版仍走 NSIS setup：会变成安装版；有更新时才提示这个差异。 */}
+			{props.installationType === "portable" && props.platform === "win32" && app?.hasUpdate && (
 				<div className="mt-2 space-y-1">
 					<p className="text-caption text-muted-foreground">{t("settings.portableUpdateNotice")}</p>
 					<Button variant="ghost" size="sm" onClick={openRelease}>
@@ -101,7 +114,7 @@ export function AppUpdateCard(props: AppUpdateCardProps) {
 				</div>
 			)}
 
-			{/* downloading：进度条 + 速度 */}
+			{/* downloading：进度条 + 速度；manual 同时展示正在下载的推荐包文件名。 */}
 			{download && download.phase === "downloading" && (
 				<div className="mt-2 space-y-1">
 					<div className="flex items-center justify-between text-caption text-muted-foreground">
@@ -112,6 +125,7 @@ export function AppUpdateCard(props: AppUpdateCardProps) {
 						</span>
 					</div>
 					<Progress value={download.percent ?? 0} aria-label={t("settings.updateDownloading", { version: "" })} />
+					{isManualDelivery && recommended && <p className="truncate text-caption text-muted-foreground">{t("settings.updateRecommendedPackage", { name: recommended.assetName, target: recommendedTargetText })}</p>}
 				</div>
 			)}
 
@@ -122,12 +136,18 @@ export function AppUpdateCard(props: AppUpdateCardProps) {
 				</div>
 			)}
 
-			{/* ready：可重启安装；若上一次请求未能启动安装器，保留包和重试入口。 */}
+			{/* ready：automatic 重启安装；manual 只打开已下载的安装包，不退出应用。 */}
 			{download && download.phase === "ready" && (
 				<div className="mt-2 flex items-center justify-between gap-2">
-					<p className={`text-caption ${download.error ? "text-destructive" : "text-success"}`}>{download.error ? t("settings.updateInstallFailed", { error: download.error }) : t("settings.updateReadyToInstall", { version: download.version ?? app?.latestVersion ?? "" })}</p>
+					<p className={`text-caption ${download.error ? "text-destructive" : "text-success"}`}>
+						{download.error
+							? t(isManualDelivery ? "settings.updateOpenInstallerFailed" : "settings.updateInstallFailed", { error: download.error })
+							: isManualDelivery
+								? t("settings.updateManualReady", { name: recommended?.assetName ?? "" })
+								: t("settings.updateReadyToInstall", { version: download.version ?? app?.latestVersion ?? "" })}
+					</p>
 					<Button variant="default" size="sm" onClick={props.onInstallUpdate}>
-						{t("settings.updateInstallNow")}
+						{isManualDelivery ? manualReadyLabel : t("settings.updateInstallNow")}
 					</Button>
 				</div>
 			)}
@@ -136,27 +156,43 @@ export function AppUpdateCard(props: AppUpdateCardProps) {
 			{download && download.phase === "error" && (
 				<div className="mt-2 flex flex-col gap-1">
 					<p className="text-caption text-destructive">{t(download.errorKind === "download" ? "update.downloadFailedDetail" : "update.checkFailedDetail", { error: download.error ?? t("common.unknown") })}</p>
-					{props.updateSource === "github" && <p className="text-caption text-muted-foreground">{t("settings.updateGithubFailHint")}</p>}
+					{props.updateSource === "github" && download.errorKind !== "download" && <p className="text-caption text-muted-foreground">{t("settings.updateGithubFailHint")}</p>}
 					<div className="flex gap-2">
-						<Button variant="ghost" size="sm" onClick={props.onCheckUpdate}>
-							{t("settings.checkUpdateRetry")}
+						<Button variant="ghost" size="sm" onClick={isManualDelivery && download.errorKind === "download" ? props.onDownloadUpdate : props.onCheckUpdate}>
+							{isManualDelivery && download.errorKind === "download" ? t("settings.updateRetryDownload") : t("settings.checkUpdateRetry")}
 						</Button>
 						<Button variant="ghost" size="sm" onClick={openRelease}>
-							{t("update.openRelease")}
+							{recommended ? t("settings.updateViewAllDownloads") : t("update.openRelease")}
 						</Button>
 					</div>
 				</div>
 			)}
 
-			{/* available：macOS 无签名发行物只能跳转 Release 手动安装 */}
+			{/* available manual：展示设备匹配的推荐包，一键下载；未匹配时才退化到发布页。 */}
 			{download && download.phase === "available" && isManualDelivery && (
-				<div className="mt-2 flex items-center justify-between gap-2">
-					{/* text-accent 在本项目 Tailwind 主题里指向 --color-bg-active（面色），
-					    当正文色用会与底色同值；强调正文统一用 text-primary（= --color-accent）。 */}
-					<p className="text-caption text-primary">{t("settings.updateManualAvailable", { version: download.version ?? "" })}</p>
-					<Button variant="secondary" size="sm" onClick={openRelease}>
-						{t("update.openRelease")}
-					</Button>
+				<div className="mt-2 space-y-1">
+					<p className="text-caption text-primary">{t("settings.updateAvailable", { version: download.version ?? "" })}</p>
+					{recommended ? (
+						<>
+							<p className="text-caption text-muted-foreground">{t("settings.updateRecommendedPackage", { name: recommended.assetName, target: recommendedTargetText })}</p>
+							<div className="flex gap-2">
+								<Button variant="secondary" size="sm" onClick={props.onDownloadUpdate}>
+									<Download size={12} aria-hidden="true" />
+									{t("settings.updateDownloadRecommended")}
+								</Button>
+								<Button variant="ghost" size="sm" onClick={openRelease}>
+									{t("settings.updateViewAllDownloads")}
+								</Button>
+							</div>
+						</>
+					) : (
+						<>
+							<p className="text-caption text-muted-foreground">{t("settings.updateNoRecommendedAsset")}</p>
+							<Button variant="secondary" size="sm" onClick={openRelease}>
+								{t("update.openRelease")}
+							</Button>
+						</>
+					)}
 				</div>
 			)}
 
@@ -188,8 +224,14 @@ export function AppUpdateCard(props: AppUpdateCardProps) {
 							<ScrollText size={12} aria-hidden="true" />
 							{t("about.changelog")}
 						</Button>
+						{isManualDelivery && recommended && (
+							<Button variant="secondary" size="sm" onClick={props.onDownloadUpdate}>
+								<Download size={12} aria-hidden="true" />
+								{t("settings.updateDownloadRecommended")}
+							</Button>
+						)}
 						<Button variant="ghost" size="sm" onClick={openRelease}>
-							{t("update.openRelease")}
+							{recommended ? t("settings.updateViewAllDownloads") : t("update.openRelease")}
 						</Button>
 					</div>
 				</div>

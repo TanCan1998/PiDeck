@@ -465,8 +465,12 @@ import { QuitCleanupRegistry } from "./lifecycle/QuitCleanupRegistry";
 import type { FeishuChatBinding } from "../shared/types";
 import { createRealAutoUpdater } from "./update/createAutoUpdater";
 import { installAtomgitNoCacheBypass, UPDATER_PARTITION_NAME } from "./update/atomgitNoCacheBypass";
-import { createMacManualUpdateChecker } from "./update/macManualUpdate";
+import { createManualUpdateChecker } from "./update/macManualUpdate";
+import { resolveAppUpdateDeliveryPlan } from "./update/deliveryPlan";
+import { resolveManualUpdateTarget } from "./update/manualUpdateSelection";
+import { downloadInstallerAsset, type InstallerDownloadProgress } from "./update/installerDownload";
 import { UpdateService } from "./update/UpdateService";
+import type { AppManualUpdateRelease } from "../shared/types/app";
 
 let mainWindow: BrowserWindow | null = null;
 // 紧凑模式（右键小任务）与主窗口几何的接线统一收在 quickTaskWindowChrome：
@@ -3569,13 +3573,49 @@ function registerIpc() {
 	};
 	// quitAndInstall 会调用 app.quit；该标记让 closeToTray 放行真正的退出。
 	let updateInstallSetQuitting = false;
-	if (process.platform === "darwin") {
-		const checkMacManualUpdate = createMacManualUpdateChecker({ channel: updateChannel });
+	// 交付模式按设备能力判定：Linux arm64 / deb / tar.gz 没有可靠的应用内替换链路，
+	// 与 macOS 无签名发行物一样走 manual（检查更新 + 一键下载设备匹配安装包）。
+	const appUpdateDelivery = resolveAppUpdateDeliveryPlan({
+		platform: process.platform,
+		arch: process.arch,
+		isAppImage: Boolean(process.env.APPIMAGE),
+	});
+	const manualUpdateTarget = resolveManualUpdateTarget({
+		platform: process.platform,
+		arch: process.arch,
+		isPortable: process.env.PORTABLE_EXECUTABLE_DIR !== undefined,
+		isAppImage: Boolean(process.env.APPIMAGE),
+		execPath: process.execPath,
+		runningUnderArm64Translation: app.runningUnderARM64Translation === true,
+	});
+	if (appUpdateDelivery.mode === "manual") {
+		const checkManualUpdate = createManualUpdateChecker({ channel: updateChannel, target: manualUpdateTarget });
 		updateService = new UpdateService({
 			...updateServiceBase,
 			deliveryMode: "manual",
+			deliveryReason: appUpdateDelivery.reason,
 			// latestReleaseUrl（镜像源）由 UpdateService 按设置传入；null = 官方 GitHub。
-			checkManualAppUpdate: (latestReleaseUrl?: string) => checkMacManualUpdate(app.getVersion(), latestReleaseUrl),
+			checkManualAppUpdate: (latestReleaseUrl?: string) => checkManualUpdate(app.getVersion(), latestReleaseUrl),
+			// 手动交付的安装包落到系统下载目录；文件名/digest 来自检查阶段匹配的 release 资产。
+			downloadManualUpdate: (release: AppManualUpdateRelease, options: { signal?: AbortSignal; onProgress?: (progress: InstallerDownloadProgress) => void }) =>
+				downloadInstallerAsset({
+					assetName: release.assetName,
+					assetUrl: release.assetUrl,
+					digestSha256: release.digestSha256,
+					targetDir: app.getPath("downloads"),
+					netFetch: (url, init) => net.fetch(url, init),
+					signal: options.signal,
+					onProgress: options.onProgress,
+				}),
+			// macOS 打开 dmg 让用户拖入 Applications；其他平台只定位文件，绝不自动运行未知安装包。
+			openManualInstaller: async (filePath: string) => {
+				if (process.platform === "darwin") {
+					const error = await shell.openPath(filePath);
+					if (error) throw new Error(error);
+					return;
+				}
+				shell.showItemInFolder(filePath);
+			},
 		});
 	} else {
 		updateService = new UpdateService({

@@ -2,13 +2,11 @@
 // 保持 electron-free：网络 fetch / 临时目录 / 启动安装器 / 退出 / 渲染层推送全部经构造期依赖注入（ipcMain 适配在 channelSwitchIpc.ts，
 // 装配在 main/index.ts registerIpc()）。退出清理用 QuitCleanupRegistry 登记（index.ts 装配时传入），避免 closeToTray 吞掉裸 quit 跳过清理。
 
-import { createHash } from "node:crypto";
-import { createWriteStream } from "node:fs";
-import { mkdirSync, rmSync } from "node:fs";
-import { once } from "node:events";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { getAppLogger } from "../logging/sharedLogger";
 import { compareVersions } from "../utils/versionCompare";
+import { downloadInstallerAsset } from "./installerDownload";
 import { RELEASES_URL, UPDATE_REPO, UPDATE_REPO_OWNER } from "./releaseRepo";
 import { inverseChannel, selectTargetRelease, toReleaseList } from "./releaseSelection";
 import type { ChannelSwitchSnapshot, TargetChannelRelease, UpdateChannel } from "../../shared/types/app";
@@ -130,76 +128,28 @@ export class ChannelSwitchService {
 	}
 
 	/**
-	 * 实际下载流程（单飞前提下执行，标志由 downloadInstaller 维护）：流式写盘（读一块写一块，主进程不整包驻留内存），
-	 * 进度百分比单调推送；完成后按 digestSha256（"sha256:hex"）校验，缺失则记日志跳过（规格 §3）。
+	 * 实际下载流程（单飞前提下执行，标志由 downloadInstaller 维护）：流式写盘、进度百分比单调推送，
+	 * 完成后按 digestSha256（"sha256:hex"）校验，缺失则记日志跳过（规格 §3）。
 	 * 返回安装包绝对路径；失败推 error 快照（保留 target）并抛错。
 	 */
 	private async downloadInstallerLocked(asset: TargetChannelRelease): Promise<string> {
-		// 边界校验：文件名只取 basename（拒绝路径分隔/上跳），地址必须 https。
-		const assetName = asset.assetName;
-		if (typeof assetName !== "string" || assetName === "" || assetName.includes("/") || assetName.includes("\\") || assetName.includes("..")) {
-			throw new Error(`非法安装包文件名：${String(assetName)}`);
-		}
-		if (typeof asset.assetUrl !== "string" || !asset.assetUrl.startsWith("https://")) {
-			throw new Error(`非法下载地址：${String(asset.assetUrl)}`);
-		}
 		this.push({ phase: "downloading", target: asset, percent: 0 });
 		try {
-			mkdirSync(this.getInstallerDir(), { recursive: true });
-			const response = await this.deps.netFetch(asset.assetUrl);
-			if (!response.ok) {
-				throw new Error(`安装包下载失败：HTTP ${response.status}`);
-			}
-			const body = response.body;
-			if (!body) {
-				throw new Error("安装包下载失败：响应无内容体");
-			}
-			const total = Number(response.headers.get("content-length") ?? "");
-			const hash = createHash("sha256");
-			const filePath = join(this.getInstallerDir(), assetName);
-			const stream = createWriteStream(filePath);
-			let received = 0;
-			let lastPercent = 0;
-			try {
-				const reader = body.getReader();
-				for (;;) {
-					const { done, value } = await reader.read();
-					if (done) break;
-					if (!value) continue;
-					hash.update(value);
-					received += value.byteLength;
-					// 背压处理：写缓冲满时等 drain，避免大安装包把主进程内存顶高。
-					if (!stream.write(value)) {
-						await once(stream, "drain");
+			let lastPercent = -1;
+			const filePath = await downloadInstallerAsset({
+				assetName: asset.assetName,
+				assetUrl: asset.assetUrl,
+				digestSha256: asset.digestSha256,
+				targetDir: this.getInstallerDir(),
+				netFetch: this.deps.netFetch,
+				onProgress: (progress) => {
+					// 进度百分比单调推送；同百分比不重复广播。
+					if (progress.percent > lastPercent) {
+						lastPercent = progress.percent;
+						this.push({ phase: "downloading", target: asset, percent: progress.percent });
 					}
-					if (Number.isFinite(total) && total > 0) {
-						const percent = Math.min(99, Math.floor((received / total) * 100));
-						if (percent > lastPercent) {
-							lastPercent = percent;
-							this.push({ phase: "downloading", target: asset, percent });
-						}
-					}
-				}
-				await new Promise<void>((resolveStream, rejectStream) => {
-					stream.once("error", rejectStream);
-					stream.end(() => resolveStream());
-				});
-			} finally {
-				stream.destroy();
-			}
-			// 完整性校验：GitHub API 的 digest 形如 "sha256:hex"（可选字段）；缺失则记日志跳过（规格 §3）。能提取 hex 就比对，非 sha256 前缀报格式错。
-			if (asset.digestSha256) {
-				const digestHex = asset.digestSha256.trim().toLowerCase().startsWith("sha256:") ? asset.digestSha256.trim().toLowerCase().slice("sha256:".length) : null;
-				if (digestHex === null) {
-					throw new Error(`安装包 digest 格式无法识别：${asset.digestSha256}`);
-				}
-				const actual = hash.digest("hex");
-				if (actual !== digestHex) {
-					throw new Error(`安装包 digest mismatch：期望 ${digestHex}，实际 sha256:${actual}`);
-				}
-			} else {
-				getAppLogger()?.info("ChannelSwitchService", "发行物未提供 digest，跳过完整性校验", assetName);
-			}
+				},
+			});
 			this.push({ phase: "ready", target: asset, percent: 100, installerPath: filePath });
 			return filePath;
 		} catch (error) {

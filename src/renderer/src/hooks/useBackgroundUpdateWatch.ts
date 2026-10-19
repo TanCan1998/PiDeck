@@ -55,12 +55,13 @@ export function useBackgroundUpdateWatch(options: BackgroundUpdateWatchOptions):
 			}
 
 			if (appStatus?.hasUpdate && download?.phase === "ready") {
-				// 下载完成后只跳转设置页：设置页负责未保存草稿确认，再由用户明确安装。
+				// 下载完成后只跳转设置页：设置页负责未保存草稿确认，再由用户明确安装/打开。
+				// 不复用 notifiedVersion：manual 模式下「发现新版本」已标记过，下载完成仍需提示一次。
 				const version = download.version ?? appStatus.latestVersion ?? "";
-				if (version && appStatus.notifiedVersion !== version && notifiedRef.current.ready !== version) {
+				if (version && notifiedRef.current.ready !== version) {
 					notifiedRef.current.ready = version;
 					void api.app.notifyUpdateSeen("app", version);
-					showNotice(t("update.readyToInstall", { version }), 0, "info", t("update.readyToInstallTitle"), settingsAction);
+					showNotice(t(isManualDelivery ? "update.manualReadyToast" : "update.readyToInstall", { version }), 0, "info", t("update.readyToInstallTitle"), settingsAction);
 				}
 				return;
 			}

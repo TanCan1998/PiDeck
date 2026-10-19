@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: 57f4015c2ef1de21372c98353321b7386f971ad953a6df97f6d1913f9a1038ae（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: 9cafa2259efe512c80bbd39f986c93f4b4396ead5960440a54e1bdf8ee59414d（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -4768,8 +4768,29 @@ export const zhTW: Record<TranslationKey, string> = {
 	"settings.updateInstallNow": "重啟並安裝",
 	"settings.updateDownloadNow": "立即下載",
 	"settings.updateAvailable": "發現新版本 v{version}",
-	"settings.updateManualAvailable": "發現新版本 v{version}，請在 Release 頁面手動安裝",
-	"settings.macManualUpdateDesc": "當前 macOS 發行版未使用 Apple Developer ID 簽名，因此只提供更新檢測和 Release 手動安裝。",
+	"settings.updateManualAvailable": "發現新版本 v{version}",
+	"settings.updateRecommendedPackage": "為你推薦：{name}（{target}）",
+	"settings.updateDownloadRecommended": "一鍵下載",
+	"settings.updateViewAllDownloads": "檢視全部下載",
+	"settings.updateNoRecommendedAsset": "沒有找到與當前裝置匹配的安裝包，請到釋出頁手動選擇。",
+	"settings.updateManualReady": "安裝包已下載：{name}。開啟後按提示完成安裝。",
+	"settings.updateOpenInstallerFailed": "未能開啟安裝包：{error}",
+	"settings.updateOpenInstaller": "開啟安裝包",
+	"settings.updateShowInstaller": "在資料夾中顯示",
+	"settings.updateRetryDownload": "重試下載",
+	"settings.updateTargetMacArm64": "macOS（Apple Silicon）",
+	"settings.updateTargetMacArm64Rosetta": "macOS（Apple Silicon，當前為 Rosetta 轉譯）",
+	"settings.updateTargetMacX64": "macOS（Intel / x64）",
+	"settings.updateTargetWinPortable": "Windows（便攜版）",
+	"settings.updateTargetWinInstalled": "Windows（安裝版）",
+	"settings.updateTargetWinZip": "Windows（免安裝 zip）",
+	"settings.updateTargetLinuxAppImage": "Linux {arch}（AppImage）",
+	"settings.updateTargetLinuxDeb": "Linux {arch}（deb）",
+	"settings.updateTargetLinuxArchive": "Linux {arch}（tar.gz）",
+	"settings.macManualUpdateDesc": "當前 macOS 發行版未使用 Apple Developer ID 簽名，因此只提供更新檢測和裝置匹配安裝包的一鍵下載。",
+	"settings.linuxArm64ManualUpdateDesc": "Linux arm64 暫不支援應用內更新；檢測到新版本後會按架構推薦安裝包，一鍵下載即可。",
+	"settings.linuxPackageManualUpdateDesc": "當前 Linux 安裝方式（deb / tar.gz）不支援應用內更新；檢測到新版本後會推薦對應安裝包，一鍵下載即可。",
+	"settings.manualUpdateDesc": "當前平臺不支援應用內更新；檢測到新版本後會推薦對應安裝包，一鍵下載即可。",
 	"settings.portableUpdateNotice": "便攜版應用內更新會執行 NSIS 安裝包並變成安裝版（開始選單/桌面快捷方式，資料目錄可能改變）。若要保持便攜，請到 GitHub Release 手動下載 portable 包。",
 	"settings.portableUpdateOpenRelease": "前往 GitHub 下 portable",
 	"settings.updateGithubFailHint": "官方 GitHub 直連失敗時，可在下方「更新源」切換到國內映象。",
@@ -5673,6 +5694,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"update.viewInSettings": "檢視設定",
 	"update.readyToInstallTitle": "更新已就緒",
 	"update.readyToInstall": "PiDeck v{version} 已下載完成，重啟即可安裝。",
+	"update.manualReadyToast": "PiDeck v{version} 安裝包已下載，可在設定中開啟。",
 	"update.installFailedTitle": "更新安裝未啟動",
 	"update.installFailedDetail": "安裝未能啟動：{error}",
 	"update.saveBeforeInstallTitle": "請先儲存檔案更改",
@@ -5684,7 +5706,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"update.downloadFailedDetail": "下載失敗：{error}",
 	"update.availableToastTitle": "發現新版本",
 	"update.availableToast": "PiDeck v{version} 可用，可在設定中下載。",
-	"update.availableManualToast": "PiDeck v{version} 可用，請從 Release 頁面手動下載安裝。",
+	"update.availableManualToast": "PiDeck v{version} 可用，可在設定中一鍵下載適配當前裝置的安裝包。",
 	"update.dotMenuTitle": "有新版本可用",
 	"update.dotMenuApp": "PiDeck v{version}",
 	"update.dotMenuPi": "Pi CLI v{version}",

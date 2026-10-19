@@ -1,7 +1,7 @@
 import { Component, Fragment, lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { getDefaultStore, useAtom, useAtomValue } from "jotai";
 import { settingsFocusAtom, type SettingsPaneId, type SettingsTabId } from "../../atoms";
-import { hasPendingUpdateAtom } from "../../atoms/update-atoms";
+import { hasPendingUpdateAtom, updateStatusAtom } from "../../atoms/update-atoms";
 import { useSettingsFocus } from "./settings/useSettingsFocus.ts";
 import { Settings2, Network, Wrench, PawPrint, Bell, Trash2, Brush, Eye, ChartColumnBig, Activity, MessageSquare, ImageIcon, DatabaseBackup, Globe, FileCode2, GitBranch, Loader2, SlidersHorizontal, MonitorCog, Keyboard, TerminalSquare, X, Bot, Puzzle, Clapperboard } from "lucide-react";
 import { t, type TranslationKey } from "../../i18n";
@@ -274,6 +274,8 @@ function SettingsModalContent(props: SettingsModalProps) {
 	// 弹窗每次打开都会重新挂载（Radix Dialog 关闭即卸载内容）。
 	// 深链（如 Git「去设置」）优先于上次记住的 tab，否则会停在外观/开发等其它页。
 	const hasPendingUpdate = useAtomValue(hasPendingUpdateAtom);
+	const updateStatus = useAtomValue(updateStatusAtom);
+	const isManualUpdateDelivery = updateStatus?.deliveryMode === "manual";
 	// GUI 扩展桥：设置弹窗是应用级单实例 chrome，由当前聚焦会话的 pi 进程供给内容（不做回落）。
 	const bridgeSessionId = useBridgeSessionId();
 	// 开弹窗时的隐藏模块快照只用于算初始 tab；侧栏过滤读草稿（下方 draftSettings.hiddenModules），开关一切即预览。
@@ -533,8 +535,12 @@ function SettingsModalContent(props: SettingsModalProps) {
 	const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
 	const [installConfirmOpen, setInstallConfirmOpen] = useState(false);
 
-	/** 安装会终止进程；任何内存草稿都必须先由用户保存或明确放弃。 */
+	/** 安装会终止进程；任何内存草稿都必须先由用户保存或明确放弃。manual 只是打开安装包，不退出应用。 */
 	const handleInstallUpdate = () => {
+		if (isManualUpdateDelivery) {
+			props.onInstallUpdate();
+			return;
+		}
 		const settingsDirty = dirtyFields.size > 0 || visionDraft.dirty || imageGenDirty;
 		if (settingsDirty || configPaneState.hasDirty) {
 			setInstallConfirmOpen(true);

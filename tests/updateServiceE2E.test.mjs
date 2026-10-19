@@ -8,98 +8,15 @@
  */
 
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import ts from "typescript";
-import vm from "node:vm";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
-function loadUpdateService() {
-	// vm 沙箱依赖解析：UpdateService 现在依赖 updateSources（其依赖 shared/updateSources）。
-	// 递归 transpile 这两个模块，按路径缓存，注入到 UpdateService 的 require 里。
-	function loadTsInVm(filePath) {
-		const source = readFileSync(filePath, "utf8");
-		const output = ts.transpileModule(source, {
-			compilerOptions: {
-				module: ts.ModuleKind.CommonJS,
-				target: ts.ScriptTarget.ES2022,
-			},
-			fileName: filePath,
-		}).outputText;
-		const module = { exports: {} };
-		vm.runInNewContext(
-			output,
-			{
-				module,
-				exports: module.exports,
-				require: (name) => {
-					const resolved = name === "../../shared/updateSources" ? "src/shared/updateSources.ts" : null;
-					const next = cache[resolved];
-					if (!next) {
-						if (!resolved || !existsSync(resolved)) {
-							throw new Error(`unexpected require in vm: ${name}`);
-						}
-						cache[resolved] = loadTsInVm(resolved);
-					}
-					return cache[resolved]?.exports;
-				},
-				console,
-				Date,
-				Error,
-				Math,
-				Promise,
-				String,
-				URL,
-				clearTimeout,
-				setTimeout,
-			},
-			{ filename: filePath },
-		);
-		return module;
-	}
-	const cache = {};
-	const filePath = "src/main/update/UpdateService.ts";
-	const source = readFileSync(filePath, "utf8");
-	const output = ts.transpileModule(source, {
-		compilerOptions: {
-			module: ts.ModuleKind.CommonJS,
-			target: ts.ScriptTarget.ES2022,
-		},
-		fileName: filePath,
-	}).outputText;
-	const module = { exports: {} };
-	vm.runInNewContext(
-		output,
-		{
-			module,
-			exports: module.exports,
-			require: (name) => {
-				const resolved = name === "./updateSources" ? "src/main/update/updateSources.ts" : null;
-				const next = cache[resolved];
-				if (!next) {
-					if (!resolved || !existsSync(resolved)) {
-						throw new Error(`unexpected require in vm: ${name}`);
-					}
-					cache[resolved] = loadTsInVm(resolved);
-				}
-				return cache[resolved]?.exports;
-			},
-			console,
-			Date,
-			Error,
-			Math,
-			Promise,
-			String,
-			URL,
-			clearTimeout,
-			setTimeout,
-		},
-		{ filename: filePath },
-	);
-	return module.exports;
-}
-
-const { UpdateService, DEFAULT_CHECK_INTERVAL_MS, DEFAULT_START_DELAY_MS } = loadUpdateService();
+// 生产依赖图（含 manualUpdateDelivery）由 helper 递归解析；Math/Date 注入宿主对象，
+// 让「把 Math.random 固定为 0」的抖动测试仍然可控。
+const { UpdateService, DEFAULT_CHECK_INTERVAL_MS, DEFAULT_START_DELAY_MS } = loadTsCommonJs("src/main/update/UpdateService.ts", {
+	globals: { Math, Date },
+});
 
 /** Fake that translates electron-updater event names into AutoUpdaterLike callbacks. */
 function createFakeUpdater() {
@@ -210,8 +127,11 @@ function createManualService(checkManualAppUpdate, options = {}) {
 		log: (level, message, details) => logs.push({ level, message, details }),
 		getCurrentVersion: () => "0.7.3-beta",
 		deliveryMode: "manual",
+		deliveryReason: options.deliveryReason ?? "mac-unsigned",
 		channel: options.channel,
 		checkManualAppUpdate,
+		downloadManualUpdate: options.downloadManualUpdate,
+		openManualInstaller: options.openManualInstaller,
 	});
 	return { service, settings, snapshots, logs };
 }
@@ -624,27 +544,158 @@ test("catalog auto update rejection cannot fail the whole check", async (t) => {
 	assert.ok(logs.some(({ level, message, details }) => level === "warn" && message === "Catalog auto update failed" && /download exploded/.test(String(details?.error))));
 });
 
-// --- manual delivery (unsigned macOS) ----------------------------------
+// --- manual delivery (unsigned macOS / Linux arm64 / deb / tar.gz) ------
 
-test("manual delivery only exposes availability; download and install are no-ops", async (t) => {
-	const { service, logs } = createManualService(async () => ({
-		latestVersion: "0.8.0",
-		hasUpdate: true,
-	}));
+const MANUAL_RELEASE = {
+	version: "0.8.0",
+	assetName: "PiDeck-0.8.0-arm64.dmg",
+	assetUrl: "https://github.com/ayuayue/PiDeck/releases/download/v0.8.0/PiDeck-0.8.0-arm64.dmg",
+	assetSize: 120_000_000,
+	kind: "dmg",
+	platform: "darwin",
+	arch: "arm64",
+	translated: false,
+	releasePageUrl: "https://github.com/ayuayue/PiDeck/releases/tag/v0.8.0",
+};
+
+test("manual delivery exposes the device installer, downloads it, and opens the package without quitting", async (t) => {
+	const opened = [];
+	const progressEvents = [];
+	const { service, snapshots } = createManualService(
+		async () => ({
+			latestVersion: "0.8.0",
+			hasUpdate: true,
+			recommendedDownload: MANUAL_RELEASE,
+		}),
+		{
+			downloadManualUpdate: async (release, options) => {
+				assert.equal(release.assetName, MANUAL_RELEASE.assetName);
+				assert.ok(options.signal, "manual download should pass an AbortSignal");
+				options.onProgress?.({ percent: 42, transferred: 42, total: 100, bytesPerSecond: 1024 });
+				progressEvents.push(release.assetName);
+				return "/tmp/PiDeck-0.8.0-arm64.dmg";
+			},
+			openManualInstaller: async (filePath) => {
+				opened.push(filePath);
+			},
+		},
+	);
 	stopAfter(t, service);
 
 	await service.checkNow();
 	let snapshot = service.getSnapshot();
 	assert.equal(snapshot.deliveryMode, "manual");
+	assert.equal(snapshot.deliveryReason, "mac-unsigned");
 	assert.equal(snapshot.autoDownload, null);
 	assert.equal(snapshot.app.latestVersion, "0.8.0");
 	assert.equal(snapshot.app.download.phase, "available");
+	assert.equal(snapshot.app.recommendedDownload.assetName, MANUAL_RELEASE.assetName);
 
 	await service.downloadNow();
-	service.installNow();
 	snapshot = service.getSnapshot();
+	assert.equal(snapshot.app.download.phase, "ready");
+	assert.equal(snapshot.app.download.percent, 100);
+	assert.deepEqual(progressEvents, [MANUAL_RELEASE.assetName]);
+	assert.ok(snapshots.some((entry) => entry.app?.download.phase === "downloading" && entry.app.download.percent === 42));
+
+	service.installNow();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.deepEqual(opened, ["/tmp/PiDeck-0.8.0-arm64.dmg"]);
+	// manual 打开安装包不能进入 installing（应用不退出）。
+	assert.equal(service.getSnapshot().app.download.phase, "ready");
+});
+
+test("manual check keeps an already downloaded package when the version is unchanged", async (t) => {
+	const { service } = createManualService(
+		async () => ({
+			latestVersion: "0.8.0",
+			hasUpdate: true,
+			recommendedDownload: MANUAL_RELEASE,
+		}),
+		{
+			downloadManualUpdate: async () => "/tmp/PiDeck-0.8.0-arm64.dmg",
+			openManualInstaller: async () => undefined,
+		},
+	);
+	stopAfter(t, service);
+
+	await service.checkNow();
+	await service.downloadNow();
+	assert.equal(service.getSnapshot().app.download.phase, "ready");
+
+	// 再次检查（同一版本）不能吞掉「打开安装包」入口。
+	await service.checkNow();
+	const snapshot = service.getSnapshot();
+	assert.equal(snapshot.app.download.phase, "ready");
+	assert.equal(snapshot.app.recommendedDownload.assetName, MANUAL_RELEASE.assetName);
+});
+
+test("manual check with a newer version resets a previously downloaded ready package", async (t) => {
+	let latest = "0.8.0";
+	const { service } = createManualService(
+		async () => ({
+			latestVersion: latest,
+			hasUpdate: true,
+			recommendedDownload: { ...MANUAL_RELEASE, version: latest, assetName: `PiDeck-${latest}-arm64.dmg` },
+		}),
+		{
+			downloadManualUpdate: async () => "/tmp/PiDeck-0.8.0-arm64.dmg",
+			openManualInstaller: async () => undefined,
+		},
+	);
+	stopAfter(t, service);
+
+	await service.checkNow();
+	await service.downloadNow();
+	assert.equal(service.getSnapshot().app.download.phase, "ready");
+
+	// 远端出了 0.8.1：旧安装包路径必须丢弃，回到 available + 新推荐包。
+	latest = "0.8.1";
+	await service.checkNow();
+	const snapshot = service.getSnapshot();
 	assert.equal(snapshot.app.download.phase, "available");
-	assert.equal(logs.filter(({ message }) => message.includes("unavailable for manual")).length, 2);
+	assert.equal(snapshot.app.download.version, "0.8.1");
+});
+
+test("manual download without a matched installer is a download error", async (t) => {
+	const { service } = createManualService(async () => ({
+		latestVersion: "0.8.0",
+		hasUpdate: true,
+		recommendedDownload: null,
+	}));
+	stopAfter(t, service);
+
+	await service.checkNow();
+	await service.downloadNow();
+	const snapshot = service.getSnapshot();
+	assert.equal(snapshot.app.download.phase, "error");
+	assert.equal(snapshot.app.download.errorKind, "download");
+	assert.match(snapshot.app.download.error, /No installer matches/);
+});
+
+test("manual download failure is reported as a download error and stays retryable", async (t) => {
+	const { service } = createManualService(
+		async () => ({
+			latestVersion: "0.8.0",
+			hasUpdate: true,
+			recommendedDownload: MANUAL_RELEASE,
+		}),
+		{
+			downloadManualUpdate: async () => {
+				throw new Error("disk full");
+			},
+		},
+	);
+	stopAfter(t, service);
+
+	await service.checkNow();
+	await service.downloadNow();
+	const snapshot = service.getSnapshot();
+	assert.equal(snapshot.app.download.phase, "error");
+	assert.equal(snapshot.app.download.errorKind, "download");
+	assert.match(snapshot.app.download.error, /disk full/);
+	// 推荐包仍在快照里，UI 可显示「重试下载」。
+	assert.equal(snapshot.app.recommendedDownload.assetName, MANUAL_RELEASE.assetName);
 });
 
 // --- lifecycle ----------------------------------------------------------

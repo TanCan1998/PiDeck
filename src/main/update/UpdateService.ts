@@ -1,9 +1,10 @@
 /**
  * 主进程后台更新检查服务。
  *
- * automatic（Windows / 可自动升级发行物）：electron-updater 负责检查、下载和
- * quitAndInstall；manual（当前无 Developer ID 签名的 macOS）：仅检查 GitHub
- * Release，UI 引导用户手动下载，绝不承诺无法稳定完成的应用内替换。
+ * automatic（Windows 安装版 / Linux x64 AppImage 等可自升级发行物）：electron-updater
+ * 负责检查、下载和 quitAndInstall；manual（macOS 无签名、Linux arm64、Linux deb/tar.gz）：
+ * 检查 GitHub/AtomGit Release 后按当前设备匹配安装包，由 ManualUpdateDelivery 负责
+ * 一键下载与打开，绝不承诺无法稳定完成的应用内替换。
  *
  * 更新通道（deps.channel）：dev 构建无论设置 updateSource 为何都强制官方 GitHub
  * 源并开启 prerelease（镜像只分发 stable 产物，dev 的 0.8.0-beta.* 仅存在于
@@ -13,12 +14,14 @@
  */
 
 import type { AppSettings } from "../../shared/types/settings";
-import type { AppUpdateDeliveryMode, AppUpdateDownloadState, AppUpdateStatusSnapshot, UpdateChannel } from "../../shared/types/app";
+import type { AppUpdateDeliveryMode, AppUpdateDeliveryReason, AppUpdateDownloadState, AppUpdateStatusSnapshot, UpdateChannel } from "../../shared/types/app";
 import type { PiUpdateCheckResult } from "../../shared/types";
 import type { CatalogCheckResult, CatalogUpdateResult } from "../../shared/types/catalog";
 import type { SettingsStore } from "../settings/SettingsStore";
 import { normalizeUpdateSource, normalizeCustomMirrorHost, updateSourceFeedUrl, updateSourceLatestReleaseUrl } from "./updateSources";
 import type { AutoUpdaterLike } from "./autoUpdaterTypes";
+import type { ManualReleaseCheckResult } from "./macManualUpdate";
+import { ManualUpdateDelivery, type ManualUpdateDeliveryDeps } from "./manualUpdateDelivery";
 
 export type AppCheckResult = { latestVersion: string; hasUpdate: boolean };
 
@@ -56,9 +59,18 @@ export type UpdateServiceDeps = {
 	rollbackInstallPreparation?: () => void;
 	/** 等待 Electron 退出并交给安装器的超时；超时后恢复可重试状态。 */
 	installExitTimeoutMs?: number;
-	/** manual 模式的纯检查器（macOS 无签名发行物只检查，不下载/安装）。
+	/** manual 模式的纯检查器（macOS 无签名 / Linux 无法自更新等只检查，不下载/安装）。
 	 * 参数 latestReleaseUrl 为镜像源 URL（null = 官方 GitHub），由 UpdateService 按设置传入。 */
-	checkManualAppUpdate?: (latestReleaseUrl?: string) => Promise<AppCheckResult>;
+	checkManualAppUpdate?: (latestReleaseUrl?: string) => Promise<ManualReleaseCheckResult>;
+	/** manual 模式的设备推荐目标原因（UI 说明文案选择依据）。 */
+	deliveryReason?: AppUpdateDeliveryReason;
+	/**
+	 * manual 模式：下载设备匹配的安装包（流式 + digest 校验后落到系统下载目录）。
+	 * 装配层注入真实实现；测试注入 fake。
+	 */
+	downloadManualUpdate?: ManualUpdateDeliveryDeps["downloadManualUpdate"];
+	/** manual 模式：打开已下载的安装包（mac 挂载 dmg；其他平台在文件夹中定位）。 */
+	openManualInstaller?: ManualUpdateDeliveryDeps["openManualInstaller"];
 };
 
 /** 默认检查周期：2h（静态 GitHub Release URL 与 updater 均适合低频轮询）。 */
@@ -87,6 +99,7 @@ function emptyDownloadState(): AppUpdateDownloadState {
 export class UpdateService {
 	private readonly deps: UpdateServiceDeps;
 	private readonly deliveryMode: AppUpdateDeliveryMode;
+	private readonly deliveryReason: AppUpdateDeliveryReason;
 	private readonly channel: UpdateChannel;
 	private timer: ReturnType<typeof setTimeout> | null = null;
 	private installWatchdog: ReturnType<typeof setTimeout> | null = null;
@@ -98,13 +111,25 @@ export class UpdateService {
 	private lastPi: PiCheckResult | null = null;
 	private lastCatalog: CatalogCheckResult | null = null;
 	private download: AppUpdateDownloadState = emptyDownloadState();
+	/** manual 交付的检查/下载/打开状态机；automatic 模式为 null。 */
+	private readonly manualDelivery: ManualUpdateDelivery | null;
 
 	constructor(deps: UpdateServiceDeps) {
 		this.deps = deps;
 		this.deliveryMode = deps.deliveryMode ?? "automatic";
+		this.deliveryReason = deps.deliveryReason ?? (this.deliveryMode === "manual" ? "unsupported" : "automatic");
 		this.channel = deps.channel ?? "stable";
+		this.manualDelivery =
+			this.deliveryMode === "manual"
+				? new ManualUpdateDelivery({
+						downloadManualUpdate: deps.downloadManualUpdate,
+						openManualInstaller: deps.openManualInstaller,
+						onChange: () => this.pushSnapshot(),
+						log: deps.log,
+					})
+				: null;
 		if (this.deliveryMode === "automatic") this.subscribeAutoUpdater();
-		else this.getManualChecker(); // Fail at composition time instead of silently disabling macOS checks.
+		else this.getManualChecker(); // Fail at composition time instead of silently disabling manual checks.
 	}
 
 	/** 启动后台调度：延迟首查 + 固定周期续查（带抖动）。 */
@@ -117,13 +142,18 @@ export class UpdateService {
 
 	/** 立即执行一轮检查（自动调度 / 手动「检测更新」共用；经 checkUpdate IPC）。 */
 	async checkNow(): Promise<void> {
-		if (this.running || this.download.phase === "installing") return;
+		const currentDownload = this.getDownloadState();
+		// 下载/安装进行中不重新检查：覆盖状态会让进度条或「打开安装包」入口消失。
+		if (this.running || currentDownload.phase === "installing" || currentDownload.phase === "downloading") return;
 		this.running = true;
 		this.applyAutoDownloadPreference();
 		// 已下载的更新保持 ready，不能因手动检测而让安装入口消失。
-		if (this.download.phase !== "ready") {
-			this.download = { ...this.download, phase: "checking", error: undefined, errorKind: undefined };
-			this.pushSnapshot();
+		if (currentDownload.phase !== "ready") {
+			if (this.manualDelivery) this.manualDelivery.markChecking();
+			else {
+				this.download = { ...this.download, phase: "checking", error: undefined, errorKind: undefined };
+				this.pushSnapshot();
+			}
 		}
 		try {
 			const [appResult, piResult, catalogResult] = await Promise.allSettled([this.checkApp(), this.checkPi(), this.checkCatalog()]);
@@ -131,7 +161,8 @@ export class UpdateService {
 			if (appResult.status === "rejected") {
 				const error = toErrorMessage(appResult.reason);
 				// electron-updater 通常也会发 error 事件，但直接 reject 时仍要有可见状态。
-				if (this.download.phase !== "ready") this.setDownloadError(error);
+				if (this.manualDelivery) this.manualDelivery.setCheckError(error);
+				else if (this.download.phase !== "ready") this.setDownloadError(error);
 				void this.deps.log?.("warn", "App update check failed", { error });
 			}
 			if (piResult.status === "fulfilled") this.lastPi = piResult.value;
@@ -155,10 +186,10 @@ export class UpdateService {
 		}
 	}
 
-	/** 手动下载已检测到的更新（仅 automatic + autoDownload=false 时使用）。 */
+	/** 手动下载已检测到的更新：manual 下载设备匹配安装包；automatic 交给 electron-updater。 */
 	async downloadNow(): Promise<void> {
-		if (this.deliveryMode === "manual") {
-			void this.deps.log?.("warn", "In-app download is unavailable for manual update delivery");
+		if (this.manualDelivery) {
+			await this.manualDelivery.download();
 			return;
 		}
 		if (this.download.phase === "installing") {
@@ -187,10 +218,10 @@ export class UpdateService {
 		}
 	}
 
-	/** 重启并安装已下载的更新（渲染层「重启并安装」按钮 → quitAndInstall）。 */
+	/** 安装/打开已下载的更新：automatic 重启安装；manual 只打开安装包，不退出应用。 */
 	installNow(): void {
-		if (this.deliveryMode === "manual") {
-			void this.deps.log?.("warn", "In-app install is unavailable for manual update delivery");
+		if (this.manualDelivery) {
+			this.manualDelivery.open();
 			return;
 		}
 		if (this.download.phase === "installing") {
@@ -256,12 +287,15 @@ export class UpdateService {
 	/** 当前快照（从持久化状态 + 最近一次检查/下载状态组装）。 */
 	getSnapshot(): AppUpdateStatusSnapshot {
 		const settings = this.deps.settingsStore.get();
+		const manualState = this.manualDelivery?.getState();
+		const download = manualState?.download ?? this.download;
 		// 检查中的首次请求或直接失败时还没有 lastApp；仍需保留 app 节点，
 		// 否则渲染层收不到 checking/error 状态，用户会看到一次无反馈的点击。
-		const hasAppState = this.lastApp !== null || this.download.phase !== "idle";
+		const hasAppState = this.lastApp !== null || download.phase !== "idle";
 		return {
 			lastCheckAt: settings.updateLastCheckAt,
 			deliveryMode: this.deliveryMode,
+			deliveryReason: this.deliveryReason,
 			autoDownload: this.deliveryMode === "automatic" ? settings.autoDownloadUpdates !== false : null,
 			app: hasAppState
 				? {
@@ -269,7 +303,8 @@ export class UpdateService {
 						hasUpdate: this.lastApp?.hasUpdate ?? false,
 						skippedVersion: settings.updateSkippedVersion,
 						notifiedVersion: settings.updateNotifiedVersion,
-						download: this.download,
+						download,
+						recommendedDownload: manualState?.recommendedDownload ?? null,
 					}
 				: null,
 			piCli: this.lastPi
@@ -303,6 +338,8 @@ export class UpdateService {
 			clearTimeout(this.installWatchdog);
 			this.installWatchdog = null;
 		}
+		// 退出/换版本时中止手动下载；进度回调与 catch 都靠 controller 身份判迟到的结果。
+		this.manualDelivery?.stop();
 		this.unsubscribeUpdater?.();
 		this.unsubscribeUpdater = null;
 	}
@@ -412,16 +449,17 @@ export class UpdateService {
 	}
 
 	private async checkApp(): Promise<AppCheckResult> {
-		if (this.deliveryMode === "manual") {
+		if (this.manualDelivery) {
 			const settings = this.deps.settingsStore.get();
 			// dev 通道强制官方 GitHub 源：镜像 latestReleaseUrl 指向 stable latest，不适用 dev prerelease（checker 内部走 releases 列表）。
 			const source = this.channel === "dev" ? "github" : normalizeUpdateSource(settings.updateSource);
 			const releaseUrl = updateSourceLatestReleaseUrl(source);
 			const result = await this.getManualChecker()(releaseUrl ?? undefined);
-			this.lastApp = result;
-			this.download = result.hasUpdate ? { phase: "available", version: result.latestVersion } : emptyDownloadState();
+			this.lastApp = { latestVersion: result.latestVersion, hasUpdate: result.hasUpdate };
+			// 状态机（ready 保留、目标版本变化重置）在 ManualUpdateDelivery 内收口。
+			this.manualDelivery.applyCheckResult(result);
 			this.pushSnapshot();
-			return result;
+			return this.lastApp;
 		}
 		// electron-updater：autoDownload=true 时检测到新版本会自动继续下载，
 		// 进度经事件回到 checkApp 所在 checkNow 之外（onEvents 已注册）分发。
@@ -484,7 +522,7 @@ export class UpdateService {
 		return this.deps.autoUpdater;
 	}
 
-	private getManualChecker(): (latestReleaseUrl?: string) => Promise<AppCheckResult> {
+	private getManualChecker(): (latestReleaseUrl?: string) => Promise<ManualReleaseCheckResult> {
 		if (!this.deps.checkManualAppUpdate) {
 			throw new Error("UpdateService manual delivery requires a checkManualAppUpdate function.");
 		}
@@ -496,11 +534,16 @@ export class UpdateService {
 	}
 
 	/** 将 updater 的 reject/事件错误统一折叠为渲染层可展示的快照状态。 */
-	private setDownloadError(error: string): void {
-		// 正在下包才叫下载失败；检查阶段（含 macOS 只查不装）是检查失败。
-		const errorKind = this.download.phase === "downloading" ? "download" : "check";
+	private setDownloadError(error: string, preferredKind?: "check" | "download"): void {
+		// 正在下包才叫下载失败；检查阶段（含手动交付只查不装）是检查失败。
+		const errorKind = preferredKind ?? (this.download.phase === "downloading" ? "download" : "check");
 		this.download = { ...this.download, phase: "error", error, errorKind };
 		this.pushSnapshot();
+	}
+
+	/** 当前生效的下载状态：manual 由 ManualUpdateDelivery 持有，automatic 由 electron-updater 事件驱动。 */
+	private getDownloadState(): AppUpdateDownloadState {
+		return this.manualDelivery?.getState().download ?? this.download;
 	}
 
 	private scheduleNext(delayMs: number, intervalMs: number): void {
