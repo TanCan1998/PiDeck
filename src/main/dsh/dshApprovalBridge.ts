@@ -81,7 +81,10 @@ export function batchQuestionsFromDsh(items: DshQuestionItem[]): AgentUiBatchQue
 	return items.map((item) => {
 		// DSH 的 select 问题必须带 options 才能渲染选项；无 options 降级 confirm
 		// （用户确认/拒绝），避免渲染成空选项的 select。
-		const type: AgentUiBatchQuestion["type"] = item.options?.length ? "select" : item.multiSelect ? "select" : "confirm";
+		// multiSelect 必须映射成 multi_select：渲染层的多选题不自动前进（见
+		// shouldAutoAdvanceBatchAnswer），若降级成 select，末题一勾选就会立刻提交全部，
+		// 用户来不及勾第二项（DSH 会话实测问题）。
+		const type: AgentUiBatchQuestion["type"] = item.options?.length ? (item.multiSelect ? "multi_select" : "select") : item.multiSelect ? "select" : "confirm";
 		const options = item.options?.length
 			? item.options.map((option) => ({
 					label: option.label,
@@ -165,6 +168,10 @@ export function buildDshRespondValue(frame: DshApprovalFrame | DshQuestionFrame,
 		.map((item) => {
 			const value = item.value;
 			// 单选/多选：selected 传用户选中的 label；自定义文本走 custom 槽。
+			// 多选（multi_select）的值是数组，必须整组透传，否则勾选的选项会被丢成空数组。
+			if (Array.isArray(value)) {
+				return { id: item.id as string, selected: value.filter((entry): entry is string => typeof entry === "string") };
+			}
 			if (typeof value === "string") {
 				if (item.wasCustom === true) {
 					return { id: item.id as string, selected: [], custom: value };
