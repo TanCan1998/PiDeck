@@ -4259,7 +4259,24 @@ export class AgentManager {
 			runtime.tab.sessionPath = undefined;
 			runtime.tab.sessionId = undefined;
 		}
-		const response = await runtime.process.client.request(command, 120_000);
+		// 远端 fork 走 SSH helper 通道：RPC 卡住时只会静静等到 120s 超时再抛，中间零日志，
+		// 现场表现为「点了 Fork 没反应」（2026-10 真机复现，渲染层 240s 后才发现）。
+		// 这里把耗时与失败原因记下来，才能区分「RPC 从未返回」与「返回了但不是成功帧」。
+		const rpcStartedAt = Date.now();
+		let response: RpcResponse;
+		try {
+			response = await runtime.process.client.request(command, 120_000);
+		} catch (error) {
+			void this.appLogger?.warn("agent", "Session replacement RPC failed", {
+				agentId,
+				remote,
+				command: command.type,
+				elapsedMs: Date.now() - rpcStartedAt,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
+		const rpcMs = Date.now() - rpcStartedAt;
 		const data: unknown = response.data;
 		const cancelled = data && typeof data === "object" && "cancelled" in data && data.cancelled === true;
 		if (response.success === false) {
@@ -4274,6 +4291,7 @@ export class AgentManager {
 				}
 				if (runtime.tab.sessionPath !== originPath) this.clearReplacedMessageWindow(agentId);
 			}
+			void this.appLogger?.warn("agent", "Session replacement rejected by pi", { agentId, remote, command: command.type, rpcMs, error: response.error ?? null });
 			throw new Error(remote ? "REMOTE_SESSION_REPLACEMENT_RPC_FAILED" : (response.error ?? "Session replacement RPC failed"));
 		}
 		if (cancelled) {
@@ -4290,7 +4308,7 @@ export class AgentManager {
 			// 所以「换绑后远端还没有这份文件」是**正常语义**、不是失败。这条布尔判据让真机排查一眼分清两种情形：
 			// true ⇒ pi 报的仍是原文件（那才是 PiDeck 身份推导的问题）；false ⇒ pi 报了新路径（符合懒创建语义）。
 			// 只记布尔、不记路径（脱敏纪律）。
-			void this.appLogger?.info("agent", "Remote session replacement reported file", { agentId, sameFileAsBefore: runtime.tab.sessionPath === originPath });
+			void this.appLogger?.info("agent", "Remote session replacement reported file", { agentId, sameFileAsBefore: runtime.tab.sessionPath === originPath, rpcMs });
 		}
 		return targetSessionId ? { ...(data && typeof data === "object" && !Array.isArray(data) ? data : {}), targetSessionId } : data;
 	}

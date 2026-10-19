@@ -501,6 +501,14 @@ export function useSessionHistoryMutations(deps: SessionHistoryMutationsDeps) {
 			// state 只负责呈现；首次 await 前同步加锁，覆盖冷启动、锚点解析和同一轮重复点击。
 			forkingRef.current = true;
 			setForkingMessageId(busyKey);
+			// fork 是「慢 + 多步 + 易失败」的用户动作（冷会话要先激活远端 runtime 8–16s）。
+			// 缺轨迹时只能靠 240s 后的 e2e 超时反推，实测把一次 1ms 的确定性拒绝误诊成「挂起」一整天。
+			// 里程碑进 renderer:log info、失败进 warn，与主进程 Session fork * 日志配对使用。
+			const forkStartedAt = Date.now();
+			const forkLog = (level: "info" | "warn", message: string, detail?: Record<string, unknown>) => {
+				void window.piDesktop?.app.rendererLog?.(level, "session", message, { sessionId, ...detail }).catch(() => undefined);
+			};
+			forkLog("info", "Fork started", { entryOrMessage: typeof entryOrMessage === "string" ? entryOrMessage : entryOrMessage.id });
 			try {
 				let target = latest.getRuntimeTargetForSession(sessionId);
 				if (!target) {
@@ -511,14 +519,17 @@ export function useSessionHistoryMutations(deps: SessionHistoryMutationsDeps) {
 						agentId: activated.agentId,
 						runtimeGeneration: activated.runtimeGeneration,
 					};
+					forkLog("info", "Fork runtime activated", { agentId: target.agentId, runtimeGeneration: target.runtimeGeneration, elapsedMs: Date.now() - forkStartedAt });
 				}
 				const entryId = typeof entryOrMessage === "string" ? entryOrMessage : await resolveForkEntryId(entryOrMessage, target);
 				if (!entryId) {
 					latest.showToast(t("app.forkMissingEntryId"), 4000);
 					return;
 				}
+				forkLog("info", "Fork entry resolved", { entryId, elapsedMs: Date.now() - forkStartedAt });
 				showOverlay(sessionId, "forking");
 				const result = requireSessionCommand(await api.sessions.forkRuntimeSession(target, entryId));
+				forkLog("info", "Fork rpc returned", { entryId, cancelled: result.cancelled === true, targetSessionId: result.targetSessionId ?? null, elapsedMs: Date.now() - forkStartedAt });
 				if (result.cancelled) {
 					latest.showToast(t("app.forkCancelled"), 3500);
 					return;
@@ -529,7 +540,9 @@ export function useSessionHistoryMutations(deps: SessionHistoryMutationsDeps) {
 				const { draft: promptText, quotes } = rehydrateDraftFromMessage(rawPromptText);
 				const projectId = latest.resolveProjectId(sessionId);
 				const targetSessionId = result.targetSessionId;
+				forkLog("info", "Fork rebind started", { targetSessionId: targetSessionId ?? null, projectId: projectId ?? null });
 				await latest.openReplacedRuntimeSession(projectId, targetSessionId);
+				forkLog("info", "Fork rebind completed", { targetSessionId: targetSessionId ?? null, elapsedMs: Date.now() - forkStartedAt });
 				const draftTarget = targetSessionId ?? sessionId;
 				if (targetSessionId) latest.setCurrentSessionIdRef(targetSessionId);
 				if (quotes.length > 0) {
@@ -547,6 +560,7 @@ export function useSessionHistoryMutations(deps: SessionHistoryMutationsDeps) {
 				latest.showToast(t("app.forkDone"), 3500);
 			} catch (error) {
 				const msg = error instanceof Error ? error.message : String(error);
+				forkLog("warn", "Fork failed", { error: msg, elapsedMs: Date.now() - forkStartedAt });
 				latest.showToast(t("app.forkFailed", { error: latest.translateAgentErrorMessage(msg) }), 5000);
 			} finally {
 				forkingRef.current = false;

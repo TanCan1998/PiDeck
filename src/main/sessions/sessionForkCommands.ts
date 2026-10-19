@@ -56,7 +56,10 @@ export interface SessionForkCommandDeps {
 	forkDshAgentSession?: (target: SessionRuntimeTarget, entryId: string) => Promise<unknown>;
 	/** DSH clone：fork 无锚点（完整副本）+ runtime 换绑 + catalog dshSessionId 回写。未装配时抛错。 */
 	cloneDshAgentSession?: (target: SessionRuntimeTarget) => Promise<unknown>;
-	logger: { info(channel: string, message: string, data?: Record<string, unknown>): unknown };
+	logger: {
+		info(channel: string, message: string, data?: Record<string, unknown>): unknown;
+		warn(channel: string, message: string, data?: Record<string, unknown>): unknown;
+	};
 	/** fork/clone 成功后的 catalog 刷新广播（桌面主窗口；Web 走 SSE 快照 diff）。 */
 	notifyForkCatalogRefreshed: (sessionId: string) => void;
 }
@@ -78,8 +81,17 @@ function forkCommandError(error: unknown): { ok: false; error: { code: "SESSION_
 
 export function createSessionForkCommands(deps: SessionForkCommandDeps): SessionForkCommands {
 	const forkRuntimeSession = async (target: SessionRuntimeTarget, entryId: string, options?: ForkRuntimeSessionOptions): Promise<SessionForkResult> => {
+		// fork 是「静默失败最伤人」的命令：它可能先花 10s 激活远端 runtime，再发一次 120s 超时的
+		// RPC。缺了入口与失败日志时，用户只看到「点了没反应」，而主进程一行记录都没有
+		// （2026-10 真机复现：三条 e2e 里一条卡满 240s，日志里只有 activation completed）。
+		// 这里补三件事：入口留痕、耗时、失败码；成功日志仍由下面的 "Session forked" 承担。
+		const startedAt = Date.now();
+		void deps.logger.info("session", "Session fork requested", { sessionId: target.sessionId, agentId: target.agentId, runtimeGeneration: target.runtimeGeneration, entryId, mutationFork: options?.mutationFork === true, branchMode: options?.branchMode === true });
 		const validated = deps.sessionRuntimeCoordinator.validateTarget(target);
-		if (!validated.ok) return validated;
+		if (!validated.ok) {
+			void deps.logger.warn("session", "Session fork rejected (target invalid)", { sessionId: target.sessionId, agentId: target.agentId, code: validated.error.code, debugDetails: validated.error.debugDetails, elapsedMs: Date.now() - startedAt });
+			return validated;
+		}
 		// fork 化重试标记（重发/编辑迁移用）：只认显式 true，其余值按 false 处理（边界校验）。
 		// branchMode：fork 锚点不是最后一条用户消息 → 旧会话保留可见（带 (fork) 后缀），
 		// 只有尾部替换才隐藏旧会话（supersededBy）。
@@ -117,14 +129,18 @@ export function createSessionForkCommands(deps: SessionForkCommandDeps): Session
 					mutationFork && !branchMode ? { markForked: false, markSuperseded: true } : { markForked: true },
 				),
 			);
-			void deps.logger.info("session", "Session forked", { sessionId: target.sessionId, entryId, mutationFork, branchMode });
+			void deps.logger.info("session", "Session forked", { sessionId: target.sessionId, entryId, mutationFork, branchMode, elapsedMs: Date.now() - startedAt });
 			deps.notifyForkCatalogRefreshed(target.sessionId);
 			return {
 				ok: true as const,
 				value,
 			};
 		} catch (error) {
-			return forkCommandError(error);
+			// 失败必须留痕：forkCommandError 只把码带回渲染层，日志缺失时无法区分
+			// 「渲染层没发」与「发了但失败」。elapsedMs 直接暴露是否卡在 RPC 超时上。
+			const failure = forkCommandError(error);
+			void deps.logger.warn("session", "Session fork failed", { sessionId: target.sessionId, agentId: target.agentId, entryId, code: failure.error.code, debugDetails: failure.error.debugDetails, elapsedMs: Date.now() - startedAt });
+			return failure;
 		}
 	};
 

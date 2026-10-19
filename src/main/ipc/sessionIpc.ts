@@ -2286,9 +2286,14 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 	// fork/clone 命令链已收口到 sessionForkCommands（与 Web HTTP 同源）：重发/编辑
 	// fork 化（mutationFork/branchMode）、supersededBy 隐藏、DSH 分流、catalog 刷新广播
 	// 都在那一层维护，两端行为必须一致（Web 重发后出现两个重复会话的教训）。
-	ipcMain.handle(ipcChannels.sessionsRuntimeClone, (_event, target: SessionRuntimeTarget) => deps.sessionForkCommands.cloneRuntimeSession(target));
-	ipcMain.handle(ipcChannels.sessionsRuntimeGetForkMessages, (_event, target: SessionRuntimeTarget) => sessionRuntimeCoordinator.getRuntimeForkMessages(target));
-	ipcMain.handle(ipcChannels.sessionsRuntimeFork, (_event, target: SessionRuntimeTarget, entryId: string, options?: { mutationFork?: boolean; branchMode?: boolean }) => deps.sessionForkCommands.forkRuntimeSession(target, entryId, options));
+	// 命令失败一律经 handleSessionCommandResult 落 session-command 日志。fork 尤其不能静默：
+	// 它前面可能刚花十几秒激活 runtime，失败后渲染层只弹一条 5s 就消失的 toast，
+	// 现场（2026-10 真机）表现为「点了没反应 + 主进程零日志」。
+	ipcMain.handle(ipcChannels.sessionsRuntimeClone, (_event, target: SessionRuntimeTarget) => handleSessionCommandResult(appLogger, "cloneRuntimeSession", target, {}, () => deps.sessionForkCommands.cloneRuntimeSession(target)));
+	ipcMain.handle(ipcChannels.sessionsRuntimeGetForkMessages, (_event, target: SessionRuntimeTarget) => handleSessionCommandResult(appLogger, "getRuntimeForkMessages", target, {}, () => sessionRuntimeCoordinator.getRuntimeForkMessages(target)));
+	ipcMain.handle(ipcChannels.sessionsRuntimeFork, (_event, target: SessionRuntimeTarget, entryId: string, options?: { mutationFork?: boolean; branchMode?: boolean }) =>
+		handleSessionCommandResult(appLogger, "forkRuntimeSession", target, { entryId, mutationFork: options?.mutationFork === true, branchMode: options?.branchMode === true }, () => deps.sessionForkCommands.forkRuntimeSession(target, entryId, options)),
+	);
 	ipcMain.handle(ipcChannels.codexSessionsScan, async (_event, projectId: string) => {
 		const project = projectStore.get(projectId);
 		if (!project) throw new Error(`Project not found: ${projectId}`);

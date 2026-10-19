@@ -194,3 +194,24 @@ CDP 直连实测；`npm run pack:dev` 的 win-unpacked 产物同法验证。
 （`--version` 输出 `v24.x`、无窗口、exit 0、无日志）。人工双击不受影响；脚本化启动必须先
 `Remove-Item Env:ELECTRON_RUN_AS_NODE`。
 
+## 11. 远端 Fork「偶发挂起」根因与修复（2026-10-19，已定位）
+
+**结论：它不是挂起，是 fork 被确定性拒绝后静默失败。** 之前的猜测（`getRuntimeForkMessages` 无超时、standby 池竞态）都不成立——standby 池对远端项目根本不参与（`claimStandbyAgent` 首行 `isLocalProject` 返回 null），`client.request` 也有 30s 默认超时。
+
+### 11.1 证据链
+
+1. **主进程日志**（修复前一次失败运行）：`Runtime activation IPC completed { activationMs: 8497 }`，之后 17ms 内什么都没有，e2e 在「Fork 后必须换绑到一条新记录」等满 240s。
+2. **补埋点后同条件复现**：`Session fork requested` → 1ms 后 `Session fork failed { code: SESSION_COMMAND_FAILED, debugDetails: "Session runtime prompt dispatch is in progress", elapsedMs: 1 }`。**不是卡住，是进来就被拒**。
+3. **为什么有在途 dispatch lease**：fork 前一步是远端 runtime 激活（8–16s）。激活一结束，渲染层立刻并发发出只读 target 命令（运行时状态 / 模型目录 / 斜杠命令预览），每条都经 `runTargetCommand` 各持一次 dispatch lease。用户此刻点 Fork，`beginRuntimeReplacement` 的 `assertNoDispatchLease` 直接硬抛。
+4. **为什么「偶发」**：只读命令是毫秒级窗口，点得早晚决定撞不撞；实测 3 条产品路约 1 条必现。
+
+### 11.2 修复
+
+- `SessionRuntimeCoordinator.replaceBoundRuntime`：占位前先 `waitForNoDispatchLease(…, REPLACEMENT_LEASE_GRACE_MS)`。同一纪律仓库里早就有（`restartSession` 用了，注释明写「硬抛对用户只是一次无意义的失败」），**fork 漏了**。宽限 5s：覆盖远端 RTT；真·在途 prompt 回合仍在宽限满后按原语义硬失败（语义不放宽）。
+- `withRuntimeReservation`（DSH fork/clone 路径）同样加宽限。
+- **可观测性**：fork 原先失败零日志（`forkCommandError` 只回码不写日志），这正是它一天查不出来的原因。现补：`Session fork requested` / `Session fork failed`（失败码 + debugDetails + elapsedMs）/ `Session fork rejected (target invalid)`；IPC 层统一经 `handleSessionCommandResult` 落 `session-command` 日志；AgentManager 侧补 `Session replacement RPC failed/rejected`（含 rpcMs）与成功路径的 rpcMs。
+
+### 11.3 回归守卫
+
+- `tests/sessionForkFailureLogging.test.mjs`（新）：失败必须写 warn 且保留 debugDetails/elapsedMs、入口日志先于失败日志、target 校验失败也留痕、成功路径仍是 info。
+- `tests/sessionRuntimeReplacement.test.mjs`：原「cannot cross an active dispatch lease」改为「**超出宽限期**仍失败」（5.17s），并新增「**瞬态 lease 被等掉**后 fork 成功」（244ms）——两条互为反例，防止宽限被写成恒等，也防止有人把宽限删掉只留硬失败。

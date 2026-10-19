@@ -480,7 +480,7 @@ test("scan and bindExisting cannot cross an active replacement reservation", asy
 	assert.equal(coordinator.getSessionId("agent-1"), "old-session");
 });
 
-test("replacement cannot cross an active prompt dispatch lease", async () => {
+test("replacement still fails when the dispatch lease is held beyond the grace window", async () => {
 	const { SessionRuntimeCoordinator } = loadCoordinator();
 	const harness = makeHarness();
 	const started = deferred();
@@ -508,6 +508,7 @@ test("replacement cannot cross an active prompt dispatch lease", async () => {
 			onAttached: () => assert.fail("must not attach while dispatch is active"),
 			onRestored: () => assert.fail("must not restore while dispatch is active"),
 		}),
+		// 真·在途 prompt 回合仍然不许被 fork 跨越：宽限期（5s）满后按原语义硬失败。
 		/prompt dispatch is in progress/,
 	);
 	assert.equal(coordinator.getSessionId("agent-1"), "old-session");
@@ -524,6 +525,45 @@ test("replacement cannot cross an active prompt dispatch lease", async () => {
 		onRestored: () => assert.fail("successful replacement must not restore"),
 	});
 	assert.equal(result.targetSessionId, "clone-session");
+});
+
+test("replacement waits out a transient dispatch lease instead of failing spuriously", async () => {
+	// 2026-10 真机事故回归：远端会话 fork 前刚做完 8–16s runtime 激活，激活一结束渲染层立刻并发
+	// 发出只读 target 命令（运行时状态/模型目录/斜杠命令预览），每条都经 runTargetCommand 各持一次
+	// dispatch lease；用户此时点 Fork 必然撞上 beginRuntimeReplacement 的硬断言，
+	// 表现为 elapsedMs=1 的静默失败 + 240s「偶发挂起」。
+	// 瞬态 lease（毫秒级）必须被等掉，不能变成用户可见的失败。
+	const { SessionRuntimeCoordinator } = loadCoordinator();
+	const harness = makeHarness();
+	const started = deferred();
+	const release = deferred();
+	const coordinator = new SessionRuntimeCoordinator(harness.catalog, harness.agents, async () => {
+		started.resolve();
+		await release.promise;
+		return { accepted: true };
+	});
+	coordinator.bindExistingAgent("old-session", "agent-1");
+
+	const sending = coordinator.send({ sessionId: "old-session", requestId: "request-1", message: "brief dispatch" });
+	await started.promise;
+
+	const replacement = coordinator.replaceBoundRuntime({
+		agentId: "agent-1",
+		replace: async () => ({ text: "forked" }),
+		resolveTargetSessionId: async () => "clone-session",
+		canRestoreOrigin: () => false,
+		onDetached: () => undefined,
+		onAttached: () => undefined,
+		onRestored: () => assert.fail("transient lease must not roll the replacement back"),
+	});
+
+	// lease 在宽限期内释放 → fork 继续，而不是抛「prompt dispatch is in progress」。
+	await new Promise((resolve) => setTimeout(resolve, 50));
+	release.resolve();
+	assert.equal((await sending).accepted, true);
+	const result = await replacement;
+	assert.equal(result.targetSessionId, "clone-session");
+	assert.equal(coordinator.getSessionId("agent-1"), "clone-session", "换绑必须真的完成");
 });
 
 test("cancelled replacement restores the old binding and preserves cancellation fields", async () => {

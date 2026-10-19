@@ -275,6 +275,12 @@ const DELIVERY_CACHE_MAX_ENTRIES = 500;
 const AGENT_READY_TIMEOUT_MS = 60_000;
 /** 删除前等 agent 进程退出的上限：超时也放行删除，由扫描层重试与结构化错误兜底。 */
 const DELETE_STOP_TIMEOUT_MS = 3000;
+/**
+ * fork/clone/restart 等「换绑运行时」命令等待瞬态 dispatch lease 释放的上限。
+ * lease 的持有者通常是一次只读 target 命令（远端 get_state/模型/命令预览，毫秒到 1–2s），
+ * 所以取 5s：足够覆盖远端 RTT，又不至于让真·在途 prompt 把用户卡太久（超时后仍按原语义硬失败）。
+ */
+const REPLACEMENT_LEASE_GRACE_MS = 5000;
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -1253,6 +1259,16 @@ export class SessionRuntimeCoordinator {
 		onAttached: (binding: SessionRuntimeBinding) => void;
 		onRestored: (binding: SessionRuntimeBinding) => void;
 	}): Promise<T & { targetSessionId?: string }> {
+		// 瞬态 lease 宽限（与 restartSession 同一纪律，见 waitForNoDispatchLease）。fork 前面常刚做完
+		// 一次远端 runtime 激活（8–16s），激活一结束渲染层立刻并发发出只读 target 命令
+		// （运行时状态 / 模型目录 / 斜杠命令预览），每条都经 runTargetCommand 各持一次 dispatch lease。
+		// 用户此刻点 Fork 就是确定性撞车：beginRuntimeReplacement 硬抛
+		// "Session runtime prompt dispatch is in progress"，elapsedMs=1、主进程零日志，
+		// 界面上只剩一条 5s 后消失的 toast ⇒ 真机表现为「Fork 偶发挂起」。
+		// 2026-10 复现：3 条产品路里 1 条必然栽在这里（激活 8497ms → fork 17ms 后被拒）。
+		// 这里等这些毫秒级 lease 释放后再占位；真·在途 prompt 仍会在宽限期满后按原语义硬失败。
+		const binding = this.getRuntimeBinding(input.agentId);
+		if (binding) await this.waitForNoDispatchLease(binding.sessionId, input.agentId, REPLACEMENT_LEASE_GRACE_MS);
 		const replacement = this.beginRuntimeReplacement(input.agentId);
 		if (!replacement) return input.replace();
 
@@ -1317,6 +1333,8 @@ export class SessionRuntimeCoordinator {
 	 * 无需像 restart 那样重建绑定。内部同样做 dispatch lease 检查。
 	 */
 	async withRuntimeReservation<T>(sessionId: string, agentId: string, fn: () => Promise<T>): Promise<T> {
+		// 与 replaceBoundRuntime 同一宽限：fork/clone 与只读 target 命令并发时不该无意义失败。
+		await this.waitForNoDispatchLease(sessionId, agentId, REPLACEMENT_LEASE_GRACE_MS);
 		const reservation = this.reserveBoundRuntime(sessionId, agentId);
 		try {
 			const result = await fn();
