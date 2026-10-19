@@ -35,7 +35,10 @@ export const MarkdownImage = memo(function MarkdownImage(props: { destination: s
 		return (
 			<span className="text-text-tertiary">
 				{t("markdown.imageLoadFailed")}
-				{label ? ` · ${label}` : ""}
+				{label ? ` · ${label}` : ""} {/* 重试把失败态清掉 → img 重新挂载 → 重新请求。文件被创建/改好之后不用刷新会话 */}
+				<button type="button" className="underline underline-offset-2 hover:text-text-secondary" onClick={() => setFailedFor(null)}>
+					{t("markdown.imageRetry")}
+				</button>
 			</span>
 		);
 	}

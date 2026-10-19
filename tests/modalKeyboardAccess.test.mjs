@@ -28,8 +28,22 @@ test("图片预览模态：Escape 接 onClose", () => {
 	// 浮层本体已抽到 ImageLightbox（Markdown 正文图片复用同一组件），
 	// 模态壳 ImagePreviewModal 仍由 SurfaceComponents 提供。
 	const src = read("src/renderer/src/components/session/ImageLightbox.tsx");
-	const modal = src.slice(Math.max(0, src.indexOf("export function ImageLightbox") - 200), src.indexOf("export function ImageLightbox") + 1600);
-	assertMatches(modal, /Escape[\s\S]{0,200}props\.onClose\(\)/, "Escape 分支调用 props.onClose()");
+	const modal = src.slice(Math.max(0, src.indexOf("export function ImageLightbox") - 200), src.indexOf("export function ImageLightbox") + 2600);
+	assertMatches(modal, /Escape[\s\S]{0,200}onClose\(\)/, "Escape 分支调用 onClose()");
+	// 捕获阶段监听 + 阻止冒泡：否则下层会话的 Esc（停止生成）会同时触发
+	assertMatches(modal, /addEventListener\("keydown",\s*onKeyDown,\s*true\)/, "Esc 用捕获阶段监听");
+	assertMatches(modal, /stopPropagation\(\)/, "Esc 阻止冒泡");
+});
+
+test("图片预览模态：焦点进入与还原 + Tab 圈定 + dialog 语义", () => {
+	const src = read("src/renderer/src/components/session/ImageLightbox.tsx");
+	assertMatches(src, /role="dialog"/, "role=dialog");
+	assertMatches(src, /aria-modal="true"/, "aria-modal");
+	assertMatches(src, /aria-label=\{/, "可读名称");
+	// 键盘用户打开预览后焦点必须进得去、关掉后回得来（否则掉回 body）
+	assertMatches(src, /closeRef\.current\?\.focus\(\)/, "打开时焦点进关闭钮");
+	assertMatches(src, /restore\?\.focus\(\)/, "卸载时还原焦点");
+	assertMatches(src, /event\.key !== "Tab"/, "Tab 圈定处理");
 });
 
 test("IM 指南弹窗：Escape 与两个关闭入口共用统一关闭路径", () => {

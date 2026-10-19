@@ -191,3 +191,5 @@ dsh 参照文件（需要复核时直接读）：`packages/client/ui-primitives/
 教训：图片链路的测试必须喂 **hast 形态的 src**（或直接跑 `toHast`）；只测 mdast url 会漏掉编码层。另外失败态要绑定到具体 `src`（而不是布尔），否则流式期间的半截路径会把图片永久粘在失败态。
 
 再次验证：真机四条正例（盘符 / `file://` / 相对 / 带空格）全部出图，`%TEMP%` 根目录的反例按预期 403 降级为「失败文案 + 原路径」。
+
+吸收 dsh 的可用性细节（同批追加）：`ImageLightbox` 补上 `role="dialog"`/`aria-modal`、打开时焦点进关闭钮、**关闭后还原焦点**、Tab 圈在浮层内、Esc 捕获阶段 `stopPropagation`、backdrop 用 `mousedown` 判定（拖选松手不误关）；加载失败补「重试」按钮（清失败态 → img 重新挂载，文件修好后不用刷新会话）。

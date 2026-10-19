@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: b0aeb9b37031cf904ea25b0f74293030427132607dd9a65142d41ab90312232b（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: a1edf600e5a3aaa20d0c34c1fe1a4d5f91859db8abf0b0c6dc48ccf74fd5fbf0（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -801,6 +801,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"app.imagePreviewAlt": "圖片預覽",
 	"markdown.imageLoadFailed": "圖片載入失敗",
 	"markdown.imageOpen": "預覽圖片",
+	"markdown.imageRetry": "重試",
 	"app.imageRemove": "移除圖片",
 	"app.imageTooLarge": "圖片過大，最大支援 10MB",
 	"app.imageUnsupported": "不支援的圖片格式，請使用 PNG/JPEG/GIF/WebP",
