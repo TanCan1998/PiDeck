@@ -172,7 +172,29 @@ test("drawer toggle stays on session tab bar right; no gap when drawer open", ()
 	// 否则抽屉开关会与关闭按钮重叠。
 	assert.match(shell, /drawer && !drawerCollapsed \? "drawer-open" : ""/);
 	assert.match(foundation, /\.custom-titlebar-enabled \.session-tabs-bar \{[\s\S]*?margin-right:\s*var\(--window-controls-width\);/);
-	assert.match(foundation, /\.custom-titlebar-enabled \.shell-panel-drawer \.detail-drawer \{[\s\S]*?padding-top:\s*var\(--window-drag-height\);/);
+});
+
+test("titlebar bottom rule stays continuous across drawer and window controls", () => {
+	const host = readFileSync("src/renderer/src/components/workspace/WorkspaceDrawerHost.tsx", "utf8");
+	// 自定义标题栏下抽屉列要给 fixed 的 min/max/close 让出 40px，让位区必须是真实元素：
+	// 它的 border-b 与 .list-toolbar / .session-tabs-bar 的 border-b 落在同一行（40px 盒子的
+	// 39–40px），标题栏下沿才是一条横贯整窗的线。用 .detail-drawer 的 padding-top 下推内容时
+	// 让位区没有线，抽屉 tab 栏比会话 tab 栏低 40px，观感就是「tab header 线不齐」。
+	assert.doesNotMatch(foundation, /\.custom-titlebar-enabled \.shell-panel-drawer \.detail-drawer \{[\s\S]*?padding-top:\s*var\(--window-drag-height\);/);
+	const spacer = host.match(/aria-hidden="true"[\s\S]*?\/>/)?.[0];
+	assert.ok(spacer, "drawer host must render the titlebar inset spacer");
+	assert.match(spacer, /h-\[var\(--window-drag-height\)\]/);
+	// 右边距扣掉窗口控件宽度：控件容器补的底边线接着画到窗口右缘，两段不在同一像素行重叠
+	//（壁纸模式窗口控件背景透明，重叠会叠出更深的双线）。
+	assert.match(spacer, /workspace-titlebar:mr-\[var\(--window-controls-width\)\]/);
+	assert.match(spacer, /workspace-titlebar:border-b/);
+	assert.match(spacer, /workspace-titlebar:border-border\/40/);
+	// 变体只服务标准工作台：小任务窗口的 list-toolbar 线本就铺满控件区、simple 外壳没有
+	// 40px 标题栏行，都不能再叠一条（壁纸下叠线更深）。
+	const tailwind = readFileSync("src/renderer/src/styles/tailwind.css", "utf8");
+	assert.match(tailwind, /@custom-variant workspace-titlebar[\s\S]{0,400}?custom-titlebar-enabled:not\(\.quick-task-shell\):not\(\.simple-shell\)/);
+	// 普通工作台的窗口控件容器补同色底边线，线因此穿到窗口右缘；控件盒尺寸/命中区不变。
+	assert.match(header, /bg-bg-panel workspace-titlebar:border-b workspace-titlebar:border-border\/40/);
 });
 
 test("streamdown code-block and table chrome share utilities-layer card skin", () => {

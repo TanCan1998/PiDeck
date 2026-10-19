@@ -1546,11 +1546,6 @@ select:focus-visible {
 .shell-panel-drawer .detail-drawer {
   height: 100%;
 }
-/* 自定义标题栏：抽屉内容从系统按钮下方开始，避免活动栏与 min/max/close 抢同一行。 */
-.custom-titlebar-enabled .shell-panel-drawer .detail-drawer {
-  padding-top: var(--window-drag-height);
-  box-sizing: border-box;
-}
 /* 抽屉/侧栏开合内容动画（AppShell）：面板库宽度即时变化，内容层补一次
    进入动画制造“滑出/淡入”感。只动 transform/opacity；animation 播完自动
    恢复默认样式（fill 默认 none），不留 transform——Windows 静止态 transform

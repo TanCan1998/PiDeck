@@ -71,7 +71,7 @@ export function AppHeader({ simple = false, useNativeTitleBar, platform, toggleA
 			    无贡献时返回 null，不占位、不吃拖拽区。 */}
 			<BridgeGuiSlot sessionId={bridgeSessionId} slot="titlebar.action" className="window-controls flex items-center gap-1" />
 			{showWinWindowControls ? (
-				<div className={cn("window-controls", simple ? "bg-(--simple-shell-surface)" : "bg-bg-panel")} aria-label={t("app.windowControls")}>
+				<div className={cn("window-controls", simple ? "bg-(--simple-shell-surface)" : "bg-bg-panel workspace-titlebar:border-b workspace-titlebar:border-border/40")} aria-label={t("app.windowControls")}>
 					<button
 						type="button"
 						className={`window-control pin${windowAlwaysOnTop ? " active" : ""}`}
