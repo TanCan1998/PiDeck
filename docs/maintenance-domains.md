@@ -152,6 +152,18 @@
 - **回归测试必须跑真实层级**：表格行（cell 内 text）、跨换行正文（`\n` 之后仍是同一个 text 节点）、inline code `__fileLink` 分支、路径正好在末尾（不留空 text 节点）。写法见 `tests/markdownPathTailTruncation.test.mjs`（unified + remark-parse 二次解析对比可见文本，不依赖 cwd/真实项目）。
 - **考古别只看最近几笔提交**：渲染丢文本这类回归可能潜伏数周，用 `git log --oneline -- <文件>` / `git log -S <片段>` 回到底，确认是「谁引入、为什么当时测不出」，再把这两件事写进注释与测试。
 
+## 对话内图片渲染（Markdown img / 本地路径 / 协议取舍）
+
+- **现状（未改造）**：`MarkdownStream` 的 `components` 只覆盖了 `a`，`img` 走 streamdown 默认渲染；样式只有 `.markdown-body img{max-width:100%;border-radius}`。缺懒加载、限高、点击放大（生图消息有预览浮层，可复用）、加载失败兜底、多图并排——要并排只能把图物理缩成小图再一行引用。
+- **URL 白名单**：`markdownUrlTransform` 放行 `file://` 与 http(s)，`data:` 被 `defaultUrlTransform` 清空 ⇒ **不能内联 base64**，本地图必须先落盘成文件。`![](C:\a.png)` 这类盘符写法被当作「本地路径」原样塞进 `src`（`C:` 被 Chromium 当 scheme）⇒ 静默破图；只有 `file:///C:/...` 成立。
+- **dev 态直接不可用**：dev 渲染层页源是 `http://localhost`，Chromium 拒绝 `file://` 子资源 ⇒ 同一段 Markdown 在 dev 里是白图、打包版才显示。改这块必须同时验 dev 与打包两种加载方式。
+- **取舍结论（2026-10 讨论，暂不实现）**：①不做「消息内 ref 存储」——那等于改会话格式与跨层契约，收益不匹配；②优先「协议直读」：新增只读协议服务白名单根目录，替换裸 `file://`；③「渲染期复制缓存 + LRU」只在「temp 被清后历史白图」成为真实抱怨时再加，且只能以**缓存**身份存在（可淘汰、可回源），不做权威存储。
+- **白名单根**：项目目录 + `<userData>` + **专属 temp 子目录**（如 `<tmp>/pideck-shots`），不放行整个 `%TEMP%`（临时解压/安装器写入的图不可信，且 temp 随时被清理）。协议必须做路径规范化 + 逃逸检查，与 `webSecurity: true` 下的既有文件读取口径一致。
+- **路径规范化要与协议同步做**：盘符/绝对路径按本地路径处理、相对路径按会话 cwd 解析，否则模型默认写法（`C:\…`、`./out/chart.png`）仍然破图。失败兜底 UI 至少给 alt + 原路径 + 可点击打开，比任何视觉打磨都省排查时间。
+- **工具结果里的 image block 目前不可见**：交互动线只渲染类别文案「已读取图片」（`src/renderer/src/components/session/timeline/toolCategory.ts`），主进程 `AgentManager` 的 `formatToolDetail` / `extractToolResultText` 只产出文本；assistant 消息里的 image block 在 `src/main/pi/messageContent.ts` 的 `extractMessageText` 被 `if (type === "image") continue` 丢弃。做可视化等于改工具投影契约（消息带 `images` 或写 blob 存 ref），**单独立 issue**，别混进渲染层改动。
+- **边界**：PiDeck 不提供「截图/贴图到会话」的工具 API——agent 行为归 pi；PiDeck 的职责只有「任何指向本地图片的 Markdown 都能稳定渲染」。
+- **实施计划**：三阶段（渲染层 `MarkdownImage` + 路径容错 → `pideck-file://` 只读协议替换裸 `file://` → 工具结果 image block 可视化）见 `docs/markdown-image-rendering-plan.md`；阶段 3 有前置探针（pi 的 `tool_execution_end.result` 到不到图片字节）。设计参照 dsh 的“双通道”（进会话的图入库做 ref，被引用的图借看），但白名单根目录与上限是 PiDeck 自建（dsh 靠 fs sandbox，PiDeck 没有那一层）。
+
 ## 自定义主题包（userData/custom-themes + shared/customThemes）
 
 - 单一事实源是 `src/shared/customThemes.ts`：token 白名单（`CUSTOM_THEME_TOKEN_GROUPS`，来自 foundation.css 语义 token 人工梳理）、id/颜色值校验、`DEMO_CUSTOM_THEME`、`CUSTOM_THEME_TEMPLATE` 全在这；主进程保存/目录扫描、渲染层编辑器提示、AI 指南（`customThemeGuide.ts` 生成的表格与示例）都从这里取数。**改 foundation token 命名或新增 token 时三处同步：foundation.css、白名单、指南测试断言**（`tests/customThemes.test.mjs` 会校验白名单全量 token 都出现在指南里）。
