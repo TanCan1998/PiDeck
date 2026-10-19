@@ -159,8 +159,10 @@ activate 的异常发生在 xterm 事件派发里，逃出 catch 变成未捕获
   SHA256 `6CC42D05F07FAC14A285DE52882B48F10FE51A52D1DD9A1641F666D3A287EE9B`），
   评估构建（临时把远端开关置 true 打包，源码已还原），干净启动 4 进程 / 窗口标题 PiDeck 正常。
   **此 exe 仅供本地试用，不要分发**。
-- **合入 dev（2026-10-19）**：`dev` 快进到集成分支（原 `1b61d6d1e` → `ab24b2bf4` → `80f2e46ba`），
-  含 dev 当日 5 个新提交；dev 上 typecheck / check:format / `npm run build` 均 0。
+- **dev 不再承载远端（2026-10-19 用户裁定）**：曾把 `dev` 快进到集成分支（`1b61d6d1e` →
+  `ab24b2bf4` → `80f2e46ba`）验证过整链，随后**按用户要求回退**：`dev` 现等于 `origin/dev`
+  （`103122d75`，ahead/behind 均 0），不含远端代码。远端能力与「门禁恒开」只留在
+  `integration/dev-sync`，后续在该分支继续做，公开前再单独决策如何回填 dev。
 
 ## 11. 远端实验门：打包版 opt-in（2026-10-19）
 
