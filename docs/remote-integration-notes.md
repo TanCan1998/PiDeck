@@ -15,7 +15,7 @@
 
 1. **dev 的新架构优先**：sidecar、session-store、GUI 桥、standby 池、新 IPC 注册结构、设置结构、组件结构一律保留 dev 的实现。
 2. **远端能力不能丢**：以 `git diff :1:<path> :2:<path>` 取出「我方相对 merge-base 的改动」，逐块叠加到 `:3:<path>`（dev 侧）上，按 dev 的新 API 适配；不要盲目两边都留。
-3. **远端开关语义不变**：feature 分支的门禁是 `!app.isPackaged && PIDECK_REMOTE_EXPERIMENTAL=1`；集成后保持该语义，后续再单独做打包版 opt-in（不要顺手放开）。
+3. **远端开关语义**：feature 分支原门禁是 `!app.isPackaged && PIDECK_REMOTE_EXPERIMENTAL=1`；集成阶段保持该语义，打包版 opt-in 作为独立决策在 2026-10-19 落地（见 §11）。
 4. **i18n**：rendererCopy / mainProcessCopy 取 dev 基线 + 追加远端的键；改完 zh-CN 后跑 `node scripts/genZhTwCopy.mjs`（zh-TW 是生成物）。
 5. **测试**：以 dev 的测试为基线，补回远端相关断言；不确定时保留 dev 测试并在报告里列出需要后续补的用例。
 6. **不做范围外改动**：只改指派的冲突文件；不 `git add/commit/reset/stash/clean`，不跑 `npm install`，不 kill 进程。
@@ -46,7 +46,7 @@
 2. **远端写面与 dev 新契约对齐**：远端会话消息 edit/delete 改为追加 pi 原生 `context_edit`（原文不改写、不墓碑），resend 仍墓碑截断；`remove-image` 在远端 fail-closed（`REMOTE_SESSION_HISTORY_WRITER_OPERATION_INVALID`），本机链路不受影响。
 3. **本机专属链路统一收窄**：Feishu/WeChat/托盘/小窗/内容索引/提示词与原生资源/ACP 项目读取/文件树本地刷新，一律 `isLocalProject` 过滤或跳过；ssh 项目不得进入本机路径消费者。
 4. **远端终端**：隧道/launcher 保持 ticket + 固定 runner；node-pty 改为 `loadNodePty()` 惰性加载（原生模块禁止顶层静态 import）；终端 I/O 非法载荷按 dev 语义静默忽略，远端 16KiB 输入预算仍抛 `INVALID_TERMINAL_INPUT`。
-5. **远端开关不变**：`!app.isPackaged && PIDECK_REMOTE_EXPERIMENTAL === "1"`；打包版 opt-in 是后续独立产品决策。
+5. **远端开关**：见 §11——判据已收敛为纯函数 `resolveRemoteExperimentEnabled`；stable 发布包恒关，dev 品牌包默认开。
 6. **i18n**：dev 删除的 9 个旧键不得复活（collapsePrevRunsOnNewTurn、config.label.compaction、config.moveProviderUp/Down、rpc.logOpenedTitle/Description/logViewNow）；远端 540+ 键保留；zh-TW 只由 `node scripts/genZhTwCopy.mjs` 生成。
 
 ## 7. 已知红灯归属（合并后全量单测）
@@ -159,5 +159,40 @@ activate 的异常发生在 xterm 事件派发里，逃出 catch 变成未捕获
   SHA256 `6CC42D05F07FAC14A285DE52882B48F10FE51A52D1DD9A1641F666D3A287EE9B`），
   评估构建（临时把远端开关置 true 打包，源码已还原），干净启动 4 进程 / 窗口标题 PiDeck 正常。
   **此 exe 仅供本地试用，不要分发**。
-- **仍未合入 dev**：等用户试用验收后再决定合入或开 PR。
+- **合入 dev（2026-10-19）**：`dev` 快进到集成分支（原 `1b61d6d1e` → `ab24b2bf4` → `80f2e46ba`），
+  含 dev 当日 5 个新提交；dev 上 typecheck / check:format / `npm run build` 均 0。
+
+## 11. 远端实验门：打包版 opt-in（2026-10-19）
+
+**背景**：`npm run pack:dev` / `dist:win` 产出的是**已打包**应用（`app.isPackaged = true`），
+旧门禁 `!app.isPackaged && PIDECK_REMOTE_EXPERIMENTAL === "1"` 导致打包版恒关——用户拿 exe 测不到远端。
+
+**决策：不「直接放开」，改为 dev 通道专用 opt-in。** 判据收敛成纯函数
+`src/main/remote/remoteFeatureGate.ts` 的 `resolveRemoteExperimentEnabled`，三档语义：
+
+| 场景 | isPackaged | devBuild | 环境变量 | 远端 |
+|------|-----------|----------|----------|------|
+| 正式发布包（stable） | true | false | 任意（含 `1`） | **恒关** |
+| 未打包开发态（`npm run dev`） | false | false | 需 `1` | 与历史完全一致 |
+| dev 品牌包（`PIDECK_DEV_BUILD=1`） | true | true | 不需要 | **默认开启** |
+
+- 为什么不做「直接放开」：远端 SSH 面仍是实验能力（Fork 偶发挂起未修、安全评审有遗留项），
+  正式包不能留一个「设了环境变量就能开」的后门；dev 品牌包与 stable 是两个 appId / 两个品牌，
+  只用于真机验收，放开它不影响正式用户。
+- 装配点只喂输入：`index.ts` 不再自己写布尔表达式（守卫 `remoteHostIpc.test.mjs` 已改，
+  并新增 `remoteFeatureGate.test.mjs` 覆盖三档真值表与「表达式必须留在纯函数里」）。
+- dev 品牌包构建：`node scripts/dist-dev.js --win portable`（`dist-dev.js` 自带
+  `PIDECK_DEV_BUILD=1`，产物 `PiDeck-Dev-<version>-portable.exe`）。`npm run pack:dev`
+  不带该标记仍是 stable 品牌包，远端照旧关闭；若坚持用 pack:dev，需自己带标记：
+  `$env:PIDECK_DEV_BUILD='1'; npm run pack:dev -- portable`（产物在 `release-dev/`，品牌显示 PiDeck Dev）。
+
+**验收证据（2026-10-19）**：产物 `release\PiDeck-Dev-0.9.1-portable.exe`
+（84,739,759 字节，SHA256 `310BE8109A4AAA0C08944A8334387163936EE31A82302F55125950527D66CDBB`）。
+- 静态：打包后 `resources/app.asar` 内 `isDevBrandBuild()` 已固化为 `return true`。
+- 运行：CDP 连进打包版渲染层调 `window.piDesktop.remoteHosts.list()` →
+  `{"ok":true,"status":"ready","hosts":[]}`（门禁关闭时应为 `REMOTE_FEATURE_DISABLED`）。
+
+**冒烟时的坑**：agent/终端环境常带 `ELECTRON_RUN_AS_NODE=1`，此时双击 exe 会被当成纯 Node 跑
+（`--version` 输出 `v24.x`、无窗口、exit 0、无日志）。人工双击不受影响；脚本化启动必须先
+`Remove-Item Env:ELECTRON_RUN_AS_NODE`。
 
