@@ -17,7 +17,7 @@ import { t } from "../../i18n";
 import { cn } from "../../lib/utils";
 import type { ProviderUsageResult, UsageProbeBackend } from "../../../../shared/types/providerUsage";
 import { useProviderUsageEntry, useProviderUsageRefresh, useProviderUsageState } from "../../hooks/useProviderUsage";
-import { formatAmount, formatBalance, relativeTimeParts, USAGE_TONE_BAR_CLASS, USAGE_TONE_TEXT_CLASS, usageToneForPercent, usageWindowLabelText, type UsageTone } from "../../utils/providerUsageDisplay";
+import { formatAmount, formatBalance, relativeTimeParts, USAGE_TONE_BAR_CLASS, USAGE_TONE_TEXT_CLASS, usageToneForPercent, usageWindowLabelText, usageWindowPercent, type UsageTone } from "../../utils/providerUsageDisplay";
 
 /** cc-switch TierBar 行：label + 圆角进度条 + 彩色粗体百分比 + 右侧小字。 */
 function UsageBarRow(props: {
@@ -139,8 +139,10 @@ export function ProviderUsageDetails(props: {
 						const total = window.total;
 						const used = window.used;
 						const remaining = window.remaining ?? (total != null && used != null ? Math.max(0, total - used) : undefined);
-						// 百分比 = 已用/总额；用超（used>total）封顶 100。total 缺失时不显示百分比。
-						const pct = total != null && used != null && total > 0 ? Math.min(100, Math.round((used / total) * 100)) : null;
+						// 百分比 = 已用/总额；与 inline 行共用 usageWindowPercent——used 缺失时用 total-remaining 反推
+						// （自建网关的余额接口常只给「剩余 + 总额」，没有 used 字段）。total 缺失时不显示百分比。
+						const windowPercent = usageWindowPercent(window);
+						const pct = windowPercent == null ? null : Math.round(windowPercent);
 						// 用量≥90% 红、≥70% 橙、其余绿（cc-switch utilizationColor 阈值）
 						const urgent = pct != null && pct >= 90;
 						// 窗口名与 inline 行共用 providerUsageDisplay 的统一映射（未知 key 原样展示）。

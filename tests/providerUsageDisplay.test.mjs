@@ -89,6 +89,23 @@ test("usagePercent：periods 封顶 100；credits remaining 可反推 used", () 
 	assert.equal(display.usagePercent(balanceResult(10, "USD")), null);
 });
 
+test("usageWindowPercent：used 缺失时用 total - remaining 反推（Details 面板与 inline 共用）", () => {
+	// 回归：自建网关的余额接口只给「剩余 + 总额」，没有 used 字段。
+	// 详情面板曾直接读 window.used，导致进度条恒为空、百分比恒显示「—」。
+	assert.equal(display.usageWindowPercent({ total: 4500, remaining: 4469 }), (31 / 4500) * 100);
+	// 按整数百分比渲染（Details 行显示 xx%）：0.69% → 1%
+	assert.equal(Math.round(display.usageWindowPercent({ total: 4500, remaining: 4469 })), 1);
+	// 显式 used 优先，不因 remaining 存在而改写
+	assert.equal(display.usageWindowPercent({ total: 100, used: 92, remaining: 999 }), 92);
+	// total 缺失、或 used/remaining 都缺失时不产生百分比（宁可留空也不臆造）
+	assert.equal(display.usageWindowPercent({ remaining: 4469 }), null);
+	assert.equal(display.usageWindowPercent({ total: 4500 }), null);
+	// total<=0 不产生百分比（避免除零）
+	assert.equal(display.usageWindowPercent({ total: 0, remaining: 0 }), null);
+	// 用超（used > total）封顶 100
+	assert.equal(display.usageWindowPercent({ total: 100, used: 150 }), 100);
+});
+
 test("formatUsageBadgeText：periods/credits-windows 出百分比，balance 出余额，credits 出剩余", () => {
 	assert.equal(display.formatUsageBadgeText(periodsResult({ rolling: 12.4 })), "12%");
 	assert.equal(display.formatUsageBadgeText(balanceResult(86.3, "CNY")), "¥86.3");
