@@ -18,3 +18,12 @@ export function resolveUpdateChannel(): UpdateChannel {
 export function isDevChannelBuild(): boolean {
 	return !app.isPackaged || __PIDECK_DEV_BUILD__;
 }
+
+/**
+ * 是否 dev 品牌构建（PIDECK_DEV_BUILD=1 的 PiDeck Dev 包）。
+ * 与 isDevChannelBuild 的区别：后者把「未打包 npm run dev」也算开发通道，
+ * 这里只回答「这个已打好的包是不是 dev 通道产物」——远端实验门的默认开启只认后者。
+ */
+export function isDevBrandBuild(): boolean {
+	return __PIDECK_DEV_BUILD__;
+}

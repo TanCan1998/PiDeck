@@ -47,10 +47,11 @@ import { readDataEnvDecision, validateStartupDataEnv, writeDataEnvDecision } fro
 import { registerDataEnvIpc } from "./ipc/dataEnvIpc";
 import { ChannelSwitchService } from "./update/ChannelSwitchService";
 import { registerChannelSwitchIpc } from "./ipc/channelSwitchIpc";
-import { resolveUpdateChannel } from "./update/channelIdentity";
+import { isDevBrandBuild, resolveUpdateChannel } from "./update/channelIdentity";
 import { APP_DEEP_LINK_SCHEME } from "./utils/deepLinkScheme";
 import { APP_DISPLAY_NAME, initializeAppBrand } from "./utils/appBrand";
 import { migrateDevUserData } from "./projects/devUserDataMigration";
+import { resolveRemoteExperimentEnabled } from "./remote/remoteFeatureGate";
 import { isMainWindowFocused, shouldAlertNow } from "./notifications/alertFocusGate";
 import { buildToastXml, notificationLaunchUrl, resolveNotificationLogoUri } from "./notifications/notificationToast";
 import { extractFocusTargetFromArgv } from "./utils/focusTarget";
@@ -2860,7 +2861,13 @@ function registerIpc() {
 	// Only the explicit dev experiment can read the remote catalog; listing starts no SSH process.
 	// The connection service is built lazily and only when the experiment is on, so a shipped build
 	// constructs nothing and every remote channel answers REMOTE_FEATURE_DISABLED.
-	const remoteExperimentEnabled = !app.isPackaged && process.env.PIDECK_REMOTE_EXPERIMENTAL === "1";
+	// 判据本身是纯函数（三档语义见 remoteFeatureGate.ts）：stable 发布包恒关；未打包开发态仍需
+	// PIDECK_REMOTE_EXPERIMENTAL=1；dev 品牌包（PIDECK_DEV_BUILD=1）默认开启供真机验收。
+	const remoteExperimentEnabled = resolveRemoteExperimentEnabled({
+		isPackaged: app.isPackaged,
+		devBuild: isDevBrandBuild(),
+		experimentalEnv: process.env.PIDECK_REMOTE_EXPERIMENTAL,
+	});
 	let remoteHostService: import("./remote/RemoteHostConnectionService").RemoteHostConnectionService | undefined;
 	/**
 	 * 已解析的 OpenSSH 客户端（SSH 路由校验与每个 ssh/scp 子进程共用同一份）。
