@@ -28,7 +28,7 @@
 | 失败降级：无 resolver 不渲染 `<img>`，只显示 alt；加载失败替换成「加载失败 · alt(或原路径)」 | ✅ 照抄 | `MarkdownImage` 组件的 failed 态，文案走 i18n |
 | `recoverLocalImages`：整段唯一节点、未转义、扩展名为图片、路径含空格时，把被解析器拆坏的 `![alt](/abs/a b.png)` 还原成 image 节点 | ✅ 照抄 | 新增 remark 插件 `remarkRecoverLocalImages`（放 `src/renderer/src/utils/markdownPlugins.ts`） |
 | 相对路径按会话 cwd 解析（`resolveWorkspacePath`），绝对路径才直读 | ✅ 照抄 | 纯函数 `resolveMarkdownImageSrc(url, ctx)` 里做，ctx 注入会话 cwd + 工作区根 |
-| 尺寸规则：单图长边 240px、长宽比夹 [0.25, 4] 且裁切贴上/贴左；多图 64px 瓷砖；点击 lightbox；缩略图失败给重试 | ✅ 照抄（数值按 PiDeck 视觉再定） | `MarkdownImage` 单一组件内三种 variant |
+| 尺寸规则（两档不同起源，别搞混）：**markdown 路径图** = `display:block` + `max-width: min(100%, 640px)` + `max-height: 360px`（contain）；**消息附件图**才是「单图长边 240、长宽比夹 [0.25, 4] 且裁切贴上/贴左」与「多图 64px 瓷砖」 | ✅ 均已对照吸收：markdown 图用前一套数值；**同段多图**直接借后一套的 64px 瓷砖 + 失败图标重试 | `MarkdownImage` 两档（`groupCount` 切）+ `remarkMarkMultiImageParagraphs` 标注 |
 | 工具结果图有专属卡片，引用**只从 result content 取**、不从 meta 复制（防 hook 改过结果后显示旧图） | ✅ 抄原则 | 阶段 3；通用化为「任何工具结果里的 image block 都渲染成画廊」 |
 | 准入：单图字节 / 每消息张数 / 总字节 / 像素 / 边长 + **魔数校验**（声明格式必须与解码一致） | 🟡 部分抄 | 只抄魔数校验；字节与张数上限已有，不引 sharp |
 | 会话授权 → 字节 → blob URL → 手动 revoke（`historical-images.ts`） | ❌ 不抄 | 自定义协议由 Chromium 管缓存，少一层生命周期 |
@@ -200,3 +200,5 @@ dsh 参照文件（需要复核时直接读）：`packages/client/ui-primitives/
 再次验证：真机四条正例（盘符 / `file://` / 相对 / 带空格）全部出图，`%TEMP%` 根目录的反例按预期 403 降级为「失败文案 + 原路径」。
 
 吸收 dsh 的可用性细节（同批追加）：`ImageLightbox` 补上 `role="dialog"`/`aria-modal`、打开时焦点进关闭钮、**关闭后还原焦点**、Tab 圈在浮层内、Esc 捕获阶段 `stopPropagation`、backdrop 用 `mousedown` 判定（拖选松手不误关）；加载失败补「重试」按钮（清失败态 → img 重新挂载，文件修好后不用刷新会话）。
+
+布局规则照 dsh 抄（2026-10-19）：markdown 单图 = `block` + `max-width: min(100%, 640px)` + `max-height: 360px`（contain，竖排）；**同段 ≥2 张** → 64px 方块瓷砖（cover）+ 点击开原图 + 失败给刷新图标重试（对应 dsh `MessageImage` 的 tile/error 形态）。数量标注由 `remarkMarkMultiImageParagraphs` 写到 mdast `data.hProperties["data-md-image-count"]`，经 mdast-util-to-hast 透传到 hast，组件用 `imageGroupCountOf` 读取——**图片逐节点渲染，看不到兄弟节点，这个标注是唯一可靠的上下文来源**。
