@@ -18,6 +18,7 @@ import {
 	sessionRecordByIdAtomFamily,
 	saveSessionScrollAnchorAtom,
 	sessionScrollAnchorByIdAtom,
+	sessionSendStateByIdAtom,
 	setSessionMessageLoadStateAtom,
 	touchSessionMessagesAtom,
 	type SessionLoadState,
@@ -678,6 +679,17 @@ export function useSessionTimelineController(options: { sessionId?: string; mess
 	/** 发送定位只比较 user 身份变化；首帧/切会话取基线，不重播历史消息。 */
 	const sendScrollRef = useRef(new SendScrollPositioner());
 	const sendMessageBaselineRef = useRef<{ ownerKey: string; messageId: string | undefined } | undefined>(undefined);
+	/**
+	 * 恢复阶段收到的用户提交：先挂起，等 restorePhase 完成再补一次发送定位。
+	 *
+	 * DSH 新会话（引导页首发 / host 冷启动）会在面板完成历史恢复前就把乐观气泡写进
+	 * 缓存——旧实现只在这一帧记基线，之后 id 不再变化，整段「发送平滑置顶」被吞掉。
+	 * 只登记发送态 in-flight（activating/sending）的变化，避免把冷会话读盘塞进来的
+	 * 历史末条误当成一次发送（那会重播历史定位）。
+	 */
+	const pendingSendScrollRef = useRef<{ ownerKey: string; messageId: string } | undefined>(undefined);
+	/** 已做过发送定位的消息：in-flight 发送态会在多次 render 里持续成立，不能重复播动画。 */
+	const positionedSendMessageRef = useRef<string | undefined>(undefined);
 	const scrollerScrollApiRef = useRef<MessageScrollerScrollApi | null>(null);
 	const loadMoreAnchorRef = useRef<Tagged<TimelineAnchor> | undefined>(undefined);
 	/** 浏览态钉行：扩窗/翻页前冻住正在看的那一轮，布局变高时按漂移补位置。 */
@@ -732,6 +744,8 @@ export function useSessionTimelineController(options: { sessionId?: string; mess
 		setScrolledWindowTurns(nextRestoreState.scrolledWindowTurns);
 		// 会话切换：发送定位与任何残留动画一律作废，不得把旧会话的动画带到新会话。
 		sendScrollRef.current.reset();
+		pendingSendScrollRef.current = undefined;
+		positionedSendMessageRef.current = undefined;
 		settleScrollCancelRef.current?.();
 		settleScrollCancelRef.current = undefined;
 	}
@@ -1063,10 +1077,45 @@ export function useSessionTimelineController(options: { sessionId?: string; mess
 	useLayoutEffect(() => {
 		const baseline = sendMessageBaselineRef.current;
 		sendMessageBaselineRef.current = { ownerKey, messageId: sendMessageId };
-		// 恢复/首帧只记录基线；role 判定覆盖 UUID、DSH 和最快同帧抵达的 assistant。
-		if (!baseline || baseline.ownerKey !== ownerKey || restorePhase !== "complete" || !sendMessageId || baseline.messageId === sendMessageId) return;
+		if (!baseline || baseline.ownerKey !== ownerKey) return;
+		const changed = Boolean(sendMessageId) && baseline.messageId !== sendMessageId;
+		// 发送态用于区分「用户提交」和「读盘/投影填充历史」：部分单测沙箱会整体 stub
+		// ../atoms 后单独加载真实模块，缺这个 atom 时按「无在途发送」处理（生产恒存在）。
+		const sendState = options.sessionId && sessionSendStateByIdAtom != null ? store.get(sessionSendStateByIdAtom)[options.sessionId] : undefined;
+		const sendingRequestId = sendState && (sendState.status === "activating" || sendState.status === "sending") ? sendState.requestId : undefined;
+		if (restorePhase !== "complete") {
+			// 恢复/激活期间的用户提交暂存，恢复完成后补定位（DSH 新会话首发就走这条窗口）。
+			// 仅在发送态 in-flight 时登记：读盘/投影填充历史也会改变末条 user id，
+			// 没有在途提交时不能误判为一次发送（否则会重播历史定位）。
+			if (sendMessageId) {
+				const pending = pendingSendScrollRef.current;
+				if (pending?.ownerKey === ownerKey) {
+					// 宿主回填把乐观 id 换成投影 id 时沿用同一条挂起项。
+					if (changed) pending.messageId = sendMessageId;
+				} else if (sendingRequestId) {
+					pendingSendScrollRef.current = { ownerKey, messageId: sendMessageId };
+				}
+			}
+			return;
+		}
+		if (!sendMessageId) {
+			pendingSendScrollRef.current = undefined;
+			return;
+		}
+		if (positionedSendMessageRef.current === sendMessageId) return;
+		const pending = pendingSendScrollRef.current;
+		const pendingMatches = Boolean(pending && pending.ownerKey === ownerKey && pending.messageId === sendMessageId);
+		// 面板挂载时乐观气泡已在缓存（引导页首发 / 切页回来）：此前的 id 变化没人观察到，
+		// 但发送态仍 in-flight 且 requestId 就是这条 user 消息，恢复完成后补一次定位。
+		const submissionMatches = sendingRequestId === sendMessageId && !changed;
+		if (!changed && !pendingMatches && !submissionMatches) {
+			if (pending?.ownerKey === ownerKey) pendingSendScrollRef.current = undefined;
+			return;
+		}
+		pendingSendScrollRef.current = undefined;
 		const timeline = timelineRef.current;
 		if (!timeline) return;
+		positionedSendMessageRef.current = sendMessageId;
 		sendScrollRef.current.pin(timeline, sendMessageId, {
 			onStart: () => {
 				invalidateHistoryBrowsing();
@@ -1086,8 +1135,15 @@ export function useSessionTimelineController(options: { sessionId?: string; mess
 			markProgrammaticScroll,
 			clearProgrammaticScroll: clearProgrammaticTimelineScroll,
 		});
-	}, [clearProgrammaticTimelineScroll, invalidateHistoryBrowsing, markProgrammaticScroll, ownerKey, restorePhase, sendMessageId]);
-	useEffect(() => () => sendScrollRef.current.reset(), []);
+	}, [clearProgrammaticTimelineScroll, invalidateHistoryBrowsing, markProgrammaticScroll, options.sessionId, ownerKey, restorePhase, sendMessageId, store]);
+	useEffect(
+		() => () => {
+			pendingSendScrollRef.current = undefined;
+			positionedSendMessageRef.current = undefined;
+			sendScrollRef.current.reset();
+		},
+		[],
+	);
 
 	const loadMoreMessages = useCallback(
 		(source: "scroll" | "button" = "scroll") => {

@@ -4,15 +4,17 @@ import { createTsSandbox } from "./helpers/createTsSandbox.mjs";
 import { quickMessageHookHost } from "./helpers/quickMessageHookHost.mjs";
 
 /** Run the real controller, geometry and rAF animation without Electron or a model request. */
-function sendScrollHarness({ height = 2800, viewportHeight = 600, latestTop = height - 140 } = {}) {
+function sendScrollHarness({ height = 2800, viewportHeight = 600, latestTop = height - 140, startLoading = false, startWithOptimistic = false } = {}) {
 	const host = quickMessageHookHost();
 	let now = 0;
 	let nextFrame = 0;
 	let naturalHeight = height;
 	let top = Math.max(0, height - viewportHeight);
 	let sessionId = "s1";
-	let messages = [{ id: "history-user", role: "user", text: "history", timestamp: 1, agentId: "agent" }];
-	const rowTops = new Map([["history-user", latestTop]]);
+	let loadStatus = startLoading ? "loading" : "ready";
+	let sendStatus = startWithOptimistic ? { status: "activating", requestId: "optimistic-uuid" } : { status: "idle" };
+	let messages = startWithOptimistic ? [{ id: "optimistic-uuid", role: "user", text: "new question", timestamp: 1, agentId: "" }] : startLoading ? [] : [{ id: "history-user", role: "user", text: "history", timestamp: 1, agentId: "agent" }];
+	const rowTops = new Map(startWithOptimistic ? [["optimistic-uuid", latestTop]] : startLoading ? [] : [["history-user", latestTop]]);
 	const frames = new Map();
 	const listeners = new Map();
 	const observers = new Set();
@@ -74,14 +76,16 @@ function sendScrollHarness({ height = 2800, viewportHeight = 600, latestTop = he
 		sessionMessageCacheBySessionIdAtomFamily: () => "entry",
 		sessionRecordByIdAtomFamily: () => "record",
 		sessionMessageLoadStateAtom: "load",
+		sessionSendStateByIdAtom: "send",
 		sessionScrollAnchorByIdAtom: "anchors",
 	};
 	const store = {
 		get(key) {
 			if (key === "cache") return { [sessionId]: { messages, source: "runtime" } };
 			if (key === "entry") return { messages, source: "runtime" };
-			if (key === "load") return { [sessionId]: { status: "ready" } };
-			if (key === "record") return { id: sessionId, projectId: "p1", status: "active" };
+			if (key === "load") return { [sessionId]: { status: loadStatus } };
+			if (key === "send") return { [sessionId]: sendStatus };
+			if (key === "record") return { id: sessionId, projectId: "p1", status: "active", filePath: "/tmp/s1.jsonl", messageCount: messages.length };
 			return {};
 		},
 	};
@@ -105,7 +109,7 @@ function sendScrollHarness({ height = 2800, viewportHeight = 600, latestTop = he
 			jotai: { atom: (value) => value, useAtomValue: (key) => (typeof key === "function" ? key() : store.get(key)), useStore: () => store, useSetAtom: () => () => {} },
 			"jotai/utils": { selectAtom: (key, select) => () => select(store.get(key)) },
 			"../atoms": atoms,
-			"../desktopApi": {},
+			"../desktopApi": { desktopApi: { sessions: { readRecordMessagePage: () => new Promise(() => {}), startDshHost: async () => false } } },
 			"../i18n": { t: (key) => key },
 		},
 		globals: {
@@ -178,6 +182,28 @@ function sendScrollHarness({ height = 2800, viewportHeight = 600, latestTop = he
 			naturalHeight += delta;
 			for (const [id, value] of rowTops) rowTops.set(id, value + delta);
 			for (const observer of observers) observer.fn();
+		},
+		/** 发送态 in-flight：restore pending 期间的 id 变化只在此时才登记发送定位。 */
+		beginSendState() {
+			sendStatus = { status: "activating", requestId: "optimistic-uuid" };
+			render();
+		},
+		endSendState() {
+			sendStatus = { status: "idle" };
+			render();
+		},
+		/** 恢复阶段读盘返回：填充历史消息但不代表用户发送。 */
+		releaseHistory() {
+			messages = [{ id: "history-user", role: "user", text: "history", timestamp: 1, agentId: "agent" }];
+			rowTops.set("history-user", latestTop);
+			loadStatus = "ready";
+			render();
+		},
+		/** 结束 restorePhase 的 pending 状态。 */
+		releaseLoad() {
+			loadStatus = "ready";
+			render();
+			advance();
 		},
 		rowGap(id) {
 			return rowTops.get(id) - viewport.scrollTop;
@@ -303,6 +329,50 @@ test("history mounting alone never replays a send animation", () => {
 		assert.equal(h.spacer.offsetHeight, 0);
 		assert.equal(h.viewport.scrollTop, 2200);
 		assert.deepEqual(h.calls, []);
+	} finally {
+		h.unmount();
+	}
+});
+
+// 回归（用户反馈「DSH 会话发消息没有平滑置顶动画」）：DSH 新会话的乐观气泡常在面板
+// 完成历史恢复前就进缓存；旧实现只在那一帧刷新基线，恢复完成后 id 不再变化，动画被吞。
+test("a send published before the timeline finishes restoring gets positioned afterwards", () => {
+	const h = sendScrollHarness({ startLoading: true });
+	try {
+		h.beginSendState();
+		h.send("optimistic-uuid");
+		// 发送态在恢复完成前已回到 idle（host 已受理），不能因此丢掉这次定位。
+		h.endSendState();
+		h.releaseLoad();
+		h.finish();
+		assert.ok(Math.abs(h.rowGap("optimistic-uuid") - 24) <= 1, `gap=${h.rowGap("optimistic-uuid")}`);
+	} finally {
+		h.unmount();
+	}
+});
+
+// 反向保护：恢复期间读盘/投影填充历史也会改变末条 user id，不能当成发送重播定位。
+test("history landing during restore does not replay send positioning", () => {
+	const h = sendScrollHarness({ startLoading: true });
+	try {
+		h.releaseHistory();
+		h.releaseLoad();
+		h.finish();
+		assert.equal(h.spacer.offsetHeight, 0);
+		assert.equal(h.controller.autoScroll, true);
+	} finally {
+		h.unmount();
+	}
+});
+
+// 引导页首发 / 切页回来：面板挂载时乐观气泡已经在缓存里（没人观察到 id 变化），
+// 发送态仍 in-flight 且 requestId 就是这条 user 消息时，恢复完成后要补一次定位。
+test("a pane mounted with an in-flight optimistic message still gets send positioning", () => {
+	const h = sendScrollHarness({ startLoading: true, startWithOptimistic: true });
+	try {
+		h.releaseLoad();
+		h.finish();
+		assert.ok(Math.abs(h.rowGap("optimistic-uuid") - 24) <= 1, `gap=${h.rowGap("optimistic-uuid")}`);
 	} finally {
 		h.unmount();
 	}
