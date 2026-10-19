@@ -5,7 +5,7 @@ import { showNotice } from "../utils/notice";
 import { Button } from "../components/ui-shadcn/button";
 import { ModelsTable, type DshModelRow } from "./DshModelsTable";
 import { FetchedModelCombobox } from "./FetchedModelCombobox";
-import { appendBlankDshModel, appendFetchedDshModels, removeDshModelAt, seedDshModelsForCustomEdit, updateDshModelAt } from "./dshModels";
+import { appendBlankDshModel, appendFetchedDshModels, dshModelInputField, removeDshModelAt, seedDshModelsForCustomEdit, updateDshModelAt } from "./dshModels";
 import type { FetchedModel } from "../../../shared/types/fetchedModel";
 import type { ModelSpec } from "../../../shared/types/modelSpecs";
 import type { ModelItem } from "./configTypes";
@@ -22,7 +22,9 @@ function dshModelSpecPatches(model: ModelItem, spec: ModelSpec | null, supportsG
 /**
  * DSH custom model editor: extend or interrogate the adapter catalog without
  * starting from an empty draft. The visible fields follow dsh-web's curated
- * model editor; advanced modality settings remain in settings.yaml.
+ * model editor, plus the input-modality control dsh-web keeps in the advanced
+ * settings page: a model declared text-only is rejected by DSH prompt
+ * admission as soon as a message carries an image.
  */
 export function DshModelsEditor(props: {
 	models: DshModelRow[];
@@ -144,6 +146,9 @@ export function DshModelsEditor(props: {
 			name: typeof row.name === "string" ? row.name : undefined,
 			contextWindow: typeof row.contextWindow === "number" ? row.contextWindow : undefined,
 			maxTokens: typeof row.maxTokens === "number" ? row.maxTokens : undefined,
+			// 已声明的模态不能被目录补全覆盖（补全只填空字段；手填可能是适配器目录
+			// 没收录的视觉别名，例如中转站的 `...-vision-exp`）。
+			input: Array.isArray(row.input) ? row.input.filter((item): item is string => typeof item === "string") : undefined,
 		};
 		const updates = dshModelSpecPatches(model, spec, props.settingsNs === "llm-pi-ai");
 		if (updates.length === 0) return;
@@ -191,6 +196,7 @@ export function DshModelsEditor(props: {
 				defaultContextWindow={props.defaultContextWindow}
 				defaultMaxTokens={props.defaultMaxTokens}
 				allowCapacitySuffixes={props.settingsNs === "llm-deepseek"}
+				inputField={dshModelInputField(props.settingsNs)}
 				writable={writable}
 				onAdd={() => props.onChange(appendBlankDshModel(seedInput))}
 				onUpdate={(index, field, value) => props.onChange(updateDshModelAt({ ...seedInput, index, field, value }))}

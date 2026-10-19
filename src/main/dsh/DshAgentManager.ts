@@ -28,7 +28,7 @@ import {
 	type DshUsageTotals,
 } from "./dshProcessEvents";
 import { applyDshControlEvent, beginDshCancel, type DshControlState } from "./dshRuntimeControl";
-import { resolveDshModelDirectory, toDshAvailableModels } from "./dshModels";
+import { isDshModelImageUnsupportedRejection, resolveDshModelDirectory, toDshAvailableModels } from "./dshModels";
 import { approvalUiRequest, buildDshRejectValue, buildDshRespondValue, parseDshApprovalFrame, parseDshQuestionFrame, questionUiRequest, type DshApprovalFrame, type DshQuestionFrame } from "./dshApprovalBridge";
 import { assembleDshHistoryEntries, countDshUserMessages, DSH_HISTORY_DEFAULT_TURN_PAGE_SIZE, normalizeDshTurnPageSize, planDshHistoryRounds, trimToOldestTurnStart } from "./dshHistoryPagePlan";
 import { isContextOverflowError } from "../../shared/contextOverflow";
@@ -457,6 +457,16 @@ export class DshAgentManager implements SessionAgentGateway {
 					error: JSON.stringify(sent.result.error),
 					delivery: "rejected",
 					i18nKey: "session.sendDshWriterHeld",
+				};
+			}
+			// 模型输入模态没声明 image：DSH 在准入阶段就拒绝带图消息，请求根本没打到
+			// 模型。原始 JSON 对用户不可操作，映射为「去配置页打开输入模态」的文案。
+			if (isDshModelImageUnsupportedRejection(sent.result.error)) {
+				return {
+					accepted: false,
+					error: JSON.stringify(sent.result.error),
+					delivery: "rejected",
+					i18nKey: "session.sendDshModelNoImageInput",
 				};
 			}
 			return { accepted: false, error: JSON.stringify(sent.result.error), delivery: "rejected" };

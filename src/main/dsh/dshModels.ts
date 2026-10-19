@@ -6,6 +6,24 @@ function isModelSelection(value: unknown): value is ModelSelection {
 	return isRecord(value) && typeof value.provider === "string" && value.provider.length > 0 && typeof value.model === "string" && value.model.length > 0 && (value.reasoningEffort === undefined || typeof value.reasoningEffort === "string");
 }
 
+/**
+ * DSH prompt 准入拒绝带图消息（模型输入模态声明为纯文本）。
+ *
+ * dsh-api-session-controller 在受理 prompt 前检查 `model.inputModalities`：
+ * 已声明且不含 image 时直接抛 session/attachment-invalid + reason
+ * MODEL_DOES_NOT_SUPPORT_IMAGES，请求不会到达模型。配置侧的修法是给模型把
+ * 输入模态设为 text+image（见 DSH 配置页模型编辑器的「输入模态」）。
+ * 这里只负责把该结构化错误识别出来，供发送层映射成可操作文案，而不是把
+ * 原始 JSON 丢给用户。
+ */
+export function isDshModelImageUnsupportedRejection(error: unknown): boolean {
+	if (!isRecord(error) || error.code !== "session/attachment-invalid") return false;
+	const details = isRecord(error.details) ? error.details : undefined;
+	if (details?.reason === "MODEL_DOES_NOT_SUPPORT_IMAGES") return true;
+	// 旧版宿主可能不带 details.reason，按稳定文案兜底。
+	return typeof error.message === "string" && error.message.includes("does not support image input");
+}
+
 function isModelReasoning(value: unknown): boolean {
 	return (
 		isRecord(value) &&
@@ -109,17 +127,29 @@ export function toDshAvailableModels(groups: readonly DshModelGroupInput[]): Ava
 	return result;
 }
 
+/** DSH 适配器只认这两种输入模态；其余噪声一律丢弃。 */
+function asDshInputModalities(value: unknown): Array<"text" | "image"> | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const modalities = [...new Set(value.filter((item): item is "text" | "image" => item === "text" || item === "image"))];
+	return modalities.length > 0 ? modalities : undefined;
+}
+
 /** DSH discovery candidates → the shared config-page fetched-model shape. */
 export function toDshFetchedModels(models: DshDiscoveredModel[]): FetchedModel[] {
 	const result: FetchedModel[] = [];
 	for (const model of models) {
 		const id = model.id.trim();
 		if (!id) continue;
+		// 目录/端点声明的图片能力必须原样带到配置页：否则新增的视觉模型会被写成
+		// text-only（DSH llm-pi-ai 缺省 defaultInput=["text"]），带图消息在 prompt
+		// 准入阶段被 session/attachment-invalid 直接拒绝（用户反馈「发图片识别不了」）。
+		const input = asDshInputModalities(model.inputModalities);
 		result.push({
 			id,
 			...(typeof model.name === "string" && model.name ? { name: model.name } : {}),
 			...(typeof model.contextWindow === "number" ? { contextWindow: model.contextWindow } : {}),
 			...(typeof model.maxTokens === "number" ? { maxTokens: model.maxTokens } : {}),
+			...(input ? { input } : {}),
 		});
 	}
 	return result;

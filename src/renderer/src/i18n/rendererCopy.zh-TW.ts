@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: d6aaae40530ccb00194d441edf5b3d3013388bcc2cfc6388b8cf136ac56fd96b（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: 66c8cf2585483dd296f9b11f85fb3c1e7cee55292e8ac16b1e3a3fc0b1f2255a（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -1531,7 +1531,8 @@ export const zhTW: Record<TranslationKey, string> = {
 	"session.backendPickerHint": "選擇後端（Pi / DSH / 生圖 / 生影片 / Agent CLI）",
 	"session.backendLockedHint": "後端已鎖定（已傳送訊息後不可切換）",
 	"session.backendLockedNotice": "會話已開始，後端已鎖定，無法再切換。如需更換後端，請新建一個會話。",
-	"session.sendDshImagesUnsupported": "DSH 暫不支援圖片附件",
+	"session.sendDshImagesUnsupported": "DSH 不支援該圖片格式（僅支援 PNG / JPEG / WebP / GIF）",
+	"session.sendDshModelNoImageInput": "當前 DSH 模型未宣告支援圖片輸入，訊息已被拒絕。請到「設定 → DSH → 供應商」展開該模型，把「輸入模態」改為「文本 + 圖片」後重試。",
 	"session.sendDshModelRouteUnavailable": "當前 DSH 模型路由不可用，請選擇其他模型或恢復提供方配置。",
 	"session.sendDshUnsupportedPayload": "DSH 暫不支援宿主指令",
 	"session.sendDshWriterHeld": "該會話正被其他 DSH 客戶端（如 DeepSeek 桌面版或 DSH CLI）佔用寫入。請在那邊關閉該會話或退出程式，然後重試。",
@@ -1908,6 +1909,10 @@ export const zhTW: Record<TranslationKey, string> = {
 	"config.dsh.modelIdPlaceholder": "模型 ID",
 	"config.dsh.modelNamePlaceholder": "留空時使用模型 ID",
 	"config.dsh.modelMaxTokens": "最大輸出 token 數",
+	"config.dsh.modelInputModalities": "輸入模態",
+	"config.dsh.inputModalityInherit": "跟隨目錄 / 預設",
+	"config.dsh.inputModalityText": "僅文本",
+	"config.dsh.inputModalityTextImage": "文本 + 圖片",
 	"config.dsh.modelError.idRequired": "模型 {index}：必須填寫模型 ID。",
 	"config.dsh.modelError.idDuplicate": "模型 {index}：模型 ID 不能重複。",
 	"config.dsh.modelError.nameInvalid": "模型 {index}：顯示名稱不能為空。",

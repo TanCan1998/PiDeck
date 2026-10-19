@@ -10,9 +10,10 @@
 import { useState } from "react";
 import { Button } from "../components/ui-shadcn/button";
 import { Input } from "../components/ui-shadcn/input";
-import { ChevronDown, ChevronRight, Plus, Trash2 } from "lucide-react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui-shadcn/select";
+import { ChevronDown, ChevronRight, Image as ImageIcon, Plus, Trash2 } from "lucide-react";
 import { t } from "../i18n";
-import { formatDshModelCapacity, parseDshModelCapacity } from "./dshModels";
+import { formatDshModelCapacity, dshModalitySelection, dshModalityValue, parseDshModelCapacity, type DshModalitySelection, type DshModelInputField } from "./dshModels";
 
 export type DshModelRow = {
 	id?: unknown;
@@ -44,6 +45,11 @@ export function ModelsTable(props: {
 	defaultMaxTokens?: number;
 	/** Direct DeepSeek accepts the same 256K / 1M shorthand as DSH Web. */
 	allowCapacitySuffixes?: boolean;
+	/**
+	 * 输入模态在 settings.yaml 的字段名（llm-pi-ai=`input` / llm-deepseek=`inputModalities`）。
+	 * 声明为纯文本的模型会被 DSH 的 prompt 准入直接拒绝带图消息，所以这一项必须可配。
+	 */
+	inputField?: DshModelInputField;
 	writable: boolean;
 	/** 行内字段更新（field 为模型条目键名，如 id/name/contextWindow/maxTokens）。 */
 	onUpdate: (index: number, field: string, value: unknown) => void;
@@ -90,6 +96,8 @@ export function ModelsTable(props: {
 	const inherited = !overridden && (props.catalog?.length ?? 0) > 0;
 	const canEditRows = !inherited || props.editableInherited === true;
 	const shownModels = inherited ? (props.catalog ?? []) : models;
+	// 闭包里保持常量收窄：inputField 存在时才渲染模态选择器。
+	const inputField = props.inputField;
 
 	return (
 		<div className="grid gap-1.5">
@@ -148,6 +156,8 @@ export function ModelsTable(props: {
 									) : (
 										<span className="min-w-0 flex-1" aria-hidden="true" />
 									)}
+									{/* 图片能力要在行上直接可见：用户反馈「配置里看不出模型支不支持图片」。 */}
+									{inputField && dshModalitySelection(model[inputField]) === "textImage" ? <ImageIcon className="size-3.5 shrink-0 text-muted-foreground" role="img" aria-label={t("config.dsh.inputModalityTextImage")} /> : null}
 									{canEditRows && (
 										<Button
 											type="button"
@@ -195,6 +205,28 @@ export function ModelsTable(props: {
 												onBlur={() => settleCapacity(index, "maxTokens")}
 											/>
 										</label>
+										{inputField ? (
+											<div className="grid gap-1 sm:col-span-2">
+												<span className="text-micro text-muted-foreground">{t("config.dsh.modelInputModalities")}</span>
+												<Select
+													value={dshModalitySelection(model[inputField])}
+													disabled={!writable}
+													onValueChange={(value) => {
+														const selection: DshModalitySelection = value === "text" || value === "textImage" ? value : "inherit";
+														onUpdate(index, inputField, dshModalityValue(selection));
+													}}
+												>
+													<SelectTrigger size="sm" className="w-full">
+														<SelectValue />
+													</SelectTrigger>
+													<SelectContent>
+														<SelectItem value="inherit">{t("config.dsh.inputModalityInherit")}</SelectItem>
+														<SelectItem value="text">{t("config.dsh.inputModalityText")}</SelectItem>
+														<SelectItem value="textImage">{t("config.dsh.inputModalityTextImage")}</SelectItem>
+													</SelectContent>
+												</Select>
+											</div>
+										) : null}
 									</div>
 								)}
 							</div>

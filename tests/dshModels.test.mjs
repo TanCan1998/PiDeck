@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
-const { parseDshModelCatalog, resolveDshModelDirectory, toDshAvailableModels, toDshFetchedModels, unwrapDshDiscoveryModels } = loadTsCommonJs("src/main/dsh/dshModels.ts");
+const { isDshModelImageUnsupportedRejection, parseDshModelCatalog, resolveDshModelDirectory, toDshAvailableModels, toDshFetchedModels, unwrapDshDiscoveryModels } = loadTsCommonJs("src/main/dsh/dshModels.ts");
 
 /** 与 DSH host llm.models / session.models 实测一致的组形状。 */
 const group = (id, models) => ({ id, name: id, models });
@@ -50,6 +50,27 @@ test("0.2 model selection uses next, then lastUsed, then default only for an exp
 test("toDshFetchedModels preserves discovery metadata and drops malformed ids", () => {
 	const models = toDshFetchedModels([{ id: "  gateway-model ", name: "Gateway Model", contextWindow: 128000, maxTokens: 8192 }, { id: "" }]);
 	assert.deepEqual(JSON.parse(JSON.stringify(models)), [{ id: "gateway-model", name: "Gateway Model", contextWindow: 128000, maxTokens: 8192 }]);
+});
+
+// 回归（用户反馈「DSH 发图片识别不了」）：适配器 discovery 已声明 inputModalities，
+// 配置页丢掉它会把视觉模型落成纯文本；llm-pi-ai 的 model.input 必须原样带过去。
+test("toDshFetchedModels carries adapter-declared input modalities", () => {
+	const [model] = toDshFetchedModels([{ id: "vision-model", inputModalities: ["text", "image"] }]);
+	assert.deepEqual(JSON.parse(JSON.stringify(model.input)), ["text", "image"]);
+	// 只接受 DSH 认识的模态，去重；全是噪声时省略而不是写空数组（DSH 里空数组=没声明）。
+	assert.deepEqual(JSON.parse(JSON.stringify(toDshFetchedModels([{ id: "noisy", inputModalities: ["image", "image", "audio"] }])[0].input)), ["image"]);
+	const textOnly = toDshFetchedModels([{ id: "text-model", inputModalities: ["text"] }])[0];
+	assert.deepEqual(JSON.parse(JSON.stringify(textOnly.input)), ["text"]);
+	assert.equal("input" in toDshFetchedModels([{ id: "unknown", inputModalities: [] }])[0], false);
+});
+
+test("isDshModelImageUnsupportedRejection recognizes the prompt-admission rejection", () => {
+	assert.equal(isDshModelImageUnsupportedRejection({ code: "session/attachment-invalid", message: 'Model "x" does not support image input.', details: { reason: "MODEL_DOES_NOT_SUPPORT_IMAGES" } }), true);
+	// 旧宿主只带稳定 message，没有 details.reason 时仍要识别。
+	assert.equal(isDshModelImageUnsupportedRejection({ code: "session/attachment-invalid", message: 'Model "x" does not support image input.' }), true);
+	assert.equal(isDshModelImageUnsupportedRejection({ code: "session/attachment-invalid", message: "attachment too large", details: {} }), false);
+	assert.equal(isDshModelImageUnsupportedRejection({ code: "session/writer-held", message: "locked", details: { reason: "MODEL_DOES_NOT_SUPPORT_IMAGES" } }), false);
+	assert.equal(isDshModelImageUnsupportedRejection(null), false);
 });
 
 test("toDshAvailableModels 透传 reasoningEfforts（按模型过滤思考档位）", () => {

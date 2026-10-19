@@ -170,4 +170,40 @@ export function appendFetchedDshModels(
 	return sortModelRows(result);
 }
 
+/** 输入模态在 settings.yaml 里的字段名：两个适配器的 schema 拼写不同。 */
+export type DshModelInputField = "input" | "inputModalities";
+
+/** 配置页的三态：继承适配器目录（不写字段）/ 仅文本 / 文本+图片。 */
+export type DshModalitySelection = "inherit" | "text" | "textImage";
+
+/**
+ * 模型行里承载输入模态的字段名。
+ *
+ * DSH 侧语义（node_modules 里两个适配器的 model schema）：
+ * - llm-pi-ai：`input?: ("text"|"image")[]`，缺省/空数组都表示「沿用适配器目录，
+ *   目录也不认识时落到 route.defaultInput（默认 ["text"]）」；
+ * - llm-deepseek：同义字段拼写为 `inputModalities`（default ["text"]）。
+ * 两个适配器都在 prompt 准入阶段用 `inputModalities` 校验带图消息，声明成纯文本
+ * 会被 session/attachment-invalid 直接拒绝（MODEL_DOES_NOT_SUPPORT_IMAGES）。
+ */
+export function dshModelInputField(settingsNs: string): DshModelInputField | undefined {
+	if (settingsNs === "llm-pi-ai") return "input";
+	if (settingsNs === "llm-deepseek") return "inputModalities";
+	return undefined;
+}
+
+/** 把已存的字段值映射成三态：缺省/空数组 = 继承。 */
+export function dshModalitySelection(value: unknown): DshModalitySelection {
+	if (!Array.isArray(value)) return "inherit";
+	const modalities = value.filter((item): item is string => typeof item === "string");
+	if (modalities.length === 0) return "inherit";
+	return modalities.includes("image") ? "textImage" : "text";
+}
+
+/** 三态 → 写入 settings.yaml 的字段值；"inherit" 用 undefined 表示删掉字段（沿用目录）。 */
+export function dshModalityValue(selection: DshModalitySelection): string[] | undefined {
+	if (selection === "inherit") return undefined;
+	return selection === "textImage" ? ["text", "image"] : ["text"];
+}
+
 /** DSH 配置页应通过 host 的 llm.discoverModels 取候选，不在 renderer 解析 provider 端点。 */
