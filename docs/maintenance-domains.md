@@ -152,6 +152,12 @@
 - **回归测试必须跑真实层级**：表格行（cell 内 text）、跨换行正文（`\n` 之后仍是同一个 text 节点）、inline code `__fileLink` 分支、路径正好在末尾（不留空 text 节点）。写法见 `tests/markdownPathTailTruncation.test.mjs`（unified + remark-parse 二次解析对比可见文本，不依赖 cwd/真实项目）。
 - **考古别只看最近几笔提交**：渲染丢文本这类回归可能潜伏数周，用 `git log --oneline -- <文件>` / `git log -S <片段>` 回到底，确认是「谁引入、为什么当时测不出」，再把这两件事写进注释与测试。
 
+## 推送与 AtomGit 镜像（pre-push 钩子）
+
+- `.githooks/pre-push`（`core.hooksPath=.githooks`，`npm install` 的 prepare 会安装）会把本次推送的引用镜像到 AtomGit；默认尽力而为，失败只提示不阻断，`PI_DECK_ATOMGIT_STRICT=1` 才让镜像失败即推送失败。
+- **无凭据的非交互环境（CI、agent 会话）里，镜像步骤会让随后的 GitHub 主推送失败**：`Connection to github.com closed by remote host` / `fatal: unable to write flush packet: Broken pipe`（2026-10-19 连续三次必现，跳过镜像即成功）。绕过：`PI_DECK_SKIP_ATOMGIT=1 git push origin dev`；新设备首次镜像需在交互终端完成一次 AtomGit 授权。
+- 判据：`git ls-remote origin dev` 正常但 `git push` 报 broken pipe ⇒ 先怀疑镜像钩子，不要当网络问题反复重试。
+
 ## 对话内图片渲染（Markdown img / 本地路径 / 协议取舍）
 
 - **现状（未改造）**：`MarkdownStream` 的 `components` 只覆盖了 `a`，`img` 走 streamdown 默认渲染；样式只有 `.markdown-body img{max-width:100%;border-radius}`。缺懒加载、限高、点击放大（生图消息有预览浮层，可复用）、加载失败兜底、多图并排——要并排只能把图物理缩成小图再一行引用。
