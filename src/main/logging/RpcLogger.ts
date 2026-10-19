@@ -1,5 +1,5 @@
 import type { RpcLogEntry } from "../../shared/types/rpcLog";
-import type { ModelTraceRecord, ModelTraceRequestInput } from "../../shared/types/bridge";
+import type { ModelTraceRecord, ModelTraceRequestInput } from "../../shared/types/modelTrace";
 import { readTextBounded } from "../fs/boundedTextRead";
 import { ModelTraceStore } from "./ModelTrace";
 import { app } from "electron";

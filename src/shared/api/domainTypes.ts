@@ -15,7 +15,7 @@ export type DomainGroup = "core" | "workspace" | "content" | "config" | "integra
  * - aggregate   门面直取：piDeckApi.<domain> === source.<namespace> 恒等（引用透传）。
  * - consolidate 收口映射：门面按方法组分组呈现（sessions 四子域、config 十子库）。
  * - redline     红线：门面不聚合、只透传原命名空间引用，文档标注用途红线
- *                （pi-auth 例外一、GUI 桥/standby 例外二/三宿主 pi 行、enhance 例外四、
+ *                （pi-auth 例外一、模型快照端点/standby 例外二/三宿主 pi 行、enhance 例外四、
  *                DSH 插件体系宿主 dsh 行；AGENTS.md 核心边界四例外 + RESEARCH §4.7）。
  */
 export type DomainAggregation = "aggregate" | "consolidate" | "redline";

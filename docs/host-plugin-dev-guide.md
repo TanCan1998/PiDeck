@@ -6,7 +6,7 @@ title: 宿主插件开发指南
 
 > **宿主插件（Host Plugin）** 是挂在 **PiDeck 桌面壳**上的本地静态扩展：一组 HTML / CSS / JS 文件放进一个目录，配一个 `pideck-plugin.json` 声明，就能在 PiDeck 里拥有自己的面板，读取当前项目的会话数据。
 >
-> 它属于 **PiDeck 的能力域**（不依赖 pi 进程、不执行命令）。页面不能直接联网，但可在声明目的地并获用户授权后，通过 `window.pideck.network.request()` 调用 HTTPS API 或已启动的本地服务。需要拦截模型请求、深度接入 pi 会话流的场景，请改用 pi 扩展 + GUI 桥，见 `docs/plugin-dev-guide.md`。
+> 它属于 **PiDeck 的能力域**（不依赖 pi 进程、不执行命令）。页面不能直接联网，但可在声明目的地并获用户授权后，通过 `window.pideck.network.request()` 调用 HTTPS API 或已启动的本地服务。需要拦截模型请求、深度接入 pi 会话流的场景，请改用 pi 扩展（`resources/extensions/` 的自包含 `.ts`，随会话 `-e` 注入）。
 
 ---
 

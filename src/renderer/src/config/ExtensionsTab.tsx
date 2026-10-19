@@ -84,7 +84,6 @@ export function ExtensionsTab(props: {
 	onShowInFolder: (extension: PiExtensionSummary) => void;
 }) {
 	// 一级 tab：已安装 / 扩展商店（与 SkillsTab 的「本地/商店」结构对齐）
-	// 「插件开发」页签已下线（宿主插件系统接替）：PluginDevSection 源文件保留但不再有入口。
 	const [extTab, setExtTab] = useState<"local" | "store">("local");
 	// 已安装列表搜索词：只服务本页渲染的局部 state（不过 IPC、不建全局 atom）
 	const [extensionQuery, setExtensionQuery] = useState("");

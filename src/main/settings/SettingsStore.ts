@@ -301,8 +301,6 @@ Gitmoji 对应关系：
 	// ── 扩展管理 ──
 	/** 用户手动移除的内置扩展，启动时跳过自动部署 */
 	removedBuiltInExtensions: [],
-	/** 用户显式开启的「默认关闭」内置扩展（GUI 扩展桥/扩展点面板），opt-in 才注入 */
-	enabledBuiltInExtensions: [],
 	/** 用户禁用的扩展（scope+source）；非空时 RPC 启动走白名单模式 */
 	disabledExtensions: [],
 	/** 白名单总开关：true 时不走 -e 注入，默认加载全部扩展（防御启动失败） */

@@ -9,7 +9,7 @@ import type { AppSettings, DisabledExtensionEntry, PiCliUpdateResult, PiExtensio
 import type { PiLocator } from "../pi/PiLocator";
 import { toWslLinuxPath, toWindowsHostPath, type WslEnvironment } from "../wsl/WslPaths";
 import type { MainProcessTranslationKey } from "../../shared/i18n/mainProcessCopy";
-import { BUILT_IN_EXTENSIONS, INTERNAL_BUILT_IN_EXTENSIONS, isBuiltInExtensionName, isDefaultDisabledBuiltInExtension, type BuiltInExtensionPathRoots } from "./builtInExtensions";
+import { BUILT_IN_EXTENSIONS, INTERNAL_BUILT_IN_EXTENSIONS, isBuiltInExtensionName, type BuiltInExtensionPathRoots } from "./builtInExtensions";
 import { MIN_PI_VERSION_FOR_EXTENSION_WHITELIST, parsePiVersion, piVersionAtLeast } from "./extensionVersionGate";
 import { redactForReport, truncateText } from "../health/redact";
 import { PiSelfUpdateRunner, supportsPiSelfUpdate } from "../pi/piSelfUpdateRunner";
@@ -258,31 +258,6 @@ export class ExtensionManager {
 		this.invalidateListCache();
 	}
 
-	/**
-	 * 开关「默认关闭」（opt-in）的内置扩展：enabled=true 写入 enabledBuiltInExtensions，
-	 * false 则移出；不碰 removedBuiltInExtensions（那是另一套「用户主动禁用默认启用扩展」机制）。
-	 * 下次 Agent 启动时按 opt-in 列表决定是否随 -e 注入。
-	 */
-	async toggleBuiltIn(source: string, enabled: boolean): Promise<void> {
-		const normalized = source.trim();
-		if (!isDefaultDisabledBuiltInExtension(normalized)) {
-			throw new Error("仅默认关闭的内置扩展支持此开关");
-		}
-		// 自愈：历史上被「移除」过（进了 removedBuiltInExtensions）的 opt-in 扩展，
-		// 用户重新打开开关时同步清掉 removed 标记——否则开关 ON 但注入层仍被 removed 拦住。
-		if (enabled) {
-			const removed = this.getPiDeckSettings().removedBuiltInExtensions ?? [];
-			if (removed.includes(normalized)) {
-				await this.saveRemovedBuiltIn(removed.filter((s) => s !== normalized));
-			}
-		}
-		const current = this.getPiDeckSettings().enabledBuiltInExtensions ?? [];
-		const next = enabled ? (current.includes(normalized) ? current : [...current, normalized]) : current.filter((s) => s !== normalized);
-		if (next.length === current.length && next.every((s, i) => s === current[i])) return;
-		await this.patchPiDeckSettings({ enabledBuiltInExtensions: next });
-		this.invalidateListCache();
-	}
-
 	/** 卸载：user/unknown 走全局缓存；project 走 `pi remove -l`，projectRoot 由 IPC 层经信任校验解析后传入。 */
 	async uninstall(source: string, scope: PiExtensionSummary["scope"] = "user", options: { projectRoot?: string } = {}): Promise<void> {
 		const normalized = source.trim();
@@ -415,11 +390,7 @@ export class ExtensionManager {
 		const normalized = source.trim();
 		// 白名单判定：pi-deck-* 前缀不足以证明内置身份（插件开发 demo 同前缀，是普通本地扩展）。
 		if (isBuiltInExtensionName(normalized)) {
-			if (isDefaultDisabledBuiltInExtension(normalized)) {
-				// 默认关闭的内置扩展（GUI 桥/扩展点面板）：开关写 enabledBuiltInExtensions（opt-in）；
-				// 注意不碰 removedBuiltInExtensions——那是「默认启用扩展的用户禁用」机制，语义互斥。
-				await this.toggleBuiltIn(normalized, enabled);
-			} else if (enabled) {
+			if (enabled) {
 				await this.restoreBuiltIn(normalized);
 			} else {
 				await this.disableBuiltIn(normalized);

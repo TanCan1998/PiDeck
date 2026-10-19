@@ -18,13 +18,12 @@ import type { DomainCatalogEntry } from "./domainTypes";
 
 export const DOMAIN_CATALOG = [
 	// ── core ────────────────────────────────────────────────────────────────────
-	// 裁决：GUI 桥（例外二，BridgeServer，渲染面经 sessions:bridge-event 透传）与 standby
-	// 预热池（例外三，StandbyAgentPool，AgentManager 内部，开关 settings.standbyRuntimeEnabled）
+	// 裁决：standby 预热池（例外三，StandbyAgentPool，AgentManager 内部，开关 settings.standbyRuntimeEnabled）
+	// 与模型快照端点（例外二，ModelTraceServer，数据只落本地日志与 modelTrace:* 只读入口）
 	// 宿主于 pi 运行时域，无独立通道前缀/命名空间；红线含义 = 门面只透传、禁止扩成通用
 	// pi/模型 API 桥（AGENTS.md 核心边界）。
 	{ id: "pi", group: "core", manager: "AgentManager（pi RPC 运行时宿主；pi 安装/路径检查面注册在 systemIpc.ts）", ipcFile: ["systemIpc.ts"], preloadNamespaces: ["pi"], channelPrefix: ["pi"], aggregation: "redline" },
-	// 裁决：sessions:bridge-event 与 sessions:bridge-resync 归 sessions 命名空间（GUI 桥事件
-	// 带 sessionId+agentId+runtimeGeneration 三身份；命名沿用不纠正 R4）。agents:* 运行时事件
+	// 裁决：agents:* 运行时事件
 	// 总线经 sessions:runtime-event 信封（sourceChannel 字段）推送给 sessions.onRuntimeEvent，
 	// 故 agents 前缀由本行认领；例外 agents:rpc-log 由 rpc-logs 行认领。
 	{
@@ -69,7 +68,6 @@ export const DOMAIN_CATALOG = [
 	// 裁决：pickBackgroundImage/removeBackgroundImage 的值域是 backgrounds:*（backgroundsIpc.ts），
 	// dialog:pick-files 在 filesIpc.ts，两者同由 dialog 命名空间消费，故 backgrounds 前缀归本行。
 	{ id: "dialog", group: "workspace", manager: "系统文件选择器（无独立 Manager，dialog 命名空间消费）", ipcFile: ["ipc/filesIpc.ts", "ipc/backgroundsIpc.ts"], preloadNamespaces: ["dialog"], channelPrefix: ["dialog", "backgrounds"], aggregation: "aggregate" },
-	{ id: "plugin-dev", group: "workspace", manager: "PluginDevService", ipcFile: ["ipc/pluginDevIpc.ts"], preloadNamespaces: ["pluginDev"], channelPrefix: ["plugin-dev"], aggregation: "aggregate" },
 	{ id: "reply-actions", group: "workspace", manager: "快捷回复动作", ipcFile: ["ipc/replyActionsIpc.ts"], preloadNamespaces: ["replyActions"], channelPrefix: ["reply-actions"], aggregation: "aggregate" },
 	// ── content ─────────────────────────────────────────────────────────────────
 	{ id: "prompts", group: "content", manager: "PromptManager + XuePromptManager", ipcFile: ["ipc/storeIpc.ts"], preloadNamespaces: ["prompts"], channelPrefix: ["prompts"], aggregation: "aggregate" },

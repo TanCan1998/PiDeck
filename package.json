@@ -204,13 +204,6 @@
         ]
       },
       {
-        "from": "resources/plugin-dev",
-        "to": "plugin-dev",
-        "filter": [
-          "*.ts"
-        ]
-      },
-      {
         "from": "resources/host-plugins",
         "to": "host-plugins",
         "filter": [

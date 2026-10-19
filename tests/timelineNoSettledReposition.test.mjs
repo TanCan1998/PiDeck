@@ -84,7 +84,6 @@ function timelineHarness() {
 			"./MarkdownStream": {},
 			"./composer/quoteChip": {},
 			"./timeline/SelectionToolbar": {},
-			"../bridge/BridgeSlot": {},
 			"../../utils/clipboard": {},
 			"../../utils/notice": {},
 			"../../i18n": { t: (key) => key },

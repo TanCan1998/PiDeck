@@ -180,15 +180,6 @@
 - 设置快照 `settings.customTheme`（无前缀键，亮暗双档）在 `SettingsStore.update` 里过 `sanitizeCustomThemeSnapshot`；**快照仅 `themeSkin === "custom"` 时生效**（`applyCustomThemeTokens` 守卫），切回内置皮肤的路径（AppearanceThemePicker onPick）必须同步 `customTheme: undefined`，否则残留快照压过内置皮肤。注入函数是 App 持久化应用（useAppAppearance）与设置弹窗预览/回滚（SettingsModal）共用入口，别复制第二份注入逻辑。
 - 内置示例 `DEMO_CUSTOM_THEME` 是常量不上磁盘：列表由它推导（校验不过就不上架，防常量与校验器漂移）；其 id 保留（`saveCustomTheme` 拒绝同名保存，否则列表里会出现两张同名卡片），「复制为新主题」靠字符串改写 id 生成副本。读写删一律以 **fileId（文件名去 `.json`）** 定位文件，不用包内 id：用户文件可以改名、可以与内置示例同 id（历史 bug：按内置 id 早退 → 界面提示「已删除」而文件仍在）。删除走 `trashPath` 回收站，文件不存在时报错不谎报成功；主题文件被删后已应用主题不失效（快照内嵌设置文件）。
 
-## 插件开发支持（pluginDev 目录 + demo + AI 指南）
-
-- 能力目录单一事实源 `src/shared/pluginDevCatalog.ts`（19 落点/42 节点 kind/事件节选/硬约束），镜像自桥实现：`GUI_SLOT_METHODS`（`pi-deck-gui-bridge-gui-spec.ts`）与 `UINode` 联合（`pi-deck-gui-bridge-types.ts`）。**桥新增落点/kind 必须同步目录，否则契约测试红**（`tests/pluginDevGuide.test.mjs` 双向校验 kind、逐项校验 slot；`tests/guiExtensionPointsDoc.test.mjs` 保证 `docs/gui-extension-points.md` 含全部 id）。
-- 指南 `AI-PLUGIN-GUIDE.md` 由 `pluginDevGuide.ts` 双语生成、写入用户扩展目录并覆盖旧版（生成物不备份）；demo 插件 `resources/plugin-dev/pi-deck-demo-plugin.ts` 复制到同目录，**已存在不覆盖**（用户改过的模板）。落盘路径固定 `~/.pi/agent/extensions/`，home 与 `ExtensionManager.userHomeDir` 同源（WSL 跟随扩展列表解析），保证复制进去的文件一定被扩展页本地扫描发现。
-- `resources/plugin-dev` 必须在 `extraResources`（filter `*.ts`）里，漏了打包版「复制 demo」直接报错（源缺失显式抛错，不静默）；demo **不在** `BUILT_IN_EXTENSIONS` 白名单（不是 `-e` 注入的内置扩展，是拷给用户的起步文件）。
-- 架构/文件地图/更新步骤详见 `docs/plugin-dev-guide.md`；无热重载（改插件重启会话），这是文档化的有意取舍。
-- **应用内入口已隐藏**（宿主插件系统接替）：`ExtensionsTab` 不再渲染「插件开发」页签（`PluginDevSection.tsx`、`pluginDev:*` IPC、`PluginDevService` 与 i18n 文案全部保留，只是没有入口）。
-- 同时下线的还有桥与扩展点面板两个内置扩展：`HIDDEN_BUILT_IN_EXTENSIONS`（`pi-deck-gui-bridge.ts`、`pi-deck-ext-points.ts`）——它们仍在 `BUILT_IN_EXTENSIONS` 表内（白名单校验与启动时清理历史部署副本要用），但 `listActiveBuiltInExtensionPaths` 无条件跳过、`ExtensionManager.list` 也不补行，因此**不注入 `-e`、不上扩展页**。刻意**不**走 `removedBuiltInExtensions` 禁用机制：那条路会写用户设置并参与命令行白名单计算，属于本需求不需要的副作用；隐藏是硬开关，历史 `enabledBuiltInExtensions` 残留（opt-in）也复活不了它们。
-
 ## 宿主插件（userData/host-plugins：独立于 pi 进程的 PiDeck 原生插件）
 
 - **与 pi 扩展是两套系统**：pi 扩展（`resources/extensions/`，`-e` 注入）活在 pi 进程里管 Agent 行为；宿主插件是 PiDeck 自己的插件——面板是渲染层创建的页面内 `<webview>`（partition `host-plugin:<instanceId>`，与内置浏览器同层叠模型，可被弹层正常覆盖），由主进程 `HostPluginViewHost` 签发实例、经窗口 attach 策略（`hostPluginWebviewPolicy`）校验后加载 `userData/host-plugins/<id>/` 资产，不经 pi、不走 pi 的扩展点。代码全部在 `src/main/plugins/`（Broker/Manager/Service/Sessions/Storage/ViewHost + policy/manifest/files/archive/webviewPolicy）。IPC 通道集中在 `shared/ipc.ts` 的 `host-plugins:*` 一组。

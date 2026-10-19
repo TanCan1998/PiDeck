@@ -131,9 +131,9 @@ test("F1-6 反向闭合：70 命名空间每个被恰好一行认领（冻结例
 	}
 });
 
-test('F1-7 红线行（pi-auth / GUI 桥 / standby / enhance / DSH 插件体系对应行）aggregation === "redline"', () => {
+test('F1-7 红线行（pi-auth / standby / model-trace / enhance / DSH 插件体系对应行）aggregation === "redline"', () => {
 	const byId = new Map(DOMAIN_CATALOG.map((row) => [row.id, row]));
-	// GUI 桥与 standby 宿主 pi 行、DSH 插件体系宿主 dsh 行（裁决见 domainCatalog.ts 行内注释）。
+	// standby 池与模型快照端点宿主 pi 行、DSH 插件体系宿主 dsh 行（裁决见 domainCatalog.ts 行内注释）。
 	for (const id of ["pi", "pi-auth", "enhance", "dsh"]) {
 		const row = byId.get(id);
 		assert.ok(row, `缺少行 ${id}`);
@@ -162,7 +162,7 @@ test("F1-9 sessions 行 subdomains === [catalog, runtime, import, rewind]；conf
 test("F1-10 四处特殊裁决注释存在（空白容忍正则）", async () => {
 	const { readFile } = await import("node:fs/promises");
 	const source = await readFile(new URL("../src/shared/api/domainCatalog.ts", import.meta.url), "utf8");
-	const rulings = [/contentStore[\s\S]{0,400}prompts-store[^\n]{0,40}skills-store/, /skill-store[\s\S]{0,200}skillStore\s*独立命名空间[\s\S]{0,200}storeIpc\.ts/, /appGetChannel[\s\S]{0,120}update:get-channel/, /sessions:bridge-event[\s\S]{0,160}归\s*sessions/];
+	const rulings = [/contentStore[\s\S]{0,400}prompts-store[^\n]{0,40}skills-store/, /skill-store[\s\S]{0,200}skillStore\s*独立命名空间[\s\S]{0,200}storeIpc\.ts/, /appGetChannel[\s\S]{0,120}update:get-channel/, /agents:rpc-log[\s\S]{0,120}rpc-logs/];
 	for (const pattern of rulings) assert.ok(pattern.test(source), `缺少特殊裁决注释: ${pattern}`);
 });
 

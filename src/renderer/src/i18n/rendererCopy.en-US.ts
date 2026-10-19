@@ -3338,13 +3338,6 @@ export const enUS: Record<TranslationKey, string> = {
 	"config.builtInExtDesc.pi-deck-plan-mode": "Plan mode: produces a numbered plan with a read-only toolset first; after you choose execute/stay/revise, write tools are restored and [DONE:n] markers drive the progress widget.",
 	"config.builtInExtDesc.pi-deck-retry-no-body": 'Transient-error retry enhancement: recognizes gateway empty responses, Chinese "service unavailable" notices, stream_read_error and other transient faults outside pi\'s retry list, rewriting them so pi retries automatically.',
 	"config.builtInExtDesc.pi-deck-security-gate": "Security gate: enforces the per-session security policy on tool calls — dangerous bash commands prompt for confirmation or are rejected; policy snapshots hot-reload without restart.",
-	"config.builtInExtDesc.pi-deck-gui-bridge":
-		"GUI extension bridge (off by default; enable here when needed): routes the declarative UI extension points that Pi drops in RPC mode (header, footer, status bar, composer widgets, working line, hidden-thinking label, session title, editor body) back into the desktop app, and adds a same-shaped set of GUI-only slots plus a GUI painting factory. Takes effect after restarting the session.",
-	"config.builtInExtDesc.pi-deck-ext-points":
-		"Extension Points panel (off by default; enable here when needed — also turn on the GUI extension bridge): lists every mountable point of Pi + PiDeck in Settings, marks whether each one actually takes effect on the desktop side, and turns your picks plus a one-line purpose into a development draft you can hand to an agent. The list is read from Pi's type definitions at runtime, so there is no build-time snapshot to keep in sync. Takes effect after restarting the session.",
-	"bridge.control.cancellable": "Cancellable",
-	"bridge.node.copy": "Copy",
-	"bridge.node.copied": "Copied",
 	"config.builtInExtDesc.pi-deck-session-title": "Session title generation: after the first round settles, generates a short title asynchronously with a minimal standalone context, without touching the main conversation or transcript.",
 	"config.builtInExtDesc.pi-deck-subagents": "Subagent status bridge: subscribes to pi-subagents / acp_delegate lifecycle events and pushes each subagent's status and result snapshots to the desktop subagent panel (it does not dispatch subagents itself).",
 	"config.builtInExtDesc.pi-deck-todo": "Todo plan management: a branch-scoped, persisted current work plan changed only via explicit list/add/update/delete/replace/restore/clear tools; switching branches restores that branch's plan.",
@@ -3496,19 +3489,6 @@ export const enUS: Record<TranslationKey, string> = {
 	// Extension store (pi.dev Package Catalog): data parsed from the catalog page fetched by the main process
 	"config.extensionStoreTab": "Extension Store",
 	// Plugin development (third tab of the extensions page): guide/demo land in ~/.pi/agent/extensions
-	"config.pluginDevTab": "Develop",
-	"config.pluginDevTitle": "Write plugins for PiDeck",
-	"config.pluginDevDesc": "A plugin is a single TypeScript file — drop it into the extensions directory and restart the session. It can use every native Pi extension point (commands/tools/events/providers) and render UI into PiDeck via GUI slots.",
-	"config.pluginDevDirLabel": "Extensions directory",
-	"config.pluginDevWriteGuide": "Generate AI dev guide",
-	"config.pluginDevGuideWritten": "Guide written and revealed — send the file path to any AI to have it write the plugin",
-	"config.pluginDevCopyDemo": "Copy demo plugin",
-	"config.pluginDevCopiedToast": "Demo plugin copied — restart the session to activate (a Demo stats panel appears in the sidebar)",
-	"config.pluginDevExistsToast": "Demo plugin already exists in the extensions directory; not overwritten (it may be your modified template)",
-	"config.pluginDevDemoInstalled": "demo installed",
-	"config.pluginDevGuideInstalled": "guide written",
-	"config.pluginDevHint": "Drop a .ts file into the directory above and restart the session; disable any plugin from Settings → Extensions.",
-	"config.pluginDevFailed": "Operation failed: {error}",
 	"config.extensionStoreSearchPlaceholder": "Search pi.dev packages…",
 	"config.extensionStoreLoadError": "Failed to load the extension store. Check your network.",
 	"config.extensionStoreInstalled": "Installed {name}",

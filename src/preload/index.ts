@@ -7,7 +7,7 @@ import type { AnnouncementState } from "../shared/types/announcement";
 import type { HostPluginContext, HostPluginDesktopApi } from "../shared/types/hostPlugin";
 import type { PiDeckMcpDesktopApi } from "../shared/types/piDeckMcp";
 import type { RpcLogBatch, RpcLogEntry } from "../shared/types/rpcLog";
-import type { ModelTraceRecord } from "../shared/types/bridge";
+import type { ModelTraceRecord } from "../shared/types/modelTrace";
 import type { DshRuntimeStatus, DshRuntimeInstallProgress } from "../shared/types/dshRuntime";
 import type { DshHomeSharingState } from "../shared/types/dshHome";
 import type { UserDataNameMigrationNotice } from "../shared/types/userDataMigration";
@@ -491,14 +491,6 @@ const api = {
 		/** 把 AI 主题开发指南写入主题目录并在资源管理器定位，返回文件路径 */
 		writeGuide: (locale: "zh-CN" | "en-US") => ipcRenderer.invoke(ipcChannels.writeCustomThemeGuide, locale) as Promise<string>,
 	},
-	pluginDev: {
-		/** 插件开发支持状态：用户扩展目录 + demo/指南是否已就位 */
-		status: () => ipcRenderer.invoke(ipcChannels.pluginDevStatus) as Promise<{ userExtensionsDir: string; demoInstalled: boolean; guideInstalled: boolean }>,
-		/** 把 AI 插件开发指南写入用户扩展目录并定位，返回文件路径 */
-		writeGuide: (locale: "zh-CN" | "en-US") => ipcRenderer.invoke(ipcChannels.pluginDevWriteGuide, locale) as Promise<string>,
-		/** 复制内置 demo 插件（已存在不覆盖，返回 exists 让 UI 提示） */
-		copyDemo: () => ipcRenderer.invoke(ipcChannels.pluginDevCopyDemo) as Promise<{ status: "copied" | "exists"; path: string }>,
-	},
 	sessions: {
 		list: (projectId?: string) => ipcRenderer.invoke(ipcChannels.sessionsList, projectId) as Promise<SessionSummary[]>,
 		/** 跨会话正文搜索（Go sidecar）；null = 不可用（未构建/boot 中/失败），调用方回退标题过滤。 */
@@ -768,16 +760,6 @@ const api = {
 		uninstallDshPlugin: (input: import("../shared/types").DshPluginLifecycleInput) => ipcRenderer.invoke(ipcChannels.dshPluginUninstall, input) as Promise<unknown>,
 		sendPrompt: (input: SendSessionPromptInput) => ipcRenderer.invoke(ipcChannels.sessionsSendPrompt, input) as Promise<SendSessionPromptResult>,
 		sendUiResponse: (input: SessionUiResponseInput) => ipcRenderer.invoke(ipcChannels.sessionsUiResponse, input) as Promise<void>,
-		/**
-		 * GUI 扩展桥：回灌一次交互事件（点列表项 / 按按钮 / 输入…）。
-		 * 返回 false 表示事件被丢弃（旧 runtime 或桥未连接），渲染层静默忽略。
-		 */
-		sendBridgeEvent: (input: import("../shared/types/bridge").BridgeEventInput) => ipcRenderer.invoke(ipcChannels.sessionsBridgeEvent, input) as Promise<boolean>,
-		/**
-		 * GUI 扩展桥：请求桥**全量重推一次**（§9.4）。
-		 * 返回 false 表示请求被丢弃（旧 runtime / 桥未连），渲染层静默忽略。
-		 */
-		requestBridgeResync: (input: import("../shared/types/bridge").BridgeResyncInput) => ipcRenderer.invoke(ipcChannels.sessionsBridgeResync, input) as Promise<boolean>,
 		onRuntimeEvent: (callback: (event: SessionRuntimeEvent) => void) => subscribe(ipcChannels.sessionsRuntimeEvent, callback),
 		listRuntimes: () => ipcRenderer.invoke(ipcChannels.sessionsRuntimeList) as Promise<SessionRuntimeInfo[]>,
 		activateRuntime: (sessionId: string) => ipcRenderer.invoke(ipcChannels.sessionsRuntimeActivate, sessionId) as Promise<SessionCommandResult<SessionRuntimeInfo>> /** 汇报当前聚焦的会话（主进程据此决定非聚焦会话的 Ask 桌面通知） */,

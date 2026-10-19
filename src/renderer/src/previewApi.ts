@@ -215,8 +215,6 @@ let previewSettings: AppSettings = {
 	fontFamilyMono: "system-mono",
 	fontFamilyMonoCustom: "",
 	removedBuiltInExtensions: [],
-	// 与主进程 defaultSettings 保持一致：默认关闭的内置扩展 opt-in 列表默认空
-	enabledBuiltInExtensions: [],
 	// 与主进程 defaultSettings 保持一致（预览壳不真实播放，仅保持设置项形状完整）
 	soundAlert: createDefaultSoundAlertSettings(),
 	imageGenSize: "unset",
@@ -612,12 +610,6 @@ export function createPreviewApi(): PiDesktopApi {
 			remove: async () => undefined,
 			writeGuide: async () => "",
 		},
-		pluginDev: {
-			// 预览模式：无扩展目录可写，状态固定“未安装”
-			status: async () => ({ userExtensionsDir: "", demoInstalled: false, guideInstalled: false }),
-			writeGuide: async () => "",
-			copyDemo: async () => ({ status: "copied" as const, path: "" }),
-		},
 		sessions: {
 			list: async () => getSessions(),
 			// 预览模式无 sidecar：null 让调用方回退标题过滤
@@ -766,9 +758,6 @@ export function createPreviewApi(): PiDesktopApi {
 				runtimeGeneration: 1,
 			}),
 			sendUiResponse: async () => undefined,
-			// GUI 扩展桥：预览模式无桥端点，恒丢弃
-			sendBridgeEvent: async () => false,
-			requestBridgeResync: async () => false,
 			onRuntimeEvent: noop,
 			listRuntimes: async () => [],
 			activateRuntime: async () => ({

@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: a1edf600e5a3aaa20d0c34c1fe1a4d5f91859db8abf0b0c6dc48ccf74fd5fbf0（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: 8b2f09aa9eb39f36d1b0468cec1e00d73ae59bee788856f486740c94bedf99c0（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -3328,11 +3328,6 @@ export const zhTW: Record<TranslationKey, string> = {
 	"config.builtInExtDesc.pi-deck-plan-mode": "計劃模式：先以只讀工具集產出編號計劃，經你選擇執行/停留/修改後再恢復寫工具，[DONE:n] 標記驅動進度展示。",
 	"config.builtInExtDesc.pi-deck-retry-no-body": "瞬態錯誤重試增強：識別閘道器空響應、中文「服務暫時不可用」、stream_read_error 等 Pi 重試名單外的瞬態故障並改寫，觸發自動重試。",
 	"config.builtInExtDesc.pi-deck-security-gate": "安全門：按會話安全等級策略攔截工具呼叫——危險 bash 命令彈窗確認或直接拒絕；策略快照熱更新，無需重啟。",
-	"config.builtInExtDesc.pi-deck-gui-bridge": "GUI 擴充套件橋（預設關閉，需要時在此開啟）：把 Pi 在 RPC 模式下被丟棄的宣告式 UI 擴充套件點（頂部區/底部狀態區/狀態列/輸入框掛件/流式狀態行/摺疊思考塊標籤/會話標題/輸入框本體）接回桌面端，並另供一套寫法同形的 GUI 專屬擴充套件點與 GUI 作畫工廠。重啟會話後生效。",
-	"config.builtInExtDesc.pi-deck-ext-points": "擴充套件點面板（預設關閉，需要時在此開啟；建議同時開啟 GUI 擴充套件橋）：在設定裡列出 Pi + PiDeck 的全部可掛載點，標好每條在桌面端會不會生效；勾選並寫下用途後可生成一份交給 agent 的開發草稿。清單在執行時從 Pi 的型別定義讀取，沒有構建期快照要同步。重啟會話後生效。",
-	"bridge.control.cancellable": "可取消",
-	"bridge.node.copy": "複製",
-	"bridge.node.copied": "已複製",
 	"config.builtInExtDesc.pi-deck-session-title": "會話標題生成：首輪結束後用獨立最小上下文非同步生成簡短標題，不修改主對話與會話記錄。",
 	"config.builtInExtDesc.pi-deck-subagents": "子代理狀態橋接：訂閱 pi-subagents / acp_delegate 委託鏈的生命週期事件，把各子代理的執行狀態與結果快照推給桌面端子代理面板展示（本身不派發子代理）。",
 	"config.builtInExtDesc.pi-deck-todo": "待辦計劃管理：分支級持久化的當前工作計劃，僅通過 list/add/update/delete/replace/restore/clear 顯式工具變更，切換分支自動恢復對應計劃。",
@@ -3486,19 +3481,6 @@ export const zhTW: Record<TranslationKey, string> = {
 	// 扩展商店（pi.dev Package Catalog）：数据从主进程抓取的目录页解析而来
 	"config.extensionStoreTab": "擴充套件商店",
 	// 插件开发（扩展页第三个 tab）：指南/demo 落盘到 ~/.pi/agent/extensions
-	"config.pluginDevTab": "外掛開發",
-	"config.pluginDevTitle": "為 PiDeck 寫外掛",
-	"config.pluginDevDesc": "外掛是一個 TypeScript 檔案，放進擴充套件目錄、重啟會話即生效：可用 Pi 全部擴充套件點（命令/工具/事件/供應商），再通過 GUI 落點把介面渲染進 PiDeck。",
-	"config.pluginDevDirLabel": "擴充套件目錄",
-	"config.pluginDevWriteGuide": "生成 AI 開發指南",
-	"config.pluginDevGuideWritten": "指南已寫入並在資源管理器定位，把檔案路徑發給任意 AI 即可代寫外掛",
-	"config.pluginDevCopyDemo": "複製 demo 外掛",
-	"config.pluginDevCopiedToast": "demo 外掛已複製，重啟會話後生效（側欄會出現 Demo 統計面板）",
-	"config.pluginDevExistsToast": "demo 外掛已存在於擴充套件目錄，未覆蓋（可能是你改過的模板）",
-	"config.pluginDevDemoInstalled": "demo 已安裝",
-	"config.pluginDevGuideInstalled": "指南已寫入",
-	"config.pluginDevHint": "把 .ts 檔案放入上面的目錄並重啟會話；設定 → 擴充套件 可隨時停用某個外掛。",
-	"config.pluginDevFailed": "操作失敗：{error}",
 	"config.extensionStoreSearchPlaceholder": "搜尋 pi.dev 擴充套件包…",
 	"config.extensionStoreLoadError": "載入擴充套件商店失敗，請檢查網路後重試",
 	"config.extensionStoreInstalled": "已安裝 {name}",

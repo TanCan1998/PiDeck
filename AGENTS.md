@@ -19,12 +19,12 @@ PiDeck 是 Electron 桌面应用，在多个项目目录间管理和运行 pi RP
 - 代码归属：`src/main/pi/auth/piAuthHostLaunch.ts`（WSL 不支持，提示改用终端 `/login`）、`src/main/pi/auth/PiAuthService.ts`（NDJSON 协议）、`resources/pi-auth-host.mjs`（stdout 只放协议数据）。必须列进 `extraResources`。
 - 禁止扩展成通用 pi API 桥；渲染层只能经 `pi-auth:*` IPC 访问，不得直接 import pi SDK。
 
-**例外二：GUI 扩展桥（`pi-deck-gui-bridge` + `pi-deck-model-trace`，只允许 UI 帧、交互事件、模型请求快照）**
+**例外二：模型请求快照端点（`pi-deck-model-trace`，只允许模型请求快照）**
 
-- pi 的 `ctx.ui` 声明式方法在 RPC 模式下被降级成空实现（见 pi `docs/rpc-extension-ui.md`），要接回只能在 pi 进程内拦截。主进程起只绑 `127.0.0.1` 的端点（`src/main/pi/bridge/BridgeServer.ts`，每 agent 一份 token，spawn 时注入 `PIDECK_BRIDGE_URL`/`PIDECK_BRIDGE_TOKEN`）；pi 侧由随包分发、`-e` 注入的桥扩展（`resources/extensions/pi-deck-gui-bridge*.ts`）推拉数据。`/bridge/<token>/model-trace` 子路由承载模型请求快照（`resources/extensions/pi-deck-model-trace.ts`，完整请求体落 `userData/logs/model-traces/`，时间线只留摘要 + traceId）。
-- 线格式唯一来源：宿主侧 `src/shared/types/bridge.ts`，桥侧 `resources/extensions/pi-deck-gui-bridge-types.ts` 逐字段对齐，由 `tests/guiBridge*.test.mjs` 与 `tests/modelTraceExtension.test.mjs` 兜底。
-- 与 pi 内部的耦合已收敛到**路径定位**：`pi-deck-gui-bridge-tui.ts` 只解析 pi-tui 的安装路径（给 ext-points 做 types.d.ts 种子 + 诊断日志），不再加载模块；组件识别走实例原型链上的构造器名（serialize 的逐级匹配），不依赖 pi 安装布局。pi 升级挪动位置时定位失败只影响扩展点目录的一种子来源，必须静默降级而非报错。
-- fail-safe：端点起不来 → 不注入 env → 桥静默不工作；桥抛错 → 最多某落点缺席；两种都不得影响 pi 会话与其余功能。生命周期配对：`registerAgent` ↔ `unregisterAgent`（统一走 `AgentManager.unregisterBridgeSession`），stop/restart/删会话/退出都要注销。用户可在扩展设置页整体关掉桥（`removedBuiltInExtensions` → 不再注入），行为回到「没有桥」。
+- `resources/extensions/pi-deck-model-trace.ts` 随包分发、`-e` 注入，在 `before_provider_request` / `after_provider_response` 里把请求帧 POST 给主进程端点；完整请求体落 `userData/logs/model-traces/`，时间线只留摘要 + traceId（存储侧 `src/main/logging/ModelTrace.ts`，只读入口 `modelTrace:*` IPC）。
+- 主进程端点只绑 `127.0.0.1`（`src/main/pi/modelTrace/ModelTraceServer.ts`，每 agent 一份 token，spawn 时注入 `PIDECK_MODEL_TRACE_URL` / `PIDECK_MODEL_TRACE_TOKEN`，扩展直连该 URL 不再拼子路由），路径形如 `/trace/<token>`，强校验请求头 `x-pideck-model-trace-token`。唯一路由只承载模型快照，**禁止扩展成通用宿主控制/回调通道**。
+- 线格式唯一来源 `src/shared/types/modelTrace.ts`；扩展是自包含 `.ts`（只能 `import type`），字段与端点契约由 `tests/modelTraceExtension.test.mjs` 兜底。
+- fail-safe：端点起不来 → 不注入 env → 扩展不注册任何 handler；扩展抛错/写失败只丢追踪，不影响 pi 会话与其余功能。生命周期配对：`registerModelTraceSession` ↔ `unregisterModelTraceSession`（stop/restart/删会话/退出都要注销）。
 
 **例外三：standby 运行时池（预热 + 只读命令预览；「消费池进程」仍然只有「提前起进程」一个用途）**
 
@@ -52,7 +52,7 @@ PiDeck 是 Electron 桌面应用，在多个项目目录间管理和运行 pi RP
 ```
 src/
 ├── main/              # Electron 主进程（唯一可访问 Node/主进程能力）
-│   ├── pi/            # pi RPC 进程管理、认证、GUI 桥
+│   ├── pi/            # pi RPC 进程管理、认证、模型请求快照端点
 │   ├── sessions/      # 会话扫描、导入、SessionRuntimeCoordinator
 │   ├── git/           # GitService；git 子进程收口在 git/gitRun.ts
 │   ├── prompts/ skills/ extensions/ settings/   # 各领域 Manager
@@ -210,8 +210,7 @@ src/
 | 生图存储 | **base64 不进 JSONL**（只存 ref）；读取永远有字节上界；`<img src>` 只走 `imageContentSrc()` | 生图会话存储 |
 | 会话消息编辑/删除/重发 | 编辑/删除写 pi 原生 `context_edit`（原文不改写、费用不回退；被移出的条目界面直接不显示，原始文件仍保留）；重发仍用 `deleted` 墓碑截断分支；追加条目的 parentId 必须取当前 leaf，pi 活着禁改会话文件，三道闸不许放宽 | 会话消息编辑/删除/重发 |
 | Markdown 渲染 | 唯一引擎 MarkdownStream，禁止再引 marked/react-markdown；流式与 settle 是两条路径，**复现要看最终态** | 会话 Markdown 渲染管线 |
-| 插件开发支持 | 能力目录 `pluginDevCatalog.ts` 镜像桥实现（19 落点/42 kind），新增落点/kind 必须同步目录+契约测试；`resources/plugin-dev` 要在 extraResources；demo 已存在不覆盖 | 插件开发支持 |
-| 宿主插件 | 与 pi 扩展是两套系统（`src/main/plugins/`，不依赖 pi 进程）；授权按内容 sha256 指纹不按版本，指纹变即重新授权；历史读取 64MiB/10 万条硬预算；改 API/权限面必须同步 `src/preload/hostPlugin.ts` + `docs/host-plugin-dev-guide.md` + 脚手架（生成物过同一套 manifest 校验）；`service.local` 只给「点名权」（命令/参数/端口在主进程适配器里，id 白名单 `src/shared/localServices.ts`）；内置示例 `resources/host-plugins/` 由 `seedBuiltin` 落位（内容没被手改过才随新版刷新，手改过的永不覆盖；`seeded` 的 id 拒绝卸载）；`.pideck-plugin` NDJSON 归档逐文件 sha256；pi-context 适配器 seam 是 fail-closed 契约 | 宿主插件 |
+| 宿主插件 | 与 pi 扩展是两套系统（`src/main/plugins/`，不依赖 pi 进程）；授权按内容 sha256 指纹不按版本，指纹变即重新授权；历史读取 64MiB/10 万条硬预算；改 API/权限面必须同步 `src/preload/hostPlugin.ts` + `docs/host-plugin-dev-guide.md` + 脚手架（生成物过同一套 manifest 校验）；`service.local` 只给「点名权」（命令/参数/端口在主进程适配器里，id 白名单 `src/shared/localServices.ts`）；内置示例 `resources/host-plugins/` 由 `seedBuiltin` 落位（内容没被手改过才随新版刷新，手改过的永不覆盖；`seeded` 的 id 拒绝卸载）；`.pideck-plugin` NDJSON 归档逐文件 sha256；GitHub 安装只走 `codeload.github.com` 的 tar.gz + 自写 tar 解析（`src/main/plugins/hostPluginGitHub.ts`），禁为不可信输入引入第三方解压依赖，三条安装路径共用 `HostPluginManager.installFiles` 同一套预算与信任判定；pi-context 适配器 seam 是 fail-closed 契约 | 宿主插件 |
 | Web 端流式链路 | 流式事件源必须按后端分别注入 `WebEventStreamRouter`：pi 走 `subscribePiEvents`，DSH 等非 pi 后端走 `subscribeAgentChannelEvents`（`DshChannelToPiEvents` 把通道载荷翻成 pi 事件形状，复用同一套 UIMessageStream 适配器）；漏挂的后端在 Web 端退化成「轮询 + 磁盘重拉」（输出慢、整轮无 finish 帧 → 察觉不到结束/停止）；回合边界只认 `turnEnded: true` | Web 端流式链路 |
 | i18n 文案 | 改任何 zh-CN 词典（rendererCopy / mainProcessCopy / WebI18n / FeishuI18n）后必须重跑 `node scripts/genZhTwCopy.mjs`；四份 `*.zh-TW.ts` 是生成物禁止手改（漏跑：先 typecheck 报 TS2739，改值不加键则由 `source-sha256` 指纹门禁拦下） | 繁体中文（zh-TW 四份词典 + locale 分支点） |
 | 发版 | CHANGELOG 中英一致 → sync-release-notes → sync-workflow-choices → 打包人工 smoke | docs/release-process.md |

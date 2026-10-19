@@ -100,23 +100,19 @@ test("settings_get 的值与设置快照同源，未设置的可选模型偏好�
 	assert.equal(buildPiDeckMcpSettingsView(cleared).agent.lastUsedModel, null);
 });
 
-test("extensions_list 的 enabled 与实际 -e 注入判定同口径（含移除、opt-in、隐藏、内部适配器、历史路径形态）", () => {
+test("extensions_list 的 enabled 与实际 -e 注入判定同口径（含移除、内部适配器、历史路径形态）", () => {
 	const settings = createDefaultAppSettings();
 	// 历史数据里移除项可能存的是完整路径；注入侧会 basename 归一化，视图必须同口径。
 	settings.removedBuiltInExtensions = ["/home/someone/pi-deck-todo.ts", " pi-deck-trash-guard.ts ", "pi-deck-shell-proxy.ts"];
-	settings.enabledBuiltInExtensions = ["pi-deck-gui-bridge.ts"];
 	const view = buildPiDeckMcpExtensionsView({ settings, builtInVersion: "1.2.3" });
 
-	const injected = listActiveBuiltInExtensionPaths(roots, settings.removedBuiltInExtensions, settings.enabledBuiltInExtensions).map((file) => file.split(/[\\/]/).pop());
+	const injected = listActiveBuiltInExtensionPaths(roots, settings.removedBuiltInExtensions).map((file) => file.split(/[\\/]/).pop());
 	// 跨 vm realm 的数组原型不同，deepStrictEqual 会因 prototype 不等而失败，先落回宿主数组。
 	const enabledIds = [...view.builtIn.filter((entry) => entry.enabled).map((entry) => entry.id)];
 	assert.deepEqual([...enabledIds].sort(), [...injected].sort(), "视图的 enabled 必须等于真实注入集合");
 	assert.equal(enabledIds.includes("pi-deck-todo.ts"), false, "完整路径形态的移除项也必须生效");
 	assert.equal(enabledIds.includes("pi-deck-trash-guard.ts"), false, "带空白的移除项也必须生效");
 	assert.equal(enabledIds.includes("pi-deck-shell-proxy.ts"), true, "内部适配器不受用户移除影响");
-	for (const hidden of ["pi-deck-gui-bridge.ts", "pi-deck-ext-points.ts"]) {
-		assert.equal(enabledIds.includes(hidden), false, `隐藏扩展 ${hidden} 即使 opt-in 也不注入`);
-	}
 	assert.equal(view.builtInVersion, "1.2.3");
 });
 
