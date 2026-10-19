@@ -27,8 +27,8 @@ import {
 	PinOff,
 	Play,
 	Plus,
-	Power,
 	PanelRight,
+	Power,
 	Radio,
 	RefreshCw,
 	RotateCw,
@@ -789,10 +789,7 @@ function SidebarRunControlItems(props: { runControl: SidebarRunControl }) {
 	const primaryDisabled = disabled || !canRunSessionAction(capabilities, "start");
 	const abortDisabled = disabled || !canRunSessionAction(capabilities, "abort");
 	const reloadMode = runControl.reloadMode ?? "none";
-	const reloadAction = reloadMode === "dshHost" ? "reloadDshHost" : "reloadResources";
-	const reloadLabel = reloadMode === "dshHost" ? t("menu.restartDshHost") : t("menu.reloadResources");
-	const reloadHint = reloadMode === "dshHost" ? t("menu.restartDshHostHint") : t("menu.reloadResourcesHint");
-	const reloadEntryDisabled = reloadMode === "dshHost" ? disabled || Boolean(runControl.isReloading) : disabled || !canRunSessionAction(capabilities, "reloadResources") || Boolean(runControl.isReloading);
+	const reloadEntryDisabled = disabled || !canRunSessionAction(capabilities, "reloadResources") || Boolean(runControl.isReloading);
 	const reloadDisabled = disabled || !canRunSessionAction(capabilities, "reload") || Boolean(runControl.isReloading);
 
 	const primaryLabel = runControl.isRestarting ? t("app.restarting") : capabilities.primaryAction === "start" ? t("menu.startAgent") : t("menu.restartSession");
@@ -805,7 +802,7 @@ function SidebarRunControlItems(props: { runControl: SidebarRunControl }) {
 			<DropdownMenuSeparator />
 			<DropdownMenuItem disabled={primaryDisabled} style={primaryDisabled ? { opacity: 0.4 } : undefined} onSelect={() => runControl.onAction(capabilities.primaryAction)}>
 				<span className="inline-flex items-center gap-2">
-					{capabilities.primaryAction === "start" ? <Play className="size-3.5" aria-hidden="true" /> : <RotateCw className="size-3.5" aria-hidden="true" />}
+					{capabilities.primaryAction === "start" ? <Play className="size-3.5" aria-hidden="true" /> : <Power className="size-3.5" aria-hidden="true" />}
 					{primaryLabel}
 				</span>
 			</DropdownMenuItem>
@@ -822,11 +819,11 @@ function SidebarRunControlItems(props: { runControl: SidebarRunControl }) {
 					{t("menu.stopAnswer")}
 				</span>
 			</DropdownMenuItem>
-			{reloadMode !== "none" ? (
-				<DropdownMenuItem disabled={reloadEntryDisabled} style={reloadEntryDisabled ? { opacity: 0.4 } : undefined} title={reloadHint} onSelect={() => runControl.onAction(reloadAction)}>
+			{reloadMode === "resources" ? (
+				<DropdownMenuItem disabled={reloadEntryDisabled} style={reloadEntryDisabled ? { opacity: 0.4 } : undefined} title={t("menu.reloadResourcesHint")} onSelect={() => runControl.onAction("reloadResources")}>
 					<span className="inline-flex items-center gap-2">
 						<RefreshCw className={cn("size-3.5", runControl.isReloading && "animate-pideck-spin")} aria-hidden="true" />
-						{runControl.isReloading ? t("app.reloading") : reloadLabel}
+						{runControl.isReloading ? t("app.reloading") : t("menu.reloadResources")}
 					</span>
 				</DropdownMenuItem>
 			) : null}

@@ -10,8 +10,8 @@ import { displayProjectDirectoryName } from "../../rendererUtils";
 import { Button } from "../ui-shadcn/button";
 import { DshAgentPresetControl } from "./DshAgentPresetControl";
 import { DshAgentToolsPanel } from "./DshAgentToolsPanel";
-import { SessionRunToolbar } from "./SessionRunToolbar";
-import type { SessionRunControlView } from "../../utils/sessionCommands";
+import { SessionActionsControl } from "./SessionActionsControl";
+import type { SessionMenuModel, SessionMenuRunControl } from "./SessionActionsMenu";
 
 type HeaderActions = {
 	headerRef: RefObject<HTMLDivElement | null>;
@@ -33,8 +33,10 @@ type HeaderActions = {
 	onExitSplit?: () => void;
 	/** 状态徽章绑定的会话（runtime / 缓存命中率）；与 mode=session 的身份可并存。 */
 	statusSessionId?: string;
-	/** 本栏运行控制快照：会话头部右侧的停止/重启/重载工具条。 */
-	runControl?: SessionRunControlView;
+	/** 本栏运行控制快照：会话头部右侧的停止/重启/重载快捷钮（仅 pi 渲染）。 */
+	runControl?: SessionMenuRunControl;
+	/** 会话操作菜单（原 Tab 栏「⋯」）：重命名/复制/导出/代理/工具开关等。 */
+	menu?: SessionMenuModel;
 };
 
 type LegacySessionHeaderProps = HeaderActions & {
@@ -56,9 +58,8 @@ export type SessionHeaderProps = LegacySessionHeaderProps | ModernSessionHeaderP
 
 /**
  * 渲染会话状态徽章（+ 分屏身份标题）。
- * 运行控制的快捷入口固定在头部右侧（SessionRunToolbar）；完整菜单仍在 Tab 下拉/右键，
- * embedded 模式供 Tab 栏 actions 复用；普通模式保留分屏 pane 外壳
- * （paneTitle + 退出分屏）。
+ * 运行/重载快捷钮与会话操作「⋯」固定在右端（SessionActionsControl，原 Tab 栏「⋯」已并入）；
+ * embedded 模式供 Tab 栏 actions 复用；普通模式保留分屏 pane 外壳（paneTitle + 退出分屏）。
  */
 export function SessionHeader(props: SessionHeaderProps) {
 	const sessionMode = props.mode === "session";
@@ -86,7 +87,8 @@ export function SessionHeader(props: SessionHeaderProps) {
 			)}
 			{props.embedded && session?.backend === "dsh" && <DshAgentPresetControl sessionId={sessionId} />}
 			{sessionMode && session?.backend === "dsh" && <DshToolsButton sessionId={sessionId} />}
-			{props.runControl ? <SessionRunToolbar control={props.runControl} /> : null}
+			{/* 原 Tab 栏「⋯」已并入这里：运行控制 + 会话操作对所有后端统一入口。 */}
+			{props.runControl || props.menu ? <SessionActionsControl runControl={props.runControl} menu={props.menu} /> : null}
 		</div>
 	);
 

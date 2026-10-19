@@ -4,6 +4,7 @@ import type { HideableComposerFeatureId } from "../../../../shared/composerFeatu
 import type { QueuedPrompt } from "../../hooks/useQueuedPrompt";
 import type { NoticeId, NoticeKind } from "../../utils/notice";
 import type { SessionRunAction, SessionRunCapabilities } from "../../utils/sessionCommands";
+import type { SessionMenuModel } from "./SessionActionsMenu";
 import type { TerminalDockStateByOwner } from "../../terminalDockState";
 import type { TerminalDockSettings } from "../terminal/TerminalDock";
 
@@ -34,6 +35,10 @@ export type SessionPaneServices = {
 	/** 本栏会话运行控制：悬停工具条/菜单按 sessionId 取能力与动作（分屏各栏隔离）。 */
 	getSessionRunCapabilities: (sessionId: string | undefined) => SessionRunCapabilities | undefined;
 	runSessionControl: (sessionId: string, action: SessionRunAction) => Promise<void>;
+	/** 关闭 Agent（杀进程 + 解绑）：会话头部「⋯」菜单项与侧栏/Tab 右键同源。 */
+	requestCloseAgentForSession?: (sessionId: string) => void;
+	/** 会话头部「⋯」菜单（原 Tab 栏「⋯」）：会话操作 / 代理 / 工具开关，按 sessionId 现算。 */
+	getSessionMenu?: (sessionId: string) => SessionMenuModel | undefined;
 	stoppingAgentId?: string | null;
 	activatingSessionId?: string | null;
 	reloadingSessionId?: string | null;

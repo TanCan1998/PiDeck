@@ -18,7 +18,8 @@ import { usePaneGitInfo } from "../../hooks/usePaneGitInfo";
 import { useSessionCommandNames } from "../../hooks/useSessionCommandNames";
 import { desktopApi } from "../../desktopApi";
 import { t } from "../../i18n";
-import { requireSessionCommand, resolveSessionReloadMode, sessionCommandFailureToast, toSessionRuntimeTarget, type SessionRunControlView } from "../../utils/sessionCommands";
+import { requireSessionCommand, resolveSessionReloadMode, sessionCommandFailureToast, toSessionRuntimeTarget } from "../../utils/sessionCommands";
+import type { SessionMenuModel, SessionMenuRunControl } from "./SessionActionsMenu";
 import { resolveActiveAskRequest } from "../../utils/askUi";
 import { formatRelativeTime } from "../../utils/relativeTime";
 import { ConfirmDialog } from "../ui-shadcn/ConfirmDialog";
@@ -187,19 +188,24 @@ export const SessionRuntimeInjector = React.memo(function SessionRuntimeInjector
 	const canEditOrDeleteMessages = !isDshBackend && !isAcpBackend;
 	const canResend = !isDshBackend && !isAcpBackend;
 
-	// 本栏运行控制快照：会话头部工具条按本会话 runtime 能力渲染，分屏两栏各算各的。
-	// 重载按后端分流（pi 热重载 / DSH host 重启）；LAN Web 没有对应链路，隐藏。
+	// 本栏运行控制快照：会话头部快捷钮按本会话 runtime 能力渲染，分屏两栏各算各的。
+	// 重载只有 pi 有（DSH/ACP reloadMode=none，头部不显示运行快捷钮）；LAN Web 无对应链路。
 	const paneRunCapabilities = services.getSessionRunCapabilities(currentSessionId);
-	const paneRunControl: SessionRunControlView | undefined = paneRunCapabilities
+	const paneAgentId = currentSessionRuntime?.agentId;
+	const paneRunControl: SessionMenuRunControl | undefined = paneRunCapabilities
 		? {
 				capabilities: paneRunCapabilities,
-				isStopping: Boolean(services.stoppingAgentId && services.stoppingAgentId === currentSessionRuntime?.agentId),
+				isStopping: Boolean(services.stoppingAgentId && services.stoppingAgentId === paneAgentId),
 				isRestarting: runtime.isRestartingThisAgent || services.activatingSessionId === currentSessionId,
 				isReloading: services.reloadingSessionId === currentSessionId,
 				reloadMode: services.isLanWeb ? "none" : resolveSessionReloadMode(sessionRecord?.backend),
+				agentId: paneAgentId,
+				onCloseAgent: paneAgentId && services.requestCloseAgentForSession ? () => services.requestCloseAgentForSession?.(currentSessionId) : undefined,
 				onAction: (action) => void services.runSessionControl(currentSessionId, action),
 			}
 		: undefined;
+	// 会话操作菜单（原 Tab 栏「⋯」）：会话操作 / 代理 / 工具开关，按本栏会话现算。
+	const paneMenu: SessionMenuModel | undefined = services.getSessionMenu?.(currentSessionId);
 
 	// ── 回退到此消息：解析最近检查点 + 确认回退（仅 pi 后端注入入口）──
 	const [rewindConfirm, setRewindConfirm] = React.useState<RewindCheckpointSummary | null>(null);
@@ -273,6 +279,7 @@ export const SessionRuntimeInjector = React.memo(function SessionRuntimeInjector
 					isAgentStarting={runtime.isAgentStarting}
 					isRestarting={runtime.isRestartingThisAgent}
 					runControl={paneRunControl}
+					menu={paneMenu}
 					sessionDuration={runtime.sessionDuration}
 					showThinking={services.showThinking}
 					validCommandNames={paneValidCommandNames}

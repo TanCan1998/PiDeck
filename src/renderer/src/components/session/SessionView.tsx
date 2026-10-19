@@ -18,7 +18,7 @@ import { SessionTeamStrip } from "./SessionTeamStrip";
 import { SessionQueuedMessagesStrip } from "./SessionQueuedMessagesStrip";
 import { SessionSurfaceStage } from "./SessionSurfaceStage";
 import { ComposerArea } from "./ComposerArea";
-import type { SessionRunControlView } from "../../utils/sessionCommands";
+import type { SessionMenuModel, SessionMenuRunControl } from "./SessionActionsMenu";
 import { useReplyActions } from "../../hooks/useReplyActions";
 import { useAnimationWindow } from "../../hooks/useAnimationWindow";
 import { chatContentWidthStyle } from "./chatContentWidth";
@@ -62,8 +62,10 @@ export type SessionViewProps = {
 	// ── Header 状态 ──
 	isAgentStarting: boolean;
 	isRestarting: boolean;
-	/** 本栏运行控制快照：会话区悬停工具条用；分屏两栏各算各的。 */
-	runControl?: SessionRunControlView;
+	/** 本栏运行控制快照：会话头部快捷钮用；分屏两栏各算各的。 */
+	runControl?: SessionMenuRunControl;
+	/** 会话头部「⋯」菜单（原 Tab 栏菜单）：会话操作 / 代理 / 工具开关。 */
+	menu?: SessionMenuModel;
 	sessionDuration?: number;
 
 	// ── Timeline interaction ──
@@ -143,6 +145,7 @@ export function SessionView({
 	isAgentStarting,
 	isRestarting,
 	runControl,
+	menu,
 	sessionDuration,
 	showThinking,
 	validCommandNames,
@@ -294,6 +297,7 @@ export function SessionView({
 					duration={sessionDuration}
 					isStarting={isAgentStarting}
 					runControl={runControl}
+					menu={menu}
 				/>
 			)}
 			{/* GUI 扩展桥：会话头部状态区落点（ctx.gui.setStatusbarItem）。

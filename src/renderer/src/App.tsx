@@ -2483,6 +2483,45 @@ export function App() {
 		[setBranchByProject],
 	);
 
+	// 工具开关上收会话 Tab 栏（原右侧悬浮工具条入口的唯一挂载点）：
+	// 草稿纸 / 终端 / 外部编辑器，与抽屉开关同排。
+	// 终端按钮绑定 owner（agent 或项目），不再要求 agent 已激活；
+	// web 预览 / 无可用目标（纯聊天无项目）时隐藏，避免指向无处可开的终端。
+	const sessionToolActions: SessionToolAction[] = [
+		{
+			id: "scratch",
+			label: t("scratchPad.openTooltip"),
+			icon: <Pencil size={14} />,
+			active: scratchPad.isOpen,
+			onClick: () => scratchPad.toggle(),
+		},
+		...(!isLanWeb && terminalTarget
+			? [
+					{
+						id: "terminal",
+						label: t("app.terminal"),
+						icon: <Terminal size={14} />,
+						active: terminalOpen,
+						onClick: () => {
+							setTerminalOpenForOwner(!terminalOpen);
+						},
+					},
+				]
+			: []),
+		{
+			id: "editors",
+			label: t("app.openWithEditor"),
+			icon: <Code size={14} />,
+			active: editorsOpen,
+			onClick: (e) => {
+				const projectPath = activeAgent?.cwd || (activeProject && !isChatProject(activeProject) ? activeProject.path : null);
+				// 无项目目录也允许打开：编辑器入口在气泡内禁用并提示，
+				// 文件管理器不依赖项目（空路径由主进程回退用户主目录）
+				const anchor = adjustMenuPos(e.currentTarget.getBoundingClientRect().left - 4, e.currentTarget.getBoundingClientRect().bottom + 4, 240, 240);
+				workspace.openExternalEditorChooser(projectPath || "", anchor);
+			},
+		},
+	];
 	const sessionPaneServices = useMemo(
 		() => ({
 			simpleNavigation: settings.navigationMode === "simple",
@@ -2496,6 +2535,13 @@ export function App() {
 			restartActiveAgent,
 			getSessionRunCapabilities,
 			runSessionControl,
+			// 会话头部「⋯」菜单（原 Tab 栏「⋯」）：会话操作 / 代理 / 工具开关按本栏 sessionId 现算。
+			requestCloseAgentForSession,
+			getSessionMenu: (sessionId: string) => ({
+				sessionActions: buildTabsSessionActions(sessionId),
+				toolActions: sessionToolActions,
+				onOpenProxySetting: getSessionRecord(sessionId)?.backend !== "acp" ? () => setProxyDialogSessionId(sessionId) : undefined,
+			}),
 			stoppingAgentId,
 			activatingSessionId,
 			reloadingSessionId,
@@ -2687,46 +2733,6 @@ export function App() {
 		active: !workbenchHasGitDiff && tab.id === activeTabId,
 	}));
 	const workbenchEditorTabs = [...(simpleMode || !workbenchHasGitDiff ? fileTabs : []), ...(workbenchHasGitDiff && gitDrawerDiff ? [{ id: `git-diff:${gitDrawerDiff.filePath}`, label: gitDrawerDiff.label, title: gitDrawerDiff.filePath, active: true }] : [])];
-
-	// 工具开关上收会话 Tab 栏（原右侧悬浮工具条入口的唯一挂载点）：
-	// 草稿纸 / 终端 / 外部编辑器，与抽屉开关同排。
-	// 终端按钮绑定 owner（agent 或项目），不再要求 agent 已激活；
-	// web 预览 / 无可用目标（纯聊天无项目）时隐藏，避免指向无处可开的终端。
-	const sessionToolActions: SessionToolAction[] = [
-		{
-			id: "scratch",
-			label: t("scratchPad.openTooltip"),
-			icon: <Pencil size={14} />,
-			active: scratchPad.isOpen,
-			onClick: () => scratchPad.toggle(),
-		},
-		...(!isLanWeb && terminalTarget
-			? [
-					{
-						id: "terminal",
-						label: t("app.terminal"),
-						icon: <Terminal size={14} />,
-						active: terminalOpen,
-						onClick: () => {
-							setTerminalOpenForOwner(!terminalOpen);
-						},
-					},
-				]
-			: []),
-		{
-			id: "editors",
-			label: t("app.openWithEditor"),
-			icon: <Code size={14} />,
-			active: editorsOpen,
-			onClick: (e) => {
-				const projectPath = activeAgent?.cwd || (activeProject && !isChatProject(activeProject) ? activeProject.path : null);
-				// 无项目目录也允许打开：编辑器入口在气泡内禁用并提示，
-				// 文件管理器不依赖项目（空路径由主进程回退用户主目录）
-				const anchor = adjustMenuPos(e.currentTarget.getBoundingClientRect().left - 4, e.currentTarget.getBoundingClientRect().bottom + 4, 240, 240);
-				workspace.openExternalEditorChooser(projectPath || "", anchor);
-			},
-		},
-	];
 
 	// ── 命令面板（Ctrl/Cmd+P）────────────────────────────────────────────
 	//

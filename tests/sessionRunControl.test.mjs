@@ -162,16 +162,12 @@ test("hot reload is only available for live idle sessions with no queued sends",
 	assert.equal(sessionRunCapabilities({ state: "idle", hasBinding: true, hasInFlightQueuedPrompt: true }).canHotReload, false);
 });
 
-test("reload entry is backend-specific: pi hot reload, DSH host restart, ACP none", () => {
+test("reload entry is pi-only: DSH and ACP report no reload mode", () => {
 	assert.equal(resolveSessionReloadMode(undefined), "resources");
 	assert.equal(resolveSessionReloadMode("pi"), "resources");
-	assert.equal(resolveSessionReloadMode("dsh"), "dshHost");
+	// DSH 共享 host、ACP 由外部 CLI 托管：没有会话级 reload，头部工具条也整组不显示。
+	assert.equal(resolveSessionReloadMode("dsh"), "none");
 	assert.equal(resolveSessionReloadMode("acp"), "none");
-	// DSH host 重启由确认框做最终闸门；策略层复用 idle 判定。
-	const idle = sessionRunCapabilities({ state: "idle", hasBinding: true });
-	assert.equal(canRunSessionAction(idle, "reloadDshHost"), true);
-	const running = sessionRunCapabilities({ state: "running", hasBinding: true });
-	assert.equal(canRunSessionAction(running, "reloadDshHost"), false);
 });
 
 test("resolveSessionRunState normalizes runtime snapshots", () => {

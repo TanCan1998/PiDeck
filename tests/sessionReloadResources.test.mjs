@@ -42,13 +42,27 @@ test("composer send path is gated while a hot reload is in flight", () => {
 	assert.match(send, /sessionCommand\.reloadResourcesBusy/);
 });
 
-test("DSH reload entry reuses the existing shared-host restart IPC", () => {
+test("run controls and reload quick button are pi-only", () => {
 	const commands = read("src/renderer/src/utils/sessionCommands.ts");
-	const hook = read("src/renderer/src/hooks/session/useSessionRunControl.ts");
+	const control = read("src/renderer/src/components/session/SessionActionsControl.tsx");
 	assert.match(commands, /resolveSessionReloadMode/);
-	assert.match(commands, /dshHost/);
-	assert.match(hook, /restartDshHost/);
-	assert.match(hook, /api\.sessions\.restartDshHost\s*\(\s*\)/);
+	// DSH/ACP 没有会话级 reload：解析结果只有 resources / none，不再有 dshHost 分支。
+	assert.doesNotMatch(commands, /dshHost/);
+	assert.doesNotMatch(commands, /reloadDshHost/);
+	assert.match(control, /runControl\?\.reloadMode\s*\?\?\s*"none"\)\s*===\s*"resources"/);
+	// 「⋯」对所有后端保留（否则 DSH/ACP 丢掉会话操作入口），运行/重载快捷钮只给 pi。
+	assert.match(control, /SessionMenuItems/);
+});
+
+test("run control opts out of the legacy header button box", () => {
+	const control = read("src/renderer/src/components/session/SessionActionsControl.tsx");
+	const foundation = read("src/renderer/src/styles/foundation.css");
+	// legacy `.chat-header-actions button` 会把每个头部按钮撑成 60px 宽的面板色块 + 边框，
+	// 迷你控件必须显式顶掉这三项（utilities 层高于 legacy 层才能压住）。
+	assert.match(foundation, /\.chat-header-actions button,?\s*\n?[^{]*\{[\s\S]{0,120}min-width:\s*60px/);
+	assert.match(control, /min-w-0/);
+	assert.match(control, /border-0/);
+	assert.match(control, /bg-transparent/);
 });
 
 test("runtime adapter is always injected and listed in the extension manifest", () => {
