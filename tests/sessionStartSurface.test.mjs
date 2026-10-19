@@ -30,8 +30,11 @@ test("start surface reuses the session bottom composer, not a second input imple
 test("start surface centers the composer", () => {
 	// DeepSeek 式居中：flex 列 + 重心下移（pt-[18vh] 压向视口中心）；
 	// 2026-11 整体放大：Logo 72 / 980px / 高 300；快捷项按钮已按用户要求移除
+	// 2027-02 用户反馈输入框偏小：容器 980→1080px，并在本页把内容宽度百分比提到 100%，
+	// 否则内容宽度设置（默认 80%）会在 1080 里再收一刀，实际还是 784px
 	assert.match(surface, /pt-\[18vh\]/);
-	assert.match(surface, /max-w-\[980px\]/);
+	assert.match(surface, /max-w-\[1080px\]/);
+	assert.match(surface, /\[--chat-content-pct-set:100%\]/);
 	assert.doesNotMatch(surface, /defaultHeight=/);
 	assert.match(surface, /session-start-surface/);
 	// 移除快捷项后不再存在相关常量/交互代码

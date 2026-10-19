@@ -162,7 +162,7 @@ export function DshPermissionMenu(props: { sessionId: string; disabled?: boolean
 		<>
 			<DropdownMenu open={open} onOpenChange={setOpen}>
 				<DropdownMenuTrigger asChild>
-					<Button variant="ghost" size="icon" className="composer-bar-btn security dsh size-6 rounded-md text-foreground hover:bg-muted/60" disabled={props.disabled || sending} aria-label={t("dshPermission.menuTitle")} title={`${t("dshPermission.menuTitle")}: ${presetLabel(effectivePreset)}`}>
+					<Button variant="ghost" size="icon" className="composer-bar-btn security dsh size-7 rounded-md text-foreground hover:bg-muted/60" disabled={props.disabled || sending} aria-label={t("dshPermission.menuTitle")} title={`${t("dshPermission.menuTitle")}: ${presetLabel(effectivePreset)}`}>
 						<Icon size={15} strokeWidth={2} aria-hidden="true" />
 					</Button>
 				</DropdownMenuTrigger>

@@ -231,7 +231,8 @@ test("bottom bar keeps model and thinking together with independent one-click en
 	// 装配点契约是「contextMeter prop 注入 SessionContextMeter 且带 backend」，不绑字数：
 	// 组件长出的新 prop / 注释（ACP 分支）会不断撑大这一段，限额只会定期红一次。
 	assert.match(areaSource, /contextMeter=\{[\s\S]*?<SessionContextMeter[\s\S]*?backend=\{composer\.backend === "dsh" \? "dsh" : "pi"\}/);
-	assert.match(source, /composer-bottom-right ml-auto flex shrink-0 items-center gap-2/);
+	// 2027-02 底栏密度统一：右区与左区同一间距（gap-1 = 4px，原 gap-2 = 8px）
+	assert.match(source, /composer-bottom-right ml-auto flex shrink-0 items-center gap-1/);
 	const chip = readFileSync("src/renderer/src/components/session/ModelThinkingChip.tsx", "utf8");
 	const host = readFileSync("src/renderer/src/components/session/ComposerPickerHost.tsx", "utf8");
 	// 同一紧凑组合保留分隔点，两个入口各自直达目标，不再先弹二级导航菜单。

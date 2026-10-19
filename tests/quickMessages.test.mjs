@@ -297,9 +297,10 @@ test("底栏接线：安全控制位右侧渲染 props.quickMessagesControl，�
 	// 生图/生视频后端没有对话 runtime，飞书镜像/安全等级/DSH 权限/快捷消息四个控制位都不该出现；
 	// 一起判断是为了防止将来只屏蔽其中几个。
 	// 守卫分支内允许夹其它节点（分组竖线 Separator、按需渲染的置空前分隔符等），不锚死「<> 后紧跟第一个控制位」；
+	// 也不锚死外层形状：2027-02 统一底栏间距后三个控制位包进一个 shrink-0 分组 div，外层可能是 <> 也可能是 <div>；
 	// 但三个控制位必须都在同一个守卫分支里、且自左向右保持原顺序——顺序错（快捷消息跑到安全等级左边）
 	// 与漏进守卫外（生图会话也露出入口）都要能被判红。
-	const guardedGroup = source.match(/isMediaComposer\s*\?\s*null\s*:\s*\(\s*<>([\s\S]*?)<\/>\s*\)/);
+	const guardedGroup = source.match(/isMediaComposer\s*\?\s*null\s*:\s*\(\s*(?:<>|<div[^>]*>)([\s\S]*?)(?:<\/>|<\/div>)\s*\)/);
 	assert.ok(guardedGroup, "四个控制位必须整体挂在 isMediaComposer ? null 分支里");
 	const guardedProps = [...guardedGroup[1].matchAll(/\{(props\.(?:feishuIndicator|securityControl|quickMessagesControl))\s*\}/g)].map((match) => match[1]);
 	assert.deepEqual(guardedProps, ["props.feishuIndicator", "props.securityControl", "props.quickMessagesControl"], "守卫分支内必须依次渲染飞书/安全等级/快捷消息，且三个都在");

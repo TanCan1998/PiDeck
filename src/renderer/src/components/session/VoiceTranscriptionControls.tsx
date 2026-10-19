@@ -29,7 +29,7 @@ export function VoiceTranscriptionControls(props: { state: VoiceTranscriptionSta
 			{props.state === "idle" ? (
 				<VoiceTip label={t("voice.start")}>
 					<Button type="button" variant="ghost" size="icon" ripple disabled={props.disabled} aria-label={t("voice.start")} className={BAR_BUTTON_CLASS} onClick={props.onStart}>
-						<Mic className="size-3.5" aria-hidden="true" />
+						<Mic className="size-[15px]" aria-hidden="true" />
 					</Button>
 				</VoiceTip>
 			) : props.state === "recording" ? (
@@ -42,7 +42,7 @@ export function VoiceTranscriptionControls(props: { state: VoiceTranscriptionSta
 					</VoiceTip>
 					<VoiceTip label={t("voice.cancel")}>
 						<Button type="button" variant="ghost" size="icon" aria-label={t("voice.cancel")} className={BAR_BUTTON_CLASS} onClick={props.onCancel}>
-							<X className="size-3.5" aria-hidden="true" />
+							<X className="size-[15px]" aria-hidden="true" />
 						</Button>
 					</VoiceTip>
 				</div>
@@ -59,7 +59,7 @@ export function VoiceTranscriptionControls(props: { state: VoiceTranscriptionSta
 					    之前这一支只渲染 loading 按钮，用户根本点不到取消。 */}
 					<VoiceTip label={t("voice.cancel")}>
 						<Button type="button" variant="ghost" size="icon" aria-label={t("voice.cancel")} className={BAR_BUTTON_CLASS} onClick={props.onCancel}>
-							<X className="size-3.5" aria-hidden="true" />
+							<X className="size-[15px]" aria-hidden="true" />
 						</Button>
 					</VoiceTip>
 				</div>

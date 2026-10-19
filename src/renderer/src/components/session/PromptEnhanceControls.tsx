@@ -43,7 +43,7 @@ export function PromptEnhanceControls(props: { disabled?: boolean; view: PromptE
 		<Tooltip>
 			<TooltipTrigger asChild>
 				<Button type="button" variant="ghost" size="icon" ripple disabled={props.disabled} aria-label={t("enhance.start")} className={BAR_BUTTON_CLASS} onClick={props.onStart}>
-					<Sparkles className="size-3.5" aria-hidden="true" />
+					<Sparkles className="size-[15px]" aria-hidden="true" />
 				</Button>
 			</TooltipTrigger>
 			<TooltipContent>{startTip}</TooltipContent>

@@ -352,7 +352,7 @@ export function ComposerSendControls(props: {
 	// 主题色圆钮（随外观主题主色：经典=近黑、森系绿=鼠尾草绿）。
 	// 空闲发送；忙碌且输入框为空时才变停止（清空输入即回到停止）；
 	// 忙碌但有内容时保持发送（走 steer/followUp 投递，见 busySendDelivery）。
-	// 主钮尺寸对齐底栏其余按钮（28px），避免「过大不统一」。
+	// 主钮尺寸对齐底栏其余按钮（28px 盒子 / 15px 字形），避免「过大不统一」。
 	const buttonState = resolveComposerSendButtonState({
 		isAgentBusy: props.isAgentBusy,
 		hasContent: props.hasContent,
@@ -380,7 +380,7 @@ export function ComposerSendControls(props: {
 				disabled={disabled}
 				onClick={primaryStops ? props.onStop : props.onSend}
 			>
-				{props.isGeneratingImage ? <LoaderCircle size={14} strokeWidth={2.4} className="animate-pideck-spin" aria-hidden="true" /> : primaryStops ? <Square size={12} strokeWidth={0} fill="currentColor" aria-hidden="true" /> : <ArrowUp size={14} strokeWidth={2.4} aria-hidden="true" />}
+				{props.isGeneratingImage ? <LoaderCircle size={15} strokeWidth={2.4} className="animate-pideck-spin" aria-hidden="true" /> : primaryStops ? <Square size={12} strokeWidth={0} fill="currentColor" aria-hidden="true" /> : <ArrowUp size={15} strokeWidth={2.4} aria-hidden="true" />}
 			</Button>
 			{hasSplitMenu ? (
 				<DropdownMenu>

@@ -49,18 +49,23 @@
 }
 
 /* 与 composer 底栏的紧凑控件保持同一高度；透明底、无文字 label——入口用飞书三色 Logo（main 对齐项）。 */
+/* 底栏图标按钮统一规格（2027-02）：与 composer-bar-btn 一致——28×28 盒子、圆角 --radius-md、
+   无横向内边距；否则同样是图标按钮却宽 30px，与邻居的视觉间隙就大一圈。飞书已连接/未连接只改
+   图标透明度，不改盒子尺寸。 */
 .composer-bottom-left .feishu-link-trigger {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 5px;
   min-width: 0;
   max-width: min(156px, 100%);
-  height: var(--control-height-xs);
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
   border: 0;
-  border-radius: var(--radius-xs);
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text-secondary);
-  padding: 0 8px;
+  padding: 0;
   font-size: var(--font-size-caption);
   font-weight: 600;
   cursor: pointer;
@@ -97,8 +102,8 @@
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  width: 14px;
-  height: 14px;
+  width: 15px;
+  height: 15px;
   line-height: 0;
   opacity: 0.5;
   transition: opacity 0.15s ease;

@@ -100,7 +100,7 @@ export function SecurityLevelMenu(props: { sessionId: string; disabled?: boolean
 	return (
 		<DropdownMenu>
 			<DropdownMenuTrigger asChild>
-				<Button variant="ghost" size="icon" className={`composer-bar-btn security size-6 rounded-md text-foreground hover:bg-muted/60 ${enabled ? "security-active" : "opacity-60"}`} disabled={props.disabled || saving} aria-label={t("security.menuTitle")} title={`${t("security.menuTitle")}: ${levelName}`}>
+				<Button variant="ghost" size="icon" className={`composer-bar-btn security size-7 rounded-md text-foreground hover:bg-muted/60 ${enabled ? "security-active" : "opacity-60"}`} disabled={props.disabled || saving} aria-label={t("security.menuTitle")} title={`${t("security.menuTitle")}: ${levelName}`}>
 					<Icon size={15} strokeWidth={2} aria-hidden="true" />
 				</Button>
 			</DropdownMenuTrigger>

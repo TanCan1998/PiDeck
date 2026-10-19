@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback, type ReactNode } from "react"
 import { AnimatePresence } from "motion/react";
 import { useAtomValue } from "jotai";
 import { dshModuleHiddenAtom, imageGenModuleHiddenAtom, videoGenModuleHiddenAtom, acpEnabledAtom, acpToolsAtom } from "../../atoms";
-import { AlertCircle, BrainCircuit, Check, ChevronDown, ChevronLeft, ChevronRight, Clapperboard, CornerDownLeft, Eye, EyeOff, FileText, GitBranch, ImageIcon, ListChecks, Loader2, Paperclip, Plus, RefreshCw, Settings2, Sparkles, Star, Target, X, Zap } from "lucide-react";
+import { AlertCircle, BrainCircuit, Check, ChevronDown, ChevronLeft, ChevronRight, Clapperboard, CornerDownLeft, Eye, EyeOff, FileText, GitBranch, ImageIcon, LayoutGrid, ListChecks, Loader2, Paperclip, RefreshCw, Settings2, Sparkles, Star, Target, X, Zap } from "lucide-react";
 import { t, type TranslationKey } from "../../i18n";
 import type { PromptEnhanceView } from "../../hooks/usePromptEnhance";
 import { PromptEnhanceControls } from "./PromptEnhanceControls";
@@ -275,7 +275,10 @@ export function ComposerBackendPicker(props: { backend: AgentBackend; acpToolId?
 		>
 			<SelectTrigger
 				size="sm"
-				className="composer-bar-btn backend h-7 gap-1 rounded-md border-transparent bg-transparent px-1.5 text-control font-semibold text-foreground hover:bg-muted/60 focus-visible:border-transparent focus-visible:ring-0 data-[state=open]:border-transparent data-[state=open]:bg-muted/60 data-[state=open]:ring-0 [&_[data-slot='select-icon']]:hidden"
+				/* size-7 + p-0 + justify-center = 与底栏其它图标按钮同一个 28×28 盒子；
+				   data-[size=sm]:h-7 必需——SelectTrigger 基底高度是 data 变体，
+				   base h-7 既压不过它，也不会被 tailwind-merge 合成一条。 */
+				className="composer-bar-btn backend size-7 justify-center rounded-md border-transparent bg-transparent p-0 text-control font-semibold text-foreground hover:bg-muted/60 focus-visible:border-transparent focus-visible:ring-0 data-[size=sm]:h-7 data-[state=open]:border-transparent data-[state=open]:bg-muted/60 data-[state=open]:ring-0 [&_[data-slot='select-icon']]:hidden"
 				title={`${triggerLabel} · ${t("session.backendPickerHint")}`}
 				aria-label={triggerLabel}
 			>
@@ -357,7 +360,7 @@ function ComposerBranchSwitcher(props: { gitInfo: GitBranchInfo; disabled?: bool
 							count: props.gitInfo.branches.length,
 						})}
 					>
-						<GitBranch size={14} strokeWidth={1.8} aria-hidden="true" />
+						<GitBranch size={15} strokeWidth={1.8} aria-hidden="true" />
 						<span className="composer-bar-branch-name min-w-0 truncate">{props.gitInfo.current}</span>
 						<ChevronDown size={12} strokeWidth={2} aria-hidden="true" className="shrink-0 text-muted-foreground" />
 					</Button>
@@ -580,7 +583,10 @@ export function ComposerBottomBar(props: {
 	return (
 		<div className="composer-bottom-bar min-h-10 shrink-0 border-t border-transparent px-2.5 py-2">
 			<div className="composer-bottom-layout flex min-w-0 items-center gap-2">
-				<div className="composer-bottom-left flex min-w-0 flex-nowrap items-center gap-0.5 overflow-x-auto overflow-y-hidden [scrollbar-width:none]">
+				{/* 底栏统一节奏（2027-02 用户反馈「logo 大小、间隙不统一」）：所有图标控件 28×28 盒子（size-7）、
+				图标字形 15px、控件间距 4px（gap-1）——左区、会话级开关组、右区共用同一套数值，
+				不再出现「24px 盒子 + 2px 间距」与「28px 盒子 + 8px 间距」两种密度并存。 */}
+				<div className="composer-bottom-left flex min-w-0 flex-nowrap items-center gap-1 overflow-x-auto overflow-y-hidden [scrollbar-width:none]">
 					{props.onChangeBackend ? (
 						<>
 							{/* picker 组内高亮当前工具（acpToolId），工具改选也走同一条后端切换链 */}
@@ -594,7 +600,7 @@ export function ComposerBottomBar(props: {
 						   点击时弹提示说明锁定原因与换后端的途径（新建会话）。 */
 						<button
 							type="button"
-							className="composer-bar-btn backend inline-flex h-7 cursor-pointer items-center gap-1 rounded-md px-1.5 text-control font-semibold text-foreground hover:bg-muted/60"
+							className="composer-bar-btn backend inline-flex size-7 cursor-pointer items-center justify-center rounded-md p-0 text-control font-semibold text-foreground hover:bg-muted/60"
 							title={lockedAcpTool ? `${lockedAcpTool.name} · ${t("session.backendLockedHint")}` : t("session.backendLockedHint")}
 							aria-label={lockedAcpTool ? `${lockedAcpTool.name} · ${t("session.backendLockedHint")}` : t("session.backendLockedHint")}
 							onClick={() => showNotice(t("session.backendLockedNotice"), 5000)}
@@ -637,12 +643,12 @@ export function ComposerBottomBar(props: {
 								data-testid="composer-add-menu"
 								/* 与后端/模式触发器同族：菜单关闭时 Radix 把焦点还给触发器，Button 基底的 ring 会闪一圈
 								   （2026-10 用户反馈过 focus 环闪）。这里用 bg 高亮代替 ring，指针用户不闪、键盘用户仍有焦点反馈。 */
-								className="composer-bar-btn icon size-6 rounded-md text-foreground hover:bg-muted/60 focus-visible:border-transparent focus-visible:bg-muted/60 focus-visible:ring-0"
+								className="composer-bar-btn icon size-7 rounded-md text-foreground hover:bg-muted/60 focus-visible:border-transparent focus-visible:bg-muted/60 focus-visible:ring-0"
 								aria-label={t("app.composerAddTitle")}
 								title={t("app.composerAddTitle")}
 								disabled={props.disabled}
 							>
-								<Plus size={15} strokeWidth={2} aria-hidden="true" />
+								<LayoutGrid size={15} strokeWidth={2} aria-hidden="true" />
 							</Button>
 						</DropdownMenuTrigger>
 						<DropdownMenuContent align="start" sideOffset={4} className="min-w-44">
@@ -686,11 +692,11 @@ export function ComposerBottomBar(props: {
 					   且 SecurityControl 按 backend 分发时没有 imagegen 分支会误显示成 pi 安全等级菜单；
 					   飞书镜像把输入同步到 IM，生图/生视频的 prompt 不走会话 runtime；
 					   快捷消息同理（正文是给对话模型的指令），四个控制位一起屏蔽。 */}
-					{/* 会话级开关组（飞书/安全等级/快捷消息）：组内 gap-0，不再叠父级 gap 与竖线 margin。
-						图标按钮之间原本各有 6px 透明内边距（28px 盒子包 15px 图标），叠上去会出现「空列」
-						（用户反馈图标不紧凑）；按钮本体统一 size-6（24px，仍满足最小点按尺寸）。 */}
+					{/* 会话级开关组（飞书/安全等级/快捷消息）：与左区其余控件同一套尺寸与间距
+						（28px 盒子 + gap-1）；飞书触发器原本还带 8px 横向内边距（28px 盒子却宽 30px），
+						已收掉（见 integrations.css），否则同样是图标按钮却比邻居宽一圈。 */}
 					{isMediaComposer ? null : (
-						<div className="flex shrink-0 items-center gap-0">
+						<div className="flex shrink-0 items-center gap-1">
 							{props.feishuIndicator}
 							{props.securityControl}
 							{props.quickMessagesControl}
@@ -740,7 +746,7 @@ export function ComposerBottomBar(props: {
 					    （request/context 的 contextWindow + 消息估算），圆环不再因缺数据隐藏，
 					    原独立 compact 按钮移除，避免双入口。 */}
 				</div>
-				<div className="composer-bottom-right ml-auto flex shrink-0 items-center gap-2">
+				<div className="composer-bottom-right ml-auto flex shrink-0 items-center gap-1">
 					{/* 分支只读 chip 升级为可切换下拉：当前分支即触发器，展开列表选目标分支后
 					    先弹确认（切换会携带未提交更改），确认后才调栏级 switchBranch（绑定本栏项目）。 */}
 					{props.gitInfo?.current && props.onSwitchBranch ? (
@@ -753,7 +759,7 @@ export function ComposerBottomBar(props: {
 								count: props.gitInfo.branches.length,
 							})}
 						>
-							<GitBranch size={14} strokeWidth={1.8} aria-hidden="true" />
+							<GitBranch size={15} strokeWidth={1.8} aria-hidden="true" />
 							<span className="composer-bar-branch-name truncate">{props.gitInfo.current}</span>
 						</span>
 					) : null}
