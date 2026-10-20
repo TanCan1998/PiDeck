@@ -399,7 +399,9 @@ test("ProviderUsageDetails renders each usage window as a labeled progress row",
 	assert.match(source, /usageWindowLabelText\(window\.key, t\)/);
 	assert.match(source, /t\("sessionContext\.usageWindowRemaining", \{ n: formatAmount\(remaining\) \}\)/);
 	// 用超封顶 100、≥90% 红字警示（与 periods 同判断）
-	assert.match(source, /Math\.min\(100, Math\.round\(\(used \/ total\) \* 100\)\)/);
+	// 封顶与 used 缺失时 total-remaining 反推都由 providerUsageDisplay.usageWindowPercent 负责（#380），
+	// 面板只做四舍五入取整——两处各算一份正是「详情面板恒显示 —」的根因。
+	assert.match(source, /usageWindowPercent\(window\)/);
 	assert.match(source, /pct != null && pct >= 90/);
 });
 
