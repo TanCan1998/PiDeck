@@ -142,6 +142,8 @@ src/
 
 **窗口与 webview**：主窗口基线 `contextIsolation: true` + `nodeIntegration: false` + `webviewTag: true`（仅主窗口），新增窗口逐项评估禁止默认全开；Chromium 沙箱默认关闭是刻意的（Windows 安全软件/旧驱动在沙箱初始化触发 0x80000003），关闭时显式 `appendSwitch("no-sandbox")`，开关改动需整应用重启；`setWindowOpenHandler` 主窗口与 webview guest 都要注册（走 `openExternalUrl` 并 deny）；webview 用专属 `partition` 强制 `sandbox: true`/`nodeIntegration: false`/`webSecurity: true`，删除外部传入的 `preload`/`allowpopups`（见 `configureBrowserPanelWebviewHost`），`did-attach-webview` 校验 partition 不符立即 close，导航白名单 `will-frame-navigate`/`will-redirect`/`setWindowOpenHandler` 三层都要过（只拦一层会被重定向绕过）；自定义标题栏改动要验证三平台控制按钮、拖拽区、双击最大化。
 
+**E2E 测试窗口（不打扰模式）**：`PIDECK_E2E=1` 时主窗口默认摆到屏幕外（`src/main/e2eWindowMode.ts`：`setPosition(-32000,-32000)` + `setSkipTaskbar(true)` + `showInactive`），并关闭后台节流（`backgroundThrottling: false` 与 `disable-background-timer-throttling`/`disable-renderer-backgrounding`/`disable-backgrounding-occluded-windows` + `disable-features=CalculateNativeWinOcclusion`）——否则 Windows 遮挡判定会把屏幕外窗口当不可见、节流渲染，Playwright 点击/截图随机卡死。**跑 e2e 不得把窗口弹到用户桌面最前或抢焦点**：新增窗口/新 fixture 必须沿用同一开关，禁止 `show()`/`focus()`/`maximize()` 抢前台；需要真实窗口位置/几何断言的用例（如 `window-memory`、`quick-task`）必须 `test.use({ e2eWindowMode: "visible" })`（fixture 下发 `PIDECK_E2E_WINDOW_MODE=visible`），调试时想看窗口同样设该环境变量。摆放失败必须静默回退，不允许阻断 e2e（守卫：`tests/e2eWindowMode.test.mjs` + `e2e/window-background.spec.ts`）。
+
 **IPC 与 preload**：preload 不做业务，只做校验后的转发与订阅封装；事件推送 preload 侧返回 unsubscribe 函数，渲染层卸载必须退订。
 
 **原生模块与打包**：node-pty 等原生模块必须 `asarUnpack` 并 postinstall 修权限（`scripts/fix-pty-permissions.js`）；afterPack 删 node_modules 冗余文件必须有对应测试（`tests/afterPackCleanup.test.mjs`）；资源路径用 `process.resourcesPath`/`app.getAppPath()` 推导，禁止裸 `__dirname` 假设 asar 可读，preload 路径走 `preloadPath.ts`。**安装器完成页的「运行 PiDeck」必须直接启动 `$INSTDIR\${APP_EXECUTABLE_FILENAME}`**（`build/installer.nsh` 的 `customFinishPage`）——electron-builder 默认用 `$launchLink`，它优先取开始菜单 `PiDeck.lnk`，那条 .lnk 可能被指向另一份同名同版本的 PiDeck（解包构建/旧安装目录，实例 2026-10），装完点运行会跑错程序且版本号看着是对的；守卫测试 `tests/nsisFinishPageLaunch.test.mjs`。**原生模块禁止顶层静态 import**——JS 包装可能在模块求值时同步加载对应平台二进制（koffi 即如此），跨 arch 打包时可选依赖（`@koromix/koffi-*`）不会自动跟随，缺二进制环境启动即崩（issue #313）；必须经专属模块函数内 `createRequire` 惰性加载 + try/catch 降级，守卫测试见 `tests/cua/cuaKoffiFallback.test.mjs`。
@@ -165,6 +167,7 @@ src/
 | 针对性单测（改动涉及的测试文件，日常必跑） | `node --test tests/<相关>.test.mjs` |
 | 全量单测（仅跨域大改动/合并前最终确认） | `npm test` |
 | 单测串行（排查并发干扰） | `npm run test:serial` |
+| E2E（窗口默认屏幕外、不打扰；需要看窗口时设 `PIDECK_E2E_WINDOW_MODE=visible`） | `npx playwright test e2e/<相关>.spec.ts` |
 | 验证退出码（硬性） | 门禁命令禁止用管道吞 rc：`npm run typecheck \| tail` 返回的是 tail 的 0。用 `set -o pipefail` 或重定向到文件后查 `$?`（测试经沙箱 TS 转译对语法错误容错，可能假绿，typecheck/format 是唯一门禁——2026-10 实际漏过一个缺括号） |
 
 改动影响主进程/IPC/会话链路：typecheck + 相关针对性测试；纯 UI 样式微调至少 typecheck。
