@@ -72,9 +72,46 @@ export function planMessageContextMenu(input: MessageContextMenuInput): MessageC
 	return { selectionText, messageText, liveText: "" };
 }
 
+/** 视口矩形（Range.getClientRects 的元素形状，只取判断命中需要的字段）。 */
+export type ClientRectLike = { left: number; top: number; right: number; bottom: number };
+
+/**
+ * 右键落点是否压在选区高亮上（任一行矩形命中即可，slack 给 2px 容差）。
+ *
+ * 为什么不能只用 Selection.containsNode(target)：右键事件的 target 是段落元素时，
+ * 它是一个「包含选区的祖先」而不是选区内的节点——Chromium 对祖先的 containsNode
+ * 返回值不稳定（实测同一段落里有时 true 有时 false），而落点落在**选区末尾的留白**上
+ * （高亮外几像素）时 containsNode 也照样命中；那会被误判成「选中内容复制」。
+ * 用几何矩形判定：只有真正压在高亮行上才算「复制选中内容」，点在高亮外则走整条消息复制。
+ */
+export function isPointInsideRects(rects: readonly ClientRectLike[], x: number, y: number, slack = 2): boolean {
+	return rects.some((rect) => x >= rect.left - slack && x <= rect.right + slack && y >= rect.top - slack && y <= rect.bottom + slack);
+}
+
+/** 复制动作种类：与菜单项一一对应（一次右键只给一组复制目标，见 planMessageContextMenuCopyKinds）。 */
+export type MessageContextMenuCopyKind = "selection" | "messageText" | "messageMarkdown" | "liveText";
+
+/**
+ * 一次右键的复制菜单项（有序，最多三项）。
+ *
+ * 为什么必须互斥（用户反馈「复制就有三个，选项重复」）：有选区时「复制」= 复制选中内容，
+ * 若再并列「复制为文本 / 复制为 Markdown」（整条消息），三个都叫复制、目标却不同，用户无法
+ * 从文案判断该点哪个。所以按优先级只给一组：
+ * - 有选区 → 只有「复制」（选中内容才是用户当前关心的目标）；
+ * - 无选区、命中消息原文 → 整条消息的「复制为文本 / 复制为 Markdown」两种形态；
+ * - 无选区、只有 live 流式正文（无原始 markdown）→ 只有「复制为文本」（DOM 文本回退）。
+ * 「全选」不计入复制项，由视图按 canSelectAll 单独渲染。
+ */
+export function planMessageContextMenuCopyKinds(plan: MessageContextMenuPlan): MessageContextMenuCopyKind[] {
+	if (plan.selectionText) return ["selection"];
+	if (plan.messageText) return ["messageText", "messageMarkdown"];
+	if (plan.liveText) return ["liveText"];
+	return [];
+}
+
 /** 菜单是否有可执行项：全空时右键不打开空菜单（落在空白 / 无正文区域）。 */
 export function hasMessageContextMenuCopy(plan: MessageContextMenuPlan): boolean {
-	return Boolean(plan.selectionText || plan.messageText || plan.liveText);
+	return planMessageContextMenuCopyKinds(plan).length > 0;
 }
 
 /**

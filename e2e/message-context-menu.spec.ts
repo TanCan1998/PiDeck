@@ -49,19 +49,20 @@ function menuLocator(window: Page) {
 }
 
 type ViewportPoint = { x: number; y: number };
+type ViewportRect = { x: number; y: number; width: number; height: number };
 
 /**
- * 最终回答第一段在视口内的右键落点（页面内一次 scroll + 量取）。
+ * 最终回答第一段的视口矩形（页面内一次 scroll + 量取）。
  *
  * 为什么不用 Playwright locator 做坐标：settle 后 MarkdownStream 先保持流式末帧的轻量渲染，
  * 再用 requestIdleCallback（timeout 1500）在空闲时把正文整块重挂成全量渲染；这段时间里
  * 段落节点会被替换，已拿到的 locator 句柄随即 detached —— scrollIntoViewIfNeeded /
- * boundingBox 会抛 "Element is not attached to the DOM"。每次都在页面里按当下 DOM 重新查询，
- * 就不会踩到「量完坐标、点击前节点被换掉」这一类时序。
- * 重试走 expect.poll：DOM 尚未挂载/尺寸为零时返回 null 继续轮询。
+ * boundingBox 会抛 "Element is not attached to the DOM"（实测在负载高的机器上第一条用例
+ * 就命中了）。每次都在页面里按当下 DOM 重新查询，就不会踩到「量完坐标、点击前节点被换掉」。
+ * 重试走 expect.poll：DOM 尚未挂载 / 尺寸为零 / 不在视口内时返回 null 继续轮询。
  */
-async function answerParagraphPoint(window: Page): Promise<ViewportPoint> {
-	let latest: ViewportPoint | null = null;
+async function answerParagraphRect(window: Page): Promise<ViewportRect> {
+	let latest: ViewportRect | null = null;
 	await expect
 		.poll(
 			async () => {
@@ -71,16 +72,104 @@ async function answerParagraphPoint(window: Page): Promise<ViewportPoint> {
 					// 每次重新居中：复制/上一次右键后的滚动不影响下一次落点。
 					paragraph.scrollIntoView({ block: "center" });
 					const rect = paragraph.getBoundingClientRect();
-					if (rect.width === 0 || rect.height === 0) return null;
-					return { x: rect.x + 20, y: rect.y + rect.height / 2 };
+					if (rect.width < 40 || rect.height <= 0) return null;
+					// 鼠标事件用视口坐标：完整落在视口内才可点
+					if (rect.top < 8 || rect.bottom > window.innerHeight - 8) return null;
+					return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
 				});
 				return latest;
 			},
 			{ timeout: 10_000, message: "最终回答第一段必须已挂载且可测量" },
 		)
 		.not.toBeNull();
+	const rect: ViewportRect | null = latest;
+	if (!rect) throw new Error("final answer paragraph rect is unavailable");
+	return rect;
+}
+
+/** 最终回答第一段的右键落点（段落左侧 20px、垂直居中）。 */
+async function answerParagraphPoint(window: Page): Promise<ViewportPoint> {
+	const rect = await answerParagraphRect(window);
+	return { x: rect.x + 20, y: rect.y + rect.height / 2 };
+}
+
+/**
+ * 当前高亮选区的可命中点（选区矩形中心偏左）。
+ *
+ * 为什么不在拖选前把坐标算死：settle 后的「回复定位」流水线会在停顿若干百毫秒后把本轮
+ * 拉到视口中上方，段落位置会整体移动（实测拖选后高亮矩形比拖选前量到的段落坐标高 40+px），
+ * 按旧坐标右键就落到高亮外，Chromium 先清选区、菜单退化成「整条消息复制」。
+ * 这里在拖选完成后按**实时选区矩形**重新取点，天然跟着布局漂移走。
+ */
+async function selectionCenterPoint(window: Page): Promise<ViewportPoint> {
+	let latest: ViewportPoint | null = null;
+	await expect
+		.poll(
+			async () => {
+				latest = await window.evaluate(() => {
+					const selection = window.getSelection();
+					if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
+					const rect = selection.getRangeAt(0).getBoundingClientRect();
+					if (rect.width < 4 || rect.height <= 0) return null;
+					if (rect.top < 8 || rect.bottom > window.innerHeight - 8) return null;
+					return { x: rect.left + Math.min(24, rect.width / 2), y: rect.top + rect.height / 2 };
+				});
+				return latest;
+			},
+			{ timeout: 10_000, message: "拖选后必须有可见的高亮矩形" },
+		)
+		.not.toBeNull();
 	const point: ViewportPoint | null = latest;
-	if (!point) throw new Error("final answer paragraph point is unavailable");
+	if (!point) throw new Error("selection center point is unavailable");
+	return point;
+}
+
+/**
+ * 在最终回答第一段里拖出非空选区（失败重试）。
+ *
+ * settle 后的「回复定位」流水线会延迟把本轮拉到视口中上方，段落可能在「量坐标 → 拖选」
+ * 之间整体位移，导致 mouse down/up 落在空白上、选区为空。重试时重新量取即可；
+ * 后面的右键落点走「实时选区矩形」，不依赖这里的旧坐标。
+ */
+async function dragSelectParagraphText(window: Page): Promise<string> {
+	let last = "";
+	for (let attempt = 0; attempt < 6; attempt += 1) {
+		const rect = await answerParagraphRect(window);
+		const y = rect.y + rect.height / 2;
+		await dragSelect(window, { x: rect.x + 16, y }, { x: rect.x + Math.min(120, rect.width - 8), y });
+		last = (await selectedText(window)).trim();
+		if (last.length > 0) return last;
+		await window.waitForTimeout(120);
+	}
+	throw new Error(`拖不出非空选区（最后一次：${JSON.stringify(last)}）`);
+}
+
+/**
+ * live 流式正文的可点击点（页面内实时量取，单次 evaluate）。
+ *
+ * 不能用 locator.boundingBox()：流式正文每次 chunk 都重挂/位移，等它「稳定」往往等到流结束、
+ * live 副本卸载，坐标随即失效（实测右键落到 settled 正文上，菜单项与断言全变）。
+ */
+async function liveAnswerPoint(window: Page): Promise<ViewportPoint> {
+	let latest: ViewportPoint | null = null;
+	await expect
+		.poll(
+			async () => {
+				latest = await window.evaluate(() => {
+					const nodes = document.querySelectorAll<HTMLElement>(".message-timeline [data-live-answer]");
+					const element = nodes[nodes.length - 1];
+					if (!element) return null;
+					const rect = element.getBoundingClientRect();
+					if (rect.width < 40 || rect.height < 20 || rect.top < 8 || rect.bottom > window.innerHeight - 8) return null;
+					return { x: rect.left + 24, y: rect.top + 14 };
+				});
+				return latest;
+			},
+			{ timeout: 30_000, message: "live 流式正文必须仍挂载且可点击" },
+		)
+		.not.toBeNull();
+	const point: ViewportPoint | null = latest;
+	if (!point) throw new Error("live answer point is unavailable");
 	return point;
 }
 
@@ -111,22 +200,22 @@ test("message context menu: right click on a selection copies exactly the select
 	const composer = await startComposer(window);
 	const answer = await sendMdemoAndSettle(window, composer, "MDEMO 右键复制选区回归");
 
-	// 第一段是单行短句：拖选后段内选区稳定，右键落点就在拖选终点（真实坐标菜单的定位输入）。
-	const paragraph = answer.locator("p").first();
-	await paragraph.scrollIntoViewIfNeeded();
-	const box = (await paragraph.boundingBox())!;
-	expect(box.y, "段落必须落在视口内（鼠标事件用视口坐标）").toBeGreaterThan(0);
-	const midY = box.y + box.height / 2;
-	const from = { x: box.x + 16, y: midY };
-	const to = { x: box.x + 120, y: midY };
-	await dragSelect(window, from, to);
-	const selected = (await selectedText(window)).trim();
+	// 第一段是单行短句：拖选后段内选区稳定，右键落点按实时选区矩形取（见 selectionCenterPoint）。
+	// 坐标全部走页面内量取，避免 locator 在 settle 重挂/定位漂移时 detached。
+	const selected = await dragSelectParagraphText(window);
 	expect(selected.length, "拖选必须真的选中了文本").toBeGreaterThan(0);
 
-	// 右键落在拖选终点：菜单按指针坐标弹出，且不能把选区收掉（快照发生在 pointerdown）。
-	await window.mouse.click(to.x, to.y, { button: "right" });
+	// 右键落在高亮文字上：落点必须压在高亮矩形内，否则 Chromium 会把「点在选区外」
+	// 当成新的光标动作、先清掉选区（快照也会因此为空）。按实时选区矩形取点，避开布局漂移。
+	const inside = await selectionCenterPoint(window);
+	await window.mouse.click(inside.x, inside.y, { button: "right" });
 	const menu = menuLocator(window);
 	await expect(menu).toBeVisible({ timeout: 5_000 });
+	// 复制项互斥：有选区时菜单只能有一个「复制」（用户反馈「复制就有三个」），
+	// 整条消息的「复制为文本 / 复制为 Markdown」不得与选区复制并列。
+	await expect(menu.getByRole("menuitem", { name: "复制为文本", exact: true })).toHaveCount(0);
+	await expect(menu.getByRole("menuitem", { name: "复制为 Markdown", exact: true })).toHaveCount(0);
+	await expect(menu.getByRole("menuitem", { name: "全选", exact: true })).toBeVisible();
 	await menu.getByRole("menuitem", { name: "复制", exact: true }).click();
 
 	// 剪贴板写入是异步 IPC：poll 到内容到位或超时（不能立即读，避免时序假红）。
@@ -187,10 +276,10 @@ test("message context menu: works while the reply is still streaming (live body 
 	// 自校验：此刻还没 settle（最终回答尚未出现），确实在流式窗口里
 	await expect(timeline.locator("[data-final-answer]")).toHaveCount(0);
 
-	const box = (await live.boundingBox())!;
-	expect(box.y, "live 正文必须在视口内").toBeGreaterThan(0);
-	// 坐标右键：live 正文每次 chunk 都会重挂 DOM，按元素句柄点容易撞上 detached，按屏幕坐标不受影响。
-	await window.mouse.click(box.x + 24, box.y + 14, { button: "right" });
+	// 坐标右键：live 正文每次 chunk 都会重挂 DOM，按元素句柄点容易撞上 detached，
+	// 页面内实时量取坐标后立刻点击，才能保证这一击仍落在流式副本上。
+	const point = await liveAnswerPoint(window);
+	await window.mouse.click(point.x, point.y, { button: "right" });
 	const menu = menuLocator(window);
 	await expect(menu).toBeVisible({ timeout: 5_000 });
 	// live 正文没有原始 markdown：只有文本回退一项 + 全选，不能出现「复制为 Markdown」。

@@ -17,10 +17,10 @@ import { t } from "../i18n";
 import { writeClipboard } from "../utils/clipboard";
 import { showNotice } from "../utils/notice";
 import { stripMarkdown } from "../components/session/SurfaceParts";
-import { CONTEXT_MENU_IGNORE_SELECTOR, LIVE_ANSWER_SELECTOR, MESSAGE_BODY_SELECTOR, cleanMessageCopyText, hasMessageContextMenuCopy, planMessageContextMenu } from "../components/session/timeline/messageContextMenuPolicy";
+import { CONTEXT_MENU_IGNORE_SELECTOR, LIVE_ANSWER_SELECTOR, MESSAGE_BODY_SELECTOR, cleanMessageCopyText, hasMessageContextMenuCopy, isPointInsideRects, planMessageContextMenu, type MessageContextMenuCopyKind } from "../components/session/timeline/messageContextMenuPolicy";
 
-/** 复制来源：与菜单项一一对应。 */
-export type MessageContextMenuCopyKind = "selection" | "messageText" | "messageMarkdown" | "liveText";
+// 复制来源类型与「一次只给一组复制项」的纯策略同源（单个真相源在 policy，避免类型与菜单项漂移）
+export type { MessageContextMenuCopyKind } from "../components/session/timeline/messageContextMenuPolicy";
 
 export type MessageContextMenuState = {
 	/** 右键坐标（视口坐标，供 fixed 定位的虚拟 Trigger 使用）。 */
@@ -65,14 +65,17 @@ function resolveMessageById(messages: readonly ChatMessage[], messageId: string)
 
 /**
  * 右键按下瞬间锁存选区。
- * 只在「按在选区内」时锁存：按在选区外等于开始新的选择 / 光标动作，浏览器会收掉旧选区，
- * 此时保留旧选区会让「复制」复制到用户没在看的内容。按在选区内（哪怕只是同一段落内）
- * 一律锁存，之后无论浏览器是否塌陷选区，「复制」都用这份快照。
+ *
+ * 只在「按在高亮选区上」时锁存：按在选区外（含同一段的空白处 / 选区末尾留白）等于开始新的
+ * 光标动作，浏览器随后会收掉旧选区，此时保留旧选区会让「复制」复制到用户没在看的内容。
+ * 判定走几何矩形（见 policy 的 isPointInsideRects）：右键事件 target 常是段落祖先，
+ * Selection.containsNode 对祖先的返回值不稳定，且会把「段内远离选区的点」也算命中。
  */
-function readSelectionSnapshotAtPointerDown(target: EventTarget | null): string {
+function readSelectionSnapshotAtPointerDown(event: PointerEvent): string {
 	const selection = window.getSelection();
 	if (!selection || selection.isCollapsed || selection.rangeCount === 0) return "";
-	if (!(target instanceof Node) || !selection.containsNode(target, true)) return "";
+	const rects = Array.from(selection.getRangeAt(0).getClientRects());
+	if (!isPointInsideRects(rects, event.clientX, event.clientY)) return "";
 	return selection.toString();
 }
 
@@ -91,7 +94,7 @@ export function useMessageContextMenu(options: { messages: readonly ChatMessage[
 		const onPointerDown = (event: PointerEvent) => {
 			// 只处理右键：左键按下是新的拖选动作，不能复用旧快照。
 			if (event.button !== 2) return;
-			selectionSnapshotRef.current = readSelectionSnapshotAtPointerDown(event.target);
+			selectionSnapshotRef.current = readSelectionSnapshotAtPointerDown(event);
 		};
 		// capture：浏览器的选区塌陷发生在默认动作阶段，必须在捕获阶段（早于任何冒泡处理器）拍快照。
 		document.addEventListener("pointerdown", onPointerDown, true);
