@@ -8,6 +8,7 @@ import test from "node:test";
 // 独立读取（默认参数兜底），实时语义不变。
 const settingsStore = readFileSync("src/main/settings/SettingsStore.ts", "utf8");
 const mainIndex = readFileSync("src/main/index.ts", "utf8");
+const sessionIpc = readFileSync("src/main/ipc/sessionIpc.ts", "utf8");
 
 test("boot preferences share one settings snapshot instead of three reads", () => {
 	assert.match(settingsStore, /export function readBootPreferences\(\) \{/, "readBootPreferences 应存在");
@@ -32,4 +33,16 @@ test("cold start milestones are logged at app ready and first window shown", () 
 	assert.match(mainIndex, /const bootAnchorMs = Date\.now\(\)/);
 	assert.match(mainIndex, /Cold start milestone: app ready/);
 	assert.match(mainIndex, /Cold start milestone: first window shown/);
+});
+
+test("first session list records scan cost as the third cold start milestone", () => {
+	// 前两个里程碑只到「窗口可见」，用户真正看到内容要等首个 sessions:list 返回。
+	// scanMs 必须单独记录：否则无法区分「窗口起得慢」和「会话扫描慢」（侧栏扫描是
+	// 唯一还没进 sidecar 的机械成本，Wave 3 的收益门禁就靠这个数字）。
+	assert.match(sessionIpc, /Cold start milestone: first session list/);
+	assert.match(sessionIpc, /scanMs:\s*Date\.now\(\) - startedAt/);
+	assert.match(sessionIpc, /processUptimeMs:\s*Math\.round\(process\.uptime\(\) \* 1000\)/);
+	// 只记一次：切项目会重复调用 sessions:list，重复记录会淹没真正的冷启动数据。
+	assert.match(sessionIpc, /let firstSessionListMilestoneLogged = false/);
+	assert.match(sessionIpc, /if \(!firstSessionListMilestoneLogged\)/);
 });

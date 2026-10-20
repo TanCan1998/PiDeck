@@ -609,6 +609,13 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		}
 	};
 
+	/**
+	 * 冷启动里程碑（3/3）：首个会话列表返回。前两个里程碑（app ready / first window shown）
+	 * 记在 index.ts，但用户真正看到内容要等这次扫描结束；scanMs 单独拆出来，才能区分
+	 * 「窗口起得慢」和「会话扫描慢」（侧栏扫描是唯一未进 sidecar 的机械成本，见
+	 * docs/session-data-plane-plan.md §7）。只在首个请求记录一次，切项目不再刷屏。
+	 */
+	let firstSessionListMilestoneLogged = false;
 	ipcMain.handle(ipcChannels.sessionsList, async (_event, projectId?: string) => {
 		const project = projectId ? projectStore.get(projectId) : undefined;
 		let projectPath = project?.path;
@@ -617,7 +624,18 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		if (projectPath && settingsStore.get().wslEnabled && settingsStore.get().wslDistro) {
 			projectPath = projectPath.replace(/^([A-Za-z]):\\/, (_: string, d: string) => `/mnt/${d.toLowerCase()}/`).replace(/\\/g, "/");
 		}
-		return sessionScanner.list(projectPath);
+		const startedAt = Date.now();
+		const sessions = await sessionScanner.list(projectPath);
+		if (!firstSessionListMilestoneLogged) {
+			firstSessionListMilestoneLogged = true;
+			void appLogger.info("app", "Cold start milestone: first session list", {
+				scanMs: Date.now() - startedAt,
+				sessions: sessions.length,
+				projectId: projectId ?? null,
+				processUptimeMs: Math.round(process.uptime() * 1000),
+			});
+		}
+		return sessions;
 	});
 	// 跨会话正文搜索：sidecar 不可用/boot 中/失败一律返回 null，渲染层回退标题过滤
 	ipcMain.handle(ipcChannels.sessionsSearchContent, async (_event, query: unknown) => {
