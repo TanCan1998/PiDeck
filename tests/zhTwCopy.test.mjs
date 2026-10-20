@@ -37,9 +37,11 @@ test("resolveLocale：显式选择优先，system 下 zh-Hant 系列走 zh-TW", 
 	}
 });
 
-test("渲染层 t()：zh-TW 出繁体，简繁两份词典互不串味", () => {
+test("渲染层 t()：zh-TW 出繁体，简繁两份词典互不串味", async () => {
 	const i18n = load("src/renderer/src/i18n.ts");
 	const previous = i18n.getI18nLocale();
+	// 词典按需加载：zh-TW 不在常驻基准里，必须先 ensure。
+	await i18n.ensureI18nLocale("zh-TW");
 	try {
 		i18n.setI18nLocale("zh-CN");
 		assert.equal(i18n.t("settings.languageZh"), "简体中文");

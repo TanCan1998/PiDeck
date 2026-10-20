@@ -18,7 +18,9 @@ const hookModule = loadTsCommonJs("src/renderer/src/hooks/useFeishuBridge.ts", {
 	globals: { window: {} },
 });
 
-test("renderer Feishu copy exists in both supported locales", () => {
+test("renderer Feishu copy exists in both supported locales", async () => {
+	// 词典按需加载：非 zh-CN 必须先 ensure，否则 t() 回退 zh-CN。
+	await i18n.ensureI18nLocale("en-US");
 	i18n.setI18nLocale("zh-CN");
 	assert.equal(i18n.t("config.im.connectingToFeishu"), "正在连接飞书…");
 	assert.equal(i18n.t("config.im.saveBot"), "保存 Bot");

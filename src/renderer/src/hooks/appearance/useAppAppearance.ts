@@ -1,7 +1,7 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useReducer, useRef, useState } from "react";
 import { applyAppearanceAttributes } from "../../themeAppearance";
 import { msUntilNextThemeBoundary, resolveAppColorScheme } from "../../../../shared/themeSchedule";
-import { resolveLocale, setI18nLocale } from "../../i18n";
+import { ensureI18nLocale, isI18nLocaleLoaded, resolveLocale, setI18nLocale } from "../../i18n";
 import type { AppSettings } from "../../../../shared/types";
 import { applyAppearanceWithTransition } from "./appearanceTransition";
 
@@ -66,10 +66,25 @@ export function useAppAppearance({ settings, systemLanguage, settingsLoaded }: {
 	});
 
 	const resolvedLocale = resolveLocale(settings.language, systemLanguage ?? undefined);
+	// 词典按需加载后，切语言可能要先加载另一份 chunk：已加载时仍同步生效（绘制前），
+	// 未加载时先 set（t() 回退 zh-CN），加载完再 set 一次并强制重渲染让文案落地。
+	const [, bumpLocaleRender] = useReducer((n: number) => n + 1, 0);
 	// i18n 是模块级单例：切语言属于外部系统副作用，必须放 effect（渲染期直写在 StrictMode 双渲染下会与其他实例竞态）；
-	// 用 useLayoutEffect 保证首帧绘制前生效，避免旧语言闪一帧
+	// 用 useLayoutEffect 保证已加载语言在首帧绘制前生效，避免旧语言闪一帧。
 	useLayoutEffect(() => {
+		let cancelled = false;
 		setI18nLocale(resolvedLocale);
+		if (isI18nLocaleLoaded(resolvedLocale)) return;
+		void ensureI18nLocale(resolvedLocale)
+			.catch(() => undefined)
+			.then(() => {
+				if (cancelled) return;
+				setI18nLocale(resolvedLocale);
+				bumpLocaleRender();
+			});
+		return () => {
+			cancelled = true;
+		};
 	}, [resolvedLocale]);
 
 	useEffect(() => {
