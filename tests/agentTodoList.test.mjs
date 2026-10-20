@@ -121,10 +121,12 @@ test("compact variant is optional, defaults to official classes, and uses PiDeck
 });
 
 test("tailwind-merge keeps widget font sizes next to status colors", () => {
-	// 2027-01 回归：cn() 内的 tailwind-merge 把自定义 text-widget* 误判为颜色类，
+	// 2027-01 回归：裸 tailwind-merge（默认配置）把自定义 text-widget* 误判为颜色类，
 	// 与 text-muted-foreground/* 同组冲突而被丢弃——条目曾退回继承 body 14px
-	// （用户反馈“字体特别大”的根因）。必须用 text-[length:var(--text-widget-*)]
-	// 显式声明字号类型，twMerge 才归入 font-size 组与颜色共存。
+	// （用户反馈“字体特别大”的根因）。组件用 text-[length:var(--text-widget-*)]
+	// 显式声明字号类型，默认配置下也能归入 font-size 组与颜色共存。
+	// #389 起生产 cn() 已在 lib/tailwindMerge.ts 注册项目字号 token，命名形式同样可用
+	// （见 tests/uiFontSizeConsistency.test.mjs）；这里保留裸 twMerge 断言以锁定默认配置边界。
 	const item = twMerge("min-w-0 flex-1 break-words text-[length:var(--text-widget-item)] text-muted-foreground/65");
 	assert.match(item, /text-\[length:var\(--text-widget-item\)\]/);
 	assert.match(item, /text-muted-foreground\/65/);

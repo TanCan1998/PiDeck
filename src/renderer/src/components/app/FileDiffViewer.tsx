@@ -1,5 +1,5 @@
 import type { ProjectFileAccessScope } from "../../../../shared/types";
-import { lazy, Suspense, useCallback, useEffect, useId, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useSetAtom } from "jotai";
 import { t } from "../../i18n";
 import { ArrowLeft, Maximize, Minimize2, Rows2, SquareSplitHorizontal, X, Eye, FileCode, Loader2 } from "lucide-react";
@@ -21,6 +21,7 @@ import { formatFilePathRef } from "../session/composer/chips";
 
 import { isBinaryExtension, isImageFile, isPdfFile } from "../../utils/isTextFile";
 import { updateInstallPreflightTasksAtom } from "../../atoms/update-install-preflight";
+import { encodeHtmlPreviewUrl } from "../../../../shared/htmlPreview";
 
 type ViewMode = "view" | "diff";
 
@@ -597,5 +598,10 @@ function mimeFromImageExt(ext: string): string {
 }
 
 function HtmlPreview({ content }: { content: string }) {
-	return <iframe className="h-full w-full border-0 bg-[var(--color-bg-panel)]" srcDoc={content} title={t("editor.htmlPreview")} sandbox="allow-scripts allow-forms" referrerPolicy="no-referrer" style={{ width: "100%", height: "100%", border: "none" }} />;
+	// 走 pideck-html: 协议而非 srcDoc：srcdoc 会继承主窗口 CSP，把文件里的内联脚本整段拦掉（#377）。
+	// 协议文档的 CSP 由主进程响应头下发，与主窗口策略解耦，内联 <script> 才能正常执行。
+	const src = useMemo(() => encodeHtmlPreviewUrl(content), [content]);
+	// 超大文件不为跑脚本把整份内容塞进 URL：退回 srcDoc，至少能看到静态内容
+	const source = src ? { src } : { srcDoc: content };
+	return <iframe className="h-full w-full border-0 bg-[var(--color-bg-panel)]" {...source} title={t("editor.htmlPreview")} sandbox="allow-scripts allow-forms" referrerPolicy="no-referrer" style={{ width: "100%", height: "100%", border: "none" }} />;
 }

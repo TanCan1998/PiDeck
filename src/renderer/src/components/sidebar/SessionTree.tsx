@@ -10,7 +10,6 @@ import { sessionRuntimeUiByIdAtom } from "../../atoms/session-atoms";
 import { t } from "../../i18n";
 import { formatRelativeTime } from "../../utils/relativeTime";
 import { hasPendingAskForSession } from "../../utils/askUi";
-import { BridgeGuiSlot } from "../bridge/BridgeSlot";
 import { filterSidebarSessions, getBoundSidebarRuntimeAgent, type SidebarController } from "../../hooks/useSidebarController";
 import { Button } from "../ui-shadcn/button";
 import type { SidebarActions } from "./SidebarContent";
@@ -77,7 +76,19 @@ function renderRuntimeStatusDot(status?: string | null) {
 	return <span className={cn("size-1.5 shrink-0 rounded-full", dotClass, status === "error" ? "" : "animate-pulse")} aria-label={label} title={label} />;
 }
 
-export function SessionTree(props: { project: Project; sessions: readonly SessionRecord[]; agents: readonly AgentTab[]; currentSessionId?: string; controller: SidebarController; actions: SidebarActions; nested?: boolean; visibleChildCount?: number; onShowMore?: () => void }) {
+export function SessionTree(props: {
+	project: Project;
+	sessions: readonly SessionRecord[];
+	agents: readonly AgentTab[];
+	currentSessionId?: string;
+	controller: SidebarController;
+	actions: SidebarActions;
+	nested?: boolean;
+	visibleChildCount?: number;
+	onShowMore?: () => void;
+	/** 无行可渲染时的空态（仅聊天分组传入）：空列表必须有可见反馈，不能静默 return null。 */
+	emptyState?: ReactNode;
+}) {
 	const filter = props.controller.sourceFilterFor(props.project.id);
 	const search = props.controller.search.trim();
 	// 待确认 ask 以**会话**为粒度展示：同一项目下可能多个会话各自在等回答，
@@ -128,8 +139,9 @@ export function SessionTree(props: { project: Project; sessions: readonly Sessio
 	useEffect(() => {
 		if (hasRows) setRetainingExit(true);
 	}, [hasRows]);
-	// 最后一条也必须留到退场结束；空树最终仍不占 session-card 的空间。
-	if (!hasRows && !retainingExit) return null;
+	// 最后一条也必须留到退场结束；空树在调用方未提供空态时仍不占 session-card 的空间。
+	// 聊天分组提供 emptyState：展开且为空时显示「还没有聊天记录」，与「分组被折叠」区分开（#387）。
+	if (!hasRows && !retainingExit) return props.emptyState ? <>{props.emptyState}</> : null;
 
 	/** 单击走设置默认模式（App 层读 sessionTabOpenMode）；双击显式常驻。
 	 *  不设本地默认值：undefined 透传后由 App 的 sessions.open 用设置值兜底 */
@@ -398,12 +410,6 @@ export function SessionTree(props: { project: Project; sessions: readonly Sessio
 						<Ellipsis size={14} aria-hidden="true" />
 					</Button>
 				</div>
-				{/* GUI 扩展桥：会话列表条目附加落点（ctx.gui.setSessionItemExtra）。
-				    **追加**在行容器之后、子代理列表之前 —— 不改行本身的结构与 hover/拖拽行为（§7.4 只追加）。
-				    无贡献时返回 null，不占位。
-				    注：仓库无统一 SessionItem 组件，此处只接了 SessionTree 的历史会话行；
-				    ActiveSessionsTree / RecentSessionsSection / SessionTabsBar 仍为 pending。 */}
-				<BridgeGuiSlot sessionId={child.session.id} slot="session.item" className="flex flex-col gap-0.5 pl-5" />
 				{renderSubagents(groupKey, child.codexSubagents, child.piSubagents)}
 			</SidebarRemovalRow>
 		);

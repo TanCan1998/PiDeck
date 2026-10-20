@@ -7,13 +7,14 @@ import type { AnnouncementState } from "../shared/types/announcement";
 import type { HostPluginContext, HostPluginDesktopApi } from "../shared/types/hostPlugin";
 import type { PiDeckMcpDesktopApi } from "../shared/types/piDeckMcp";
 import type { RpcLogBatch, RpcLogEntry } from "../shared/types/rpcLog";
-import type { ModelTraceRecord } from "../shared/types/bridge";
+import type { ModelTraceRecord } from "../shared/types/modelTrace";
 import type { DshRuntimeStatus, DshRuntimeInstallProgress } from "../shared/types/dshRuntime";
 import type { DshHomeSharingState } from "../shared/types/dshHome";
 import type { UserDataNameMigrationNotice } from "../shared/types/userDataMigration";
 import type { DataEnvChoiceFailure, DataEnvChoiceResult, DataEnvInfo, DataEnvMode, ImportPreviewResult, ImportProgress, ImportStartResult } from "../shared/types/dataEnv";
 import type { GitExecutableInfo } from "../shared/types/git";
 import type { DshRunnerNodeInfo, DshRunnerNodeInstallResult } from "../shared/types/dshRunnerNode";
+import type { LocalImageBytes } from "../shared/localImage";
 import type { ImageBlobPayload, ImageGenConfigFile, ImageGenRequest, ImageGenResult, ImageGenSaveResult } from "../shared/types/imagegen";
 import type { VideoGenConfigFile, VideoGenRequest, VideoGenSaveResult, VideoGenSubmitResult, VideoGenJobSnapshot } from "../shared/types/videogen";
 import type { CustomThemeListItem } from "../shared/customThemes";
@@ -35,6 +36,8 @@ import type {
 } from "../shared/types/voiceTranscription";
 import type { WhisperInstallProgress, WhisperInstallResult, WhisperRuntimeStatus } from "../shared/types/whisperRuntime";
 import type { EnhanceEventPayload, EnhanceRunInput, EnhanceRunResult } from "../shared/types/enhance";
+import type { AgentChangedEvent, AgentInvokeEventPayload, AgentInvokeInput, AgentInvokeResult, AgentMarketSettings, AgentProfile, AgentProfileSnapshot, BindAgentSessionInput, CreateAgentProfileInput, UpdateAgentMarketSettingsInput, UpdateAgentProfileInput } from "../shared/types/agentProfile";
+import type { SelectionToolInsertInput, SelectionToolShowPayload, SelectionToolWindowState } from "../shared/types/selectionTool";
 import type { QuickMessagesSaveResult, QuickMessagesSnapshot } from "../shared/types/quickMessages";
 import type { NoticeHistoryFileEntry, NoticeHistoryRecordInput } from "../shared/types/noticeHistory";
 import type { ReplyActionRule, ReplyActionsSaveResult, ReplyActionsSnapshot } from "../shared/types/replyActions";
@@ -234,6 +237,7 @@ const hostPlugins: HostPluginDesktopApi = {
 	openDirectory: () => ipcRenderer.invoke(ipcChannels.hostPluginsOpenDirectory),
 	install: () => ipcRenderer.invoke(ipcChannels.hostPluginsInstall),
 	installDirectory: () => ipcRenderer.invoke(ipcChannels.hostPluginsInstallDirectory),
+	installGitHub: (url: string) => ipcRenderer.invoke(ipcChannels.hostPluginsInstallGitHub, url),
 	scaffold: (input) => ipcRenderer.invoke(ipcChannels.hostPluginsScaffold, input),
 	mount: (input) => ipcRenderer.invoke(ipcChannels.hostPluginsMount, input),
 	update: (instanceId: string, context: HostPluginContext) => ipcRenderer.invoke(ipcChannels.hostPluginsUpdate, instanceId, context),
@@ -490,14 +494,6 @@ const api = {
 		/** 把 AI 主题开发指南写入主题目录并在资源管理器定位，返回文件路径 */
 		writeGuide: (locale: "zh-CN" | "en-US") => ipcRenderer.invoke(ipcChannels.writeCustomThemeGuide, locale) as Promise<string>,
 	},
-	pluginDev: {
-		/** 插件开发支持状态：用户扩展目录 + demo/指南是否已就位 */
-		status: () => ipcRenderer.invoke(ipcChannels.pluginDevStatus) as Promise<{ userExtensionsDir: string; demoInstalled: boolean; guideInstalled: boolean }>,
-		/** 把 AI 插件开发指南写入用户扩展目录并定位，返回文件路径 */
-		writeGuide: (locale: "zh-CN" | "en-US") => ipcRenderer.invoke(ipcChannels.pluginDevWriteGuide, locale) as Promise<string>,
-		/** 复制内置 demo 插件（已存在不覆盖，返回 exists 让 UI 提示） */
-		copyDemo: () => ipcRenderer.invoke(ipcChannels.pluginDevCopyDemo) as Promise<{ status: "copied" | "exists"; path: string }>,
-	},
 	sessions: {
 		list: (projectId?: string) => ipcRenderer.invoke(ipcChannels.sessionsList, projectId) as Promise<SessionSummary[]>,
 		/** 跨会话正文搜索（Go sidecar）；null = 不可用（未构建/boot 中/失败），调用方回退标题过滤。 */
@@ -721,8 +717,12 @@ const api = {
 		listSessionFileChanges: (sessionId: string) => ipcRenderer.invoke(ipcChannels.sessionsListFileChanges, sessionId) as Promise<import("../shared/types").SessionFileChange[]>,
 		/** 会话级 todo 快照（pi-deck-todo custom 条目重建，历史会话任务 tab）。 */
 		listSessionTodo: (sessionId: string) => ipcRenderer.invoke(ipcChannels.sessionsListSessionTodo, sessionId) as Promise<import("../shared/types").SessionTodoSnapshot | undefined>,
-		/** DSH 技能目录（skill.list 只读；/name 斜杠调用，G7）。 */
-		listDshSkills: (agentId: string) => ipcRenderer.invoke(ipcChannels.dshListSkills, agentId) as Promise<import("../shared/types").DshSkillView[]>,
+		/**
+		 * DSH 技能目录（skill.list 只读；/name 斜杠调用，G7）。
+		 * 运行中会话传 agentId；草稿会话传 { sessionId }：主进程懒建/复用 host 会话后读取
+		 * （不启动 agent），会话启动前也能看到技能列表。
+		 */
+		listDshSkills: (target: string | { sessionId: string }) => ipcRenderer.invoke(ipcChannels.dshListSkills, target) as Promise<import("../shared/types").DshSkillView[]>,
 		/** DSH 孤儿会话 id 列表（host 有但 catalog 无映射；G3/D11 清理提示用）。 */
 		listDshOrphans: () => ipcRenderer.invoke(ipcChannels.dshListOrphans) as Promise<string[]>,
 		/** DSH 外部会话清单（dsh-web 等其他工具创建的 host 根会话，跨工具导入用）。 */
@@ -767,16 +767,6 @@ const api = {
 		uninstallDshPlugin: (input: import("../shared/types").DshPluginLifecycleInput) => ipcRenderer.invoke(ipcChannels.dshPluginUninstall, input) as Promise<unknown>,
 		sendPrompt: (input: SendSessionPromptInput) => ipcRenderer.invoke(ipcChannels.sessionsSendPrompt, input) as Promise<SendSessionPromptResult>,
 		sendUiResponse: (input: SessionUiResponseInput) => ipcRenderer.invoke(ipcChannels.sessionsUiResponse, input) as Promise<void>,
-		/**
-		 * GUI 扩展桥：回灌一次交互事件（点列表项 / 按按钮 / 输入…）。
-		 * 返回 false 表示事件被丢弃（旧 runtime 或桥未连接），渲染层静默忽略。
-		 */
-		sendBridgeEvent: (input: import("../shared/types/bridge").BridgeEventInput) => ipcRenderer.invoke(ipcChannels.sessionsBridgeEvent, input) as Promise<boolean>,
-		/**
-		 * GUI 扩展桥：请求桥**全量重推一次**（§9.4）。
-		 * 返回 false 表示请求被丢弃（旧 runtime / 桥未连），渲染层静默忽略。
-		 */
-		requestBridgeResync: (input: import("../shared/types/bridge").BridgeResyncInput) => ipcRenderer.invoke(ipcChannels.sessionsBridgeResync, input) as Promise<boolean>,
 		onRuntimeEvent: (callback: (event: SessionRuntimeEvent) => void) => subscribe(ipcChannels.sessionsRuntimeEvent, callback),
 		listRuntimes: () => ipcRenderer.invoke(ipcChannels.sessionsRuntimeList) as Promise<SessionRuntimeInfo[]>,
 		activateRuntime: (sessionId: string) => ipcRenderer.invoke(ipcChannels.sessionsRuntimeActivate, sessionId) as Promise<SessionCommandResult<SessionRuntimeInfo>> /** 汇报当前聚焦的会话（主进程据此决定非聚焦会话的 Ask 桌面通知） */,
@@ -1624,6 +1614,12 @@ const api = {
 		readImageBlob: (ref: string) => ipcRenderer.invoke(ipcChannels.imagegenReadImageBlob, ref) as Promise<ImageBlobPayload | null>,
 	},
 
+	// ── 对话内本地图片：保存/复制按需取字节（展示走 pideck-file://，不经这里） ──
+	localImage: {
+		/** 按绝对路径读取白名单内的图片字节；主进程拒绝（越界/超限/非图片）时返回 null */
+		readBytes: (path: string) => ipcRenderer.invoke(ipcChannels.localImageReadBytes, path) as Promise<LocalImageBytes | null>,
+	},
+
 	// ── 生视频：独立 videogen.json 凭据 + 提交/轮询异步协议（与生图同域不同生命周期） ──
 	videogen: {
 		submit: (request: VideoGenRequest) => ipcRenderer.invoke(ipcChannels.videogenSubmit, request) as Promise<VideoGenSubmitResult>,
@@ -1714,6 +1710,39 @@ const api = {
 		updateSettings: (patch: UpdateAutomationSettingsInput) => ipcRenderer.invoke(ipcChannels.automationUpdateSettings, patch) as Promise<AutomationSettings>,
 		previewCron: (expression: string, count?: number) => ipcRenderer.invoke(ipcChannels.automationPreviewCron, expression, count) as Promise<AutomationCronPreview>,
 		onChanged: (callback: (event: AutomationChangedEvent) => void) => subscribe<AutomationChangedEvent>(ipcChannels.automationChanged, callback),
+	},
+
+	// ── 智能体市场（Agent Market）：配置 CRUD + 一次性调用（划词工具共用同一协议） ──
+	agentProfiles: {
+		getSnapshot: () => ipcRenderer.invoke(ipcChannels.agentProfilesGetSnapshot) as Promise<AgentProfileSnapshot>,
+		create: (input: CreateAgentProfileInput) => ipcRenderer.invoke(ipcChannels.agentProfilesCreate, input) as Promise<AgentProfile>,
+		update: (agentId: string, patch: UpdateAgentProfileInput) => ipcRenderer.invoke(ipcChannels.agentProfilesUpdate, agentId, patch) as Promise<AgentProfile>,
+		/** 删除自定义智能体；内置智能体返回 false（不抛错，UI 用同一路径提示不可删）。 */
+		remove: (agentId: string) => ipcRenderer.invoke(ipcChannels.agentProfilesDelete, agentId) as Promise<boolean>,
+		/** 把内置智能体恢复到内置原文（用户改坏了可一键回退）。 */
+		resetBuiltin: (agentId: string) => ipcRenderer.invoke(ipcChannels.agentProfilesResetBuiltin, agentId) as Promise<AgentProfile>,
+		duplicate: (agentId: string) => ipcRenderer.invoke(ipcChannels.agentProfilesDuplicate, agentId) as Promise<AgentProfile>,
+		updateSettings: (patch: UpdateAgentMarketSettingsInput) => ipcRenderer.invoke(ipcChannels.agentProfilesUpdateSettings, patch) as Promise<AgentMarketSettings>,
+		onChanged: (callback: (event: AgentChangedEvent) => void) => subscribe<AgentChangedEvent>(ipcChannels.agentProfilesChanged, callback),
+		/** 一次性调用：受理后流式事件经 onInvokeEvent 推送（与提示词增强同一协议形态）。 */
+		invoke: (input: AgentInvokeInput) => ipcRenderer.invoke(ipcChannels.agentProfilesInvoke, input) as Promise<AgentInvokeResult>,
+		cancelInvoke: () => ipcRenderer.invoke(ipcChannels.agentProfilesInvokeCancel) as Promise<{ ok: boolean }>,
+		onInvokeEvent: (callback: (payload: AgentInvokeEventPayload) => void) => subscribe<AgentInvokeEventPayload>(ipcChannels.agentProfilesInvokeEvent, callback),
+		/** 绑定/解绑会话与智能体：绑定后该会话每次发送由主进程注入隐藏角色设定。 */
+		bindSession: (input: BindAgentSessionInput) => ipcRenderer.invoke(ipcChannels.agentProfilesBindSession, input) as Promise<AgentMarketSettings>,
+	},
+
+	// ── 系统级划词浮窗（全局快捷键触发的独立窗口；与主窗口共用同一份 preload） ──
+	selectionTool: {
+		getState: () => ipcRenderer.invoke(ipcChannels.selectionToolGetState) as Promise<SelectionToolWindowState>,
+		hide: () => ipcRenderer.invoke(ipcChannels.selectionToolHide) as Promise<void>,
+		/** 浮窗「发送到 PiDeck」：把文本插入主窗口当前会话输入框。 */
+		insertToMain: (input: SelectionToolInsertInput) => ipcRenderer.invoke(ipcChannels.selectionToolInsertToMain, input) as Promise<boolean>,
+		/** 浮窗显示时主进程推送的捕获文本（空串 = 没读到，让用户手输）。 */
+		onCaptured: (callback: (payload: SelectionToolShowPayload) => void) => subscribe<SelectionToolShowPayload>(ipcChannels.selectionToolCaptured, callback),
+		onStateChanged: (callback: (state: SelectionToolWindowState) => void) => subscribe<SelectionToolWindowState>(ipcChannels.selectionToolStateChanged, callback),
+		/** 主窗口侧：系统浮窗点「发送到 PiDeck」时收到文本（插入当前会话输入框）。 */
+		onInserted: (callback: (payload: SelectionToolInsertInput) => void) => subscribe<SelectionToolInsertInput>(ipcChannels.selectionToolInserted, callback),
 	},
 
 	// ── CUA 审批门 ──

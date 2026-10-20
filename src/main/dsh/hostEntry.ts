@@ -186,15 +186,10 @@ async function main(): Promise<void> {
 			{ id: "workspace-controller", name: "@deepseek-ai/dsh-api-workspace-controller" },
 			{ id: "pideck-directory-picker", name: pathToFileURL(join(configDir, "pideck-directory-picker.js")).href },
 			{ id: "pideck-slash-bridge", name: pathToFileURL(join(configDir, "pideck-slash-bridge.js")).href },
-			// 持久 pwsh 工具：继续用本地 dsh-tool-pwsh-persistent，不要换成官方
-			// `@deepseek-ai/dsh-tool-pwsh-persistent`。官方工具名是 `pwsh`，会和
-			// 一次性沙箱 pwsh 抢名字，且依赖 ctx.terminals + terminal-bash
-			//（shellDialect: pwsh），base/standard/code 预设都没挂。绝对路径：
-			// utilityProcess 的模块锚在 app node_modules，裸名不一定解析到同一目录。
-			{
-				id: "tool-pwsh-persistent",
-				name: require.resolve("dsh-tool-pwsh-persistent"),
-			},
+			// 持久 pwsh 工具已下线（0.2.1 起不再随 PiDeck 分发本地 file: 包）。
+			// 不换官方 `@deepseek-ai/dsh-tool-pwsh-persistent`：官方工具名是 `pwsh`，
+			// 会和一次性沙箱 pwsh 抢名字，且依赖 ctx.terminals + terminal-bash，
+			// base/standard/code 预设都没挂。
 			// 0.2 registry 与预设声明分离：此处登记服务，官方 bundle 的声明在
 			// prepareDshHostProfile 装配；配置页与会话使用同一组稳定 ID。
 			agentPresetsRow(),
@@ -222,9 +217,9 @@ async function main(): Promise<void> {
 			// name 用绝对路径：host 的模块解析锚在 app node_modules，裸名在
 			// utilityProcess 里不一定能走到同一目录。
 			{ id: "bill", name: require.resolve("dsh-bill") },
-			// PiDeck 最小化收敛：host 层仍保留 bill_stats / pwsh_persistent 供
-			// 非 minimal 预设使用，但 minimal 会话必须挡掉这两个全局扩展，
-			// 保持与官方 minimal（Windows 为持久 pwsh + 文件工具）一致。
+			// PiDeck 最小化收敛：host 层仍保留 bill_stats 供非 minimal 预设使用，
+			// 但 minimal 会话必须挡掉这个全局扩展，保持与官方 minimal（Windows
+			// 为 pwsh + 文件工具）一致。
 			{
 				id: "pideck-minimal-tool-filter",
 				// 文件本体在下方 writeFileSync 落盘（boot 前必已存在），这里只内联绝对路径。
@@ -292,8 +287,8 @@ async function main(): Promise<void> {
 	);
 
 	// 极简工具过滤插件：挂在 host 组合里，minimal agent 创建时把 PiDeck 全局
-	// 扩展（bill_stats / pwsh_persistent）从继承工具目录中剔除；非 minimal 预设
-	// 仍保留这两个扩展。只拦继承层，不动 minimal 自身注册的 bash/pwsh/editor。
+	// 扩展（bill_stats）从继承工具目录中剔除；非 minimal 预设仍保留该扩展。
+	// 只拦继承层，不动 minimal 自身注册的 bash/pwsh/editor。
 	const minimalToolFilterPath = join(configDir, "pideck-minimal-tool-filter.js");
 	writeFileSync(
 		minimalToolFilterPath,
@@ -306,7 +301,7 @@ async function main(): Promise<void> {
 			"        const presets = ctx.get('agentPresets');",
 			"        if (!presets || typeof presets.composedPreset !== 'function') return;",
 			"        if (presets.composedPreset(agent.ctx) !== 'minimal') return;",
-			"        agent.ctx.tools.restrict({ deny: ['bill_stats', 'pwsh_persistent'] });",
+			"        agent.ctx.tools.restrict({ deny: ['bill_stats'] });",
 			"      } catch (error) {",
 			"        console.warn('[pideck-minimal-tool-filter] failed:', error?.message ?? String(error));",
 			"      }",

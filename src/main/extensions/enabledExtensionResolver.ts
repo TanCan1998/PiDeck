@@ -21,8 +21,6 @@ export type EnabledExtensionResolverOptions = {
 	disabled: DisabledExtensionEntry[];
 	/** 已移除的内置扩展（独立机制，不参与 disabled 列表）。 */
 	removedBuiltInExtensions: readonly string[];
-	/** 用户显式开启的「默认关闭」内置扩展（opt-in 集合，见 DEFAULT_DISABLED_BUILT_IN_EXTENSIONS）。 */
-	enabledBuiltInExtensions?: readonly string[];
 	/** 内置扩展资源根（dev / packaged）。 */
 	builtInRoots: BuiltInExtensionPathRoots;
 };
@@ -96,7 +94,7 @@ export function resolveLoadableExtensionPaths(options: EnabledExtensionResolverO
 		if (resource.enabled && isEnabled(resource.scope, resource.source)) addPath(resource.path);
 	}
 
-	for (const path of listActiveBuiltInExtensionPaths(options.builtInRoots, options.removedBuiltInExtensions, options.enabledBuiltInExtensions ?? [])) {
+	for (const path of listActiveBuiltInExtensionPaths(options.builtInRoots, options.removedBuiltInExtensions)) {
 		const name = basename(path);
 		const isInternal = (INTERNAL_BUILT_IN_EXTENSIONS as readonly string[]).includes(name);
 		// 内部适配器不是用户可见扩展，必须始终跟随 RPC 加载；否则用户手动写入

@@ -400,10 +400,8 @@ jobs:
       # 目录自装），但**不能**因此省掉完整 npm ci——pack 脚本还会做两件必须依赖 root
       # node_modules 的事：
       #   1) 裸 import tar（prod）/ semver（dev）：归档写入与范围匹配；
-      #   2) 构建仓库内的 file: 本地包 packages/dsh-tool-pwsh-persistent（dsh pwsh
-      #      工具）：需 tsc + @types/node，且其 src 直接 import @deepseek-ai/
-      #      {dsh-tools,dsh-timeout,schemastery,dsh-pwsh-local} 类型——这些只在 dev
-      #      树里，--omit=dev 装不到。
+      #   2) 构建仓库内 packages/ 下的 file: 本地包（若有）：需 tsc + @types/node，
+      #      这些只在 dev 树里，--omit=dev 装不到。
       # 2026-09-22 两次事故都源于此：v0.7.7 发布时漏 tar → 12 个 runtime 资产全缺；
       # 补发时又因 --omit=dev 缺 tsc/@deepseek-ai → 6 个平台再次全挂。
       # 所以这里老老实实装完整依赖（ubuntu 约 45 秒），--ignore-scripts 跳过 electron

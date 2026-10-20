@@ -598,7 +598,7 @@ function EditorWorkbenchTab(props: { tab: WorkbenchEditorTabItem; onSelect?: (ta
 					aria-selected={Boolean(tab.active)}
 					aria-label={tab.title ?? tab.label}
 					className={cn(
-						// 显式标明 length，避免 cn 把自定义 text-tab 当颜色类、被状态颜色覆盖。
+						// 显式标明 length 只设字号、不带行高（行高紧随其后用 leading-(--line-height-tab)）。
 						"session-tab group relative flex h-7 shrink-0 cursor-pointer select-none items-center rounded-md border px-2 text-[length:var(--font-size-tab)] leading-(--line-height-tab) transition-[color,background-color,border-color,box-shadow,transform] duration-base",
 						// 工作台文件/Diff Tab 宽度上限跟随外观设置（--session-tab-max-w 由 SessionTabsBar 根注入），
 						// 与会话 Tab 统一宽度来源，不再保留旧固定值。

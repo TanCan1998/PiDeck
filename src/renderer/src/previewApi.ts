@@ -215,8 +215,6 @@ let previewSettings: AppSettings = {
 	fontFamilyMono: "system-mono",
 	fontFamilyMonoCustom: "",
 	removedBuiltInExtensions: [],
-	// 与主进程 defaultSettings 保持一致：默认关闭的内置扩展 opt-in 列表默认空
-	enabledBuiltInExtensions: [],
 	// 与主进程 defaultSettings 保持一致（预览壳不真实播放，仅保持设置项形状完整）
 	soundAlert: createDefaultSoundAlertSettings(),
 	imageGenSize: "unset",
@@ -293,6 +291,7 @@ export function createPreviewApi(): PiDesktopApi {
 			openDirectory: async () => ({ ok: false, code: "desktop-only" }),
 			install: async () => ({ ok: false, code: "desktop-only" }),
 			installDirectory: async () => ({ ok: false, code: "desktop-only" }),
+			installGitHub: async () => ({ ok: false, code: "desktop-only" }),
 			scaffold: async () => ({ ok: false, code: "desktop-only" }),
 			mount: async () => ({ ok: false, code: "desktop-only" }),
 			update: async () => ({ ok: false, code: "desktop-only" }),
@@ -611,12 +610,6 @@ export function createPreviewApi(): PiDesktopApi {
 			remove: async () => undefined,
 			writeGuide: async () => "",
 		},
-		pluginDev: {
-			// 预览模式：无扩展目录可写，状态固定“未安装”
-			status: async () => ({ userExtensionsDir: "", demoInstalled: false, guideInstalled: false }),
-			writeGuide: async () => "",
-			copyDemo: async () => ({ status: "copied" as const, path: "" }),
-		},
 		sessions: {
 			list: async () => getSessions(),
 			// 预览模式无 sidecar：null 让调用方回退标题过滤
@@ -765,9 +758,6 @@ export function createPreviewApi(): PiDesktopApi {
 				runtimeGeneration: 1,
 			}),
 			sendUiResponse: async () => undefined,
-			// GUI 扩展桥：预览模式无桥端点，恒丢弃
-			sendBridgeEvent: async () => false,
-			requestBridgeResync: async () => false,
 			onRuntimeEvent: noop,
 			listRuntimes: async () => [],
 			activateRuntime: async () => ({
@@ -1870,6 +1860,10 @@ export function createPreviewApi(): PiDesktopApi {
 			saveConfig: async (config) => ({ ok: true, config }),
 			readImageBlob: async () => null,
 		},
+		// 本地图片预览桩：没有主进程白名单，取不到字节（保存/复制降级为失败提示）
+		localImage: {
+			readBytes: async () => null,
+		},
 		// 生视频预览桩：与生图同策略（LAN web 模式继承此桩，远程暂不支持生视频任务）
 		videogen: {
 			submit: async () => ({ ok: false, error: "notConfigured" }),
@@ -2029,6 +2023,54 @@ export function createPreviewApi(): PiDesktopApi {
 			}),
 			previewCron: async () => ({ valid: true, nextRuns: [] }),
 			onChanged: () => () => {},
+		},
+		// 智能体市场预览桩：预览模式没有 userData/agent-profiles.json 可读，市场显示空态；
+		// 写操作按邻近桩的惯例直接抛错（不伪造成功，避免预览里以为真存了盘）。
+		// 一次性调用（划词/市场面板）在预览环境必然失败，返回结构化错误而不是 reject，
+		// 让调用面板走正常错误提示路径。
+		agentProfiles: {
+			getSnapshot: async () => ({
+				revision: 0,
+				agents: [],
+				settings: { selectionToolEnabled: true, systemSelectionEnabled: false, selectionToolAgentId: null, sessionAgentBindings: {} },
+			}),
+			create: async () => {
+				throw new Error("preview stub");
+			},
+			update: async () => {
+				throw new Error("preview stub");
+			},
+			remove: async () => {
+				throw new Error("preview stub");
+			},
+			resetBuiltin: async () => {
+				throw new Error("preview stub");
+			},
+			duplicate: async () => {
+				throw new Error("preview stub");
+			},
+			// 设置返回合并结果：预览里开关/下拉要能点，但不产生真实写入。
+			updateSettings: async (patch) => ({
+				selectionToolEnabled: patch.selectionToolEnabled ?? true,
+				systemSelectionEnabled: patch.systemSelectionEnabled ?? false,
+				selectionToolAgentId: patch.selectionToolAgentId ?? null,
+				sessionAgentBindings: {},
+			}),
+			/** 会话绑定在预览/Web 端没有落盘位置，返回空绑定表（不报错，避免「使用」路径炸掉）。 */
+			bindSession: async () => ({ selectionToolEnabled: true, systemSelectionEnabled: false, selectionToolAgentId: null, sessionAgentBindings: {} }),
+			onChanged: () => () => {},
+			invoke: async () => ({ ok: false as const, errorKind: "spawn-failed" as const, message: "unavailable" }),
+			cancelInvoke: async () => ({ ok: false }),
+			onInvokeEvent: () => () => {},
+		},
+		// 系统级划词浮窗：预览/Web 端没有独立窗口，全部 inert。
+		selectionTool: {
+			getState: async () => ({ visible: false }),
+			hide: async () => {},
+			insertToMain: async () => false,
+			onCaptured: () => () => {},
+			onStateChanged: () => () => {},
+			onInserted: () => () => {},
 		},
 		cua: {
 			onApprovalRequest: () => () => {},

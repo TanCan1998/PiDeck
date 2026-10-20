@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, ne
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
-import { homedir, release as osRelease } from "node:os";
+import { release as osRelease } from "node:os";
 import { createWriteStream, existsSync } from "node:fs";
 import { copyFile, readFile, readdir, rm, stat } from "node:fs/promises";
 import { is } from "@electron-toolkit/utils";
@@ -11,13 +11,22 @@ import { downgradeRunningStartedBefore, downgradeStaleRunning } from "./pi/deriv
 import { SoundAlertService } from "./sounds/SoundAlertService";
 import { registerSoundIpc } from "./ipc/soundIpc";
 import { registerSoundProtocol } from "./sounds/soundProtocol";
+import { registerHtmlPreviewProtocol } from "./htmlPreviewProtocol";
 import { AnnouncementService } from "./announcements/AnnouncementService";
 import { registerAnnouncementIpc } from "./ipc/announcementIpc";
 import { CuaService } from "./cua/CuaService";
 import { AutomationStore } from "./automation/AutomationStore";
+import { AgentProfileStore } from "./agents/AgentProfileStore";
+import { AgentInvokeService } from "./agents/AgentInvokeService";
 import { AutomationScheduler } from "./automation/AutomationScheduler";
 import { AutomationRunCoordinator } from "./automation/AutomationRunCoordinator";
 import { registerAutomationIpc } from "./ipc/automationIpc";
+import { registerAgentProfileIpc } from "./ipc/agentProfileIpc";
+import { registerAgentInvokeIpc } from "./ipc/agentInvokeIpc";
+import { registerSelectionToolIpc } from "./ipc/selectionToolIpc";
+import { SelectionToolService } from "./selection/SelectionToolService";
+import { SelectionToolWindow } from "./selection/SelectionToolWindow";
+import { resolveShortcutBindings } from "../shared/shortcuts";
 import { registerFeishuIpc } from "./ipc/feishuIpc";
 import { registerWeChatIpc } from "./ipc/wechatIpc";
 import { applyLinuxDisplayBackendWorkaround, isUsingLinuxXWaylandWorkaround } from "./linuxDisplayBackend";
@@ -76,6 +85,14 @@ initializeAppBrand(app, app.isPackaged && __PIDECK_DEV_BUILD__ ? "PiDeck Dev" : 
 // E2E（Playwright 驱动）静默运行：窗口显示但不抢焦点、不最大化铺满屏，
 // 避免打断用户在其他软件的输入。fixture 通过 env PIDECK_E2E=1 标识。
 const isE2E = process.env.PIDECK_E2E === "1";
+// E2E 窗口默认摆到屏幕外（见 e2eWindowMode.ts）：不遮挡、不抢焦点、不进任务栏；
+// PIDECK_E2E_WINDOW_MODE=visible 给 window-memory / quick-task 这类需要真实几何的用例回退。
+const e2eWindowPlacement = resolveE2EWindowPlacement(isE2E, process.env.PIDECK_E2E_WINDOW_MODE);
+if (isE2E) {
+	// 屏幕外窗口会被 Windows 原生遮挡判定当成不可见 → 渲染/定时器节流，Playwright 点击与截图会卡住。
+	for (const switchName of E2E_RENDERING_SWITCHES) app.commandLine.appendSwitch(switchName);
+	app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
+}
 
 // 冷启动计时锚点（2026-10 流畅度审计）：里程碑在 whenReady 与 showMainWindowOnce 记录，
 // 日志对比 sinceModuleLoadMs / processUptimeMs 两个口径即可观测启动回归。
@@ -270,7 +287,7 @@ import { defaultPathCheck } from "./projects/projectPresence";
 import { FileSystemService } from "./fs/FileSystemService";
 import { AgentManager } from "./pi/AgentManager";
 import { PiProcess } from "./pi/PiProcess";
-import { getBridgeServer, stopBridgeServer } from "./pi/bridge/BridgeServer";
+import { getModelTraceServer, stopModelTraceServer } from "./pi/modelTrace/ModelTraceServer";
 import { PiModelCapabilityCache, watchPiConfigDirectory } from "./pi/PiModelCapabilityCache";
 // 生图消息不走 Agent 消息流，改名前需判断标题是否仍是占位名
 import { isDefaultAgentTitle } from "./pi/agentUtils";
@@ -288,6 +305,8 @@ import { autoUpdateDshRuntimeIfOutdated } from "./dsh/runtime/dshRuntimeAutoUpda
 import { createNetDownloader, createTarExtractor, fetchDshRuntimeIndex } from "./dsh/runtime/dshRuntimeIo";
 import { credentialValueFromDocument } from "./dsh/dshCredentials";
 import { DshAgentManager } from "./dsh/DshAgentManager";
+import { createDshSessionSkillLoader } from "./dsh/dshSessionSkillLoader";
+import { listDshFilesystemSkills } from "./skills/skillCatalog";
 import { startDshHostInBackground } from "./dsh/startDshHostInBackground";
 import { importForeignSession, knownForeignSessionIds, syncForeignSessions, type DshForeignSyncDeps } from "./dsh/dshForeignSync";
 import { PiLocator } from "./pi/PiLocator";
@@ -298,6 +317,7 @@ import { testPiProxy } from "./pi/PiProxyTester";
 import { SessionScanner } from "./sessions/SessionScanner";
 import { resolveLaunchDefaultOptions, isModelInModelsConfig } from "./sessions/launchDefaults";
 import { mergeCatalogModels } from "./pi/catalogModelsForValidation";
+import { pickStandbyWarmupProject } from "./pi/standbyWarmupTarget";
 import { createSessionModelPreference } from "../shared/modelDisplayName";
 import { modelThinkingLevelOf } from "../shared/modelThinkingLevels";
 import { SessionCatalog, canAttachRuntimeMetadata } from "./sessions/SessionCatalog";
@@ -311,6 +331,7 @@ import { SessionCommandIpcError } from "./sessions/SessionCommandIpcError";
 import { appendSessionForkSuffix } from "./sessions/sessionForkTitle";
 import { sanitizeAutomaticTitle } from "./sessions/sessionTitleSanitize";
 import { createSessionForkCommands } from "./sessions/sessionForkCommands";
+import { createDshSessionFork } from "./sessions/dshSessionFork";
 import { registerAllDomains } from "./api/domainAssembly";
 import { CodexSessionImporter } from "./sessions/CodexSessionImporter";
 import { ClaudeSessionImporter } from "./sessions/ClaudeSessionImporter";
@@ -366,10 +387,10 @@ import { registerProjectsIpc } from "./ipc/projectsIpc";
 import { registerUsageStatsIpc } from "./ipc/usageStatsIpc";
 import { UsageStatsService } from "./usageStats/UsageStatsService";
 import { constrainWindowBoundsToWorkArea, type LastWindowBounds, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, readLastWindowBounds, saveLastWindowBounds } from "./windowState";
+import { applyE2EWindowPlacement, E2E_RENDERING_SWITCHES, resolveE2EWindowPlacement } from "./e2eWindowMode";
 import { createRendererCrashRecoveryGuard } from "./window/rendererCrashRecovery";
 import { registerBackgroundImageProtocol, registerBackgroundsIpc } from "./ipc/backgroundsIpc";
 import { registerThemesIpc } from "./ipc/themesIpc";
-import { registerPluginDevIpc } from "./ipc/pluginDevIpc";
 import { registerHostPluginsIpc } from "./ipc/hostPluginsIpc";
 import { registerPiDeckMcpIpc } from "./ipc/piDeckMcpIpc";
 import { PiDeckMcpService } from "./mcp/PiDeckMcpService";
@@ -381,7 +402,6 @@ import { LocalServiceRegistry } from "./localServices/LocalServiceRegistry";
 import { createLocalServiceCli, killLocalServiceProcess } from "./localServices/localServiceCli";
 import { HOST_PLUGIN_SCHEME } from "./plugins/hostPluginPolicy";
 import { hostPluginPartitionId, hostPluginWebviewBridge } from "./plugins/hostPluginWebviewPolicy";
-import { PluginDevService } from "./extensions/PluginDevService";
 import { registerGitIpc } from "./ipc/gitIpc";
 import { registerStoreIpc } from "./ipc/storeIpc";
 import { registerTerminalIpc } from "./ipc/terminalIpc";
@@ -395,6 +415,8 @@ import { ImageSessionStore } from "./imagegen/ImageSessionStore";
 import { ImageBlobStore } from "./imagegen/ImageBlobStore";
 import { registerImageGenImageProtocol } from "./imagegen/ImageGenImageProtocol";
 import { registerLocalImageProtocol } from "./media/LocalImageProtocol";
+import { registerLocalImageIpc } from "./ipc/localImageIpc";
+import { createCanonicalRootsProvider } from "./media/localImageRoots";
 import { ImageGenConfigStore } from "./imagegen/ImageGenConfigStore";
 import { registerVideoGenIpc } from "./ipc/videogenIpc";
 import { VideoGenConfigStore } from "./videogen/VideoGenConfigStore";
@@ -474,6 +496,41 @@ import { UpdateService } from "./update/UpdateService";
 import type { AppManualUpdateRelease } from "../shared/types/app";
 
 let mainWindow: BrowserWindow | null = null;
+/**
+ * 草稿 DSH 会话的技能目录入口（懒装配）：sessionCatalog/dshAgentManager 都是
+ * whenReady 之后才赋值，构造必须延迟到首次 IPC 调用，避免启动顺序耦合。
+ */
+let dshSessionSkillLoader: ReturnType<typeof createDshSessionSkillLoader> | undefined;
+function getDshSessionSkillLoader(): ReturnType<typeof createDshSessionSkillLoader> {
+	dshSessionSkillLoader ??= createDshSessionSkillLoader({
+		getEntry: (sessionId) => {
+			const entry = sessionCatalog.get(sessionId);
+			if (!entry) return undefined;
+			return { backend: entry.backend, status: entry.status, noSession: entry.noSession, projectId: entry.projectId, dshSessionId: entry.dshSessionId, agentPreset: entry.agentPreset };
+		},
+		getProjectPath: (projectId) => projectStore.get(projectId)?.path,
+		// 预览层：通用 SKILL.md 文件系统扫描（pi/dsh 共用逻辑），不依赖 host/agent。
+		scanFilesystem: async (entry) => {
+			const projectPath = projectStore.get(entry.projectId)?.path;
+			if (!projectPath) return [];
+			return listDshFilesystemSkills({
+				projectPath,
+				dshHome: dshHost.getHomeDir(),
+				agentsHome: process.env.DSH_AGENTS_HOME?.trim() || undefined,
+				bundledSkillDir: process.env.DSH_BUNDLED_SKILL_DIR?.trim() || undefined,
+			});
+		},
+		ensureHostSession: (cwd, agentPreset) => dshAgentManager.ensureAttachableHostSession(cwd, agentPreset),
+		attachHostSession: async (deckSessionId, dshSessionId, agentPreset) => {
+			const updated = await sessionCatalog.attachRuntime({ sessionId: deckSessionId, dshSessionId, ...(agentPreset ? { agentPreset } : {}) });
+			// host id 回写后渲染层的「模式锁定」/删除墓碑语义随之变化，静默重拉该项目列表。
+			mainWindow?.webContents.send(ipcChannels.sessionsCatalogRefreshed, { projectId: updated.projectId });
+		},
+		dismissHostSession: (dshSessionId) => sessionCatalog.rememberDismissedDshSession(dshSessionId),
+		listSkills: (dshSessionId) => dshAgentManager.listSkillsByHostSession(dshSessionId),
+	});
+	return dshSessionSkillLoader;
+}
 // 紧凑模式（右键小任务）与主窗口几何的接线统一收在 quickTaskWindowChrome：
 // 本文件不再出现紧凑模式的激活判断、屏幕几何计算与「关闭=返回工作台」的拦截逻辑。
 const quickTaskChrome = new QuickTaskWindowChrome({
@@ -620,6 +677,45 @@ let usageStatsService: UsageStatsService | null = null;
 let piAuthService: PiAuthService | null = null;
 /** 提示词增强服务（输入框增强按钮的后端）：常驻助手进程复用用户那套 pi 的 ModelRuntime。 */
 let enhancePromptService: EnhancePromptService | null = null;
+/** 智能体市场配置存储（<userData>/agent-profiles.json）；null = 尚未初始化。 */
+let agentProfileStore: AgentProfileStore | null = null;
+/** 智能体一次性调用服务（划词工具 / 市场面板）：业务在 service，侧车进程在下面的 completion。 */
+let agentInvokeService: AgentInvokeService | null = null;
+/**
+ * 智能体调用专用侧车实例。与提示词增强共用同一套 pi-enhance-host 协议，但必须是
+ * **独立进程**：EnhancePromptService 是「新 run 打断旧 run」的单飞语义，共用实例会
+ * 让划词翻译把用户正在跑的输入框增强打断（见 AGENTS.md 例外四）。
+ */
+let agentInvokeCompletionService: EnhancePromptService | null = null;
+/** 系统级划词浮窗（全局快捷键触发的独立 BrowserWindow）；null = 尚未装配/装配失败。 */
+let selectionToolWindow: SelectionToolWindow | null = null;
+/** 系统级划词服务：取词、浮窗展示与全局快捷键注册的唯一归属地。 */
+let selectionToolService: SelectionToolService | null = null;
+
+/**
+ * 同步系统级划词的全局快捷键（开关、键位、市场设置任一变化都调用）。
+ *
+ * globalShortcut 是应用级独占资源：关闭开关必须立刻注销，改键必须先释放旧键再注册
+ * （Electron 对同一 accelerator 重复注册返回 false）。注册失败只记日志——常见原因是
+ * 该组合被其他应用占用，此时设置页仍显示键位、用户可改键或关闭开关。
+ */
+function syncSelectionToolShortcut(): void {
+	const service = selectionToolService;
+	if (!service) return;
+	const systemEnabled = agentProfileStore?.getSnapshot().settings.systemSelectionEnabled === true;
+	if (!systemEnabled) {
+		service.unregisterShortcut();
+		return;
+	}
+	const accelerator = resolveShortcutBindings(settingsStore.get().shortcuts ?? {}, process.platform).openSelectionTool;
+	if (!accelerator) {
+		service.unregisterShortcut();
+		return;
+	}
+	if (service.getRegisteredShortcut() === accelerator) return;
+	const registered = service.setShortcut(accelerator);
+	if (!registered) void appLogger.warn("selection-tool", "Global shortcut registration failed", { accelerator });
+}
 /** 粘贴文件启动清理（registerIpc 阶段赋值；whenReady 后 fire-and-forget 执行） */
 let cleanupPasteFiles: (() => Promise<number>) | undefined;
 
@@ -1296,36 +1392,38 @@ async function replaceAgentSession(agentId: string, replace: () => Promise<unkno
 }
 
 // ── fork/clone 统一命令层（桌面 IPC 与 Web HTTP 共用；W1 重发/编辑 fork 化统一）──
-// DSH fork/clone：runtime 已原地换绑到新会话（agentId 不变，焦点会话 id 不变），
-// 只需把 catalog 的 dshSessionId 同步为新 fork 会话，重启后 attach 正确。
-const forkDshAgentSessionImpl = async (target: SessionRuntimeTarget, entryId: string) => {
-	const result = await dshAgentManager.forkSession(target.agentId, entryId);
-	const tab = dshAgentManager.list().find((candidate) => candidate.id === target.agentId);
-	if (tab?.sessionId) {
-		await sessionCatalog.attachRuntime({
-			sessionId: target.sessionId,
-			dshSessionId: tab.sessionId,
-			promoteToActive: true,
+// DSH fork/clone：session.fork 出新 host 会话后**新建 catalog 条目**（(fork) 标题 + 新
+// dshSessionId + forked 标记），再把 runtime 换绑过去；原条目保留在侧栏。
+// 旧实现只把当前条目的 dshSessionId 原地改写，用户永远只看到一条会话（issue #381 后续）。
+// 懒装配：dshAgentManager / sessionCatalog / coordinator 都在 whenReady 后才赋值。
+let dshSessionForkInstance: ReturnType<typeof createDshSessionFork> | undefined;
+const getDshSessionFork = () => {
+	if (!dshSessionForkInstance) {
+		if (!dshAgentManager) throw new Error("DSH agent manager is not ready");
+		dshSessionForkInstance = createDshSessionFork({
+			catalog: sessionCatalog,
+			agents: dshAgentManager,
+			coordinator: sessionRuntimeCoordinator,
+			forkedSuffix: () => mainCopy("session.forkedSuffix"),
+			onDetached: emitSessionRuntimeDetach,
+			onAttached: (binding) => emitReplacementState(binding, true),
+			onRestored: (binding) => emitReplacementState(binding, false),
+			// host 改名失败不阻断 fork，但必须可见：与 pi 侧同一文案，引导手动重命名补后缀。
+			onTitleRenameFailed: () =>
+				emitAgentsNotice({
+					message: mainCopy("notice.sessionSuffixRenameFailed"),
+					i18nKey: "notice.sessionSuffixRenameFailed",
+					i18nParams: { mode: mainCopy("session.forkedSuffix") },
+					kind: "warning",
+				}),
+			logger: appLogger,
 		});
 	}
-	return { ...result };
+	return dshSessionForkInstance;
 };
-// DSH clone：fork 无锚点（完整副本），runtime 换绑到新会话，语义同 fork。
-const cloneDshAgentSessionImpl = async (target: SessionRuntimeTarget) => {
-	const result = await dshAgentManager.cloneSession(target.agentId);
-	const tab = dshAgentManager.list().find((candidate) => candidate.id === target.agentId);
-	if (tab?.sessionId) {
-		await sessionCatalog.attachRuntime({
-			sessionId: target.sessionId,
-			dshSessionId: tab.sessionId,
-			promoteToActive: true,
-		});
-	}
-	return { ...result };
-};
-/** fork/clone 成功后推送 catalog 刷新：pi 新建了 catalog 条目、DSH 换绑了 dshSessionId，
+/** fork/clone 成功后推送 catalog 刷新：pi/DSH 都会新建 catalog 条目（或回填标题/标记），
  * 侧栏只有收到 sessionsCatalogRefreshed 才会静默重拉列表（useProjectSync），否则
- * 新建/换绑后的会话要等下次手动刷新才出现。Web 端由 /api/events SSE 快照 diff 兜底。 */
+ * 新会话要等下次手动刷新才出现。Web 端由 /api/events SSE 快照 diff 兜底。 */
 const notifyForkCatalogRefreshed = (sessionId: string): void => {
 	const projectId = sessionCatalog.get(sessionId)?.projectId;
 	if (!projectId) return;
@@ -1344,8 +1442,8 @@ const getSessionForkCommands = () => {
 			agentManager,
 			replaceAgentSession,
 			isDshAgent: (agentId) => dshAgentManager?.list().some((tab) => tab.id === agentId) === true,
-			forkDshAgentSession: forkDshAgentSessionImpl,
-			cloneDshAgentSession: cloneDshAgentSessionImpl,
+			replaceDshAgentSession: (target, entryId) => getDshSessionFork().fork(target, entryId),
+			replaceDshCloneSession: (target) => getDshSessionFork().clone(target),
 			logger: appLogger,
 			notifyForkCatalogRefreshed,
 		});
@@ -2191,6 +2289,8 @@ async function createWindow() {
 			contextIsolation: true,
 			nodeIntegration: false,
 			webviewTag: true,
+			// E2E 窗口在屏幕外/无系统焦点时也必须持续渲染：否则定时器与合成被动节流，用例会随机超时。
+			...(isE2E ? { backgroundThrottling: false } : {}),
 			// 渲染进程 V8 堆上限：必须覆盖 Chromium 透传的全局 `--js-flags`（#213）
 			additionalArguments: rendererHeapAdditionalArguments(),
 		},
@@ -2199,6 +2299,8 @@ async function createWindow() {
 	// Windows 建窗时可能裁掉工作区外的不可见 resize border；构造参数不足以精确还原贴边外框。
 	// 显示/最大化前显式设置已解析的几何，避免重启后高度再次被原生建窗流程缩短。
 	createdWindow.setBounds(startupWindowBounds);
+	// E2E：挪到屏幕外再显示（默认），避免每个用例的新窗口弹到用户桌面最前；失败保持原摆放。
+	applyE2EWindowPlacement(createdWindow, e2eWindowPlacement);
 	configureBrowserPanelWebviewHost(createdWindow);
 	let hasShownMainWindow = false;
 	function showMainWindowOnce() {
@@ -2567,12 +2669,54 @@ async function stopDshHostForRuntimeDiskOperation(): Promise<boolean> {
 }
 
 /**
- * DSH 后台预热是否允许：默认后端是 dsh、runtime 可用，且用户没有手动停止过 host。
- * 手动停止优先级最高——即使用户把默认后端切成 dsh，也不该把用户明确停掉的 host
- * 又悄悄拉起来（预热失败只记日志，用户无感，所以这里必须直接不开）。
+ * DSH 后台预热是否允许：runtime 已安装可用，且用户没有手动停止过 host。
+ *
+ * 刻意不再要求 `defaultAgentBackend === "dsh"`：runtime 需要用户单独下载/安装（几十 MB），
+ * 它出现在 userData 里本身就是「用户要用 DSH」的显式信号；host boot 实测约 20s，装了却
+ * 不预热会让第一次打开 DSH 会话/配置页白等一轮 boot。只要装了、又没手动停过，就提前拉起。
+ *
+ * 内存取舍：host 常驻约 200MB。手动停止（dshManualStopped）优先级最高——用户表达过
+ * 「不想让它运行」时一律不预热；runtime 未安装时不预热（boot 必然失败，白起进程）。
  */
 function dshWarmupEnabled(): boolean {
-	return settingsStore.get().defaultAgentBackend === "dsh" && dshRuntimeStatus.canCreateDshSession() && settingsStore.get().dshManualStopped !== true;
+	return dshRuntimeStatus.canCreateDshSession() && settingsStore.get().dshManualStopped !== true;
+}
+
+/**
+ * 启动期 pi standby 预热（fire-and-forget）：把「首次新会话要付的完整 pi 启动」提前挪进
+ * 应用启动/用户阅读历史的空窗。
+ *
+ * 为什么需要：一次 pi RPC 启动实测 8~25s（耗时几乎全在 pi 加载用户 npm 扩展），而现有
+ * 预热只在草稿创建/激活完成之后触发——应用刚启动后从引导页发的第一条消息是「建草稿 +
+ * 立刻发送」，standby 还没握手完，只能再 spawn 一个（实测两个 pi 进程并行冷启动，更慢）。
+ * 这里按 catalog 最近活跃项目提前起一个待命进程。
+ *
+ * 触发条件收敛在 pickStandbyWarmupProject：默认后端 pi 取最近活跃项目，非 pi 默认只在
+ * 近期确实用过 pi 时预热，避免纯 DSH/ACP 用户为用不到的能力常驻约 300MB。
+ * 必须在 syncWslConfig 之后调用：WSL 项目的 spawn 参数依赖 agentManager 的 WSL 快照，
+ * 抢跑会用错环境，认领时指纹不符又白起一个进程。
+ * 失败一律只记日志：预热是启动期优化，绝不阻断启动。
+ */
+function warmStandbyAgentAtStartup(): void {
+	try {
+		if (settingsStore.get().standbyRuntimeEnabled === false) return;
+		// 已有 pi 会话正在启动时让路：并行 spawn 会互相拖慢（磁盘/CPU 竞争），而且该会话激活
+		// 结束后自己的链路还会补热一个 standby。
+		if (agentManager.list().some((tab) => tab.status === "starting")) return;
+		const target = pickStandbyWarmupProject({
+			entries: sessionCatalog.listEntries(),
+			projectIds: new Set(projectStore.list().map((project) => project.id)),
+			defaultBackend: settingsStore.get().defaultAgentBackend,
+			now: Date.now(),
+		});
+		if (!target) return;
+		void appLogger?.info("agent", "Startup standby warmup requested", { projectId: target });
+		agentManager.ensureStandbyAgent(target);
+	} catch (error) {
+		void appLogger?.warn("agent", "Startup standby warmup target resolution failed", {
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 }
 
 /**
@@ -2759,6 +2903,31 @@ function registerIpc() {
 	registerPiAuthIpc(ipcMain, piAuthService);
 	// 提示词增强（输入框增强按钮）：只做校验/适配，进程与协议在 EnhancePromptService
 	registerEnhanceIpc(ipcMain, enhancePromptService);
+	// 智能体市场：配置 CRUD + 一次性调用（划词工具）。store 在 whenReady 里已 load，
+	// 这里只按域注册边界 handler；直接调用走独立侧车实例（见 agentInvokeCompletionService）。
+	if (agentProfileStore) {
+		registerAgentProfileIpc({
+			store: agentProfileStore,
+			appLogger,
+			onNotifyChanged: (event) => {
+				const win = mainWindow;
+				if (win && !win.isDestroyed()) win.webContents.send(ipcChannels.agentProfilesChanged, event);
+			},
+		});
+	}
+	registerAgentInvokeIpc(ipcMain, agentInvokeService);
+	// 系统级划词浮窗：状态/隐藏/「发送到 PiDeck」（文本插入主窗口当前会话输入框）。
+	registerSelectionToolIpc({
+		service: selectionToolService,
+		window: selectionToolWindow,
+		insertToMain: (text) => {
+			const win = mainWindow;
+			if (!win || win.isDestroyed()) return false;
+			win.webContents.send(ipcChannels.selectionToolInserted, { text });
+			focusMainWindow();
+			return true;
+		},
+	});
 	// 数据环境（数据模式决策 / 目录归属校验）：业务在 dataEnvService，handler 只校验/适配。
 	// relaunchApp 复用 restartApp（先停常驻服务 + isQuitting，防止 closeToTray 吞掉 relaunch）；
 	// quitApp 先置 isQuitting，与托盘「退出」菜单同一写法，避免 closeToTray 把退出吞成隐藏到托盘。
@@ -2903,13 +3072,6 @@ function registerIpc() {
 	});
 	// 内置示例插件（billion-context）首次启动落位；目录已存在则不覆盖。
 	void hostPlugins.initialize(resolveBuiltinHostPluginDirectory(resolveBuiltInExtensionRoots())).catch(() => appLogger.warn("host-plugins", "Optional plugin host initialization failed"));
-	// 插件开发支持：demo/指南落 ~/.pi/agent/extensions（与扩展列表同一 home 来源）
-	const pluginDevService = new PluginDevService(resolveBuiltInExtensionRoots(), () => extensionManager?.userHomeDir ?? homedir());
-	registerPluginDevIpc(pluginDevService, {
-		// demo 是落进用户扩展目录的普通扩展：落盘后同步失效扩展列表缓存，
-		// 避免已打开的扩展页/缓存读看不到新行（与安装包后失效缓存同一语义）。
-		onExtensionFilesChanged: () => extensionManager?.invalidateListCache(),
-	});
 	registerProjectsIpc({
 		projectStore,
 		settingsStore,
@@ -3051,12 +3213,14 @@ function registerIpc() {
 	// pideck-file://：对话内本地图片只读通道。白名单根=项目目录（含 worktree）+ 聊天工作区
 	// + userData + 专属临时图片目录。**不放行整个 %TEMP%**：安装器/解压/其它程序的临时文件
 	// 不该被消息内容当图床读（取舍见 docs/markdown-image-rendering-plan.md）。
-	registerLocalImageProtocol(() => [
-		app.getPath("userData"),
-		join(app.getPath("temp"), "pideck-shots"),
-		projectStore.getChatProjectPath(),
-		...projectStore.list().map((project) => project.path),
-	]);
+	const resolveLocalImageRoots = () => [app.getPath("userData"), join(app.getPath("temp"), "pideck-shots"), projectStore.getChatProjectPath(), ...projectStore.list().map((project) => project.path)];
+	// 协议与 IPC 共用同一份「已规范化 + 5s 缓存」的根列表：realpathSync.native 是同步调用，
+	// 一条消息几十张图时不能每次请求都把全部项目根重算一遍。
+	const canonicalLocalImageRoots = createCanonicalRootsProvider(resolveLocalImageRoots);
+	registerLocalImageProtocol(canonicalLocalImageRoots);
+	// 保存/复制要在渲染层拿字节：fetch(pideck-file://) 在该 scheme 上会被拦（corsEnabled: false），
+	// 所以字节走 IPC，白名单与体积判定跟协议同一份实现。
+	registerLocalImageIpc({ resolveRoots: canonicalLocalImageRoots });
 	registerImageGenIpc({
 		imageGen: new ImageGenService({
 			getProviderCredentials: async (provider) => {
@@ -3238,6 +3402,9 @@ function registerIpc() {
 		settingsStore,
 		sessionScanner,
 		sessionCatalog,
+		// 会话 ↔ 智能体绑定：绑定的会话每次发送注入角色设定（pi/acp 隐藏 agentMessage，
+		// dsh 退化为可见前缀，由 sessionIpc 的 composeAgentInstruction 统一组合）。
+		resolveSessionAgentInstruction: (sessionId) => agentProfileStore?.getBoundAgent(sessionId)?.systemPrompt,
 		sessionRuntimeCoordinator,
 		agentManager,
 		configManager,
@@ -3406,6 +3573,8 @@ function registerIpc() {
 			cancelDshQueuedMessage: (agentId, itemId) => dshAgentManager.cancelQueuedMessage(agentId, itemId),
 			listDshSubagents: (agentId) => dshAgentManager.listSubagents(agentId),
 			listDshSkills: (agentId) => dshAgentManager.listSkills(agentId),
+			// 草稿 DSH 会话：会话启动前读技能目录（懒建/复用 host 会话，不启动 agent）。
+			listDshSessionSkills: (sessionId) => getDshSessionSkillLoader()(sessionId),
 			readDshSubagentHistory: (agentId, childSessionId, beforeSeq, maxMessages) => dshAgentManager.readSubagentHistory(agentId, childSessionId, beforeSeq, maxMessages),
 			listDshOrphans: async () => {
 				// G3/D11：host 持久化会话中，catalog 无 dshSessionId 映射的视为孤儿
@@ -3671,6 +3840,8 @@ function registerIpc() {
 		log: (message, detail) => void appLogger.info("tokendance", message, detail),
 	});
 	registerSystemIpc({
+		// 设置保存后的主进程副作用：系统级划词快捷键按新键位/开关重注册（appShortcuts 同一时机）。
+		afterSettingsUpdate: () => syncSelectionToolShortcut(),
 		piLocator,
 		settingsStore,
 		configManager,
@@ -4009,6 +4180,8 @@ protocol.registerSchemesAsPrivileged([
 	{ scheme: "pideck-img", privileges: { secure: true, standard: true, corsEnabled: false, supportFetchAPI: true, stream: true } },
 	// 对话内本地图片（Markdown 正文引用白名单目录内的图片）：替代 file://，dev 与打包行为一致
 	{ scheme: "pideck-file", privileges: { secure: true, standard: true, corsEnabled: false, supportFetchAPI: true, stream: true } },
+	// 文件预览的 HTML：内容编码在 URL 里，CSP 由主进程响应头下发，与主窗口策略解耦（#377）
+	{ scheme: "pideck-html", privileges: { secure: true, standard: true, corsEnabled: false, supportFetchAPI: false, stream: false } },
 ]);
 
 app
@@ -4717,8 +4890,8 @@ app
 		// RPC 日志是合并落盘的（250ms / 256 行刷一批），退出前把缓冲刷干净。
 		// 必须排在 pi-agents 之后：runAll 顺序执行，先停进程（最后几条日志在这里产生）再刷盘。
 		quitCleanup.register("rpc-logs-flush", () => rpcLogger?.flushPending());
-		// GUI 扩展桥端点：关掉监听，释放端口（桥随 pi 子进程一起结束）
-		quitCleanup.register("gui-bridge", () => stopBridgeServer());
+		// 模型请求快照端点：关掉监听，释放端口（快照随 pi 子进程一起结束）
+		quitCleanup.register("model-trace", () => stopModelTraceServer());
 		// 开发诊断必须在 registerIpc 之前创建：systemIpc 闭包捕获这个实例。
 		diagnosticsMonitor = new DiagnosticsMonitor({
 			logger: appLogger,
@@ -5307,7 +5480,64 @@ app
 		);
 		automationStore = new AutomationStore(join(app.getPath("userData"), "automation.json"));
 		const automationStorePreload = automationStore.load();
-		await Promise.all([sessionCatalog.load(), automationStorePreload]);
+		// 智能体市场：配置存储（userData/agent-profiles.json）。load 内部做旧数据归一化与
+		// 内置翻译智能体补种；与 sessionCatalog 并行加载，不额外拖慢启动。
+		agentProfileStore = new AgentProfileStore(join(app.getPath("userData"), "agent-profiles.json"));
+		const agentProfileStorePreload = agentProfileStore.load();
+		await Promise.all([sessionCatalog.load(), automationStorePreload, agentProfileStorePreload]);
+		// 智能体一次性调用（划词工具 / 市场面板）：复用提示词增强侧车协议，但**独立实例**。
+		// 侧车进程常驻、首次调用才拉起（EnhancePromptService 的现有语义），启动期只做装配。
+		agentInvokeCompletionService = new EnhancePromptService({
+			resolveLaunch: () =>
+				resolvePiAuthHostLaunch({
+					settings: settingsStore.get(),
+					locator: piLocator as PiLocator,
+					userDataPath: app.getPath("userData"),
+					appPath: app.getAppPath(),
+					resourcesPath: process.resourcesPath,
+					isPackaged: app.isPackaged,
+					helperFilename: PI_ENHANCE_HOST_FILENAME,
+				}),
+			logger: {
+				debug: (message) => void appLogger.debug("agent-invoke", message),
+				info: (message) => void appLogger.info("agent-invoke", message),
+				warn: (message) => void appLogger.warn("agent-invoke", message),
+				error: (message) => void appLogger.error("agent-invoke", message),
+			},
+		});
+		// C12：常驻子进程，退出时必须回收（与 enhance-prompt 同一清理登记表）。
+		quitCleanup.register("agent-invoke", () => agentInvokeCompletionService?.dispose());
+		agentInvokeService = new AgentInvokeService({
+			profiles: agentProfileStore,
+			completion: agentInvokeCompletionService,
+			logger: {
+				warn: (message) => void appLogger.warn("agent-invoke", message),
+				error: (message) => void appLogger.error("agent-invoke", message),
+			},
+		});
+
+		// 系统级划词：独立浮窗（复用主 preload，渲染层与主窗口同一份 desktopApi）+ 服务 + 全局快捷键。
+		// 浮窗只在首次触发时创建；warmUp 预加载可把首次弹出延迟降到只剩 show。
+		const selectionToolPreloadPath = await prepareMainPreloadPath();
+		selectionToolWindow = new SelectionToolWindow({
+			preloadPath: selectionToolPreloadPath,
+			logger: appLogger,
+			devRendererUrl: process.env.ELECTRON_RENDERER_URL ?? null,
+		});
+		selectionToolService = new SelectionToolService({
+			window: selectionToolWindow,
+			logger: {
+				info: (scope, message, detail) => void appLogger.info(scope, message, detail),
+				warn: (scope, message, detail) => void appLogger.warn(scope, message, detail),
+				error: (scope, message, detail) => void appLogger.error(scope, message, detail),
+			},
+		});
+		// 预热放在 registerIpc 之后（见下方 assemble 段）：浮窗加载即会 settings.get / agentProfiles.getSnapshot，
+		// 提前 warmUp 会让首帧拿到「服务未就绪」的拒绝（只是闪一下默认主题，但没必要）。
+		quitCleanup.register("selection-tool", () => selectionToolService?.dispose());
+		// 市场设置的「系统级划词」开关保存后即时生效（不必重启应用）。
+		agentProfileStore.onChanged(() => syncSelectionToolShortcut());
+		syncSelectionToolShortcut();
 		// #354：身份归并会把被吸收的历史会话 ID 从 catalog 移除，而侧栏置顶按稳定 ID 存在
 		// settings.json 里，不迁移就是死链（用户看到置顶丢失）。必须在本行完成——它早于
 		// createWindow，渲染层首次 settings.get 拿到的就是迁移后的值。
@@ -5712,19 +5942,22 @@ app
 
 		// 先注册 IPC 并创建窗口：WSL 探测 / pi settings / 代理 / Web 服务都可能卡住或抛错，
 		// 不能挡在 createWindow 前面（打包便携版表现为「启动没反应」，dev 因热路径较短不易复现）。
-		// GUI 扩展桥端点：只绑 127.0.0.1，起不来就静默跳过（桥不工作，pi 与 PiDeck 照常）。
-		// 必须在任何 Agent spawn 之前启动，否则首个 agent 拿不到 PIDECK_BRIDGE_URL。
+		// 模型请求快照端点：只绑 127.0.0.1，起不来就静默跳过（快照不工作，pi 与 PiDeck 照常）。
+		// 必须在任何 Agent spawn 之前启动，否则首个 agent 拿不到 PIDECK_MODEL_TRACE_URL。
 		// 放在 registerIpc 之前：端点与 IPC 注册无依赖，早启动早就绪。
-		void getBridgeServer()
+		void getModelTraceServer()
 			.start()
 			.then((info) => {
 				if (!info) return;
-				void appLogger?.info("app", "GUI bridge endpoint ready", { baseUrl: info.baseUrl });
+				void appLogger?.info("app", "Model trace endpoint ready", { baseUrl: info.baseUrl });
 			})
 			.catch((error: unknown) => {
-				void appLogger?.warn("app", "GUI bridge endpoint startup failed", error);
+				void appLogger?.warn("app", "Model trace endpoint startup failed", error);
 			});
 		registerIpc();
+		// 系统级划词浮窗预热：必须在 registerIpc 之后——浮窗加载即会 settings.get /
+		// agentProfiles.getSnapshot，提前预热会让首帧读到「服务未就绪」的拒绝。
+		void selectionToolWindow?.warmUp().catch(() => undefined);
 		// 统一接口聚合层：注册全部域与导入器并冻结（deps 缺省在 domainAssembly.ts 收集，FIND-5）
 		registerAllDomains();
 		registerFeishuIpc({
@@ -5788,7 +6021,7 @@ app
 			},
 			appVersion: () => app.getVersion(),
 			isPackaged: () => app.isPackaged,
-			// 自动更新完成前 warmup 因 outdated 被跳过：装好且默认后端是 dsh 时补一次预热。
+			// 自动更新完成前 warmup 因 outdated 被跳过：装好后补一次预热（门控见 dshWarmupEnabled）。
 			onRuntimeReady: () => {
 				startDshHostInBackground(dshHost, appLogger, {
 					enabled: dshWarmupEnabled(),
@@ -5801,10 +6034,10 @@ app
 			});
 		});
 
-		// 窗口已可用后再按需预热 DSH：默认后端是 dsh 且 runtime 可用才后台 boot，
-		// 避免纯 pi 用户空转 utilityProcess（约 200MB），也避免 runtime 不在时 boot 必然失败。
-		// 用户手动停止过 DSH（dshManualStopped）时也跳过——不弹错误，用户下次显式启动即可。
-		// 发送/历史/配置路径仍由 ensureStarted 兜底。
+		// 窗口已可用后预热 DSH：runtime 已安装且用户没手动停止过 host 才后台 boot。
+		// 不再要求默认后端是 dsh——装 runtime 本身就是显式选择，host boot 约 20s，装了就该提前拉起；
+		// 未安装时 boot 必然失败（白起 utilityProcess），手动停止（dshManualStopped）优先级最高，
+		// 两种情况都不预热（不弹错误，用户下次显式启动即可）。发送/历史/配置路径仍由 ensureStarted 兜底。
 		startDshHostInBackground(dshHost, appLogger, {
 			enabled: dshWarmupEnabled(),
 		});
@@ -5813,6 +6046,10 @@ app
 		// 使用同一套 WSL HOME/config 目录；不阻塞首帧。
 		void syncWslConfig()
 			.then(async () => {
+				// pi standby 启动预热放在这里：必须晚于 syncWslConfig（WSL 项目的 spawn 参数依赖
+				// agentManager 的 WSL 快照），但早于模型目录刷新/能力 hydration——三者互不依赖，
+				// 先让 pi 进程开始加载扩展，越早开始越能把启动耗时藏进启动空窗。
+				warmStandbyAgentAtStartup();
 				// 冷启动先刷 pi 模型目录缓存（models-store.json）再 hydration：PiDeck 的 RPC
 				// 进程都带 --offline，pi 启动时的自动目录网络刷新被跳过；目录若不主动刷新
 				// 只能靠 TUI 更新，可能长期滞后（官方 provider 新模型导致「列表有、Agent
@@ -5973,6 +6210,7 @@ app
 		// 声音提醒：纯主进程判定（settled/error 边沿/waiting 请求）+ 渲染层播放。
 		// 与宠物系统同构，独立开关，不依赖宠物是否启用。
 		registerSoundProtocol();
+		registerHtmlPreviewProtocol();
 		registerSoundIpc();
 		soundAlertService = new SoundAlertService({
 			agentManager,

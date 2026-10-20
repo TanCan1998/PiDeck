@@ -123,6 +123,8 @@ export type HostPluginDesktopApi = {
 	install: () => Promise<HostPluginResult<HostPluginCatalog>>;
 	/** Pick and install an unpacked plugin directory (same dialog rule: the renderer never supplies a path). */
 	installDirectory: () => Promise<HostPluginResult<HostPluginCatalog>>;
+	/** Install from a public GitHub repo URL: the main process downloads and extracts it, the renderer only passes the link. */
+	installGitHub: (url: string) => Promise<HostPluginResult<HostPluginCatalog>>;
 	/** 卸载：删掉 userData 里的插件目录并清掉授权；内置示例不可卸载（返回 plugin-builtin）。 */
 	remove: (id: string) => Promise<HostPluginResult<HostPluginCatalog>>;
 	mount: (input: HostPluginMountInput) => Promise<HostPluginResult<HostPluginMount>>;

@@ -88,6 +88,17 @@ export type EnhanceRunCallbacks = {
 	onError: (errorKind: EnhanceErrorKind, message: string) => void;
 };
 
+/**
+ * 服务层 run 入参：渲染层契约（EnhanceRunInput）之上多一个可选的 systemPrompt。
+ *
+ * 为什么只在主进程侧：智能体市场的一次性调用由主进程按 agentId 解析角色设定，渲染层
+ * 永远只能传 agentId（见 shared/types/agentProfile.ts）。若把该字段并进共享
+ * EnhanceRunInput，enhance:run 的 IPC 校验（parseEnhanceRunInput 按共享类型收口）就被
+ * 绕过——渲染层可以把任意系统指令塞进模型。缺省不传 = 内置增强模板，提示词增强的
+ * 线上行为逐字节不变（守卫：tests/enhancePromptService.test.mjs）。
+ */
+export type EnhanceServiceRunInput = EnhanceRunInput & { systemPrompt?: string };
+
 export type EnhanceAcceptResult = { ok: true; runId: string } | { ok: false; errorKind: EnhanceErrorKind; message: string };
 
 export type EnhancePromptServiceOptions = {
@@ -179,7 +190,7 @@ export class EnhancePromptService {
 	 * 发起一次增强。受理成功后，终态一律通过回调送达（done/aborted/error 各恰好
 	 * 一次）；受理失败（通道起不来）同步返回错误。
 	 */
-	enhance(input: EnhanceRunInput, callbacks: EnhanceRunCallbacks): Promise<EnhanceAcceptResult> {
+	enhance(input: EnhanceServiceRunInput, callbacks: EnhanceRunCallbacks): Promise<EnhanceAcceptResult> {
 		if (this.disposed) return Promise.resolve({ ok: false, errorKind: "sdk-unavailable", message: "提示词增强服务已停止" });
 		const accepted = this.acceptChain.then(
 			() => this.acceptInternal(input, callbacks),
@@ -193,7 +204,7 @@ export class EnhancePromptService {
 	}
 
 	/** 串行化的受理实现：打断旧的 → 确保 helper 进程 ready → 登记 run → 下发。 */
-	private async acceptInternal(input: EnhanceRunInput, callbacks: EnhanceRunCallbacks): Promise<EnhanceAcceptResult> {
+	private async acceptInternal(input: EnhanceServiceRunInput, callbacks: EnhanceRunCallbacks): Promise<EnhanceAcceptResult> {
 		// 先停掉助手侧旧模型流，再本地结算；只清 UI 会让旧请求继续消耗额度。
 		// 旧 id 的迟到记录被丢弃，不等待助手确认，也不会二次回调。
 		this.cancel();
@@ -215,7 +226,9 @@ export class EnhancePromptService {
 		// 定时器必须在写入首帧前就存在：异步 stdin error 可能紧跟 write() 触发，
 		// 此时错误处理会同步清理 activeRun，不能留下一个永不结算的定时器。
 		this.activeRun = { id: runId, callbacks, timer, accepted: false };
-		const sent = this.sendToHelper({ cmd: "complete", id: runId, provider: input.provider, modelId: input.modelId, systemPrompt: ENHANCE_SYSTEM_PROMPT, userText: input.userText, ...(input.context?.length ? { context: input.context } : {}) });
+		// 智能体市场的一次性调用会带自己的角色设定；空白值视作未提供，回落内置增强模板。
+		const systemPrompt = input.systemPrompt?.trim() || ENHANCE_SYSTEM_PROMPT;
+		const sent = this.sendToHelper({ cmd: "complete", id: runId, provider: input.provider, modelId: input.modelId, systemPrompt, userText: input.userText, ...(input.context?.length ? { context: input.context } : {}) });
 		if (!sent.ok) {
 			if (this.activeRun?.id === runId) this.settleActive("protocol", sent.message);
 			else clearTimeout(timer);

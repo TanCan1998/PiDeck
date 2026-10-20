@@ -2,7 +2,7 @@
  * 模型请求快照（RPC 日志的「模型」视图数据源）。
  *
  * 数据链路：pi 侧 `pi-deck-model-trace` 扩展（before_provider_request 钩子）→
- * 桥端点 POST /bridge/<token>/model-trace → AgentManager 回调 → 本模块。
+ * 主进程端点 POST /trace/<token>（src/main/pi/modelTrace/ModelTraceServer.ts）→ AgentManager 回调 → 本模块。
  *
  * 两级存储，职责不同：
  * - **完整请求体**：每条一个文件 `<root>/model-<agentId>-<traceId>.json`（可能上百 KB）。
@@ -16,7 +16,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { ModelTraceInput, ModelTraceRecord } from "../../shared/types/bridge";
+import type { ModelTraceInput, ModelTraceRecord } from "../../shared/types/modelTrace";
 import { readTextBounded } from "../fs/boundedTextRead";
 import type { ModelTraceLogData, RpcLogEntry } from "../../shared/types/rpcLog";
 

@@ -47,15 +47,20 @@ test("startDshHostInBackground skips warmup when enabled is false", () => {
 	assert.equal(started, false, "默认后端为 pi 时不应 fork DSH host");
 });
 
-test("startup integration warms DSH after the main window only when default backend is dsh", () => {
+test("startup integration warms DSH after the main window whenever the runtime is installed and the host was not stopped", () => {
 	// AgentRuntimeProvider 阶段 1：预热再加一道 runtime 门控——runtime 不在时 boot 必然失败，
 	// 白起一个 utilityProcess（约 200MB）没有意义。
 	// 43f8b7c2 起 createWindow 与直连预热之间插入了 runtime 版本错配自动更新块
-	// （其 onRuntimeReady 也用同一门控补预热），窗口放宽到 2400 字符；
-	// 门控条件收敛到 dshWarmupEnabled()：default backend dsh + canCreateDshSession
-	// + 未手动停止（dshManualStopped，见 tests/dshManualStopWiring.test.mjs）。
+	// （其 onRuntimeReady 也用同一门控补预热），窗口放宽到 2400 字符。
+	// 门控条件收敛到 dshWarmupEnabled()：canCreateDshSession + 未手动停止
+	// （dshManualStopped，见 tests/dshManualStopWiring.test.mjs）；**不再要求默认后端是 dsh**——
+	// 装好 runtime 本身就是用户要用 DSH 的显式信号，host boot 约 20s，装了就该提前拉起来。
 	assert.match(main, /await createWindow\(\);[\s\S]{0,2400}startDshHostInBackground\(dshHost, appLogger, \{\s*enabled:\s*dshWarmupEnabled\(\),\s*\}\)/);
 	assert.match(main, /function dshWarmupEnabled\(\): boolean[\s\S]{0,400}dshManualStopped !== true/);
+	assert.match(main, /function dshWarmupEnabled\(\): boolean[\s\S]{0,400}canCreateDshSession\(\)/);
+	// 默认后端不再是预热门控：纯 pi 用户只要装了 runtime 也应该预热 DSH host。
+	assert.doesNotMatch(main, /function dshWarmupEnabled\(\): boolean[\s\S]{0,300}defaultAgentBackend/);
+	assert.match(main, /function dshWarmupEnabled\(\): boolean\s*\{\s*return dshRuntimeStatus\.canCreateDshSession\(\) && settingsStore\.get\(\)\.dshManualStopped !== true;\s*\}/);
 	assert.match(configTab, /const restartHost = async \(\) =>/);
 	assert.match(configTab, /desktopApi\.sessions\.restartDshHost\(\)/);
 	assert.match(configTab, /t\("config\.dsh\.restartHost"\)/);

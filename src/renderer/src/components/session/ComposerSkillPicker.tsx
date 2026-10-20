@@ -5,41 +5,15 @@ import { toSkillInvocationToken } from "../../composerBehavior";
 import { t } from "../../i18n";
 import { desktopApi } from "../../desktopApi";
 import { projectByIdAtomFamily } from "../../atoms";
-import type { AgentBackend, DshSkillView, PiSkillSummary, ProjectResourceDiscoveryResult } from "../../../../shared/types";
+import type { AgentBackend, DshSkillView } from "../../../../shared/types";
+import { emptyProjectResourceDiscovery, type SkillCatalogEntry, mergePiSkillCatalog } from "../../../../shared/skillCatalog";
 import { Command, CommandEmpty, CommandInput, CommandItem, CommandList } from "../ui-shadcn/command";
 import { Button } from "../ui-shadcn/button";
 import { PickerDialog } from "./ComposerComponents";
 import { showNotice } from "../../utils/notice";
 
-/** 技能选择面板展示用的统一条目（pi 项目技能 + 全局技能 / DSH 部署技能）。 */
-type SkillItem = {
-	/** 调用名（不含前导斜杠；pi/DshSkillView.name 已是 kebab-case）。 */
-	name: string;
-	description: string;
-	whenToUse?: string;
-	/** false = 用户专用技能（disable-model-invocation）：仅用户可调用。 */
-	userOnly?: boolean;
-	/** 来源归属：项目技能或全局技能（仅 pi 后端有意义，用于徽标区分）。 */
-	source?: "project" | "global";
-	/** 来源标识：项目禁用覆盖筛选全局技能时保留稳定 identity。 */
-	sourceId?: string;
-	/** 完整来源路径（徽标 title 提示，如 ~/.pi/agent/skills / .pi/skills）。 */
-	sourceLabel?: string;
-	/** SKILL.md 绝对路径（仅 pi 技能有；DSH 技能由宿主管理，无正文读取通道）。 */
-	path?: string;
-};
-
-function mapDiscoveredSkill(skill: ProjectResourceDiscoveryResult["skills"][number]): SkillItem {
-	const source = skill.sourceId === "settings-project" || skill.sourceId === "package-project" || skill.sourceId === "ancestor-agents" ? "project" : "global";
-	return {
-		name: skill.name,
-		description: skill.description,
-		userOnly: skill.userOnly,
-		source,
-		sourceId: skill.sourceId,
-		sourceLabel: skill.sourceLabel,
-	};
-}
+/** 选择面板条目直接复用 shared/skillCatalog 的统一模型（pi 与 DSH 同一形状）。 */
+type SkillItem = SkillCatalogEntry;
 
 /** 技能详情预览态：正文懒加载（点击眼睛/插入时才读 SKILL.md，列表加载不背文件 IO）。 */
 type SkillDetailState = {
@@ -54,8 +28,10 @@ export function ComposerSkillPicker(props: {
 	backend: AgentBackend;
 	/** pi 后端需要项目 ID 才能读取项目技能。 */
 	projectId?: string;
-	/** DSH 后端需要已激活的 Agent（skill.list 走 runtime wire）。 */
+	/** DSH 运行中会话的 Agent（skill.list 走 runtime wire，含活跃会话的实时命令）。 */
 	agentId?: string;
+	/** 会话记录 id：DSH 没有运行中 agent 时用它读目录（共享文件扫描 + host 权威结果并集，不要求会话启动）。 */
+	sessionId?: string;
 	onClose: () => void;
 	onPick: (name: string) => void;
 	/** 一键插入技能正文到输入框（controller insertSkillContent）；传了才显示插入按钮。 */
@@ -68,8 +44,9 @@ export function ComposerSkillPicker(props: {
 
 	// 数据源随后端分叉：pi 走 projectResources.list（项目技能）+ skills.list
 	// （全局技能：~/.pi/agent/skills 与 ~/.agents/skills），DSH 走 listDshSkills
-	// （G7 skill.list 只读目录）；只有 DSH 要求 agentId 已激活，pi 无项目时
-	// 仍然能读全局技能（不再整面板阻塞，全局技能本来就不依赖项目）。
+	// （G7 skill.list 只读目录）。DSH 运行中会话传 agentId；草稿会话传 { sessionId }
+	// （主进程懒建/复用 host 会话，不启动 agent），已激活但无 runtime 的历史会话
+	// 仍要求先启动（不能换新 host id）。pi 无项目时仍能读全局技能（不整面板阻塞）。
 	// 内置聊天项目（builtin-chat）没有项目级资源目录：不发起 project-resources:list
 	// （后端虽已对 chat 返回空结果兜底，前端直接跳过可省一次 IPC 并避免把
 	// 「项目技能」这类概念混进纯聊天上下文）。inventory 未加载时 kind 未知，
@@ -79,8 +56,13 @@ export function ComposerSkillPicker(props: {
 	// 内置聊天项目没有项目级资源目录，不发起 project-resources:list；inventory 未加载时
 	// kind 未知，仍按有项目处理，由后端对 chat 返回空结果兜底，不会报错。
 	const hasProjectResources = Boolean(props.projectId) && !isChatSessionProject;
+	// DSH 没有运行中 agent 时也能读目录：主进程先扫描本地技能根（通用 SKILL.md 逻辑），
+	// 能拿到 host 权威列表时再做并集（preset/插件技能不漏）。引导页等虚拟会话 id
+	// （renderer: 前缀）没有 catalog 记录，仍走「启动后可读」提示。
+	const dshCatalogSessionId = props.backend === "dsh" && !props.agentId && props.sessionId && !props.sessionId.startsWith("renderer:") ? props.sessionId : undefined;
+
 	useEffect(() => {
-		if (props.backend === "dsh" && !props.agentId) {
+		if (props.backend === "dsh" && !props.agentId && !dshCatalogSessionId) {
 			setLoading(false);
 			return;
 		}
@@ -90,62 +72,23 @@ export function ComposerSkillPicker(props: {
 		const load =
 			props.backend === "pi"
 				? Promise.all([
-						hasProjectResources
-							? desktopApi.projectResources.list(props.projectId as string).then((result) =>
-									result.skills
-										.filter((skill) => skill.enabled)
-										.map<SkillItem>((skill: PiSkillSummary) => ({
-											name: skill.name,
-											description: skill.description,
-											userOnly: skill.userOnly,
-											source: "project",
-											sourceId: skill.sourceId,
-											sourceLabel: skill.sourceLabel,
-											path: skill.path,
-										})),
-								)
-							: Promise.resolve<SkillItem[]>([]),
-						desktopApi.skills.list().then((result) =>
-							result.skills
-								.filter((skill) => skill.enabled)
-								.map<SkillItem>((skill) => ({
-									name: skill.name,
-									description: skill.description,
-									userOnly: skill.userOnly,
-									source: "global",
-									sourceId: skill.sourceId,
-									sourceLabel: skill.sourceLabel,
-									path: skill.path,
-								})),
-						),
-						desktopApi.projectResources.discovery(props.projectId).catch(() => ({ projectResourcesAllowed: false, overrides: { disabledGlobalExtensions: [], disabledGlobalSkills: [], disabledGlobalPrompts: [] }, skills: [], prompts: [], extensions: [] })),
-					]).then(([projectSkills, globalSkills, discovery]) => {
-						const projectResourcesAllowed = discovery.projectResourcesAllowed;
-						const visibleProjectSkills = projectResourcesAllowed ? projectSkills : [];
-						const disabledInheritedSkills = new Set(discovery.overrides.disabledGlobalSkills);
-						const visibleGlobalSkills = globalSkills.filter((skill) => !disabledInheritedSkills.has(`${skill.sourceId}:${skill.name.toLowerCase()}`));
-						const discoveredSkills = discovery.skills.filter((skill) => skill.enabled).map(mapDiscoveredSkill);
-						const discoveredProjectSkills = discoveredSkills.filter((skill) => skill.source === "project");
-						const discoveredGlobalSkills = discoveredSkills.filter((skill) => skill.source === "global");
-						// 同名去重：项目直接目录优先，其次项目 Pi 发现项，再到全局目录。
-						const seen = new Map<string, SkillItem>();
-						for (const skill of [...visibleProjectSkills, ...discoveredProjectSkills, ...visibleGlobalSkills, ...discoveredGlobalSkills]) {
-							const key = skill.name.toLowerCase();
-							const prev = seen.get(key);
-							if (!prev || (skill.source === "project" && prev.source === "global")) {
-								seen.set(key, skill);
-							}
-						}
-						return Array.from(seen.values()).sort((a, b) => a.name.localeCompare(b.name));
-					})
-				: desktopApi.sessions.listDshSkills(props.agentId as string).then((list: DshSkillView[]) =>
-						list.map<SkillItem>((skill) => ({
+						hasProjectResources ? desktopApi.projectResources.list(props.projectId as string).then((result) => result.skills) : Promise.resolve([]),
+						desktopApi.skills.list().then((result) => result.skills),
+						desktopApi.projectResources.discovery(props.projectId).catch(() => emptyProjectResourceDiscovery()),
+					]).then(([projectSkills, globalSkills, discovery]) => mergePiSkillCatalog({ projectSkills, globalSkills, discovery }))
+				: (async (): Promise<SkillItem[]> => {
+						// 运行中会话按 agentId 读（runtime 权威）；无 runtime 时按 catalog sessionId 读
+						// （文件扫描 + host 结果并集）。两者都没有时上面已提前 return。
+						const target = props.agentId !== undefined ? props.agentId : dshCatalogSessionId !== undefined ? { sessionId: dshCatalogSessionId } : undefined;
+						if (target === undefined) return [];
+						const list: DshSkillView[] = await desktopApi.sessions.listDshSkills(target);
+						return list.map<SkillItem>((skill) => ({
 							name: skill.name,
 							description: skill.description,
 							whenToUse: skill.whenToUse,
 							userOnly: !skill.modelInvocable,
-						})),
-					);
+						}));
+					})();
 		void load
 			.then((next) => {
 				if (!cancelled) setItems(next);
@@ -159,7 +102,7 @@ export function ComposerSkillPicker(props: {
 		return () => {
 			cancelled = true;
 		};
-	}, [hasProjectResources, isChatSessionProject, props.backend, props.projectId, props.agentId]);
+	}, [hasProjectResources, isChatSessionProject, props.backend, props.projectId, props.agentId, dshCatalogSessionId]);
 
 	/** 读技能正文：白名单校验在主进程（只允许全局/项目技能位置），渲染层只传 path。 */
 	function readContent(item: SkillItem): Promise<string | undefined> {
@@ -236,8 +179,8 @@ export function ComposerSkillPicker(props: {
 		);
 	}
 
-	// DSH 草稿未启动：Agent 未激活读不到技能目录，给定位原因而非误报为空。
-	const blockedByAgent = props.backend === "dsh" && !props.agentId;
+	// DSH 且没有运行中 Agent、也没有 catalog 会话（如引导页虚拟会话）：给定位原因而非误报为空。
+	const blockedByAgent = props.backend === "dsh" && !props.agentId && !dshCatalogSessionId;
 	// pi 无项目资源（无普通项目 / 内置聊天项目）：只显示全局技能，不阻塞；
 	// 区分提示语让用户知道当前范围。
 	const globalOnly = props.backend === "pi" && !hasProjectResources;

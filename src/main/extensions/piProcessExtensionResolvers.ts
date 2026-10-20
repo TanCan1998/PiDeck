@@ -30,7 +30,7 @@ export function createPiProcessExtensionResolvers(
 	return {
 		resolveBuiltInExtensionPaths: (processSettings, includeProjectResources = true) => {
 			const disabledForProject = new Set(includeProjectResources ? readProjectResourceOverrides(cwd).disabledGlobalExtensions : []);
-			return listActiveBuiltInExtensionPaths(builtInRoots, processSettings?.removedBuiltInExtensions ?? settings.removedBuiltInExtensions ?? [], processSettings?.enabledBuiltInExtensions ?? settings.enabledBuiltInExtensions ?? []).filter((path) => {
+			return listActiveBuiltInExtensionPaths(builtInRoots, processSettings?.removedBuiltInExtensions ?? settings.removedBuiltInExtensions ?? []).filter((path) => {
 				const name = basename(path);
 				return (INTERNAL_BUILT_IN_EXTENSIONS as readonly string[]).includes(name) || !disabledForProject.has(name);
 			});

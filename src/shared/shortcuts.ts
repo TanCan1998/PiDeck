@@ -18,7 +18,23 @@
  * 见 parseAccelerator。纯函数实现，node --test 可直接单测，不依赖 electron 运行时。
  */
 
-export type ShortcutId = "openSettings" | "toggleDevTools" | "openNewSession" | "openSearch" | "findInSession" | "openCommandPalette" | "cycleModel" | "cycleThinking" | "openQuickMessages" | "toggleVoiceRecording" | "cycleSessionTabs" | "cycleSessionTabsReverse" | "closeSessionTab" | "zoomIn" | "zoomOut";
+export type ShortcutId =
+	| "openSettings"
+	| "toggleDevTools"
+	| "openNewSession"
+	| "openSearch"
+	| "findInSession"
+	| "openCommandPalette"
+	| "cycleModel"
+	| "cycleThinking"
+	| "openQuickMessages"
+	| "toggleVoiceRecording"
+	| "cycleSessionTabs"
+	| "cycleSessionTabsReverse"
+	| "closeSessionTab"
+	| "zoomIn"
+	| "zoomOut"
+	| "openSelectionTool";
 
 /** 设置页分组：general=通用（普通用户常用），dev=开发调试 */
 export type ShortcutGroupId = "general" | "dev";
@@ -165,6 +181,16 @@ export const SHORTCUT_DEFS: readonly ShortcutDef[] = [
 		descriptionKey: "settings.shortcuts.zoomOutDesc",
 		// 与 zoomIn 对称：Cmd/Ctrl+- 缩小；默认时兼容数字键盘 -。
 		defaultAccelerator: { darwin: "Cmd+-", other: "Ctrl+-" },
+	},
+	{
+		id: "openSelectionTool",
+		group: "general",
+		labelKey: "settings.shortcuts.openSelectionToolLabel",
+		descriptionKey: "settings.shortcuts.openSelectionToolDesc",
+		// 系统级划词（任意应用选中文字后触发）：**唯一走 Electron globalShortcut 的快捷键**，
+		// 由主进程注册而不是 before-input-event（后者只在 PiDeck 窗口有焦点时生效）。
+		// 主键选 X：Ctrl/Cmd+Shift+X 在浏览器/编辑器里没有既有含义（不抢开发者工具/搜索/标签页）。
+		defaultAccelerator: { darwin: "Cmd+Shift+X", other: "Ctrl+Shift+X" },
 	},
 	{
 		id: "toggleDevTools",

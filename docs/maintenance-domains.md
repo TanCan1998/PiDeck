@@ -143,12 +143,28 @@
 - `pideck-img://` 是自定义协议（`main/imagegen/ImageGenImageProtocol.ts`）：`registerSchemesAsPrivileged` 在 ready 前声明、`protocol.handle` 在 ready 后注册，`img-src` 已在 `src/renderer/index.html` 的 CSP 里放行。内容寻址 ⇒ ref 与内容一一对应，可长缓存。**别把 ref 回读成 base64 塞回消息对象**，那等于把 200 MB 字符串搬回渲染进程堆。
 - 孤儿 blob 回收（`pruneOrphanBlobs`）带 1 小时宽限期（`put` 落盘与引用写进 JSONL 之间有窗口），且**扫描失败整体放弃**（fail-closed：宁可留垃圾也不删掉读不到会话所引用的图）。
 
+## 智能体市场与划词工具（agent-profiles.json + 一次性补全侧车 + 系统级划词浮窗）
+
+- 智能体是 PiDeck 层的「提示词预设」，不是 pi 的东西：名称 / 简介 / emoji 图标 / 分类 / 角色设定（systemPrompt）/ 可选模型 / **会话后端（backend: pi|dsh）**，全部落 `<userData>/agent-profiles.json`（`{version,revision,settings,agents}`，`AgentProfileStore` 串行写 + 读盘归一化）。**内置智能体只在 id 缺失时补种，绝不覆盖用户编辑**；新增内置智能体只改 `src/main/agents/builtinAgents.ts` 的 `BUILTIN_AGENT_SEEDS`（id 一旦发布不可改；内置删除返回 false，可编辑、可用 `resetBuiltin` 恢复出厂内容）。
+- **清空可选模型**的约定与自动化任务一致：更新传 `model: null` 或成对空串 `{provider:"",modelId:""}`，归一化层丢字段（= 跟随会话模型）；半填/超长/控制字符的 ref 一律丢弃，绝不落半截值。**清空 backend** 同理：update patch 自带 `backend` 键且值为 `undefined/null` = 跟随设置默认（`Object.hasOwn` 判定，不能靠缺键）。
+- 市场是**页面覆盖层不是弹窗**：`AgentMarketPage` 挂在会话列（`absolute inset-0 z-30`，与 `HostPluginPageOverlay` 同约定），由 `agentMarketPageOpenAtom` 驱动；侧栏入口只切 atom，关闭/Esc/切会话即还原会话视图。**划词设置全部在「设置 → 通用」的 `SelectionToolSettingsSection`**（应用内开关 / 系统级开关 / 默认智能体 / 只读快捷键提示）；市场里不再有设置页。
+- 一次性调用（划词翻译 / 系统浮窗）：`agent-profiles:invoke` → `AgentInvokeService` → 注入的**独立** `EnhancePromptService` → `resources/pi-enhance-host.mjs`（AGENTS.md 例外四）。边界：**systemPrompt 只能由主进程按 agentId 从 store 解析**，渲染层只传 agentId / 短 instruction / 目标语言 / provider+modelId；事件按 runId 配对（started|delta|done|aborted|error 恰好一次）；单飞语义（新 run 打断旧 run）意味着**不能与输入框增强共用实例**，否则划词会打断增强。
+- 智能体模型优先级复用 `shared/enhanceModelPreference.ts` 的解析链（agent.model > 会话记录 > 设置 enhanceModel > 引导页偏好）；系统浮窗没有会话上下文，最后兜底 `sessions.resolveLaunchDefaults()` 的默认模型。
+- **「使用」= 会话页面复用 + 隐藏提示词**：市场「使用」→ `sessions.createDraft`（标题=智能体名，backend=agent.backend ?? 设置默认，仅 pi 带 agent.model）→ `agent-profiles:bind-session` 写 `settings.sessionAgentBindings` → 打开会话。绑定的会话每次发送，`sessionIpc` 用 `composeAgentInstruction` 把角色设定拼进 `SendPromptInput.agentMessage`（pi/acp 隐藏，时间线只显示用户输入；DSH 显式拒绝 agentMessage 且会拒收整条 prompt → 退化为可见前缀）。绑定表只能经 bind-session 改（`updateSettings` 的 patch 含 bindings 会被 IPC 拒绝）；上限 2000 条，删除智能体会同一次写入里清掉指向它的绑定，悬空/坏键在读盘时修复。PiDeck 不写 pi 的系统提示。
+- **应用内划词**：document 级 mouseup/keyup 捕获选区快照；**浮钮 mousedown 必须 preventDefault**，否则按下瞬间浏览器清掉选区；跳过 `INPUT/TEXTAREA/SELECT/contenteditable` 与 `[data-selection-tool-ui]` 子树。结果**在划词工具栏里内联输出**（紧凑工具栏 ~400px，打开即自动翻译，无「开始」按钮），不是弹窗。默认智能体 `settings.selectionToolAgentId` 悬空时主进程归一化清空、渲染层回退内置翻译官（`builtin-translate`）。
+- **与时间线「引用并提问」浮层共存**：会话消息里划选时，时间线自带的胶囊浮层渲染两个动作（`data-quote-action="quote"` / `"translate"`）；它可见期间（`quoteToolbarVisibleAtom`）全局划词浮钮不再出现，翻译动作写 `openSelectionInlineAtom({text, rect})` 由 `SelectionToolHost` 打开内联工具栏——同一时刻只有一个浮层。e2e 点击必须命中 `[data-quote-action="quote"]` 而不是容器中心。
+- **系统级划词**（其他应用也能用）：`shared/shortcuts.ts` 的 `openSelectionTool`（默认 Ctrl/Cmd+Shift+X）是**全应用唯一 `globalShortcut` 注册**；主进程 `syncSelectionToolShortcut()` 在启动、设置保存（`systemIpc` 的 afterSettingsUpdate）、市场设置变更（store changed）时同步——关开关立即注销、改键先释放旧键。取词 `src/main/selection/systemSelectionReader.ts`：保存剪贴板 → 写唯一哨兵 → 平台模拟复制（win32 走 CUA 的 SendInput，macOS osascript，Linux X11 xdotool；Wayland 无 xdotool → unsupported）→ 轮询剪贴板直到变化 → 恢复原剪贴板；失败返回 structured reason 绝不抛。浮窗 `SelectionToolWindow`（440x280 无边框透明置顶、独立 `selection-tool.html` 入口、复用主 preload）在光标附近弹出，等待加载完成再推 `selection-tool:captured`；失焦即藏。浮窗的「发送到 PiDeck」经 `selection-tool:insert-to-main` 把文本插入主窗口当前会话输入框（`selection-tool:inserted`）。
+- i18n：文案键分 `agentMarket.*` / `agentInvoke.*` / `selectionTool.*` / `settings.selectionTool.*` 四组，zh-CN + en-US 同步、改完跑 `node scripts/genZhTwCopy.mjs`（生成物禁止手改）。
+
+
+
 ## 会话 Markdown 渲染管线（MarkdownStream / streamdown 唯一引擎）
 
 - 唯一引擎是 `src/renderer/src/components/session/MarkdownStream.tsx`（streamdown 2.x + gfm/codeMeta/remarkLinkifyPaths）。公告详情、diff 预览、便签等静态 markdown 场景复用同一套管线（公告走 light 模式），**禁止再引一套 marked/react-markdown**，也禁止 `dangerouslySetInnerHTML` 绕过 sanitize。
 - **流式与 settle 是两条渲染路径**：流式期间不跑 remark 插件（`NO_STREAM_REMARK_PLUGINS`），只做 marked 核心解析；`isStreaming` 转 false 后先保持轻量渲染，`requestIdleCallback` 空闲才切全量（高亮/mermaid/表格）。所以在流式输出里看不到的问题，很可能在 settle 后才暴露——**复现问题要看最终态，别只盯流式过程**。
 - **mdast 插件用「临时属性 + 父节点整体替换 children」协议时，必须补回 `last → text.length` 的尾段**。`MarkdownLinkCore.ts` 的 `remarkLinkifyPaths` 把裸路径文本节点拆成 `[text, link, …]` 写进 `node.__segs`，父节点随后整体替换原文本节点；漏掉尾段，路径之后的全部正文（含 mdast 里同一 text 节点携带的换行后续行）会整段消失——用户看到的现象是「/ 后面的文本不显示、后一行整行不见」。
 - **事故教训（2026-09-23，用户报「斜杠后文本不显示」）**：尾段回填在 `fb6b5667`（feat(markdown): 文件链接存在性校验，失效路径降级纯文本）把 `while` 改成 `for-of` 时被丢掉；表格 cell / API 路径场景下一个 text 节点几乎必以路径结尾，而日常只在段中命中路径，样例永远测不出来。用真实会话 jsonl 实测：91 条回复 47 条丢文本。判据是解析产物可见文本与原文一致，而不是「链接能点」。
+- **streamdown 内部会跑 `rehype-sanitize`（defaultSchema）+ `rehype-harden`**：非白名单属性会被静默剥掉——实测 `{src, alt, data-md-image-count}` 过一遍只剩 `{alt}`（2026-10-20）。所以**不要用 HTML 属性给自定义组件传上下文**（用 React context）；图片/链接的最终 URL 是 sanitize 之后由 `urlTransform` 重新写入的，改 URL 规则时别只看 mdast。
 - **回归测试必须跑真实层级**：表格行（cell 内 text）、跨换行正文（`\n` 之后仍是同一个 text 节点）、inline code `__fileLink` 分支、路径正好在末尾（不留空 text 节点）。写法见 `tests/markdownPathTailTruncation.test.mjs`（unified + remark-parse 二次解析对比可见文本，不依赖 cwd/真实项目）。
 - **考古别只看最近几笔提交**：渲染丢文本这类回归可能潜伏数周，用 `git log --oneline -- <文件>` / `git log -S <片段>` 回到底，确认是「谁引入、为什么当时测不出」，再把这两件事写进注释与测试。
 
@@ -169,7 +185,7 @@
 - **工具结果里的 image block 目前不可见**：交互动线只渲染类别文案「已读取图片」（`src/renderer/src/components/session/timeline/toolCategory.ts`），主进程 `AgentManager` 的 `formatToolDetail` / `extractToolResultText` 只产出文本；assistant 消息里的 image block 在 `src/main/pi/messageContent.ts` 的 `extractMessageText` 被 `if (type === "image") continue` 丢弃。做可视化等于改工具投影契约（消息带 `images` 或写 blob 存 ref），**单独立 issue**，别混进渲染层改动。
 - **边界**：PiDeck 不提供「截图/贴图到会话」的工具 API——agent 行为归 pi；PiDeck 的职责只有「任何指向本地图片的 Markdown 都能稳定渲染」。
 - **已落地（2026-10，阶段 1+2）**：本地图不再走裸 `file://`，统一 `pideck-file://local/?path=<绝对路径>`（`src/shared/localImage.ts` 是线格式唯一来源）。白名单根 = userData + `<tmp>/pideck-shots` + 聊天工作区 + 全部项目路径；**realpath 后复检**（防符号链接逃逸）、≤32MiB、`no-store` + `nosniff` + CSP sandbox，判定在 `src/main/media/localImageAccess.ts`（纯函数、可单测）。不要退回 `file://`：dev 页源是 `http://localhost`，Chromium 直接拒 `file://` 子资源，等于同一段 Markdown 在 dev 白图。
-- **渲染侧硬约束**：Markdown 图片唯一入口是 `MarkdownImage`（`MarkdownStream` 的 `components.img` 注入）——单图 `block` + `max-width:min(100%,640px)` + `max-height:360px`；同段 ≥2 张切 64px 瓷砖（数量标注见 `remarkMarkMultiImageParagraphs`，别让组件去猜兄弟节点）；懒加载、点击放大、失败降级成「失败文案 · alt/原路径」+ 重试，**任何分支都不得产出空 `src` 的白图**。预览浮层唯一实现是 `ImageLightbox`（`ImagePreviewModal` 只剩“注入复制/保存动作条”的薄壳，Markdown 图与附件图共用）。`remarkRecoverLocalImages` 只在「段落仅一个未转义 text 节点 + `/`、`./`、盘符前缀 + 图片扩展名 + 路径含空格」时动手，放宽它会改写正文里的语法示例。
+- **渲染侧硬约束**：Markdown 图片唯一入口是 `MarkdownImage`（`MarkdownStream` 的 `components.img` 注入）——单图 `block` + `max-width:min(100%,640px)` + `max-height:360px`；同段 ≥2 张切 96px 瓷砖（张数由 `p` 组件数出来经 context 下发，**不要改回 HTML 属性**：`rehype-sanitize` 会剥掉非白名单属性）；懒加载、点击放大、失败降级成「失败文案 · alt/原路径」+ 重试，**任何分支都不得产出空 `src` 的白图**。图片动作（复制/保存）走 `MarkdownImageActions`（`fetch(src)` 取字节，**CSP `connect-src` 必须含 `pideck-file:`**，否则本地图保存无反应）。预览浮层唯一实现是 `ImageLightbox`（`ImagePreviewModal` 只剩“注入复制/保存动作条”的薄壳，Markdown 图与附件图共用）。`remarkRecoverLocalImages` 只在「段落仅一个未转义 text 节点 + `/`、`./`、盘符前缀 + 图片扩展名 + 路径含空格」时动手，放宽它会改写正文里的语法示例。
 - **两个真机坑（2026-10-19 dev 实例 smoke 暴露，单测看不见）**：① Windows `app.getPath("temp")` 返回 **8.3 短名**（`C:\Users\ADMINI~1\…`），消息里是长名 → 白名单比较字面不等，白名单内的图全判 403；必须用 `realpath.native`（`main/media/nativeRealpath.ts`），**普通 `fs.realpath` 不展开中间段短名**。② `mdast-util-to-hast` 把反斜杠编码成 `%5C`（`C:\Users\a` → `C:%5CUsers%5Ca`），图片目标必须先百分号解码再判盘符/协议，否则被当未知协议丢弃、图静默变 alt。**测试要喂 hast 形态的 src**，只测 mdast url 会漏掉这两层。
 - **后续计划**：阶段 3（工具结果 image block 可视化）**探针已完成**（2026-10-19）：pi 的 `toolResult.content` 确实带 `{type:"image", data:<base64>, mimeType}`，且 base64 直接内联写进 pi 的会话文件 ⇒ 可行；但当前决定**只记账不实施**。真要做时：main 侧读时投影成 blob ref（**不把 base64 塞进消息对象、不改写 pi 会话文件**），约束与范围见 `docs/markdown-image-rendering-plan.md` 阶段 3。设计参照 dsh 的“双通道”（进会话的图入库做 ref，被引用的图借看）；白名单与上限是 PiDeck 自建（dsh 靠 fs sandbox，PiDeck 没有那一层）。
 
@@ -179,15 +195,6 @@
 - 用户 JSON 是不可信输入，两道闸都不可放宽：键必须在白名单内；值必须匹配静态颜色正则（`#hex` 或纯数值参数的 `rgb()/hsl()/oklch()`），天然排除 `var()/url()/渐变`（值最终只进 inline style，双保险）。坏文件不致命：目录扫描降级为 `parseError` 条目呈现。
 - 设置快照 `settings.customTheme`（无前缀键，亮暗双档）在 `SettingsStore.update` 里过 `sanitizeCustomThemeSnapshot`；**快照仅 `themeSkin === "custom"` 时生效**（`applyCustomThemeTokens` 守卫），切回内置皮肤的路径（AppearanceThemePicker onPick）必须同步 `customTheme: undefined`，否则残留快照压过内置皮肤。注入函数是 App 持久化应用（useAppAppearance）与设置弹窗预览/回滚（SettingsModal）共用入口，别复制第二份注入逻辑。
 - 内置示例 `DEMO_CUSTOM_THEME` 是常量不上磁盘：列表由它推导（校验不过就不上架，防常量与校验器漂移）；其 id 保留（`saveCustomTheme` 拒绝同名保存，否则列表里会出现两张同名卡片），「复制为新主题」靠字符串改写 id 生成副本。读写删一律以 **fileId（文件名去 `.json`）** 定位文件，不用包内 id：用户文件可以改名、可以与内置示例同 id（历史 bug：按内置 id 早退 → 界面提示「已删除」而文件仍在）。删除走 `trashPath` 回收站，文件不存在时报错不谎报成功；主题文件被删后已应用主题不失效（快照内嵌设置文件）。
-
-## 插件开发支持（pluginDev 目录 + demo + AI 指南）
-
-- 能力目录单一事实源 `src/shared/pluginDevCatalog.ts`（19 落点/42 节点 kind/事件节选/硬约束），镜像自桥实现：`GUI_SLOT_METHODS`（`pi-deck-gui-bridge-gui-spec.ts`）与 `UINode` 联合（`pi-deck-gui-bridge-types.ts`）。**桥新增落点/kind 必须同步目录，否则契约测试红**（`tests/pluginDevGuide.test.mjs` 双向校验 kind、逐项校验 slot；`tests/guiExtensionPointsDoc.test.mjs` 保证 `docs/gui-extension-points.md` 含全部 id）。
-- 指南 `AI-PLUGIN-GUIDE.md` 由 `pluginDevGuide.ts` 双语生成、写入用户扩展目录并覆盖旧版（生成物不备份）；demo 插件 `resources/plugin-dev/pi-deck-demo-plugin.ts` 复制到同目录，**已存在不覆盖**（用户改过的模板）。落盘路径固定 `~/.pi/agent/extensions/`，home 与 `ExtensionManager.userHomeDir` 同源（WSL 跟随扩展列表解析），保证复制进去的文件一定被扩展页本地扫描发现。
-- `resources/plugin-dev` 必须在 `extraResources`（filter `*.ts`）里，漏了打包版「复制 demo」直接报错（源缺失显式抛错，不静默）；demo **不在** `BUILT_IN_EXTENSIONS` 白名单（不是 `-e` 注入的内置扩展，是拷给用户的起步文件）。
-- 架构/文件地图/更新步骤详见 `docs/plugin-dev-guide.md`；无热重载（改插件重启会话），这是文档化的有意取舍。
-- **应用内入口已隐藏**（宿主插件系统接替）：`ExtensionsTab` 不再渲染「插件开发」页签（`PluginDevSection.tsx`、`pluginDev:*` IPC、`PluginDevService` 与 i18n 文案全部保留，只是没有入口）。
-- 同时下线的还有桥与扩展点面板两个内置扩展：`HIDDEN_BUILT_IN_EXTENSIONS`（`pi-deck-gui-bridge.ts`、`pi-deck-ext-points.ts`）——它们仍在 `BUILT_IN_EXTENSIONS` 表内（白名单校验与启动时清理历史部署副本要用），但 `listActiveBuiltInExtensionPaths` 无条件跳过、`ExtensionManager.list` 也不补行，因此**不注入 `-e`、不上扩展页**。刻意**不**走 `removedBuiltInExtensions` 禁用机制：那条路会写用户设置并参与命令行白名单计算，属于本需求不需要的副作用；隐藏是硬开关，历史 `enabledBuiltInExtensions` 残留（opt-in）也复活不了它们。
 
 ## 宿主插件（userData/host-plugins：独立于 pi 进程的 PiDeck 原生插件）
 

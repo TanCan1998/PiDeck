@@ -211,12 +211,11 @@ function packageNameOf(dir) {
 }
 
 /**
- * 作用域外的种子：这两个包不在 @deepseek-ai 下，但 hostEntry 会
- * `require.resolve` 它们（持久 pwsh 工具、用量计费插件），缺了 host 起不来。
- * dsh-tool-pwsh-persistent 是 file: 本地包（packages/），dsh-bill 在 registry。
+ * 作用域外的种子：dsh-bill 不在 @deepseek-ai 下，但 hostEntry 会
+ * `require.resolve` 它（用量计费插件），缺了 host 起不来。
  * 提前到交叉解析之前声明：lock 闭包遍历与临时 package.json 都要用它。
  */
-const EXTRA_SEED_NAMES = ["dsh-bill", "dsh-tool-pwsh-persistent"];
+const EXTRA_SEED_NAMES = ["dsh-bill"];
 
 /**
  * 判断包目录是否为 file: 本地依赖的 symlink（npm 7+ 对 file:/workspace: 建链）。
@@ -233,11 +232,11 @@ function isSymlinkedLocalPackage(dir) {
 /**
  * 闭包入口预检（file: 本地包未构建防护）。
  *
- * 事故背景（2026-09 v0.7.5 sidecar）：dsh-tool-pwsh-persistent 是 file: 本地包，
- * lib/ 是 gitignore 的构建产物——全新检出上 npm ci 只把包以链接形式挂进
- * node_modules，源码-only 的包被原样打进归档，host 启动时
- * require.resolve("dsh-tool-pwsh-persistent")（exports 指向 lib/index.js）即崩
- * （Cannot find module .../node_modules/dsh-tool-pwsh-persistent/lib/index.js）。
+ * 事故背景（2026-09 v0.7.5 sidecar）：当时的 file: 本地包 dsh-tool-pwsh-persistent
+ * 的 lib/ 是 gitignore 的构建产物——全新检出上 npm ci 只把包以链接形式挂进
+ * node_modules，源码-only 的包被原样打进归档，host 启动时 require.resolve
+ * 命中不存在的 lib/index.js 即崩。该类包现已下线，但 file: 本地包随时可能再加，
+ * 护栏保留。
  * check-dsh-asar 只守护 CI 上传链路，手动 pack/upload 会绕过——所以打包前必须
  * 在磁盘上把每个闭包包运行时入口钉死。
  *
@@ -354,7 +353,7 @@ function resolveClosureNodeModulesRoot() {
 		console.error(`[pack-dsh-runtime] lock 里找不到种子包：${missingSeeds.join(", ")}（package.json 与 package-lock.json 不同步？先 npm install）`);
 		process.exit(1);
 	}
-	// file: 本地包（dsh-tool-pwsh-persistent）在 lock 里是 link 条目，没有版本号；
+	// file: 本地包在 lock 里是 link 条目，没有版本号；
 	// 只要仓库内 packages/ 目录存在且已构建（入口预检会验）就算种子在位。
 	for (const name of EXTRA_SEED_NAMES) {
 		const entry = lockPackages[`node_modules/${name}`];

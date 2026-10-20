@@ -4,6 +4,7 @@ import { Loader2, ArchiveRestore, ChevronDown, Cpu, FileCode2, FolderOpen, Layou
 import { desktopApi } from "../desktopApi";
 import { t, type TranslationKey } from "../i18n";
 import { showNotice } from "../utils/notice";
+import { refreshDshAgentPresets } from "../utils/dshAgentPresets";
 import { Button } from "../components/ui-shadcn/button";
 import { Input } from "../components/ui-shadcn/input";
 import { Switch } from "../components/ui-shadcn/switch";
@@ -1037,6 +1038,10 @@ function PresetsTab(props: { writable: boolean; namespace?: DshNamespaceView; on
 			await props.onSave(pendingDefault);
 			setPendingDefault(null);
 			await reload();
+			// 会话头胶囊读的是共享目录缓存（utils/dshAgentPresets）：不主动刷新的话，
+			// 改完默认预设后新建会话仍显示旧默认，发出去才变成新组合。这里 force 重拉，
+			// 让已挂载的胶囊立即同步（失败不影响保存结果，胶囊侧保留重试）。
+			void refreshDshAgentPresets();
 			return true;
 		} catch (error) {
 			showNotice(error instanceof Error ? error.message : t("config.dsh.presetSetDefaultFailed"), 4000);

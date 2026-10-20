@@ -785,6 +785,11 @@ export class SessionCatalog {
 		/** 外部（dsh-web 等）会话导入：host 会话已存在，条目直接置 active（重启不清理）。 */
 		dshSessionId?: string;
 		/**
+		 * fork 产物标记（DSH fork/clone 新建条目的身份元数据；pi 侧同名标记来自文件头探测）。
+		 * (fork) 标题后缀已写进标题本身，这里只保留「是不是 fork 出来的会话」供列表/导航判断。
+		 */
+		forked?: boolean;
+		/**
 		 * DSH 外部会话的真实活跃时间（磁盘日志文件 mtime）。自动同步每轮全量重导，
 		 * 不带这个就用 Date.now()，会话每次重启被顶到启动时刻、永远排在 pi 会话上面。
 		 * 语义与 pi 会话一致（扫描器用文件 mtime 当 updatedAt）。
@@ -822,6 +827,7 @@ export class SessionCatalog {
 						existing.title !== nextTitle ||
 						existing.backend !== input.backend ||
 						agentPresetChanged ||
+						(input.forked === true && existing.forked !== true) ||
 						existing.status !== "active" ||
 						// mtime 变化也落盘：修正历史被顶高的 updatedAt，否则排序永远错
 						existing.updatedAt !== (input.updatedAt ?? now);
@@ -831,6 +837,8 @@ export class SessionCatalog {
 					existing.status = "active";
 					// 外部会话 header 携带的 preset 变化（host 会话 header 是权威）随导入同步
 					if (input.agentPreset !== undefined) existing.agentPreset = input.agentPreset;
+					// fork 产物可能是外部同步先导入、fork 命令后到：标记只增补不清空。
+					if (input.forked) existing.forked = true;
 					// 排序语义：用磁盘日志文件 mtime（真实活跃时间），不再顶到导入时刻
 					existing.updatedAt = input.updatedAt ?? now;
 					return { value: cloneEntry(existing), changed };
@@ -848,6 +856,7 @@ export class SessionCatalog {
 				channel: input.channel,
 				// 只落 true：false 与缺省同义，不写进存档省得 JSON 里堆噪声字段
 				sideTask: input.sideTask ? true : undefined,
+				forked: input.forked ? true : undefined,
 				backend: input.backend,
 				wslDistro: input.environment === "wsl" ? this.identityContext.wslDistro : undefined,
 				wslUser: input.environment === "wsl" ? this.identityContext.wslUser : undefined,

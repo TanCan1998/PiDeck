@@ -18,13 +18,12 @@ import type { DomainCatalogEntry } from "./domainTypes";
 
 export const DOMAIN_CATALOG = [
 	// ── core ────────────────────────────────────────────────────────────────────
-	// 裁决：GUI 桥（例外二，BridgeServer，渲染面经 sessions:bridge-event 透传）与 standby
-	// 预热池（例外三，StandbyAgentPool，AgentManager 内部，开关 settings.standbyRuntimeEnabled）
+	// 裁决：standby 预热池（例外三，StandbyAgentPool，AgentManager 内部，开关 settings.standbyRuntimeEnabled）
+	// 与模型快照端点（例外二，ModelTraceServer，数据只落本地日志与 modelTrace:* 只读入口）
 	// 宿主于 pi 运行时域，无独立通道前缀/命名空间；红线含义 = 门面只透传、禁止扩成通用
 	// pi/模型 API 桥（AGENTS.md 核心边界）。
 	{ id: "pi", group: "core", manager: "AgentManager（pi RPC 运行时宿主；pi 安装/路径检查面注册在 systemIpc.ts）", ipcFile: ["systemIpc.ts"], preloadNamespaces: ["pi"], channelPrefix: ["pi"], aggregation: "redline" },
-	// 裁决：sessions:bridge-event 与 sessions:bridge-resync 归 sessions 命名空间（GUI 桥事件
-	// 带 sessionId+agentId+runtimeGeneration 三身份；命名沿用不纠正 R4）。agents:* 运行时事件
+	// 裁决：agents:* 运行时事件
 	// 总线经 sessions:runtime-event 信封（sourceChannel 字段）推送给 sessions.onRuntimeEvent，
 	// 故 agents 前缀由本行认领；例外 agents:rpc-log 由 rpc-logs 行认领。
 	{
@@ -58,6 +57,10 @@ export const DOMAIN_CATALOG = [
 	{ id: "editors", group: "workspace", manager: "外部编辑器检测", ipcFile: ["ipc/editorsIpc.ts"], preloadNamespaces: ["editors"], channelPrefix: ["editors"], aggregation: "aggregate" },
 	{ id: "browser", group: "workspace", manager: "main/browser/（webview 宿主与导航白名单）", ipcFile: ["ipc/filesIpc.ts"], preloadNamespaces: ["browser"], channelPrefix: ["browser"], aggregation: "aggregate" },
 	{ id: "files", group: "workspace", manager: "文件抽屉读写", ipcFile: ["ipc/filesIpc.ts"], preloadNamespaces: ["files"], channelPrefix: ["files"], aggregation: "aggregate" },
+	// 基线补齐：local-image 通道与 localImage 命名空间（Markdown 图片保存/复制走 IPC 读字节，
+	// 避免 fetch pideck-file:// 被拦）在 2026-10-20 的 markdown 重构提交已落地，但域清单漏行，
+	// F1-4/F1-6 反向闭合在 dev 上常红；本行只做认领，不改任何运行时行为。
+	{ id: "local-image", group: "workspace", manager: "本地图片字节读取（Markdown 图片保存/复制）", ipcFile: ["ipc/localImageIpc.ts"], preloadNamespaces: ["localImage"], channelPrefix: ["local-image"], aggregation: "aggregate" },
 	{ id: "clipboard", group: "workspace", manager: "剪贴板（sendSync 同步读）", ipcFile: ["ipc/clipboardIpc.ts"], preloadNamespaces: ["clipboard"], channelPrefix: ["clipboard"], aggregation: "aggregate" },
 	{ id: "paste-files", group: "workspace", manager: "粘贴文件收集", ipcFile: ["ipc/pasteFilesIpc.ts"], preloadNamespaces: ["pasteFiles"], channelPrefix: ["paste-files"], aggregation: "aggregate" },
 	{ id: "wsl", group: "workspace", manager: "WslPaths", ipcFile: ["ipc/systemIpc.ts"], preloadNamespaces: ["wsl"], channelPrefix: ["wsl"], aggregation: "aggregate" },
@@ -69,7 +72,6 @@ export const DOMAIN_CATALOG = [
 	// 裁决：pickBackgroundImage/removeBackgroundImage 的值域是 backgrounds:*（backgroundsIpc.ts），
 	// dialog:pick-files 在 filesIpc.ts，两者同由 dialog 命名空间消费，故 backgrounds 前缀归本行。
 	{ id: "dialog", group: "workspace", manager: "系统文件选择器（无独立 Manager，dialog 命名空间消费）", ipcFile: ["ipc/filesIpc.ts", "ipc/backgroundsIpc.ts"], preloadNamespaces: ["dialog"], channelPrefix: ["dialog", "backgrounds"], aggregation: "aggregate" },
-	{ id: "plugin-dev", group: "workspace", manager: "PluginDevService", ipcFile: ["ipc/pluginDevIpc.ts"], preloadNamespaces: ["pluginDev"], channelPrefix: ["plugin-dev"], aggregation: "aggregate" },
 	{ id: "reply-actions", group: "workspace", manager: "快捷回复动作", ipcFile: ["ipc/replyActionsIpc.ts"], preloadNamespaces: ["replyActions"], channelPrefix: ["reply-actions"], aggregation: "aggregate" },
 	// ── content ─────────────────────────────────────────────────────────────────
 	{ id: "prompts", group: "content", manager: "PromptManager + XuePromptManager", ipcFile: ["ipc/storeIpc.ts"], preloadNamespaces: ["prompts"], channelPrefix: ["prompts"], aggregation: "aggregate" },
@@ -110,6 +112,23 @@ export const DOMAIN_CATALOG = [
 	// 命名空间伴生认领 settings（F1-6 冻结例外表）。
 	{ id: "web", group: "integration", manager: "WebServiceManager + WebEventStream/WebWorkspaceRoutes/WebI18n/WebNetwork", ipcFile: ["ipc/systemIpc.ts"], preloadNamespaces: ["settings"], channelPrefix: ["web"], aggregation: "aggregate" },
 	{ id: "enhance", group: "integration", manager: "EnhancePromptService（常驻 sidecar pi-enhance-host.mjs）", ipcFile: ["ipc/enhanceIpc.ts"], preloadNamespaces: ["enhance"], channelPrefix: ["enhance"], aggregation: "redline" },
+	// 裁决：智能体市场（AgentProfileStore + AgentInvokeService）。一次性调用复用 enhance 侧车
+	// 协议但走独立 EnhancePromptService 实例（AGENTS.md 例外四）：systemPrompt 只由主进程按
+	// agentId 解析、渲染层禁传；本行按普通域聚合（配置 CRUD + 市场设置 + 一次性调用入口），
+	// invoke 通道的红线约束由 AGENTS.md 例外四与 agentInvokeIpc 边界校验兜住，不扩成通用模型桥。
+	{
+		id: "agent-profiles",
+		group: "integration",
+		manager: "AgentProfileStore + AgentInvokeService（划词工具一次性调用，复用 pi-enhance-host sidecar 独立实例）",
+		ipcFile: ["ipc/agentProfileIpc.ts", "ipc/agentInvokeIpc.ts"],
+		preloadNamespaces: ["agentProfiles"],
+		channelPrefix: ["agent-profiles"],
+		aggregation: "aggregate",
+	},
+	// 裁决：系统级划词浮窗（SelectionToolWindow + SelectionToolService）。独立 BrowserWindow
+	// 复用主 preload（同一份 desktopApi），凭据/模型调用都走 agent-profiles:invoke 既有红线通道；
+	// 本行只认领浮窗自身的状态/隐藏/回填通道，不做任何聚合扩展。
+	{ id: "selection-tool", group: "integration", manager: "SelectionToolService + SelectionToolWindow（全局快捷键 + 系统级划词浮窗）", ipcFile: ["ipc/selectionToolIpc.ts"], preloadNamespaces: ["selectionTool"], channelPrefix: ["selection-tool"], aggregation: "aggregate" },
 	{ id: "channel-switch", group: "integration", manager: "ChannelSwitchService + UpdateService（更新通道切换）", ipcFile: ["ipc/channelSwitchIpc.ts"], preloadNamespaces: ["channelSwitch"], channelPrefix: ["channel-switch"], aggregation: "aggregate" },
 	{ id: "cua", group: "integration", manager: "CuaEngine + CuaGate + McpHttpHost + CuaService", ipcFile: ["ipc/cuaIpc.ts"], preloadNamespaces: ["cua"], channelPrefix: ["cua"], aggregation: "aggregate" },
 	{ id: "usage-stats", group: "integration", manager: "用量统计", ipcFile: ["ipc/usageStatsIpc.ts"], preloadNamespaces: ["usageStats"], channelPrefix: ["usage-stats"], aggregation: "aggregate" },

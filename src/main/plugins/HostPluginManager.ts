@@ -106,6 +106,15 @@ export class HostPluginManager {
 		// 先看体再读内容：拒绝把超大文件整读进内存。
 		if ((await stat(archivePath)).size > 24 * 1024 * 1024) throw new Error("archive-too-large");
 		const { files } = parseHostPluginArchive(await readFile(archivePath));
+		return await this.installFiles(files);
+	}
+
+	/**
+	 * 逐文件落位：归档、目录包与 GitHub 源码包共用这一条暂存路径，
+	 * 三种来源的信任判定、授权门禁与原子换入完全一致，不会因为多一个来源就多一条信任路径。
+	 */
+	async installFiles(files: ReadonlyArray<{ path: string; bytes: Buffer }>): Promise<HostPluginCatalog> {
+		if (files.length === 0) throw new Error("missing-manifest");
 		const temporary = this.temporaryDirectory(".install");
 		try {
 			await mkdir(temporary, { recursive: true });

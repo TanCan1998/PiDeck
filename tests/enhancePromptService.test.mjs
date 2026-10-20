@@ -109,6 +109,22 @@ test("受理：下发 complete 指令并转发 started/delta/done", async () => 
 	]);
 });
 
+test("角色设定：主进程内部调用可覆盖 systemPrompt，缺省/空白仍回落内置模板", async (t) => {
+	const { service, latest } = createService();
+	t.after(() => service.dispose());
+	// 智能体市场的一次性调用带自己的角色设定（主进程按 agentId 解析后注入）。
+	// 该字段只存在于服务层入参（EnhanceServiceRunInput），渲染层契约里没有。
+	const first = await acceptRun(service, latest, { provider: "p", modelId: "m", userText: "Good morning", systemPrompt: "你是专业翻译，只输出译文。" });
+	assert.equal(first.result.ok, true);
+	assert.equal(latest().commands().at(-1).systemPrompt, "你是专业翻译，只输出译文。");
+	latest().emitLine({ type: "done", id: first.result.runId, text: "早上好" });
+
+	// 空白覆盖视作未提供：提示词增强的默认行为必须逐字节不变。
+	const blank = await acceptRun(service, latest, { provider: "p", modelId: "m", userText: "草稿", systemPrompt: "  \n " });
+	assert.equal(blank.result.ok, true);
+	assert.equal(latest().commands().at(-1).systemPrompt, ENHANCE_SYSTEM_PROMPT);
+});
+
 test("新 run 打断旧 run：先取消后台旧请求，旧回调立即 aborted，迟到记录被丢弃", async (t) => {
 	const { service, latest } = createService();
 	t.after(() => service.dispose());

@@ -220,7 +220,7 @@ export type UsageBadgeSegment = {
 const TONE_SEVERITY: Record<UsageTone, number> = { empty: 3, low: 2, ok: 1, neutral: 0 };
 
 /** 单窗口的已用百分比（0-100 封顶）：used 缺失时用 total-remaining 反推；无 total 不产生百分比。 */
-function usageWindowPercent(window: { total?: number; used?: number; remaining?: number }): number | null {
+export function usageWindowPercent(window: { total?: number; used?: number; remaining?: number }): number | null {
 	const used = window.used ?? (window.remaining != null && window.total != null ? window.total - window.remaining : undefined);
 	if (window.total == null || used == null || window.total <= 0) return null;
 	return Math.min(100, (used / window.total) * 100);

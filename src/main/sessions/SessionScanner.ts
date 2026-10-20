@@ -898,21 +898,28 @@ export class SessionScanner {
 		return all;
 	}
 
-	/** 分块并发 + 块间让出事件循环，避免数百 JSONL 同时 parse 卡住点击/输入。 */
+	/**
+	 * 滑动窗口并发：每个 worker 在 `await mapper(...)` 处自然交回事件循环，因此不需要批次间隔。
+	 *
+	 * 为什么不用「分块 + 块间让出」（2026-10 实测）：旧实现在每块之间 `setTimeout(resolve, 0)`，
+	 * 而 Windows 定时器最小粒度是 **16.3ms/次**（实测 50 次 = 814ms）。本机 1040 个会话 / 并发 4
+	 * = 260 块 → 每次侧栏扫描白等约 4.2s（实测 3994ms），而真正的 stat 总量只要 45ms。
+	 * 换成滑动窗口后同一批文件实测 11ms；也不用 setImmediate（部分测试 VM 里没有它）。
+	 * 回归守卫：tests/sessionScannerMapLimited.test.mjs。
+	 */
 	private async mapLimited<T, R>(items: readonly T[], concurrency: number, mapper: (item: T) => Promise<R>): Promise<R[]> {
-		const results: R[] = [];
+		const results = new Array<R>(items.length);
 		const limit = Math.max(1, concurrency);
-		for (let index = 0; index < items.length; index += limit) {
-			const chunk = items.slice(index, index + limit);
-			const mapped = await Promise.all(chunk.map((item) => mapper(item)));
-			results.push(...mapped);
-			if (index + limit < items.length) {
-				// setTimeout(0) 兼容测试 VM（无 setImmediate），同样把控制权交回事件循环。
-				await new Promise<void>((resolve) => {
-					setTimeout(resolve, 0);
-				});
+		let next = 0;
+		const worker = async (): Promise<void> => {
+			for (;;) {
+				const index = next;
+				next += 1;
+				if (index >= items.length) return;
+				results[index] = await mapper(items[index]!);
 			}
-		}
+		};
+		await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
 		return results;
 	}
 

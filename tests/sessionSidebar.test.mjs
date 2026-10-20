@@ -332,7 +332,8 @@ test("Chat section keeps an independent collapse control after the parent projec
 	assert.match(chatSection, /aria-expanded=\{!collapsed\}/);
 	assert.match(chatSection, /onClick=\{\(\) => props\.controller\.toggleProject\(project\.id\)\}/);
 	assert.match(chatSection, /title=\{collapsed \? t\("app\.projectExpand"\) : t\("app\.projectCollapse"\)\}/);
-	assert.match(chatSection, /<ChevronsDownUp size=\{14\} aria-hidden="true" \/>/);
+	// 箭头随折叠态旋转（#387）：展开/折叠共用同一个静态图标时，用户无法区分「列表为空」与「分组被收起」。
+	assert.match(chatSection, /<ChevronRight\s+size=\{14\}\s+className=\{cn\("transition-transform", !collapsed && "rotate-90"\)\}/);
 	// 显式「+ 新建会话」按钮外露（最常用入口），匿名会话收进 ⋯ 项目菜单
 	assert.match(chatSection, /aria-label=\{t\("app\.newNormalSession"\)\}/);
 	assert.match(chatSection, /void props\.actions\.sessions\.createDraft\(project\.id\)/);

@@ -7,7 +7,7 @@ import test from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 import { mainIpcSource } from "./helpers/mainIpcSources.mjs";
 
-const { setI18nLocale, translateI18nDescriptor } = loadTsCommonJs("src/renderer/src/i18n.ts");
+const { ensureI18nLocale, setI18nLocale, translateI18nDescriptor } = loadTsCommonJs("src/renderer/src/i18n.ts");
 const { mainProcessT, normalizeMainProcessLocale } = loadTsCommonJs("src/shared/i18n/mainProcessCopy.ts");
 
 test("main-process copy resolves locale and interpolates stable product text", () => {
@@ -96,7 +96,9 @@ test("main-process managers use the injected locale for user-visible validation"
 	);
 });
 
-test("structured main-process copy translates parameters and preserves fallback behavior", () => {
+test("structured main-process copy translates parameters and preserves fallback behavior", async () => {
+	// 词典按需加载：切到非 zh-CN 前必须先 ensure，否则 t() 回退 zh-CN。
+	await ensureI18nLocale("en-US");
 	setI18nLocale("en-US");
 	assert.equal(
 		translateI18nDescriptor(

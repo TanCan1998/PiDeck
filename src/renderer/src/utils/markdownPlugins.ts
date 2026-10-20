@@ -32,8 +32,6 @@ type MdNode = {
 	url?: string;
 	children?: MdNode[];
 	position?: { start?: { offset?: number }; end?: { offset?: number } };
-	/** mdast 的数据载荷：`hProperties` 会被 mdast-util-to-hast 原样带成 hast 属性 */
-	data?: { hProperties?: Record<string, string> };
 	[key: string]: unknown;
 };
 
@@ -69,35 +67,6 @@ export const remarkRecoverLocalImages = () => {
 					}
 				}
 				return;
-			}
-			if (!Array.isArray(children)) return;
-			for (const child of children) visit(child);
-		};
-
-		visit(tree);
-	};
-};
-
-/**
- * 给「同一段落里有多张图」的每个图片节点打上数量标注。
- *
- * 布局规则照 dsh：单图按内容尺寸展示（上限 640×360），同段多图缩成 64px 瓷砖。
- * 图片是逐节点渲染的，组件看不到兄弟节点，所以数量必须在 mdast 层标到节点上。
- * 注：`mdast-util-to-hast` 会把 `data.hProperties` 原样透传成 hast 属性。
- */
-export const remarkMarkMultiImageParagraphs = () => {
-	return (tree: MdNode) => {
-		const mark = (node: MdNode, count: number) => {
-			const data = node.data ?? {};
-			const hProperties = data.hProperties ?? {};
-			node.data = { ...data, hProperties: { ...hProperties, "data-md-image-count": String(count) } };
-		};
-
-		const visit = (node: MdNode) => {
-			const children = node.children;
-			if (node.type === "paragraph" && Array.isArray(children)) {
-				const images = children.filter((child) => child.type === "image");
-				if (images.length > 1) for (const image of images) mark(image, images.length);
 			}
 			if (!Array.isArray(children)) return;
 			for (const child of children) visit(child);

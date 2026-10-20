@@ -66,7 +66,7 @@ PiDeck 可作为本机 MCP 服务，向 pi 和其他兼容客户端开放**明�
 | `runtime_status` | 无；`arguments` 可省略或传 `{}` | `{ authorizedProjectCount, activeProjectCount, runningCount, runtimes: [{ sessionId, projectId, runtimeGeneration, status, busy, createdAt }] }`；只有活着的运行时，不含路径 |
 | `sessions_abort` | `sessionId`，可选 `expectedRuntimeGeneration`（整数 0–1000000） | `{ sessionId, aborted: true }`；**只在写开关打开时注册**，语义等同界面的“停止响应” |
 | `settings_get` | 无；`arguments` 可省略或传 `{}` | `{ app, agent, workspace }`，PiDeck 自身配置摘要；宿主未就绪时为 `null` |
-| `extensions_list` | 无；`arguments` 可省略或传 `{}` | `{ builtInVersion, injectionDisabled, builtIn, removedBuiltInExtensions, enabledBuiltInExtensions, disabledExtensions }`；宿主未就绪时为 `null` |
+| `extensions_list` | 无；`arguments` 可省略或传 `{}` | `{ builtInVersion, injectionDisabled, builtIn, removedBuiltInExtensions, disabledExtensions }`；宿主未就绪时为 `null` |
 | `sessions_list` | `projectId`，可选 `offset`（默认 0，整数 0–100000） | `{ sessions, nextOffset }`，每页最多 100 条，按更新时间倒序 |
 | `sessions_get` | `projectId`、`sessionId` | 单个会话元信息 |
 | `sessions_search` | `projectId`、`query`（1–500 字符），可选 `limit`（默认 20，1–100） | 会话元信息数组；标题的不区分大小写子串搜索，**不是全文搜索** |

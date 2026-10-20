@@ -77,7 +77,6 @@ function renderComposer(run, options = {}) {
 			"./ComposerStatsLine": { ComposerStatsLine: hidden },
 			"./ComposerWidgetLayout": { ComposerWidgetLayoutProvider: passthrough, useComposerWidgetLayoutValue: () => ({}) },
 			"./VoiceTranscriptionControls": { VoiceTranscriptionControls: hidden },
-			"../bridge/BridgeSlot": { BridgeGuiSlot: hidden, BridgeWidgetSlot: hidden },
 			"../../i18n": { t: (key) => key },
 			"../ui-shadcn/button": { Button: ({ children, variant: _variant, size: _size, ...props }) => createElement("button", props, children) },
 		},

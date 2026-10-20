@@ -282,11 +282,10 @@ export function TodoList({ items, title = t("app.todoListTitle"), open, defaultO
 											<span
 												className={cn(
 													"min-w-0 flex-1 break-words",
-													// ⚠️ 不能写 text-widget-item（命名 token 形式）：tailwind-merge 会把
-													// 未知的 text-* 误判为颜色类，与下方状态色 text-muted-foreground/65
-													// 同组冲突而被丢弃（条目会退回继承 body 14px——“字体特别大”的根因）。
-													// text-[length:var(--text-widget-item)] 显式声明字号类型，twMerge 归入
-													// font-size 组，与颜色类共存；官方分支 text-sm 是内置字号白名单，无此问题。
+													// text-[length:var(--text-widget-item)] 只设字号、不带行高；命名形式
+													// text-widget-item 会连同 --text-widget-item--line-height 一起生效。
+													// （历史：默认 tailwind-merge 曾把该命名 token 当颜色类吞掉，#389 起
+													// cn() 已在 lib/tailwindMerge.ts 注册项目字号，命名形式也能与状态色共存。）
 													compact ? "text-[length:var(--text-widget-item)]" : "text-sm leading-5",
 													// 2027-01 用户要求条目文字“黑色”：pending 与 in-progress 同用
 													// 前景色；完成/取消保留淡色弱化（☑ 对勾已足够区分完成态）
@@ -302,8 +301,7 @@ export function TodoList({ items, title = t("app.todoListTitle"), open, defaultO
 												<span
 													className={cn(
 														"shrink-0",
-														// 与条目同理：text-widget-detail 会被 twMerge 误删或反删颜色，
-														// 用显式 length: 类型声明与状态色共存
+														// 与条目同理：显式 length 只设字号、不带行高，且与状态色共存
 														compact ? "text-[length:var(--text-widget-detail)] text-muted-foreground/55" : "text-sm text-muted-foreground/55",
 													)}
 												>

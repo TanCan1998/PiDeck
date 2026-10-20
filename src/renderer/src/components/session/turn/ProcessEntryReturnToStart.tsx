@@ -14,7 +14,7 @@ export function ProcessEntryReturnToStart(props: { onClick: () => void }) {
 					<ArrowUpToLine size={12} aria-hidden="true" />
 				</Button>
 			</TooltipTrigger>
-			{/* 显式 length：裸 text-chat-detail 会被 twMerge 当成颜色，吞掉 Tooltip 的 text-background。 */}
+			{/* 显式 length 只设字号、不带行高（命名 token 会同时带 --text-chat-detail--line-height）。 */}
 			<TooltipContent side="top" sideOffset={4} className="text-[length:var(--font-size-chat-detail)]">
 				{label}
 			</TooltipContent>

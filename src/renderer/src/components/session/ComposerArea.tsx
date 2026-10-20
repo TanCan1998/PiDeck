@@ -26,7 +26,6 @@ import type { ReplyActionRule } from "../../../../shared/types/replyActions";
 import type { EnqueuePromptSnapshot } from "../../hooks/useSessionSend";
 import { VoiceTranscriptionControls } from "./VoiceTranscriptionControls";
 import { SessionReplyActions } from "./SessionReplyActions";
-import { BridgeGuiSlot, BridgeWidgetSlot } from "../bridge/BridgeSlot";
 import { SessionContextMeter } from "./SessionContextMeter";
 import { isComposerFeatureHidden, type HideableComposerFeatureId } from "../../../../shared/composerFeatures";
 
@@ -74,8 +73,6 @@ type ComposerExtrasProps = {
 	composerBox: ReactNode;
 	/** 输入卡正下方 StatsLine；与输入卡同一列，不吃剩余高度。 */
 	statsLine?: ReactNode;
-	/** GUI 扩展桥：输入框上方挂件（aboveEditor）。 */
-	bridgeWidgetsAbove?: ReactNode;
 };
 
 /**
@@ -101,8 +98,6 @@ function ComposerMeasuredExtras(props: ComposerExtrasProps) {
 				    （2026-10 子代理条事故，契约见 tests/composerStripWheelChain.test.mjs）。 */}
 				<div className="flex min-h-0 min-w-0 flex-col gap-2 overflow-y-auto overscroll-contain pb-px empty:hidden">
 					{props.widgets}
-					{/* GUI 扩展桥：输入框上方挂件（aboveEditor）。无内容时该组件返回 null，不占位。 */}
-					{props.bridgeWidgetsAbove}
 					{props.queuePanel}
 					{props.deliveryNotice}
 				</div>
@@ -254,8 +249,6 @@ export const ComposerArea = forwardRef<HTMLElement, ComposerAreaProps>(function 
 											}
 										/>
 									}
-									// GUI 扩展桥只挂输入框上方 widget；输入框下方保持 PiDeck 原生布局。
-									bridgeWidgetsAbove={<BridgeWidgetSlot sessionId={props.sessionId} placement="aboveEditor" />}
 									composerBox={
 										<div
 											// overflow-visible：保留命令面板/建议浮层；面板 minSize 已保证底栏不被裁切
@@ -409,14 +402,10 @@ export const ComposerArea = forwardRef<HTMLElement, ComposerAreaProps>(function 
 													/>
 												}
 											/>
-											{/* GUI 扩展桥：输入框工具栏不挂输入行内（扩展文本会干扰输入 UI，
-									    原位置曾被禁用），改挂输入区下方的独立条；无贡献不占位。 */}
 										</div>
 									}
 								/>
 							</footer>
-							{/* GUI 扩展桥：输入区工具栏落点（ctx.gui.setComposerToolbar）。 */}
-							<BridgeGuiSlot sessionId={props.sessionId} slot="composer.toolbar" className="flex shrink-0 flex-wrap items-center gap-1 px-3 pb-1" />
 							{composer.previewImage ? <ImagePreviewModal image={composer.previewImage} onClose={composer.modals.closePreview} /> : null}
 							{composer.delivery.videoConfirmPending ? (
 								<ConfirmDialog title={t("videogen.confirm.title")} message={t("videogen.confirm.body", { model: composer.delivery.videoGenConfig.activeModel })} confirmLabel={t("videogen.confirm.ok")} onConfirm={() => composer.delivery.confirmVideoGen()} onCancel={() => composer.delivery.cancelVideoGen()} />

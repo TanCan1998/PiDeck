@@ -50,6 +50,8 @@ export * from "./types/backup";
 export * from "./types/soundAlert";
 export * from "./types/packageCatalog";
 export * from "./types/automation";
+export * from "./types/agentProfile";
+export * from "./types/selectionTool";
 export * from "./types/contentUpdate";
 export * from "./types/piAuth";
 export * from "./types/quickMessages";

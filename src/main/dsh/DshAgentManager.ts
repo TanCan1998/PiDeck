@@ -86,6 +86,27 @@ function isDshImageMediaType(value: string): value is "image/png" | "image/jpeg"
 	return value === "image/png" || value === "image/jpeg" || value === "image/webp" || value === "image/gif";
 }
 
+/** skills/list 的 host 错误：保留 error.code 以便上层区分「会话未 attach」与真实故障。 */
+export class DshSkillListError extends Error {
+	readonly code: string;
+
+	constructor(code: string, message: string) {
+		super(message);
+		this.name = "DshSkillListError";
+		this.code = code;
+	}
+}
+
+/** skills/list 条目 → 渲染层视图（listSkills / listSkillsByHostSession 共用同一映射）。 */
+function toDshSkillViews(skills: Array<{ name?: string; description?: string; whenToUse?: string; modelInvocable?: boolean }> | undefined): DshSkillView[] {
+	return (skills ?? []).map((skill) => ({
+		name: String(skill.name),
+		description: String(skill.description),
+		...(skill.whenToUse !== undefined && skill.whenToUse !== null ? { whenToUse: String(skill.whenToUse) } : {}),
+		modelInvocable: skill.modelInvocable !== false,
+	}));
+}
+
 /** DSH 历史消息里由投影器登记的持久化图片引用（canonical ImageBlock.attachment）。 */
 type DshImageRef = {
 	attachmentId: string;
@@ -1439,15 +1460,47 @@ export class DshAgentManager implements SessionAgentGateway {
 	 */
 	async listSkills(agentId: string): Promise<DshSkillView[]> {
 		const runtime = this.runtime(agentId);
-		const client = this.requireClient();
-		const listed = await client.skillsList({ sessionId: runtime.sessionId });
-		if (!listed.result.ok) return [];
-		return (listed.result.value.skills ?? []).map((skill) => ({
-			name: String(skill.name),
-			description: String(skill.description),
-			...(skill.whenToUse !== undefined && skill.whenToUse !== null ? { whenToUse: String(skill.whenToUse) } : {}),
-			modelInvocable: skill.modelInvocable !== false,
-		}));
+		// 工具面板等既有入口保持「失败返回空列表」的宽容语义（UI 只展示空态）。
+		try {
+			return await this.listSkillsByHostSession(String(runtime.sessionId));
+		} catch {
+			return [];
+		}
+	}
+
+	/**
+	 * 按 host 会话 id 列技能（不要求 live agent）。
+	 *
+	 * host 的 skill.list 只要会话 attached 即可：有 live agent 时用其 preset 的 skill
+	 * service，没有时回退全局 skill registry + 会话 preset 的 standing scope
+	 * （dsh-host-apiproxy 实际实现，不启动 agent/turn）。草稿会话拿到 host 会话 id 后
+	 * 即可在「会话启动前」读目录；`session-not-found` 会带 code 抛给调用方判定
+	 * （草稿可以安全换新会话，历史会话不行）。
+	 */
+	async listSkillsByHostSession(dshSessionId: string): Promise<DshSkillView[]> {
+		const client = await this.ensureClient();
+		const listed = await client.skillsList({ sessionId: dshSessionId as SessionId });
+		if (!listed.result.ok) {
+			const error = listed.result.error as { code?: unknown; message?: unknown } | undefined;
+			const code = typeof error?.code === "string" ? error.code : "internal";
+			const message = typeof error?.message === "string" ? error.message : "skill listing failed";
+			throw new DshSkillListError(code, message);
+		}
+		return toDshSkillViews(listed.result.value.skills);
+	}
+
+	/**
+	 * 为草稿会话准备一个可读技能目录的 host 会话（不启动 agent）。
+	 *
+	 * 与 create() 内部建会话同一条 `sessions.create` 路径，保证真正开聊时激活能 attach
+	 * 同一个会话（不会另起会话丢历史）；agentPreset 沿用草稿预选，host 可能回退部署
+	 * 默认，返回值里的实际 preset 由调用方决定是否回写 catalog。
+	 */
+	async ensureAttachableHostSession(cwd: string, agentPreset?: string): Promise<{ sessionId: string; agentPreset?: string }> {
+		const client = await this.ensureClient();
+		const created = await this.createHostSession(client, cwd, agentPreset);
+		if (!created.ok) throw new Error(`dsh session.create failed: ${created.error}`);
+		return created.agentPreset ? { sessionId: created.sessionId, agentPreset: created.agentPreset } : { sessionId: created.sessionId };
 	}
 
 	async setModel(agentId: string, provider: string, modelId: string): Promise<unknown> {

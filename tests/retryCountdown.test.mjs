@@ -34,7 +34,7 @@ function findLabel(node) {
 	return undefined;
 }
 
-function countdownHarness({ now: initialNow = 10000, locale = "zh-CN" } = {}) {
+async function countdownHarness({ now: initialNow = 10000, locale = "zh-CN" } = {}) {
 	const host = quickMessageHookHost();
 	const timers = new Map();
 	let now = initialNow;
@@ -77,7 +77,10 @@ function countdownHarness({ now: initialNow = 10000, locale = "zh-CN" } = {}) {
 			},
 		},
 	});
-	load("src/renderer/src/i18n.ts").setI18nLocale(locale);
+	// 词典按需加载：sandbox 里 import() 会被转成同步 require，await 只是让微任务结算。
+	const i18n = load("src/renderer/src/i18n.ts");
+	await i18n.ensureI18nLocale(locale);
+	i18n.setI18nLocale(locale);
 	const { RetryStep } = load("src/renderer/src/components/session/turn/RetryStep.tsx");
 	return {
 		render(message, hidden = false) {
@@ -102,9 +105,9 @@ function countdownHarness({ now: initialNow = 10000, locale = "zh-CN" } = {}) {
 	};
 }
 
-test("重试行按实际延迟逐秒倒计时，保留次数且不修改原消息", () => {
+test("重试行按实际延迟逐秒倒计时，保留次数且不修改原消息", async () => {
 	for (const seconds of [5, 10, 30, 90]) {
-		const h = countdownHarness();
+		const h = await countdownHarness();
 		const message = retryMessage({ delayMs: seconds * 1000 });
 		const original = JSON.stringify(message);
 		assert.equal(h.render(message), `正在自动重试 1/10，${seconds} 秒后重试`);
@@ -119,8 +122,8 @@ test("重试行按实际延迟逐秒倒计时，保留次数且不修改原消�
 	}
 });
 
-test("延迟挂载和后台节流按消息时间校准，到零后显示正在重试且停止计时", () => {
-	const h = countdownHarness({ now: 12000 });
+test("延迟挂载和后台节流按消息时间校准，到零后显示正在重试且停止计时", async () => {
+	const h = await countdownHarness({ now: 12000 });
 	const message = retryMessage();
 	assert.equal(h.render(message), "正在自动重试 1/10，3 秒后重试");
 	h.advanceBy(2500);
@@ -133,8 +136,8 @@ test("延迟挂载和后台节流按消息时间校准，到零后显示正在�
 	h.unmount();
 });
 
-test("不足整秒的退避向上取整，并在真实秒数边界更新", () => {
-	const h = countdownHarness();
+test("不足整秒的退避向上取整，并在真实秒数边界更新", async () => {
+	const h = await countdownHarness();
 	const message = retryMessage({ delayMs: 1500 });
 	assert.equal(h.render(message), "正在自动重试 1/10，2 秒后重试");
 	h.advanceBy(500);
@@ -145,9 +148,9 @@ test("不足整秒的退避向上取整，并在真实秒数边界更新", () =>
 	h.unmount();
 });
 
-test("下一次退避立即使用新次数和新延迟，成功/失败清理计时器", () => {
+test("下一次退避立即使用新次数和新延迟，成功/失败清理计时器", async () => {
 	for (const status of ["success", "error"]) {
-		const h = countdownHarness();
+		const h = await countdownHarness();
 		h.render(retryMessage());
 		h.advanceBy(2000);
 		const next = retryMessage({ timestamp: 12000, attempt: 2, delayMs: 30000 });
@@ -160,8 +163,8 @@ test("下一次退避立即使用新次数和新延迟，成功/失败清理计�
 	}
 });
 
-test("折叠停止计时，重新展开按当前剩余秒数恢复，卸载清理计时器", () => {
-	const h = countdownHarness();
+test("折叠停止计时，重新展开按当前剩余秒数恢复，卸载清理计时器", async () => {
+	const h = await countdownHarness();
 	const message = retryMessage({ delayMs: 30000 });
 	h.render(message);
 	h.render(message, true);
@@ -173,8 +176,8 @@ test("折叠停止计时，重新展开按当前剩余秒数恢复，卸载清�
 	assert.equal(h.timerCount, 0);
 });
 
-test("英文使用同一实时倒计时，不依赖中文正文或固定秒数", () => {
-	const h = countdownHarness({ locale: "en-US" });
+test("英文使用同一实时倒计时，不依赖中文正文或固定秒数", async () => {
+	const h = await countdownHarness({ locale: "en-US" });
 	const message = retryMessage({ delayMs: 30000 });
 	assert.equal(h.render(message), "Automatically retrying (1/10) in 30 seconds");
 	h.advanceBy(3000);
@@ -182,8 +185,8 @@ test("英文使用同一实时倒计时，不依赖中文正文或固定秒数",
 	h.unmount();
 });
 
-test("过期历史与非等待重试不启动计时器，未知延迟保持原文案", () => {
-	const h = countdownHarness({ now: 20000 });
+test("过期历史与非等待重试不启动计时器，未知延迟保持原文案", async () => {
+	const h = await countdownHarness({ now: 20000 });
 	assert.equal(h.render(retryMessage()), "正在自动重试 1/10");
 	assert.equal(h.timerCount, 0);
 	const message = retryMessage({ timestamp: 20000 });

@@ -52,10 +52,6 @@ export type PiDeckMcpBuiltInExtension = {
 	id: string;
 	/** 按当前设置是否会注入 pi 进程（不含「文件是否存在」与 `piRpcNoExtensions` 整段关闭） */
 	enabled: boolean;
-	/** 默认关闭、需用户在扩展页显式开启 */
-	defaultDisabled: boolean;
-	/** 对用户完全隐藏：不注入，opt-in 也不能复活 */
-	hidden: boolean;
 	/** 内部适配器：不受用户移除影响 */
 	internal: boolean;
 };
@@ -67,7 +63,6 @@ export type PiDeckMcpExtensionsView = {
 	injectionDisabled: boolean;
 	builtIn: PiDeckMcpBuiltInExtension[];
 	removedBuiltInExtensions: string[];
-	enabledBuiltInExtensions: string[];
 	disabledExtensions: AppSettings["disabledExtensions"];
 };
 

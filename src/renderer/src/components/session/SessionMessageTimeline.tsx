@@ -12,9 +12,10 @@ import { getMultiSelectImageCaptureIds, groupToolMessages, reconcileRuns, type R
 import { liveThinkingIdBySessionIdAtomFamily, liveTextStreamingBySessionAtom, liveThinkingStreamingBySessionAtom, sessionMessageCacheBySessionIdAtomFamily, sessionMessageLoadStateAtom, sessionRecordByIdAtomFamily, sessionRuntimeBySessionIdAtomFamily, sessionSendStateByIdAtom } from "../../atoms";
 import { writeClipboardImage } from "../../utils/clipboard";
 import { useTimelineSelection } from "../../hooks/useTimelineSelection";
+import { useMessageContextMenu } from "../../hooks/useMessageContextMenu";
 import { SelectionToolbar } from "./timeline/SelectionToolbar";
+import { MessageContextMenu } from "./timeline/MessageContextMenu";
 import { deriveTimelineRunActivity } from "./timeline/timelineRunActivity";
-import { BridgeWorkingLine } from "../bridge/BridgeSlot";
 import { canLoadSessionTimelineMore, deriveSessionSurfaceRuntime, type SessionTimelineController } from "../../hooks/useSessionTimelineController";
 import { t } from "../../i18n";
 import { cn } from "../../lib/utils";
@@ -124,6 +125,8 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 	// DSH host 被用户手动停止：历史暂时读不了（main 侧降级成带原因的空页）。
 	// 与普通读盘失败分开渲染——DSH 会话没有 pi 会话文件，重试也永远不会自愈。
 	const dshHostStopped = messageLoadState?.status === "error" && messageLoadState.reason === "dsh-host-stopped";
+	// DSH 运行时未安装（#375）：与手动停止不同，「启动 host」修不好这件事——缺的是 runtime 资源本身
+	const dshRuntimeMissing = messageLoadState?.status === "error" && messageLoadState.reason === "dsh-runtime-missing";
 	// 会话文件还不存在（新建会话/外部连接建的会话，在发出第一条消息前 pi 不落盘）：
 	// 这不是故障，是「还没有内容」——给友好空态，不显示错误原因，也不落到起始页。
 	const sessionFileMissing = messageLoadState?.status === "error" && messageLoadState.reason === "file-missing";
@@ -172,6 +175,9 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 	const canLoadMoreMessages = canLoadSessionTimelineMore(modernSurfaceState.isStarting, activeMessages.length);
 	// 划选引用：选区落在同一条消息内时在选区上方提供「引用并提问」按钮
 	const { quote: selectionQuote, clear: clearSelectionQuote, toolbarRef: selectionToolbarRef } = useTimelineSelection(timelineRef);
+	// 消息右键菜单：复制来源（选区快照 / 命中消息 / live 正文回退）由 hook 解析，
+	// 这里只持有控制器并挂到消息列表容器上（消息、用户气泡、工具卡都在容器内）。
+	const messageContextMenu = useMessageContextMenu({ messages: activeMessages, scopeKey: sessionId });
 	const activeRuntimeState = runtime?.state;
 	const activeConversationStatus = modernSurfaceState.status;
 	// 只订 live id：思考正文由 ThinkingStep 叶子订阅，避免 50ms 戳醒整条 timeline。
@@ -814,7 +820,7 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
           也不裸显示起始页误导——明确错误文案 + 重试（2026-08 生图会话文件缺失）。
           DSH host 被手动停止走下面的专态分支：DSH 会话没有 pi 会话文件，说成
           「文件可能已被删除」会把用户引向错误方向，而且重试永远无效。 */}
-			{messageLoadState?.status === "error" && activeMessages.length === 0 && !dshHostStopped && !sessionFileMissing && (
+			{messageLoadState?.status === "error" && activeMessages.length === 0 && !dshHostStopped && !dshRuntimeMissing && !sessionFileMissing && (
 				<div className="flex flex-col items-center gap-3 px-6 py-10 text-center">
 					<p className="text-sm font-medium">{t("timeline.loadFailed")}</p>
 					<p className="max-w-[560px] text-xs text-muted-foreground">{t("timeline.loadFailedHint")}</p>
@@ -845,6 +851,18 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 				</div>
 			)}
 
+			{/* DSH 运行时未安装专态：与手动停止分开——点「启动 host」修不好这件事，缺的是 runtime
+			    资源本身，恢复路径在「设置 → DSH」，所以这里只给提示 + 重试。 */}
+			{messageLoadState?.status === "error" && activeMessages.length === 0 && dshRuntimeMissing && (
+				<div className="flex flex-col items-center gap-3 px-6 py-10 text-center">
+					<p className="text-sm font-medium">{t("timeline.dshRuntimeMissing")}</p>
+					<p className="max-w-[560px] text-xs text-muted-foreground">{t("timeline.dshRuntimeMissingHint")}</p>
+					<Button type="button" variant="outline" size="sm" onClick={() => void controller.reloadFromDisk()}>
+						{t("common.retry")}
+					</Button>
+				</div>
+			)}
+
 			{/* 空会话（文件尚未创建）专态：只说「还没有内容」+ 怎么产生内容，不展示 ENOENT，
 			    也不渲染起始页——新建会话/外部连接会话打开时就应该是这一屏。 */}
 			{messageLoadState?.status === "error" && activeMessages.length === 0 && sessionFileMissing && (
@@ -866,7 +884,7 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
           - 学 Proma：总折叠压缩单行 DOM；另在贴底时只挂尾部 N 个 agent-run
             （见 turnRenderWindow），上滚放开。分页仍做数据窗口治理。 */}
 			{hasActiveConversation && !isConversationLoading && activeMessages.length > 0 && (
-				<div className="message-list min-w-0 w-full mx-auto transition-opacity duration-fast">
+				<div className="message-list min-w-0 w-full mx-auto transition-opacity duration-fast" onContextMenu={messageContextMenu.handleContextMenu}>
 					{displayRuns.map((item, index) => {
 						if (item.kind === "agent-run") {
 							// Only an active model turn keeps its latest run live. Context
@@ -980,10 +998,6 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 					{hasActiveConversation && !cancellingUi && isRuntimeBusy && (
 						<RespondingIndicator isCompacting={isCompacting} isStarting={activeConversationStatus === "starting"} isExecutingTool={activeRuntimeState?.isExecutingTool} executingToolName={activeRuntimeState?.executingToolName} liveTextStreaming={liveTextStreaming} liveThinkingStreaming={liveThinkingStreaming} />
 					)}
-					{/* GUI 扩展桥：流式状态行（ctx.ui.setWorkingMessage / setWorkingVisible / setWorkingIndicator）。
-					    **旁插**在原生指示器之后 —— 保留原生形态，不顶替（§8.2 A 组 / §7.4 只追加）。
-					    无桥贡献时该组件返回 null，不占位。 */}
-					<BridgeWorkingLine sessionId={sessionId} />
 					{props.replyActionsRef ? <div key={sessionId} ref={props.replyActionsRef} data-session-id={sessionId} data-testid="session-reply-actions-target" className="min-w-0 empty:hidden" /> : null}
 				</div>
 			)}
@@ -997,6 +1011,9 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 			<div aria-hidden="true" data-send-scroll-spacer="true" className="shrink-0" />
 
 			{multiSelectOpen && <MultiSelectModal renderedRuns={reconciledRuns} onClose={() => setMultiSelectOpen(false)} onCopy={copySelectedMessages} />}
+
+			{/* 消息右键菜单：portal 到 body、fixed 定位在右键坐标（见 MessageContextMenu） */}
+			<MessageContextMenu state={messageContextMenu.state} onCopy={messageContextMenu.copy} onSelectAll={messageContextMenu.selectAll} onClose={messageContextMenu.close} />
 
 			{/* 划选引用浮层：portal 到 body，fixed 定位；空会话起始页无消息不出现 */}
 			{!showSurfaceEmptyState && sessionId && <SelectionToolbar quote={selectionQuote} sessionId={sessionId} onConsume={clearSelectionQuote} toolbarRef={selectionToolbarRef} />}

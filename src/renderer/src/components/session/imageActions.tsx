@@ -4,16 +4,12 @@ import type { ImageContent } from "../../../../shared/types";
 import { loadImageBase64 } from "../../../../shared/imageContentSrc";
 import { t } from "../../i18n";
 import { Button } from "../ui-shadcn/button";
+import { imageFileExtension } from "../../../../shared/imageFilename";
 import { writeClipboardImage } from "../../utils/clipboard";
 import { showNotice } from "../../utils/notice";
 
-/** 图片 MIME → 下载扩展名：避免 jpeg 被存成 .png；生图 provider 偶发 octet-stream 兜底 png。 */
-function imageDownloadExt(mimeType: string): string {
-	if (mimeType === "image/jpeg") return "jpg";
-	if (mimeType === "image/webp") return "webp";
-	if (mimeType === "image/gif") return "gif";
-	return "png";
-}
+/** 图片 MIME → 下载扩展名（与正文图共用 `shared/imageFilename`，避免两份实现漂移）。 */
+const imageDownloadExt = imageFileExtension;
 
 /**
  * 对话图片统一动作（复制图片 / 保存为文件 / 有历史权限时移除单图）。

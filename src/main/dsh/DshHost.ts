@@ -3,6 +3,7 @@ import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
+import { dshRuntimeMissingError } from "./dshRuntimeMissing";
 import { getAppLogger } from "../logging/sharedLogger";
 import { applyProxyEnvPatch, type HostProxyEnvPatch } from "../sessions/sessionProxyPolicy";
 import { DshHostProcess, resolveHostEntryPath } from "./DshHostProcess";
@@ -41,8 +42,9 @@ import type { DshCommandView, DshPluginBridgeResponse, DshPluginInstallInput, Ds
  * 形态说明（docs/dsh-agent-backend-plan.md §3.2 形态 b）：
  * - host 在 utilityProcess 里 boot（无 web/无 HTTP/无端口），原生 ABI 与崩溃面
  *   不污染主进程；hostEntry 产物经 electron-vite 多入口打包到 out/main/。
- * - 按需启动：默认后端为 dsh 时窗口首帧后后台预热；纯 pi 用户不 fork host。
- *   发送/历史/配置链路调用 ensureStarted() 幂等兜底。
+ * - 启动预热：runtime 已安装且用户没手动停止过 host 时，窗口首帧后后台预热（不等用户
+ *   先把默认后端切成 dsh——装 runtime 本身就是显式选择，boot 约 20s，装了就该提前拉起）；
+ *   纯 pi 且未装 runtime 的用户不 fork host，发送/历史/配置链路调用 ensureStarted() 幂等兜底。
  * - 桥协议：dshHostBridge.ts（fetch-request/response/chunk/end/error）。
  *
  * DSH_HOME：直接使用用户真实 ~/.dsh（与 dsh CLI 行为一致，配置/凭证/会话
@@ -1025,7 +1027,15 @@ export class DshHost {
 		// hostEntry 仍是 PiDeck 自己的产物，继续从 appPath 解析。
 		const runtimeRoot = this.resolveRuntimeAppRoot?.() ?? this.getAppPath();
 		const require = createRequire(join(runtimeRoot, "package.json"));
-		const appRoot = dirname(dirname(dirname(require.resolve("@deepseek-ai/dsh-base/package.json"))));
+		// @deepseek-ai/* 自阶段 2 起外置为 runtime 资源（app.asar 里本就没有它们），未安装 runtime
+		// 时这里必然解析失败。没有守卫的话 MODULE_NOT_FOUND 会沿 ensureClient → IPC 抛到渲染层，
+		// 会话历史分页整页失败且原因不可读（#375）。收敛成结构化错误，让调用方识别为「运行时未安装」。
+		let appRoot: string;
+		try {
+			appRoot = dirname(dirname(dirname(require.resolve("@deepseek-ai/dsh-base/package.json"))));
+		} catch (error) {
+			throw dshRuntimeMissingError(runtimeRoot, error);
+		}
 		const hostEntryPath = resolveHostEntryPath(this.getAppPath());
 
 		// dsh-bill 启动回填默认关（CPU 修复）：必须在 fork 前对 host 实际加载的那份

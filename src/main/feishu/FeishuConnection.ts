@@ -4,7 +4,9 @@
  */
 
 import type { FeishuBotConfig, FeishuTestResult } from "../../shared/types";
+import { app } from "electron";
 import type { LarkSDK, LarkClient, FeishuCardActionEvent } from "./types";
+import { loadFeishuSdkOnce } from "./feishuSdkRuntime";
 import { feishuT, type FeishuLocale } from "./FeishuI18n";
 import { getDecryptedBotAppSecret } from "./FeishuConfig";
 import { getAppLogger } from "../logging/sharedLogger";
@@ -61,7 +63,14 @@ export class FeishuConnection {
 		if (!appId || !plainSecret) throw new Error(feishuT(this.locale, "bridge.configRequired"));
 
 		try {
-			const lark = (await import("@larksuiteoapi/node-sdk")) as unknown as LarkSDK;
+			// 打包态：SDK 不在 app.asar 里，从随包 tar.gz 解压到 userData 再 require；
+			// dev：直接 node_modules。详见 feishuSdkRuntime.ts 的体积取舍。
+			const loaded = await loadFeishuSdkOnce({ resourcesPath: app.isPackaged ? process.resourcesPath : null, cacheRoot: app.getPath("userData") });
+			if (!loaded.ok) {
+				logErr("[飞书 Bridge] 飞书 SDK 不可用:", loaded.reason, loaded.message);
+				throw new Error(feishuT(this.locale, "bridge.sdkUnavailable", { reason: loaded.reason }));
+			}
+			const lark = loaded.module as unknown as LarkSDK;
 			this.client = new lark.Client({
 				appId,
 				appSecret: plainSecret,

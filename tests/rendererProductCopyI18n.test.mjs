@@ -100,7 +100,9 @@ const providerHeaders = read("src/renderer/src/config/providerHeaders.ts");
 const userAgentPresets = read("src/renderer/src/config/userAgentPresets.ts");
 const queuedPrompt = read("src/renderer/src/hooks/useQueuedPrompt.ts");
 
-test("remaining renderer product copy is available in Chinese and English", () => {
+test("remaining renderer product copy is available in Chinese and English", async () => {
+	// 词典按需加载：en-US 需先 ensure，否则 t() 回退 zh-CN。
+	await i18n.ensureI18nLocale("en-US");
 	i18n.setI18nLocale("zh-CN");
 	assert.equal(i18n.t("settings.tabs.common"), "\u5e38\u7528\u8bbe\u7f6e");
 	assert.equal(i18n.t("settings.tabs.appearance"), "\u5916\u89c2\u8bbe\u7f6e");

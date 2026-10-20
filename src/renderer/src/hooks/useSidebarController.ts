@@ -60,6 +60,8 @@ export type SidebarController = {
 	toggleProject: (projectId: string) => void;
 	/** 展开/折叠某个项目；forceExpand=true 时只展开不切换 */
 	setProjectExpanded: (projectId: string, forceExpand?: boolean) => void;
+	/** 「必须看见」场景（如在折叠分组里新建会话）：强制展开该项目分组，不切换选中。 */
+	revealProject: (projectId: string) => void;
 	/** 批量折叠/展开工作区项目：任一展开则全折叠，全折叠则全展开；Chat 由自己标题栏控制。 */
 	toggleCollapseAllProjects: () => void;
 	sourceFilterFor: (projectId: string) => SidebarSourceFilter;
@@ -424,6 +426,16 @@ export function useSidebarController(
 		},
 		[setProjectExpanded],
 	);
+	/**
+	 * 强制展开（不切换）——只给「新建会话后必须看见行」这类场景用（#387）：
+	 * 折叠分组里建完会话仍看不到列表，会被误判成「会话没记录」。
+	 */
+	const revealProject = useCallback(
+		(projectId: string) => {
+			setProjectExpanded(projectId, true);
+		},
+		[setProjectExpanded],
+	);
 	const toggleCollapseAllProjects = useCallback(() => {
 		const previous = expandedProjectIdsRef.current;
 		// 只作用于根工作区项目：Chat 折叠由自己的标题栏按钮管理，worktree 子项目不独立折叠。
@@ -533,6 +545,7 @@ export function useSidebarController(
 		isProjectCollapsed: (projectId) => !expandedProjectIds.has(projectId),
 		toggleProject,
 		setProjectExpanded,
+		revealProject,
 		toggleCollapseAllProjects,
 		sourceFilterFor: (projectId) => sourceFilters[projectId] ?? null,
 		setSourceEnabled,

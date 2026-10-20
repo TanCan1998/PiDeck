@@ -29,10 +29,13 @@ export function SessionActionsControl(props: { runControl?: SessionMenuRunContro
 	const primaryAction = capabilities?.canAbort ? "abort" : capabilities?.primaryAction;
 	const primaryLabel = runControl?.isStopping ? t("app.closing") : runControl?.isRestarting ? t("app.restarting") : capabilities?.canAbort ? t("menu.stopAnswer") : capabilities?.primaryAction === "start" ? t("tabs.startAgent") : t("app.restart");
 	const primaryDisabled = !capabilities || primaryAction === "abort" ? !capabilities?.canAbort || Boolean(runControl?.isStopping) : !canRunSessionAction(capabilities, capabilities.primaryAction) || Boolean(runControl?.isRestarting) || Boolean(runControl?.isStopping);
-	const pending = Boolean(runControl?.isRestarting || runControl?.isReloading || capabilities?.pending);
+	// 忙碌 loader 只跟随本钮自己的动作（启动/重启）：热重载会把 sessionRunCapabilities 的
+	// pending 置真（busy），但它有独立的重载钮旋转与时间线遮罩，重启钮不能跟着转，
+	// 否则用户会以为自己的点击被当成了重启。
+	const primaryPending = Boolean(runControl?.isRestarting || (capabilities?.pending && !runControl?.isReloading));
 	const reloadDisabled = !capabilities || !canRunSessionAction(capabilities, "reloadResources") || Boolean(runControl?.isReloading) || Boolean(runControl?.isStopping);
 	const reloadLabel = runControl?.isReloading ? t("app.reloading") : t("menu.reloadResources");
-	const primaryIcon = pending ? (
+	const primaryIcon = primaryPending ? (
 		<LoaderCircle className="size-4 animate-pideck-spin" aria-hidden="true" />
 	) : capabilities?.canAbort ? (
 		<Square className="size-3" fill="currentColor" strokeWidth={0} aria-hidden="true" />
