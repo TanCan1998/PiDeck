@@ -215,7 +215,7 @@ test("win32 控制台补丁同步提前加载的 ESM 导出，并在还原时同
 		esmChildProcess.spawn("C:\\app\\electron.exe", ["C:\\runtime\\runner.js", "--", "pwsh.exe"], { env: {}, stdio: ["ignore", "ignore", "ignore", "ipc", "pipe", "pipe", "pipe"] });
 		assert.equal(calls[0].args[0], sidecar);
 		assert.equal(calls[0].args[2].windowsHide, true);
-		assert.ok(calls[0].args[2].env.NODE_OPTIONS.includes("runnerConsolePreload.js"));
+		assert.equal(calls[0].args[2].env.NODE_OPTIONS, undefined, "sidecar 不注入 preload（asar 内路径在真 node.exe 上 MODULE_NOT_FOUND）");
 		assert.equal(calls[0].args[2].stdio[3], "ipc", "Job runner 的 IPC 与 target carriers 不得改变");
 		restore();
 		restore = undefined;
@@ -548,9 +548,33 @@ test("CUI sidecar：把 electron.exe runner 改写成 node.exe，且 windowsHide
 	}
 	assert.equal(calls[0][0], "C:\\app\\resources\\dsh-runner-node\\node.exe", "runner 可执行文件换成 CUI sidecar");
 	assert.equal(calls[0][2].windowsHide, true, "sidecar 自建无窗口控制台，不依赖 host AllocConsole");
-	assert.equal(calls[0][2].env.NODE_OPTIONS, `--require="C:\\\\app\\\\out\\\\main\\\\runnerConsolePreload.js"`, "sidecar 仍注入 preload：嵌套 runner 改写与兜底 AllocConsole");
+	assert.equal(calls[0][2].env.NODE_OPTIONS, undefined, "sidecar 是真 node.exe，不注入 preload：asar 内的 --require 会让 runner exit 1");
 	assert.equal("ELECTRON_RUN_AS_NODE" in calls[0][2].env, false, "node.exe 不需要 RUN_AS_NODE");
 	assert.equal(calls[1][0], "git", "非 runner spawn 不改写");
+});
+
+test("CUI sidecar 不注入 preload：真 node.exe 读不了 app.asar，注入会让第一级 runner 立刻退出（PTC 全失败回归）", () => {
+	installHostHiddenConsole("win32");
+	configureDshRunnerNodeSidecar("C:\\app\\resources\\dsh-runner-node\\node.exe");
+	const originalSpawn = childProcess.spawn;
+	const calls = [];
+	childProcess.spawn = (...args) => {
+		calls.push(args);
+		return {};
+	};
+	// 生产打包后 preload 位于 app.asar 内；sidecar 是真 node.exe，没有 Electron 的 asar 读取能力。
+	const asarPreload = "C:\\app\\resources\\app.asar\\out\\main\\runnerConsolePreload.js";
+	const restore = installHiddenConsolePatch("win32", asarPreload);
+	try {
+		childProcess.spawn("C:\\app\\electron.exe", ["C:\\app\\node_modules\\@deepseek-ai\\dsh-subprocess-local\\lib\\runner.js", "--", "node", "-e", "1"], { env: { PATH: "x", ELECTRON_RUN_AS_NODE: "1" } });
+	} finally {
+		restore();
+		configureDshRunnerNodeSidecar(undefined);
+		childProcess.spawn = originalSpawn;
+	}
+	assert.equal(calls[0][0], "C:\\app\\resources\\dsh-runner-node\\node.exe");
+	assert.equal(calls[0][2].env.NODE_OPTIONS, undefined, "NODE_OPTIONS 不得带 asar 内 preload");
+	assert.equal(calls[0][2].env.ELECTRON_RUN_AS_NODE, "1", "原有环境变量不被额外改写");
 });
 
 test("CUI sidecar：host 无 AllocConsole 时仍改写（靠 CREATE_NO_WINDOW，不再怕 GUI 父进程弹窗）", () => {
