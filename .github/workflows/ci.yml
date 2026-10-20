@@ -62,6 +62,14 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Markdown image layout e2e
+        # 图片渲染链路的几何守卫：同段多图 = 96×96 瓷砖并排、单图 640×360 上限、
+        # src 走 pideck-file://、点击开预览。这条链路的三类回归（hast 的 %5C 编码、
+        # rehype-sanitize 剥非白名单属性、Windows 8.3 短名）单测都抓不到，
+        # 只有真实 Electron 能发现。Windows runner 自带桌面会话，不需要 xvfb。
+        timeout-minutes: 10
+        run: npx playwright test e2e/markdown-image-layout.spec.ts
+
       - name: Verify packaging config
         run: npm run pack
 

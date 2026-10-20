@@ -4,6 +4,8 @@ import { localImageUrl } from "../../../../shared/localImage";
 import { t } from "../../i18n";
 import { useFileLinkBaseDir } from "./FileLinkBase";
 import { ImageLightbox } from "./ImageLightbox";
+import { MarkdownImageHoverSave, MarkdownImageToolbar } from "./MarkdownImageActions";
+import { useMarkdownImageGroupCount } from "./MarkdownImageGroup";
 import { resolveMarkdownImageSrc } from "./markdownImageSrc";
 
 /**
@@ -12,8 +14,9 @@ import { resolveMarkdownImageSrc } from "./markdownImageSrc";
  * 布局照 dsh（两档，数值直接抄）：
  * - 单图：`display: block` + `max-width: min(100%, 640px)` + `max-height: 360px`（contain）
  *   —— 大截图不会占满整条时间线，宽图按比例缩，竖排堆叠。
- * - 同段多图（≥2）：64px 方块瓷砖（cover），细节靠点击看原图 —— 与 dsh 的
- *   `MessageImage` tile 同一套尺寸；数量由 `remarkMarkMultiImageParagraphs` 标在节点上。
+ * - 同段多图（≥2）：96px 方块瓷砖（cover），细节靠点击看原图 —— 形制照 dsh 的
+ *   `MessageImage` tile，尺寸按 PiDeck 观感从 64px 放大到 96px。张数由 `p` 组件数出来后
+ *   经 `MarkdownImageGroupProvider` 下发（不能用 HTML 属性：`rehype-sanitize` 会剥掉）。
  *
  * 三条硬约束：
  * 1. 解析不出可加载 URL 时渲染 alt 原文，**绝不产出空 src 的白图**——失败要能被看见。
@@ -26,7 +29,7 @@ import { resolveMarkdownImageSrc } from "./markdownImageSrc";
  * 本地图统一走 `pideck-file://`（主进程白名单里的只读协议），不用 `file://`：
  * dev 下页源是 http，`file://` 子资源会被 Chromium 直接拒绝。
  */
-export const MarkdownImage = memo(function MarkdownImage(props: { destination: string; alt: string; groupCount?: number }) {
+export const MarkdownImage = memo(function MarkdownImage(props: { destination: string; alt: string }) {
 	const baseDir = useFileLinkBaseDir();
 	const src = useMemo(() => resolveMarkdownImageSrc(props.destination, { baseDir, toLocalUrl: localImageUrl }), [props.destination, baseDir]);
 	const [failedFor, setFailedFor] = useState<string | null>(null);
@@ -34,11 +37,11 @@ export const MarkdownImage = memo(function MarkdownImage(props: { destination: s
 	const close = useCallback(() => setOpen(false), []);
 	const label = props.alt || props.destination;
 	const failed = failedFor !== null && failedFor === src;
-	const tiled = (props.groupCount ?? 1) > 1;
+	const tiled = useMarkdownImageGroupCount() > 1;
 
 	if (src === undefined) {
 		return tiled ? (
-			<span className="inline-flex size-16 items-center justify-center rounded-sm bg-bg-muted text-text-tertiary" title={label} role="img" aria-label={label}>
+			<span className="inline-flex size-24 items-center justify-center rounded-sm bg-bg-muted text-text-tertiary" title={label} role="img" aria-label={label}>
 				<ImageOff size={16} />
 			</span>
 		) : (
@@ -47,7 +50,7 @@ export const MarkdownImage = memo(function MarkdownImage(props: { destination: s
 	}
 	if (failed) {
 		return tiled ? (
-			<button type="button" className="inline-flex size-16 cursor-pointer items-center justify-center rounded-sm bg-bg-muted text-text-tertiary hover:text-text-secondary" title={`${t("markdown.imageLoadFailed")} · ${label}`} aria-label={`${t("markdown.imageLoadFailed")} · ${label}`} onClick={() => setFailedFor(null)}>
+			<button type="button" className="inline-flex size-24 cursor-pointer items-center justify-center rounded-sm bg-bg-muted text-text-tertiary hover:text-text-secondary" title={`${t("markdown.imageLoadFailed")} · ${label}`} aria-label={`${t("markdown.imageLoadFailed")} · ${label}`} onClick={() => setFailedFor(null)}>
 				<RefreshCw size={16} />
 			</button>
 		) : (
@@ -61,28 +64,39 @@ export const MarkdownImage = memo(function MarkdownImage(props: { destination: s
 		);
 	}
 	const openLabel = props.alt ? `${t("markdown.imageOpen")}: ${props.alt}` : t("markdown.imageOpen");
+	const image = (
+		<img
+			className={tiled ? "inline-block size-24 cursor-zoom-in rounded-sm object-cover align-bottom" : "block max-h-[360px] w-auto max-w-[min(100%,640px)] cursor-zoom-in rounded-sm object-contain"}
+			src={src}
+			alt={props.alt}
+			title={openLabel}
+			role="button"
+			tabIndex={0}
+			loading="lazy"
+			decoding="async"
+			referrerPolicy="no-referrer"
+			onClick={() => setOpen(true)}
+			onKeyDown={(event) => {
+				if (event.key === "Enter" || event.key === " ") {
+					event.preventDefault();
+					setOpen(true);
+				}
+			}}
+			onError={() => setFailedFor(src)}
+		/>
+	);
 	return (
 		<>
-			<img
-				className={tiled ? "inline-block size-16 cursor-zoom-in rounded-sm object-cover align-bottom" : "block max-h-[360px] w-auto max-w-[min(100%,640px)] cursor-zoom-in rounded-sm object-contain"}
-				src={src}
-				alt={props.alt}
-				title={openLabel}
-				role="button"
-				tabIndex={0}
-				loading="lazy"
-				decoding="async"
-				referrerPolicy="no-referrer"
-				onClick={() => setOpen(true)}
-				onKeyDown={(event) => {
-					if (event.key === "Enter" || event.key === " ") {
-						event.preventDefault();
-						setOpen(true);
-					}
-				}}
-				onError={() => setFailedFor(src)}
-			/>
-			{open ? <ImageLightbox src={src} alt={props.alt || t("app.imagePreviewAlt")} onClose={close} /> : null}
+			{/* 大图带 hover 保存角标（对齐改造前 streamdown 的行为）；瓷砖太小不加角标，走预览工具条 */}
+			{tiled ? (
+				image
+			) : (
+				<span className="group relative inline-block">
+					{image}
+					<MarkdownImageHoverSave src={src} alt={props.alt} />
+				</span>
+			)}
+			{open ? <ImageLightbox src={src} alt={props.alt || t("app.imagePreviewAlt")} onClose={close} actions={<MarkdownImageToolbar src={src} alt={props.alt} />} /> : null}
 		</>
 	);
 });
