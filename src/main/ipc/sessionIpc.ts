@@ -46,6 +46,7 @@ import type { BridgeEventInput, BridgeResyncInput } from "../../shared/types/bri
 import { parseSessionProcessEventsFromFile } from "../sessions/sessionProcessEventsFile";
 import type { SessionForkCommands } from "../sessions/sessionForkCommands";
 import { dshUnavailablePageFor } from "../dsh/dshManualStop";
+import { dshRuntimeMissingPageFor } from "../dsh/dshRuntimeMissing";
 import { dshSessionModelPatch } from "../dsh/dshSessionModelSync";
 import { missingSessionFilePage } from "../sessions/sessionFileMissingPage";
 import { isSessionSearchFilePath } from "../sessions/sessionSearchPath";
@@ -1159,7 +1160,9 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 				// 转成带原因的空页，让渲染层出「运行时已停止 + 启动 host」专态，而不是把
 				// host 未运行报成「会话文件已删除/路径失效」——DSH 会话没有 pi 会话文件。
 				// 其余错误（host 崩溃 / 文件损坏）继续抛，渲染层按普通失败处理。
-				const unavailable = dshUnavailablePageFor(error);
+				// 运行时未安装（#375）与手动停止一样属于「可解释的不可用」，同样不该把原始
+				// MODULE_NOT_FOUND 抛给渲染层；其余错误（host 崩溃 / 文件损坏）继续抛。
+				const unavailable = dshUnavailablePageFor(error) ?? dshRuntimeMissingPageFor(error);
 				if (unavailable) return unavailable;
 				throw error;
 			}

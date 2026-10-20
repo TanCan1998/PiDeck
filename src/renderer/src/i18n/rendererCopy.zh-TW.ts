@@ -5660,6 +5660,8 @@ export const zhTW: Record<TranslationKey, string> = {
 	"timeline.dshHostStopped": "DSH 執行時已手動停止",
 	"timeline.dshHostStoppedHint": "這個會話的歷史存在 DSH 側，需要 host 線上才能讀取。你在設定裡手動停止了它，PiDeck 不會自動啟動——點「啟動 host 並重試」即可恢復。",
 	"timeline.dshHostStoppedStart": "啟動 host 並重試",
+	"timeline.dshRuntimeMissing": "DSH 執行時未安裝",
+	"timeline.dshRuntimeMissingHint": "這個會話的歷史存在 DSH 側，需要 DSH 執行時才能讀取。目前沒有偵測到執行時資源，請到「設定 → DSH」安裝或匯入配套版本的 runtime，然後重試。",
 	"timeline.emptySessionFile": "這個會話還沒有內容",
 	"timeline.emptySessionFileHint": "新建會話（包括微信、飛書等外部連線建立的會話）在收到第一條訊息之前不會寫入歷史檔案——訊息到達後內容會自動出現在這裡。",
 	"common.retry": "重試",

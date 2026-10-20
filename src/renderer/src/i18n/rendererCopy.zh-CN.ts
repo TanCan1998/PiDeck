@@ -5653,6 +5653,8 @@ export const zhCN = {
 	"timeline.dshHostStopped": "DSH 运行时已手动停止",
 	"timeline.dshHostStoppedHint": "这个会话的历史存在 DSH 侧，需要 host 在线才能读取。你在设置里手动停止了它，PiDeck 不会自动启动——点「启动 host 并重试」即可恢复。",
 	"timeline.dshHostStoppedStart": "启动 host 并重试",
+	"timeline.dshRuntimeMissing": "DSH 运行时未安装",
+	"timeline.dshRuntimeMissingHint": "这个会话的历史存在 DSH 侧，需要 DSH 运行时才能读取。当前没有检测到运行时资源，请到「设置 → DSH」安装或导入配套版本的 runtime，然后重试。",
 	"timeline.emptySessionFile": "这个会话还没有内容",
 	"timeline.emptySessionFileHint": "新建会话（包括微信、飞书等外部连接建立的会话）在收到第一条消息之前不会写入历史文件——消息到达后内容会自动出现在这里。",
 	"common.retry": "重试",

@@ -5675,6 +5675,8 @@ export const enUS: Record<TranslationKey, string> = {
 	"timeline.dshHostStopped": "DSH runtime is manually stopped",
 	"timeline.dshHostStoppedHint": 'This session\'s history lives on the DSH side and needs the host online. You stopped it manually in settings, so PiDeck will not start it automatically — click "Start host and retry" to resume.',
 	"timeline.dshHostStoppedStart": "Start host and retry",
+	"timeline.dshRuntimeMissing": "DSH runtime is not installed",
+	"timeline.dshRuntimeMissingHint": "This session's history lives on the DSH side and needs the DSH runtime. No runtime assets were found — install or import a matching runtime in Settings → DSH, then retry.",
 	"timeline.emptySessionFile": "This session has no content yet",
 	"timeline.emptySessionFileHint": "New sessions (including sessions created by external connections such as WeChat and Feishu) do not write a history file until the first message arrives — content will appear here once it does.",
 	"common.retry": "Retry",
