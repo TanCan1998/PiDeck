@@ -394,6 +394,7 @@ import { ImageBlobStore } from "./imagegen/ImageBlobStore";
 import { registerImageGenImageProtocol } from "./imagegen/ImageGenImageProtocol";
 import { registerLocalImageProtocol } from "./media/LocalImageProtocol";
 import { registerLocalImageIpc } from "./ipc/localImageIpc";
+import { createCanonicalRootsProvider } from "./media/localImageRoots";
 import { ImageGenConfigStore } from "./imagegen/ImageGenConfigStore";
 import { registerVideoGenIpc } from "./ipc/videogenIpc";
 import { VideoGenConfigStore } from "./videogen/VideoGenConfigStore";
@@ -3044,10 +3045,13 @@ function registerIpc() {
 	// + userData + 专属临时图片目录。**不放行整个 %TEMP%**：安装器/解压/其它程序的临时文件
 	// 不该被消息内容当图床读（取舍见 docs/markdown-image-rendering-plan.md）。
 	const resolveLocalImageRoots = () => [app.getPath("userData"), join(app.getPath("temp"), "pideck-shots"), projectStore.getChatProjectPath(), ...projectStore.list().map((project) => project.path)];
-	registerLocalImageProtocol(resolveLocalImageRoots);
+	// 协议与 IPC 共用同一份「已规范化 + 5s 缓存」的根列表：realpathSync.native 是同步调用，
+	// 一条消息几十张图时不能每次请求都把全部项目根重算一遍。
+	const canonicalLocalImageRoots = createCanonicalRootsProvider(resolveLocalImageRoots);
+	registerLocalImageProtocol(canonicalLocalImageRoots);
 	// 保存/复制要在渲染层拿字节：fetch(pideck-file://) 在该 scheme 上会被拦（corsEnabled: false），
 	// 所以字节走 IPC，白名单与体积判定跟协议同一份实现。
-	registerLocalImageIpc({ resolveRoots: resolveLocalImageRoots });
+	registerLocalImageIpc({ resolveRoots: canonicalLocalImageRoots });
 	registerImageGenIpc({
 		imageGen: new ImageGenService({
 			getProviderCredentials: async (provider) => {

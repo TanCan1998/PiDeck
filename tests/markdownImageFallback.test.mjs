@@ -24,8 +24,8 @@ const twCopy = readFileSync("src/renderer/src/i18n/rendererCopy.zh-TW.ts", "utf8
 test("解析不出 URL 时渲染 alt 原文，不产出空 src", () => {
 	// 单图态：直接显示 alt（或原路径）
 	assert.match(image, /<span className="text-text-tertiary">\{label\}<\/span>/);
-	// 瓷砖态（同段多图）：给一个 64px 占位，避免一段文字把整行瓷砖撞散
-	assert.match(image, /<ImageOff\s+size=\{16\}\s*\/>/);
+	// 解不出地址时不再渲染占位框：流式期间会先闪一下占位框再变真图，改回纯 alt 文本
+	assert.ok(!image.includes("ImageOff"), "不应再引入 ImageOff 占位图标");
 });
 
 test("加载失败：失败文案 + alt（或原路径）+ 可重试", () => {
@@ -69,8 +69,12 @@ test("图片可下载：预览工具条注入 + hover 保存角标", () => {
 	assert.match(actions, /window\.piDesktop\.localImage\.readBytes\(localPath\)/);
 	// 远程图才 fallback 到 fetch；保存用 <a download>，复制走 writeClipboardImage
 	assert.match(actions, /await fetch\(src\)/);
-	assert.match(actions, /link\.download = downloadName\(alt, blob\.type\)/);
+	assert.match(actions, /link\.download = imageDownloadName\(alt, blob\.type\)/);
 	assert.match(actions, /writeClipboardImage\(blob\)/);
+	// 下载名走共享实现（与附件图/生图同一份映射），按钮带 testid 供 e2e 定位（不依赖中文文案）
+	assert.match(actions, /import \{ imageDownloadName \} from "\.\.\/\.\.\/\.\.\/\.\.\/shared\/imageFilename"/);
+	assert.match(actions, /data-testid="markdown-image-save"/);
+	assert.match(actions, /data-testid="markdown-image-copy"/);
 	// 展示仍靠协议（img-src），保存不再依赖 connect-src 放开自定义 scheme
 	assert.match(indexHtml, /img-src[^"]*pideck-file:/);
 	assert.ok(!/connect-src[^"]*pideck-file:/.test(indexHtml), "connect-src 不应再放行 pideck-file");

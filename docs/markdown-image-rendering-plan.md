@@ -202,6 +202,12 @@ dsh 参照文件（需要复核时直接读）：`packages/client/ui-primitives/
 
 吸收 dsh 的可用性细节（同批追加）：`ImageLightbox` 补上 `role="dialog"`/`aria-modal`、打开时焦点进关闭钮、**关闭后还原焦点**、Tab 圈在浮层内、Esc 捕获阶段 `stopPropagation`、backdrop 用 `mousedown` 判定（拖选松手不误关）；加载失败补「重试」按钮（清失败态 → img 重新挂载，文件修好后不用刷新会话）。
 
+评审修复批次（2026-10-20，自审发现）：①保存/复制曾对本地图 100% 失败——`pideck-file://` 是 `corsEnabled:false` 的自定义 scheme，渲染层 `fetch` 直接 `TypeError: Failed to fetch`；改为 IPC `local-image:read-bytes`（`main/media/localImageRead.ts`，与协议共用同一份白名单判定），e2e 探针断言真拿到 `image/png` 且字节数 > 0。②下载名映射两份实现且不一致（svg/avif/bmp 被存成 `.png`），合并到 `shared/imageFilename.ts`。③白名单根每请求都做同步 `realpathSync.native`，改为 `localImageRoots.ts` 的 5s TTL + 并发合并缓存（规范化不能省：Windows 8.3 短名）。④图片被链接包裹时点图会跟着链接跳走，改为 `preventDefault + stopPropagation`。⑤e2e 不再依赖中文 aria-label，改用 `data-testid`。
+
+评审第二批修复（2026-10-20，自审复核）：①去掉「解不出 URL 时的 96px 占位框」——流式期间本地图本来就不解析，占位框会先闪一下再变真图，统一改回 alt 文本（也净减一条分支）。②主进程读取改 `readBoundedImageFile`（open → stat → 定长 read → 长度校验），协议与 IPC 共用：`stat` 与 `readFile` 之间的 TOCTOU 会让体积闸形同虚设（被换成超大文件即整读进内存）。③hover 保存角标改用 Tailwind 具名 group（`group/image`），以后祖先加 `group` 不会误触发。
+
+**已知限制**：远程图（http/https）能显示但**不能保存/复制**——渲染层 fetch 受 CORS/`connect-src` 限制，只给失败提示。要支持需主进程代取字节（会引入任意 URL 拉取面），暂不做。
+
 下载/复制能力补回（2026-10-20）：改造前正文图片由 streamdown 内置组件渲染，右下角 hover 就有下载按钮；换成自研 `MarkdownImage` 后这个能力被静默丢掉（用户反馈）。现在 `MarkdownImageActions` 提供两条入口——预览浮层工具条（复制/保存）与大图 hover 角标；取字节走 `fetch(src)`，因此 **CSP `connect-src` 必须放行 `pideck-file:`**（漏了会出现「点保存没反应」）。
 
 布局规则照 dsh 抄（2026-10-19）：markdown 单图 = `block` + `max-width: min(100%, 640px)` + `max-height: 360px`（contain，竖排）；**同段 ≥2 张** → 96px 方块瓷砖（cover）+ 点击开原图 + 失败给刷新图标重试（对应 dsh `MessageImage` 的 tile/error 形态）。数量靠 **React context** 传递：`p` 组件数出直接子级图片数（`imageCountInChildren`），经 `MarkdownImageGroupProvider` 下发给子树里的每个 `MarkdownImage`。**首版是用 mdast `data.hProperties` 打属性，真机全按单图渲染**——streamdown 内部跑 `rehype-sanitize` 的 `defaultSchema`，实测 `{src, alt, data-md-image-count}` 过一遍只剩 `{alt}`，属性通道根本到不了组件（2026-10-20 修正）。

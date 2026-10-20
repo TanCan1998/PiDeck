@@ -41,7 +41,36 @@ test.use({
 					timestamp: at(58_000),
 					message: {
 						role: "assistant",
-						content: [{ type: "text", text: "同段两张：\n\n![甲](img/big.png) ![乙](img/big.png)\n\n单图上限：\n\n![丙](img/big.png)" }],
+						content: [
+							{
+								type: "text",
+								text: [
+									"## 标题",
+									"",
+									"同段两张：",
+									"",
+									"![甲](img/big.png) ![乙](img/big.png)",
+									"",
+									"单图上限：",
+									"",
+									"![丙](img/big.png)",
+									"",
+									"| 列 | 值 |",
+									"| --- | --- |",
+									"| 单元格 | 可见 |",
+									"",
+									"- 列表项",
+									"",
+									"```js",
+									"const marker = 1;",
+									"```",
+									"",
+									"[![链接里的图](img/big.png)](https://example.com/x)",
+									"",
+									"![外部](C:\\pideck-e2e-not-whitelisted\\a.png)",
+								].join("\n"),
+							},
+						],
 					},
 				},
 			],
@@ -64,7 +93,8 @@ test("markdown 图片布局：同段多图并排瓷砖、单图限高、点击�
 	await expect(timeline).toContainText("同段两张", { timeout: 20_000 });
 
 	const images = timeline.locator("img");
-	await expect(images).toHaveCount(3, { timeout: 15_000 });
+	// 甲 + 乙（同段瓷砖）、丙（单图）、链接里的图（图包在 a 里）
+	await expect(images).toHaveCount(4, { timeout: 15_000 });
 
 	// 图片真的加载成功（白图/破图会 naturalWidth 为 0）
 	for (const index of [0, 1, 2]) {
@@ -101,13 +131,26 @@ test("markdown 图片布局：同段多图并排瓷砖、单图限高、点击�
 	expect(probe).toMatchObject({ mimeType: "image/png" });
 	expect(probe.bytes ?? 0).toBeGreaterThan(0);
 
+	// p 组件覆盖只该影响图片分组，不能碰坏其它块级元素（标题/表格/列表/代码块）
+	await expect(timeline.getByRole("heading", { level: 2, name: "标题" })).toBeVisible();
+	await expect(timeline.locator("table")).toContainText("单元格");
+	await expect(timeline.locator("li", { hasText: "列表项" })).toBeVisible();
+	await expect(timeline.locator("pre code")).toContainText("const marker = 1;");
+
+	// 白名单外 / 不存在的本地图：降级成「失败文案 · alt」+ 重试按钮，不出现破图也不崩
+	const failed = timeline.getByText(/图片加载失败 · 外部/);
+	await expect(failed).toBeVisible();
+	await expect(timeline.locator('img[alt="外部"]')).toHaveCount(0);
+	await failed.getByRole("button").click();
+	await expect(failed).toBeVisible();
+
 	// 点击瓷砖 → 全屏预览；Esc 关闭（焦点管理见 modalKeyboardAccess 契约测试）
 	await images.nth(0).click();
 	const dialog = window.getByRole("dialog");
 	await expect(dialog).toBeVisible({ timeout: 5_000 });
 	// 预览工具条：复制 / 保存（改造前 streamdown 自带 hover 下载，换成自研组件时丢了，现已补回）
-	await expect(dialog.getByRole("button", { name: "复制图片" })).toBeVisible();
-	await expect(dialog.getByRole("button", { name: "保存图片" })).toBeVisible();
+	await expect(dialog.getByTestId("markdown-image-copy")).toBeVisible();
+	await expect(dialog.getByTestId("markdown-image-save")).toBeVisible();
 	await window.keyboard.press("Escape");
 	await expect(dialog).toHaveCount(0, { timeout: 5_000 });
 });

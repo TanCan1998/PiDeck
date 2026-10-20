@@ -1,5 +1,5 @@
 import { memo, useCallback, useMemo, useState } from "react";
-import { ImageOff, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import { localImageUrl } from "../../../../shared/localImage";
 import { t } from "../../i18n";
 import { useFileLinkBaseDir } from "./FileLinkBase";
@@ -39,15 +39,9 @@ export const MarkdownImage = memo(function MarkdownImage(props: { destination: s
 	const failed = failedFor !== null && failedFor === src;
 	const tiled = useMarkdownImageGroupCount() > 1;
 
-	if (src === undefined) {
-		return tiled ? (
-			<span className="inline-flex size-24 items-center justify-center rounded-sm bg-bg-muted text-text-tertiary" title={label} role="img" aria-label={label}>
-				<ImageOff size={16} />
-			</span>
-		) : (
-			<span className="text-text-tertiary">{label}</span>
-		);
-	}
+	// 解析不出可加载 URL（含流式期间故意不解析本地图）：一律显示 alt 文本。
+	// 不再渲染 96px 占位框——流式时占位框会先闪一下再变真图，反而更吵。
+	if (src === undefined) return <span className="text-text-tertiary">{label}</span>;
 	if (failed) {
 		return tiled ? (
 			<button type="button" className="inline-flex size-24 cursor-pointer items-center justify-center rounded-sm bg-bg-muted text-text-tertiary hover:text-text-secondary" title={`${t("markdown.imageLoadFailed")} · ${label}`} aria-label={`${t("markdown.imageLoadFailed")} · ${label}`} onClick={() => setFailedFor(null)}>
@@ -75,10 +69,16 @@ export const MarkdownImage = memo(function MarkdownImage(props: { destination: s
 			loading="lazy"
 			decoding="async"
 			referrerPolicy="no-referrer"
-			onClick={() => setOpen(true)}
+			onClick={(event) => {
+				// 图被链接包裹时（`[![](a.png)](url)`）：点图应当开预览，而不是跟着链接跳走
+				event.preventDefault();
+				event.stopPropagation();
+				setOpen(true);
+			}}
 			onKeyDown={(event) => {
 				if (event.key === "Enter" || event.key === " ") {
 					event.preventDefault();
+					event.stopPropagation();
 					setOpen(true);
 				}
 			}}
@@ -91,7 +91,7 @@ export const MarkdownImage = memo(function MarkdownImage(props: { destination: s
 			{tiled ? (
 				image
 			) : (
-				<span className="group relative inline-block">
+				<span className="group/image relative inline-block">
 					{image}
 					<MarkdownImageHoverSave src={src} alt={props.alt} />
 				</span>
