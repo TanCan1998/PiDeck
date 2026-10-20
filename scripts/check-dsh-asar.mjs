@@ -98,7 +98,7 @@ const REQUIRED = [
  *  0.1.5：dsh-host-apiproxy 已废，传输半在 dsh-client-connection，
  *  网关/端点在 dsh-api-gateway / dsh-api-session-controller（见
  *  docs/dsh-remote-contract.md）。 */
-const ENTRY_PACKAGES = ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-app-boot", "@deepseek-ai/dsh-cmdline", "@deepseek-ai/dsh-client-connection", "@deepseek-ai/dsh-api-gateway", "@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-api-session-controller", "dsh-bill", "dsh-tool-pwsh-persistent"];
+const ENTRY_PACKAGES = ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-app-boot", "@deepseek-ai/dsh-cmdline", "@deepseek-ai/dsh-client-connection", "@deepseek-ai/dsh-api-gateway", "@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-api-session-controller", "dsh-bill"];
 
 /**
  * 已知「运行时代码在 src/」的包，归档里必须带这些文件（见 runtime-prune-rules.mjs
@@ -106,8 +106,8 @@ const ENTRY_PACKAGES = ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-app-boot", "@
  * 入口解析校验看不到这一层间接引用，这里显式钉死。
  */
 const MUST_HAVE_FILES = [
-	// node-pty 是 dsh-tool-pwsh-persistent 的运行时依赖；入口解析校验覆盖不到
-	// 「依赖包整个缺席」的场景（曾因 appOwnDeps 过滤被挡在归档外）。
+	// node-pty 是 @deepseek-ai/dsh-subprocess-local（DSH 终端 / 持久 shell）的运行时依赖；
+	// 入口解析校验覆盖不到「依赖包整个缺席」的场景（曾因 appOwnDeps 过滤被挡在归档外）。
 	"node_modules/node-pty/package.json",
 ];
 

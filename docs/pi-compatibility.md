@@ -10,7 +10,7 @@
 - 核对方式：静态 diff + 源码核对。`dist/modes/rpc/rpc-types.js`、`dist/modes/rpc/rpc-mode.js`、`dist/core/package-manager.js` 与 1.2.0 **逐字节相同**；`dist/core/extensions/types.d.ts` 与 `@earendil-works/pi-tui@1.3.0` 的 `dist` 同样逐字节相同；`dist/index.js` / `index.d.ts` 只新增 `formatReadLineRange` 导出。**1.3.0 未在真实会话上跑回归**；本机 pi CLI 已升级到 1.3.0（2026-10-16 核对，RPC 会话与桥/扩展在本机实际使用中），1.2.0 的扩展 API 真实回归同样待做（见 1.2.0 矩阵的扩展 API 行与 1.3.0 矩阵末节）
 - PiDeck 通信方式：`pi --mode rpc`，stdio JSON-RPC
 - 本记录范围：Pi 后端（`src/main/pi/`）以及 PiDeck 对 Pi 配置/事件的适配
-- 不包含：DSH 的 `pwsh_persistent`、Electron 自带终端、PiDeck 自己的应用更新器
+- 不包含：DSH 后端工具（原持久 pwsh 工具已于 0.2.1 下线）、Electron 自带终端、PiDeck 自己的应用更新器
 - 当前原则：工具选择由用户决定，PiDeck 的图形编辑器写 pi 原生 `settings.json`，解析与执行仍归 pi；不自动安装 PowerShell 7，不向 Pi 传硬编码 `--tools` 白名单。
 
 ## 白名单机制移除核对（2026-10-01 终态，源码逐项验证）
@@ -266,7 +266,7 @@ Pi 负责执行器选择：优先 `pwsh.exe`，否则 `powershell.exe`。因此 
 
 ### DSH 例外
 
-PiDeck 的 `pwsh_persistent` 是 DSH 独立工具。其当前实现默认指向 Windows PowerShell 7 路径；这不代表 Pi 原生 `powershell` 工具要求安装 PS7。本记录不把两者合并。
+PiDeck 曾内置 DSH 持久 pwsh 工具（`pwsh_persistent`，本地 file: 包 `packages/dsh-tool-pwsh-persistent`），0.2.1 起下线，DSH 会话只用官方预设工具；这不代表 Pi 原生 `powershell` 工具要求安装 PS7。本记录不把两者合并。
 
 ## PiDeck 后续工作清单
 

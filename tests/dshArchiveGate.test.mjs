@@ -44,7 +44,7 @@ const REQUIRED = [
 	"dsh-workflow",
 ].map((name) => `@deepseek-ai/${name}`);
 
-const ENTRY_PACKAGES = ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-app-boot", "@deepseek-ai/dsh-cmdline", "@deepseek-ai/dsh-client-connection", "@deepseek-ai/dsh-api-gateway", "@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-api-session-controller", "dsh-bill", "dsh-tool-pwsh-persistent"];
+const ENTRY_PACKAGES = ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-app-boot", "@deepseek-ai/dsh-cmdline", "@deepseek-ai/dsh-client-connection", "@deepseek-ai/dsh-api-gateway", "@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-api-session-controller", "dsh-bill"];
 
 /** 造一个「除目标包外全部合规」的最小 runtime 归档；withLib 控制事故复现与否。 */
 async function buildFixture({ withLib, nestedKoffi = false, brokenKoffi = false }) {
@@ -74,12 +74,14 @@ async function buildFixture({ withLib, nestedKoffi = false, brokenKoffi = false 
 	mkdirSync(ptyPrebuildDir, { recursive: true });
 	writeFileSync(join(ptyPrebuildDir, "pty.node"), "");
 
-	// 事故包：exports 同时声明 "." → lib/index.js 与 "./package.json"（元数据导出）
-	const culprit = join(src, "node_modules", "dsh-tool-pwsh-persistent");
+	// 事故包：exports 同时声明 "." → lib/index.js 与 "./package.json"（元数据导出）;
+	// 它是 file: 本地包形态的合成夹具（真实包不随仓库存在，也不能进 ENTRY_PACKAGES）。
+	const culprit = join(src, "node_modules", "dsh-file-local-pkg");
+	mkdirSync(culprit, { recursive: true });
 	writeFileSync(
 		join(culprit, "package.json"),
 		JSON.stringify({
-			name: "dsh-tool-pwsh-persistent",
+			name: "dsh-file-local-pkg",
 			version: "0.1.2",
 			main: "lib/index.js",
 			exports: { ".": "./lib/index.js", "./package.json": "./package.json" },
@@ -123,7 +125,7 @@ test("归档闸门：缺 lib/ 的 file: 本地包不能被 ./package.json 导出
 		}
 		assert.notEqual(status, 0, "缺 lib/index.js 的归档必须校验失败（旧实现被 ./package.json 骗过）");
 		// 归档条目路径前缀随 tar 输入形式变化（./node_modules → dsh-runtime/./…），只钉包名段
-		assert.match(stderr, /no resolvable entry: .*dsh-tool-pwsh-persistent \(main=lib\/index\.js/);
+		assert.match(stderr, /no resolvable entry: .*dsh-file-local-pkg \(main=lib\/index\.js/);
 	} finally {
 		cleanup();
 	}
