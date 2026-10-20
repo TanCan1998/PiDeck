@@ -140,7 +140,8 @@ dsh 参照文件（需要复核时直接读）：`packages/client/ui-primitives/
 ## 7. 验证门禁
 
 - `npm run typecheck`；`npm run format`（biome）。
-- 针对性单测：`node --test tests/markdownImageSrc.test.mjs tests/markdownLocalImageRecovery.test.mjs tests/localImageProtocol.test.mjs`；触动 `MarkdownStream` 时加跑 `tests/markdownStreamPolicy.test.mjs`、`tests/markdownPathTailTruncation.test.mjs`。
+- 针对性单测：`node --test tests/markdownImageSrc.test.mjs tests/markdownImageGroups.test.mjs tests/markdownImageFallback.test.mjs tests/markdownLocalImageRecovery.test.mjs tests/localImageProtocol.test.mjs`；触动 `MarkdownStream` 时加跑 `tests/markdownStreamPolicy.test.mjs`、`tests/markdownPathTailTruncation.test.mjs`。
+- 布局 e2e（真实 Electron + 真实渲染管线）：先 `npm run build:fast`，再 `npx playwright test e2e/markdown-image-layout.spec.ts`。断言：同段两张 = 两个 96×96 瓷砖且同一行、单图高度 360 上限、`src` 走 `pideck-file://`、点击开预览 + Esc 可关。它兜住的正是单测看不见的三层：hast 的 `%5C` 编码、`rehype-sanitize` 剥非白名单属性、Windows 8.3 短名。
 - 手工 smoke（两种加载方式 × 四类图 × 三种失败）：
 
 |  | 远程 http | 绝对路径 | 相对路径 | 畸形（带空格） |
@@ -201,4 +202,4 @@ dsh 参照文件（需要复核时直接读）：`packages/client/ui-primitives/
 
 吸收 dsh 的可用性细节（同批追加）：`ImageLightbox` 补上 `role="dialog"`/`aria-modal`、打开时焦点进关闭钮、**关闭后还原焦点**、Tab 圈在浮层内、Esc 捕获阶段 `stopPropagation`、backdrop 用 `mousedown` 判定（拖选松手不误关）；加载失败补「重试」按钮（清失败态 → img 重新挂载，文件修好后不用刷新会话）。
 
-布局规则照 dsh 抄（2026-10-19）：markdown 单图 = `block` + `max-width: min(100%, 640px)` + `max-height: 360px`（contain，竖排）；**同段 ≥2 张** → 64px 方块瓷砖（cover）+ 点击开原图 + 失败给刷新图标重试（对应 dsh `MessageImage` 的 tile/error 形态）。数量靠 **React context** 传递：`p` 组件数出直接子级图片数（`imageCountInChildren`），经 `MarkdownImageGroupProvider` 下发给子树里的每个 `MarkdownImage`。**首版是用 mdast `data.hProperties` 打属性，真机全按单图渲染**——streamdown 内部跑 `rehype-sanitize` 的 `defaultSchema`，实测 `{src, alt, data-md-image-count}` 过一遍只剩 `{alt}`，属性通道根本到不了组件（2026-10-20 修正）。
+布局规则照 dsh 抄（2026-10-19）：markdown 单图 = `block` + `max-width: min(100%, 640px)` + `max-height: 360px`（contain，竖排）；**同段 ≥2 张** → 96px 方块瓷砖（cover）+ 点击开原图 + 失败给刷新图标重试（对应 dsh `MessageImage` 的 tile/error 形态）。数量靠 **React context** 传递：`p` 组件数出直接子级图片数（`imageCountInChildren`），经 `MarkdownImageGroupProvider` 下发给子树里的每个 `MarkdownImage`。**首版是用 mdast `data.hProperties` 打属性，真机全按单图渲染**——streamdown 内部跑 `rehype-sanitize` 的 `defaultSchema`，实测 `{src, alt, data-md-image-count}` 过一遍只剩 `{alt}`，属性通道根本到不了组件（2026-10-20 修正）。

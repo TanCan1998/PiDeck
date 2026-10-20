@@ -13,8 +13,9 @@ import { resolveMarkdownImageSrc } from "./markdownImageSrc";
  * 布局照 dsh（两档，数值直接抄）：
  * - 单图：`display: block` + `max-width: min(100%, 640px)` + `max-height: 360px`（contain）
  *   —— 大截图不会占满整条时间线，宽图按比例缩，竖排堆叠。
- * - 同段多图（≥2）：64px 方块瓷砖（cover），细节靠点击看原图 —— 与 dsh 的
- *   `MessageImage` tile 同一套尺寸；数量由 `remarkMarkMultiImageParagraphs` 标在节点上。
+ * - 同段多图（≥2）：96px 方块瓷砖（cover），细节靠点击看原图 —— 形制照 dsh 的
+ *   `MessageImage` tile，尺寸按 PiDeck 观感从 64px 放大到 96px。张数由 `p` 组件数出来后
+ *   经 `MarkdownImageGroupProvider` 下发（不能用 HTML 属性：`rehype-sanitize` 会剥掉）。
  *
  * 三条硬约束：
  * 1. 解析不出可加载 URL 时渲染 alt 原文，**绝不产出空 src 的白图**——失败要能被看见。
@@ -39,7 +40,7 @@ export const MarkdownImage = memo(function MarkdownImage(props: { destination: s
 
 	if (src === undefined) {
 		return tiled ? (
-			<span className="inline-flex size-16 items-center justify-center rounded-sm bg-bg-muted text-text-tertiary" title={label} role="img" aria-label={label}>
+			<span className="inline-flex size-24 items-center justify-center rounded-sm bg-bg-muted text-text-tertiary" title={label} role="img" aria-label={label}>
 				<ImageOff size={16} />
 			</span>
 		) : (
@@ -48,7 +49,7 @@ export const MarkdownImage = memo(function MarkdownImage(props: { destination: s
 	}
 	if (failed) {
 		return tiled ? (
-			<button type="button" className="inline-flex size-16 cursor-pointer items-center justify-center rounded-sm bg-bg-muted text-text-tertiary hover:text-text-secondary" title={`${t("markdown.imageLoadFailed")} · ${label}`} aria-label={`${t("markdown.imageLoadFailed")} · ${label}`} onClick={() => setFailedFor(null)}>
+			<button type="button" className="inline-flex size-24 cursor-pointer items-center justify-center rounded-sm bg-bg-muted text-text-tertiary hover:text-text-secondary" title={`${t("markdown.imageLoadFailed")} · ${label}`} aria-label={`${t("markdown.imageLoadFailed")} · ${label}`} onClick={() => setFailedFor(null)}>
 				<RefreshCw size={16} />
 			</button>
 		) : (
@@ -65,7 +66,7 @@ export const MarkdownImage = memo(function MarkdownImage(props: { destination: s
 	return (
 		<>
 			<img
-				className={tiled ? "inline-block size-16 cursor-zoom-in rounded-sm object-cover align-bottom" : "block max-h-[360px] w-auto max-w-[min(100%,640px)] cursor-zoom-in rounded-sm object-contain"}
+				className={tiled ? "inline-block size-24 cursor-zoom-in rounded-sm object-cover align-bottom" : "block max-h-[360px] w-auto max-w-[min(100%,640px)] cursor-zoom-in rounded-sm object-contain"}
 				src={src}
 				alt={props.alt}
 				title={openLabel}

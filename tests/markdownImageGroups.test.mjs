@@ -43,7 +43,7 @@ test("p 组件负责数图并经 context 下发", () => {
 
 test("MarkdownImage 从 context 读张数，≥2 走瓷砖", () => {
 	assert.match(image, /const tiled = useMarkdownImageGroupCount\(\) > 1/);
-	assert.match(image, /size-16[^"]*object-cover/, "瓷砖态 64px cover");
+	assert.match(image, /size-24[^"]*object-cover/, "瓷砖态 96px cover");
 	assert.match(image, /max-w-\[min\(100%,640px\)\]/, "单图上宽 640");
 	assert.match(image, /max-h-\[360px\]/, "单图高 360");
 });
