@@ -301,6 +301,8 @@ import { autoUpdateDshRuntimeIfOutdated } from "./dsh/runtime/dshRuntimeAutoUpda
 import { createNetDownloader, createTarExtractor, fetchDshRuntimeIndex } from "./dsh/runtime/dshRuntimeIo";
 import { credentialValueFromDocument } from "./dsh/dshCredentials";
 import { DshAgentManager } from "./dsh/DshAgentManager";
+import { createDshSessionSkillLoader } from "./dsh/dshSessionSkillLoader";
+import { listDshFilesystemSkills } from "./skills/skillCatalog";
 import { startDshHostInBackground } from "./dsh/startDshHostInBackground";
 import { importForeignSession, knownForeignSessionIds, syncForeignSessions, type DshForeignSyncDeps } from "./dsh/dshForeignSync";
 import { PiLocator } from "./pi/PiLocator";
@@ -489,6 +491,41 @@ import { UpdateService } from "./update/UpdateService";
 import type { AppManualUpdateRelease } from "../shared/types/app";
 
 let mainWindow: BrowserWindow | null = null;
+/**
+ * 草稿 DSH 会话的技能目录入口（懒装配）：sessionCatalog/dshAgentManager 都是
+ * whenReady 之后才赋值，构造必须延迟到首次 IPC 调用，避免启动顺序耦合。
+ */
+let dshSessionSkillLoader: ReturnType<typeof createDshSessionSkillLoader> | undefined;
+function getDshSessionSkillLoader(): ReturnType<typeof createDshSessionSkillLoader> {
+	dshSessionSkillLoader ??= createDshSessionSkillLoader({
+		getEntry: (sessionId) => {
+			const entry = sessionCatalog.get(sessionId);
+			if (!entry) return undefined;
+			return { backend: entry.backend, status: entry.status, noSession: entry.noSession, projectId: entry.projectId, dshSessionId: entry.dshSessionId, agentPreset: entry.agentPreset };
+		},
+		getProjectPath: (projectId) => projectStore.get(projectId)?.path,
+		// 预览层：通用 SKILL.md 文件系统扫描（pi/dsh 共用逻辑），不依赖 host/agent。
+		scanFilesystem: async (entry) => {
+			const projectPath = projectStore.get(entry.projectId)?.path;
+			if (!projectPath) return [];
+			return listDshFilesystemSkills({
+				projectPath,
+				dshHome: dshHost.getHomeDir(),
+				agentsHome: process.env.DSH_AGENTS_HOME?.trim() || undefined,
+				bundledSkillDir: process.env.DSH_BUNDLED_SKILL_DIR?.trim() || undefined,
+			});
+		},
+		ensureHostSession: (cwd, agentPreset) => dshAgentManager.ensureAttachableHostSession(cwd, agentPreset),
+		attachHostSession: async (deckSessionId, dshSessionId, agentPreset) => {
+			const updated = await sessionCatalog.attachRuntime({ sessionId: deckSessionId, dshSessionId, ...(agentPreset ? { agentPreset } : {}) });
+			// host id 回写后渲染层的「模式锁定」/删除墓碑语义随之变化，静默重拉该项目列表。
+			mainWindow?.webContents.send(ipcChannels.sessionsCatalogRefreshed, { projectId: updated.projectId });
+		},
+		dismissHostSession: (dshSessionId) => sessionCatalog.rememberDismissedDshSession(dshSessionId),
+		listSkills: (dshSessionId) => dshAgentManager.listSkillsByHostSession(dshSessionId),
+	});
+	return dshSessionSkillLoader;
+}
 // 紧凑模式（右键小任务）与主窗口几何的接线统一收在 quickTaskWindowChrome：
 // 本文件不再出现紧凑模式的激活判断、屏幕几何计算与「关闭=返回工作台」的拦截逻辑。
 const quickTaskChrome = new QuickTaskWindowChrome({
@@ -3485,6 +3522,8 @@ function registerIpc() {
 			cancelDshQueuedMessage: (agentId, itemId) => dshAgentManager.cancelQueuedMessage(agentId, itemId),
 			listDshSubagents: (agentId) => dshAgentManager.listSubagents(agentId),
 			listDshSkills: (agentId) => dshAgentManager.listSkills(agentId),
+			// 草稿 DSH 会话：会话启动前读技能目录（懒建/复用 host 会话，不启动 agent）。
+			listDshSessionSkills: (sessionId) => getDshSessionSkillLoader()(sessionId),
 			readDshSubagentHistory: (agentId, childSessionId, beforeSeq, maxMessages) => dshAgentManager.readSubagentHistory(agentId, childSessionId, beforeSeq, maxMessages),
 			listDshOrphans: async () => {
 				// G3/D11：host 持久化会话中，catalog 无 dshSessionId 映射的视为孤儿

@@ -67,7 +67,7 @@ export function ComposerPickerHost(props: ComposerPickerHostProps) {
 			return <PromptTemplatePicker templates={props.templates} onClose={props.onClose} onPick={props.onInsertTemplate} onInsertContent={props.onInsertTemplateContent} />;
 		}
 		if (props.picker === "skill") {
-			return <ComposerSkillPicker backend={preference.isDshSession ? "dsh" : "pi"} projectId={preference.projectId} agentId={preference.agentId} onClose={props.onClose} onPick={props.onInsertSkill} onInsertContent={props.onInsertSkillContent} />;
+			return <ComposerSkillPicker backend={preference.isDshSession ? "dsh" : "pi"} projectId={preference.projectId} agentId={preference.agentId} sessionId={props.sessionId} onClose={props.onClose} onPick={props.onInsertSkill} onInsertContent={props.onInsertSkillContent} />;
 		}
 		if (props.picker === "model") {
 			// DSH 会话的模型归属 host（agent-default-model），不读 pi 的欢迎页偏好：

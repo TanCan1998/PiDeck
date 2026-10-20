@@ -273,6 +273,11 @@ export type DshBackendIpcDeps = {
 	readDshSubagentHistory?: (agentId: string, childSessionId: string, beforeSeq?: number, maxMessages?: number) => Promise<{ messages: import("../../shared/types").ChatMessage[]; hasMore: boolean }>;
 	/** DSH 技能目录（G7：skill.list 只读）；未装配时返回空列表。 */
 	listDshSkills?: (agentId: string) => Promise<import("../../shared/types").DshSkillView[]>;
+	/**
+	 * DSH 草稿会话的技能目录：按 deck sessionId 懒建/复用 host 会话后读 skill.list
+	 * （不启动 agent）；未装配时返回空列表。
+	 */
+	listDshSessionSkills?: (deckSessionId: string) => Promise<import("../../shared/types").DshSkillView[]>;
 	/** DSH 孤儿会话 id 列表（G3/D11：host 有但 catalog 无映射）；未装配时返回空列表。 */
 	listDshOrphans?: () => Promise<string[]>;
 	/** DSH 外部会话清单（dsh-web 等其他工具创建的 host 根会话）；未装配时返回空列表。 */
@@ -510,6 +515,7 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		listDshSubagents,
 		readDshSubagentHistory,
 		listDshSkills,
+		listDshSessionSkills,
 		listDshOrphans,
 		listDshForeignSessions,
 		importDshForeignSession,
@@ -1375,10 +1381,21 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		return readDshSubagentHistory(agentId, childSessionId, typeof beforeSeq === "number" ? beforeSeq : undefined, typeof maxMessages === "number" ? maxMessages : undefined);
 	});
 	// DSH 技能目录（G7：skill.list 只读；/name 斜杠调用提示由渲染层给）
-	ipcMain.handle(ipcChannels.dshListSkills, async (_event, agentId: unknown) => {
-		if (typeof agentId !== "string") return [];
-		if (!listDshSkills) return [];
-		return listDshSkills(agentId);
+	// 目标有两种寻址：agentId 字符串（运行中会话，工具面板/Web 端沿用）或
+	// { sessionId }（草稿会话，技能选择器在会话启动前读取目录）。
+	ipcMain.handle(ipcChannels.dshListSkills, async (_event, target: unknown) => {
+		if (typeof target === "string") {
+			if (!target.trim() || target.length > 256) return [];
+			if (!listDshSkills) return [];
+			return listDshSkills(target);
+		}
+		if (isRecord(target) && typeof target.sessionId === "string") {
+			const sessionId = target.sessionId.trim();
+			if (!sessionId || sessionId.length > 256) return [];
+			if (!listDshSessionSkills) return [];
+			return listDshSessionSkills(sessionId);
+		}
+		return [];
 	});
 	// DSH 孤儿会话列表（G3/D11：host 有但 catalog 无映射，用于清理提示）
 	ipcMain.handle(ipcChannels.dshListOrphans, async (): Promise<string[]> => {
