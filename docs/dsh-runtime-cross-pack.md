@@ -31,7 +31,7 @@
 
 | 原生依赖 | 分发形态 | 交叉解析表现 |
 | --- | --- | --- |
-| node-pty（顶层 1.1.0 + dsh-subprocess-local 嵌套 1.2.0-beta.15） | tarball 自带全平台 `prebuilds/<os>-<arch>/`（含 conpty.dll / OpenConsole.exe） | ✅ 与原生安装文件级一致 |
+| node-pty（仅 dsh-subprocess-local 嵌套 1.2.0-beta.15；项目自身 1.1.0 只为 Electron 终端服务，本地 pwsh 工具下线后不再进 runtime 闭包） | tarball 自带全平台 `prebuilds/<os>-<arch>/`（含 conpty.dll / OpenConsole.exe） | ✅ 与原生安装文件级一致 |
 | koffi | `@koromix/koffi-<os>-<arch>` optional 平台包 | ✅ `--ignore-scripts` 下 require 成功（cnoke 编译脚本不触发） |
 | sharp | `@img/sharp-<os>-<arch>` + `@img/sharp-libvips-*` optional 平台包 | ✅ |
 | @vscode/ripgrep | `@vscode/ripgrep-<os>-<arch>` optional 平台包 | ✅ Mach-O/ELF/PE 二进制均可解包（不需要执行） |
@@ -94,7 +94,8 @@ lock 闭包遍历 → 临时 package.json（lock 精确版本钉死 + 平台包�
    - `normalizeTarget` 对 linux 缺省强制 `--libc glibc`；
    - `check-dsh-asar.mjs` 按 `--target-*` 断言 sharp/koffi/rg 平台包与 node-pty
      `prebuilds/<os>-<arch>/` 在位（npm 对 EBADPLATFORM 静默跳过是 optional 语义，
-     只有归档侧断言能拦住）。
+     只有归档侧断言能拦住）；node-pty 按「任意位置的完整包」判定（顶层或嵌套在
+     dsh-subprocess-local 下均可，不要求 npm 提升），缺 package.json 同样判红。
 2. **EBADPLATFORM 硬错误**：把平台包写进 `dependencies`（而非 optionalDependencies）
    会让 npm 在非目标平台报 `notsup` 硬错误退出（node-addon-system-darwin-arm64 实证）。
 
