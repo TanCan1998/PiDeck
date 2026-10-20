@@ -64,10 +64,14 @@ test("图片可下载：预览工具条注入 + hover 保存角标", () => {
 	assert.match(image, /<MarkdownImageHoverSave src=\{src\} alt=\{props\.alt\} \/>/);
 	assert.match(actions, /export function MarkdownImageToolbar/);
 	assert.match(actions, /export function MarkdownImageHoverSave/);
-	// 取字节走 fetch（本地图是 pideck-file 协议），保存用 <a download>，复制走 writeClipboardImage
+	// 本地图必须走 IPC 取字节：pideck-file:// 是 corsEnabled:false 的自定义 scheme，fetch 会被拦
+	assert.match(actions, /parseLocalImageUrl\(src\)/);
+	assert.match(actions, /window\.piDesktop\.localImage\.readBytes\(localPath\)/);
+	// 远程图才 fallback 到 fetch；保存用 <a download>，复制走 writeClipboardImage
 	assert.match(actions, /await fetch\(src\)/);
 	assert.match(actions, /link\.download = downloadName\(alt, blob\.type\)/);
 	assert.match(actions, /writeClipboardImage\(blob\)/);
-	// CSP 必须放行 pideck-file 的 fetch，否则保存/复制在本地图上全部失败
-	assert.match(indexHtml, /connect-src 'self' pideck-file:/);
+	// 展示仍靠协议（img-src），保存不再依赖 connect-src 放开自定义 scheme
+	assert.match(indexHtml, /img-src[^"]*pideck-file:/);
+	assert.ok(!/connect-src[^"]*pideck-file:/.test(indexHtml), "connect-src 不应再放行 pideck-file");
 });
