@@ -93,6 +93,9 @@ test("markdown 图片布局：同段多图并排瓷砖、单图限高、点击�
 	await images.nth(0).click();
 	const dialog = window.getByRole("dialog");
 	await expect(dialog).toBeVisible({ timeout: 5_000 });
+	// 预览工具条：复制 / 保存（改造前 streamdown 自带 hover 下载，换成自研组件时丢了，现已补回）
+	await expect(dialog.getByRole("button", { name: "复制图片" })).toBeVisible();
+	await expect(dialog.getByRole("button", { name: "保存图片" })).toBeVisible();
 	await window.keyboard.press("Escape");
 	await expect(dialog).toHaveCount(0, { timeout: 5_000 });
 });

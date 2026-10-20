@@ -4,6 +4,7 @@ import { localImageUrl } from "../../../../shared/localImage";
 import { t } from "../../i18n";
 import { useFileLinkBaseDir } from "./FileLinkBase";
 import { ImageLightbox } from "./ImageLightbox";
+import { MarkdownImageHoverSave, MarkdownImageToolbar } from "./MarkdownImageActions";
 import { useMarkdownImageGroupCount } from "./MarkdownImageGroup";
 import { resolveMarkdownImageSrc } from "./markdownImageSrc";
 
@@ -63,28 +64,39 @@ export const MarkdownImage = memo(function MarkdownImage(props: { destination: s
 		);
 	}
 	const openLabel = props.alt ? `${t("markdown.imageOpen")}: ${props.alt}` : t("markdown.imageOpen");
+	const image = (
+		<img
+			className={tiled ? "inline-block size-24 cursor-zoom-in rounded-sm object-cover align-bottom" : "block max-h-[360px] w-auto max-w-[min(100%,640px)] cursor-zoom-in rounded-sm object-contain"}
+			src={src}
+			alt={props.alt}
+			title={openLabel}
+			role="button"
+			tabIndex={0}
+			loading="lazy"
+			decoding="async"
+			referrerPolicy="no-referrer"
+			onClick={() => setOpen(true)}
+			onKeyDown={(event) => {
+				if (event.key === "Enter" || event.key === " ") {
+					event.preventDefault();
+					setOpen(true);
+				}
+			}}
+			onError={() => setFailedFor(src)}
+		/>
+	);
 	return (
 		<>
-			<img
-				className={tiled ? "inline-block size-24 cursor-zoom-in rounded-sm object-cover align-bottom" : "block max-h-[360px] w-auto max-w-[min(100%,640px)] cursor-zoom-in rounded-sm object-contain"}
-				src={src}
-				alt={props.alt}
-				title={openLabel}
-				role="button"
-				tabIndex={0}
-				loading="lazy"
-				decoding="async"
-				referrerPolicy="no-referrer"
-				onClick={() => setOpen(true)}
-				onKeyDown={(event) => {
-					if (event.key === "Enter" || event.key === " ") {
-						event.preventDefault();
-						setOpen(true);
-					}
-				}}
-				onError={() => setFailedFor(src)}
-			/>
-			{open ? <ImageLightbox src={src} alt={props.alt || t("app.imagePreviewAlt")} onClose={close} /> : null}
+			{/* 大图带 hover 保存角标（对齐改造前 streamdown 的行为）；瓷砖太小不加角标，走预览工具条 */}
+			{tiled ? (
+				image
+			) : (
+				<span className="group relative inline-block">
+					{image}
+					<MarkdownImageHoverSave src={src} alt={props.alt} />
+				</span>
+			)}
+			{open ? <ImageLightbox src={src} alt={props.alt || t("app.imagePreviewAlt")} onClose={close} actions={<MarkdownImageToolbar src={src} alt={props.alt} />} /> : null}
 		</>
 	);
 });

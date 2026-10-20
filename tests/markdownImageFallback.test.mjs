@@ -15,6 +15,8 @@ import test from "node:test";
  */
 
 const image = readFileSync("src/renderer/src/components/session/MarkdownImage.tsx", "utf8");
+const actions = readFileSync("src/renderer/src/components/session/MarkdownImageActions.tsx", "utf8");
+const indexHtml = readFileSync("src/renderer/index.html", "utf8");
 const zhCopy = readFileSync("src/renderer/src/i18n/rendererCopy.zh-CN.ts", "utf8");
 const enCopy = readFileSync("src/renderer/src/i18n/rendererCopy.en-US.ts", "utf8");
 const twCopy = readFileSync("src/renderer/src/i18n/rendererCopy.zh-TW.ts", "utf8");
@@ -53,4 +55,19 @@ test("i18n 三份词典都有图片失败/重试/预览文案", () => {
 			assert.ok(copy.includes(`"${key}"`), `缺少 i18n key：${key}`);
 		}
 	}
+});
+
+test("图片可下载：预览工具条注入 + hover 保存角标", () => {
+	// 改造前由 streamdown 内置组件提供 hover 下载，换自研组件时丢了（用户反馈）；
+	// 现在预览浮层工具条与大图 hover 角标都要在。
+	assert.match(image, /actions=\{<MarkdownImageToolbar src=\{src\} alt=\{props\.alt\} \/>\}/);
+	assert.match(image, /<MarkdownImageHoverSave src=\{src\} alt=\{props\.alt\} \/>/);
+	assert.match(actions, /export function MarkdownImageToolbar/);
+	assert.match(actions, /export function MarkdownImageHoverSave/);
+	// 取字节走 fetch（本地图是 pideck-file 协议），保存用 <a download>，复制走 writeClipboardImage
+	assert.match(actions, /await fetch\(src\)/);
+	assert.match(actions, /link\.download = downloadName\(alt, blob\.type\)/);
+	assert.match(actions, /writeClipboardImage\(blob\)/);
+	// CSP 必须放行 pideck-file 的 fetch，否则保存/复制在本地图上全部失败
+	assert.match(indexHtml, /connect-src 'self' pideck-file:/);
 });
