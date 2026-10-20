@@ -4,6 +4,7 @@ import { localImageUrl } from "../../../../shared/localImage";
 import { t } from "../../i18n";
 import { useFileLinkBaseDir } from "./FileLinkBase";
 import { ImageLightbox } from "./ImageLightbox";
+import { useMarkdownImageGroupCount } from "./MarkdownImageGroup";
 import { resolveMarkdownImageSrc } from "./markdownImageSrc";
 
 /**
@@ -26,7 +27,7 @@ import { resolveMarkdownImageSrc } from "./markdownImageSrc";
  * 本地图统一走 `pideck-file://`（主进程白名单里的只读协议），不用 `file://`：
  * dev 下页源是 http，`file://` 子资源会被 Chromium 直接拒绝。
  */
-export const MarkdownImage = memo(function MarkdownImage(props: { destination: string; alt: string; groupCount?: number }) {
+export const MarkdownImage = memo(function MarkdownImage(props: { destination: string; alt: string }) {
 	const baseDir = useFileLinkBaseDir();
 	const src = useMemo(() => resolveMarkdownImageSrc(props.destination, { baseDir, toLocalUrl: localImageUrl }), [props.destination, baseDir]);
 	const [failedFor, setFailedFor] = useState<string | null>(null);
@@ -34,7 +35,7 @@ export const MarkdownImage = memo(function MarkdownImage(props: { destination: s
 	const close = useCallback(() => setOpen(false), []);
 	const label = props.alt || props.destination;
 	const failed = failedFor !== null && failedFor === src;
-	const tiled = (props.groupCount ?? 1) > 1;
+	const tiled = useMarkdownImageGroupCount() > 1;
 
 	if (src === undefined) {
 		return tiled ? (

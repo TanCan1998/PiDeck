@@ -1,72 +1,54 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
-import { toHast } from "mdast-util-to-hast";
-import { unified } from "unified";
-import remarkParse from "remark-parse";
-import remarkGfm from "remark-gfm";
-import { remarkMarkMultiImageParagraphs } from "../src/renderer/src/utils/markdownPlugins.ts";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
-const { imageGroupCountOf } = loadTsCommonJs("src/renderer/src/components/session/markdownImageGroup.ts");
+const { imageCountInChildren } = loadTsCommonJs("src/renderer/src/components/session/MarkdownImageGroup.tsx");
+
+const stream = readFileSync("src/renderer/src/components/session/MarkdownStream.tsx", "utf8");
+const image = readFileSync("src/renderer/src/components/session/MarkdownImage.tsx", "utf8");
+const plugins = readFileSync("src/renderer/src/utils/markdownPlugins.ts", "utf8");
 
 /**
- * 同段多图的布局标注契约（布置照 dsh：单图按内容尺寸、同段多图缩成 64px 瓷砖）。
+ * 同段多图的布局上下文契约（布置照 dsh：单图按内容尺寸、同段多图缩成 64px 瓷砖）。
  *
- * 图片是逐节点渲染的，组件看不到兄弟节点 —— 所以「这一张是不是多图里的一员」
- * 必须在 mdast 层标到节点上，并经 `mdast-util-to-hast` 的 `data.hProperties`
- * 透传到 hast。这里两头都测：插件写标注、标注真能到 hast、读取口能识别。
+ * 传递通道为什么是 context 而不是 HTML 属性：streamdown 内部会跑 `rehype-sanitize`
+ * 的 defaultSchema，**只保留白名单属性**——实测 `{src, alt, data-md-image-count}`
+ * 过一遍后只剩 `{alt}`（2026-10-20 真机 smoke 复现：首版用 data-* 标注，全按单图渲染）。
+ * 所以由 `p` 组件数出直接子级图片数，经 context 传给子树里的每个 MarkdownImage。
  */
 
-function parse(markdown) {
-	const processor = unified().use(remarkParse).use(remarkGfm, { singleTilde: false }).use(remarkMarkMultiImageParagraphs);
-	return processor.runSync(processor.parse(markdown), markdown);
-}
+const img = () => ({ type: "element", tagName: "img", properties: {}, children: [] });
+const text = (value) => ({ type: "text", value });
+const anchor = (...children) => ({ type: "element", tagName: "a", properties: {}, children });
+const paragraph = (...children) => ({ type: "element", tagName: "p", properties: {}, children });
 
-function marksOf(tree) {
-	const found = [];
-	const visit = (node) => {
-		if (!node || typeof node !== "object") return;
-		if (node.type === "image") found.push(node.data?.hProperties?.["data-md-image-count"]);
-		if (Array.isArray(node.children)) for (const child of node.children) visit(child);
-	};
-	visit(tree);
-	return found;
-}
-
-test("同段两张图：两张都标成 2", () => {
-	assert.deepEqual(marksOf(parse("![a](/tmp/a.png) ![b](/tmp/b.png)")), ["2", "2"]);
+test("imageCountInChildren：只数直接子级的 img", () => {
+	assert.equal(imageCountInChildren(undefined), 0);
+	assert.equal(imageCountInChildren(null), 0);
+	assert.equal(imageCountInChildren({}), 0);
+	assert.equal(imageCountInChildren(paragraph(text("说明"))), 0);
+	assert.equal(imageCountInChildren(paragraph(img())), 1);
+	assert.equal(imageCountInChildren(paragraph(text("说明"), img())), 1);
+	assert.equal(imageCountInChildren(paragraph(img(), text(" "), img())), 2);
+	assert.equal(imageCountInChildren(paragraph(img(), img(), img())), 3);
+	// 图套链接不算直接子级（由 a 包裹，段落里只有 1 个直接子级）
+	assert.equal(imageCountInChildren(paragraph(anchor(img()))), 0);
 });
 
-test("同段三张图：标成 3", () => {
-	assert.deepEqual(marksOf(parse("![a](a.png) ![b](b.png) ![c](c.png)")), ["3", "3", "3"]);
+test("p 组件负责数图并经 context 下发", () => {
+	assert.match(stream, /p:\s*\(paragraphProps\)\s*=>\s*\(\s*<MarkdownImageGroupProvider\s+count=\{imageCountInChildren\(paragraphProps\.node\)\}/s);
+	assert.match(stream, /<\/MarkdownImageGroupProvider>/);
 });
 
-test("单张图不标注（保持单图大图规则）", () => {
-	assert.deepEqual(marksOf(parse("![a](/tmp/a.png)")), [undefined]);
+test("MarkdownImage 从 context 读张数，≥2 走瓷砖", () => {
+	assert.match(image, /const tiled = useMarkdownImageGroupCount\(\) > 1/);
+	assert.match(image, /size-16[^"]*object-cover/, "瓷砖态 64px cover");
+	assert.match(image, /max-w-\[min\(100%,640px\)\]/, "单图上宽 640");
+	assert.match(image, /max-h-\[360px\]/, "单图高 360");
 });
 
-test("分段的图各算各的（不同段落不互相影响）", () => {
-	assert.deepEqual(marksOf(parse("![a](/tmp/a.png)\n\n![b](/tmp/b.png)")), [undefined, undefined]);
-});
-
-test("图与文字同段：仍按同段多图处理", () => {
-	assert.deepEqual(marksOf(parse("说明：![a](a.png) ![b](b.png) 完")), ["2", "2"]);
-});
-
-test("标注经 mdast-util-to-hast 透传到 hast 属性（组件就是从这里读的）", () => {
-	const hast = toHast(parse("![a](a.png) ![b](b.png)"));
-	const images = (hast.children ?? []).flatMap((block) => (block.children ?? []).filter((child) => child.tagName === "img"));
-	assert.equal(images.length, 2);
-	for (const image of images) assert.equal(image.properties?.["data-md-image-count"], "2");
-});
-
-test("imageGroupCountOf：缺失/非法值一律回落 1", () => {
-	assert.equal(imageGroupCountOf(undefined), 1);
-	assert.equal(imageGroupCountOf(null), 1);
-	assert.equal(imageGroupCountOf({}), 1);
-	assert.equal(imageGroupCountOf({ properties: {} }), 1);
-	assert.equal(imageGroupCountOf({ properties: { "data-md-image-count": "1" } }), 1);
-	assert.equal(imageGroupCountOf({ properties: { "data-md-image-count": "abc" } }), 1);
-	assert.equal(imageGroupCountOf({ properties: { "data-md-image-count": "2" } }), 2);
-	assert.equal(imageGroupCountOf({ properties: { "data-md-image-count": 3 } }), 3);
+test("回归护栏：不要再把分组信息挂在 HTML 属性上（会被 rehype-sanitize 剥掉）", () => {
+	assert.ok(!plugins.includes("data-md-image-count"), "mdast 插件不得再写 data-md-image-count");
+	assert.ok(!stream.includes("data-md-image-count"), "MarkdownStream 不得依赖该属性");
 });

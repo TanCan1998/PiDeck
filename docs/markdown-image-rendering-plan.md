@@ -201,4 +201,4 @@ dsh 参照文件（需要复核时直接读）：`packages/client/ui-primitives/
 
 吸收 dsh 的可用性细节（同批追加）：`ImageLightbox` 补上 `role="dialog"`/`aria-modal`、打开时焦点进关闭钮、**关闭后还原焦点**、Tab 圈在浮层内、Esc 捕获阶段 `stopPropagation`、backdrop 用 `mousedown` 判定（拖选松手不误关）；加载失败补「重试」按钮（清失败态 → img 重新挂载，文件修好后不用刷新会话）。
 
-布局规则照 dsh 抄（2026-10-19）：markdown 单图 = `block` + `max-width: min(100%, 640px)` + `max-height: 360px`（contain，竖排）；**同段 ≥2 张** → 64px 方块瓷砖（cover）+ 点击开原图 + 失败给刷新图标重试（对应 dsh `MessageImage` 的 tile/error 形态）。数量标注由 `remarkMarkMultiImageParagraphs` 写到 mdast `data.hProperties["data-md-image-count"]`，经 mdast-util-to-hast 透传到 hast，组件用 `imageGroupCountOf` 读取——**图片逐节点渲染，看不到兄弟节点，这个标注是唯一可靠的上下文来源**。
+布局规则照 dsh 抄（2026-10-19）：markdown 单图 = `block` + `max-width: min(100%, 640px)` + `max-height: 360px`（contain，竖排）；**同段 ≥2 张** → 64px 方块瓷砖（cover）+ 点击开原图 + 失败给刷新图标重试（对应 dsh `MessageImage` 的 tile/error 形态）。数量靠 **React context** 传递：`p` 组件数出直接子级图片数（`imageCountInChildren`），经 `MarkdownImageGroupProvider` 下发给子树里的每个 `MarkdownImage`。**首版是用 mdast `data.hProperties` 打属性，真机全按单图渲染**——streamdown 内部跑 `rehype-sanitize` 的 `defaultSchema`，实测 `{src, alt, data-md-image-count}` 过一遍只剩 `{alt}`，属性通道根本到不了组件（2026-10-20 修正）。
