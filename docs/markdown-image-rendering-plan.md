@@ -141,7 +141,7 @@ dsh 参照文件（需要复核时直接读）：`packages/client/ui-primitives/
 
 - `npm run typecheck`；`npm run format`（biome）。
 - 针对性单测：`node --test tests/markdownImageSrc.test.mjs tests/markdownImageGroups.test.mjs tests/markdownImageFallback.test.mjs tests/markdownLocalImageRecovery.test.mjs tests/localImageProtocol.test.mjs`；触动 `MarkdownStream` 时加跑 `tests/markdownStreamPolicy.test.mjs`、`tests/markdownPathTailTruncation.test.mjs`。
-- 布局 e2e（真实 Electron + 真实渲染管线）：先 `npm run build:fast`，再 `npx playwright test e2e/markdown-image-layout.spec.ts`。断言：同段两张 = 两个 96×96 瓷砖且同一行、单图高度 360 上限、`src` 走 `pideck-file://`、点击开预览 + Esc 可关。它兜住的正是单测看不见的三层：hast 的 `%5C` 编码、`rehype-sanitize` 剥非白名单属性、Windows 8.3 短名。
+- 布局 e2e（真实 Electron + 真实渲染管线）：先 `npm run build:fast`，再 `npx playwright test e2e/markdown-image-layout.spec.ts`；CI 的 windows job 在 Build 之后已接同一个命令（`ci.yml` → `Markdown image layout e2e`），PR/main 自动跑，dev 直推不触发。断言：同段两张 = 两个 96×96 瓷砖且同一行、单图高度 360 上限、`src` 走 `pideck-file://`、点击开预览 + Esc 可关。它兜住的正是单测看不见的三层：hast 的 `%5C` 编码、`rehype-sanitize` 剥非白名单属性、Windows 8.3 短名。
 - 手工 smoke（两种加载方式 × 四类图 × 三种失败）：
 
 |  | 远程 http | 绝对路径 | 相对路径 | 畸形（带空格） |
