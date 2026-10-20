@@ -50,7 +50,7 @@ export type ChatMessage = {
  * - file-missing：pi 会话文件还不存在——新建会话（含微信/飞书桥建的会话）在收到第一条
  *   消息前不落盘，此前打开会读到 ENOENT；这是「还没内容」而不是读取故障。
  */
-export type SessionHistoryUnavailableReason = "dsh-host-stopped" | "file-missing";
+export type SessionHistoryUnavailableReason = "dsh-host-stopped" | "dsh-runtime-missing" | "file-missing";
 
 /** A bounded historical timeline slice. `nextBefore` is the exclusive index for an older page. */
 export type SessionMessagePage = {

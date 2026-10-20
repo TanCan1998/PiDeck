@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: 459529eba7cda7aac4e14a28c53721a3f7d640f843533d4f9ce96eadb24fdb1b（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: ddfa30111a958b6127fbac3ce8c2ccaf5db7a0d004ad9b495b393801b90969cd（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -5670,6 +5670,8 @@ export const zhTW: Record<TranslationKey, string> = {
 	"timeline.dshHostStopped": "DSH 執行時已手動停止",
 	"timeline.dshHostStoppedHint": "這個會話的歷史存在 DSH 側，需要 host 線上才能讀取。你在設定裡手動停止了它，PiDeck 不會自動啟動——點「啟動 host 並重試」即可恢復。",
 	"timeline.dshHostStoppedStart": "啟動 host 並重試",
+	"timeline.dshRuntimeMissing": "DSH 執行時未安裝",
+	"timeline.dshRuntimeMissingHint": "這個會話的歷史存在 DSH 側，需要 DSH 執行時才能讀取。當前沒有檢測到執行時資源，請到「設定 → DSH」安裝或匯入配套版本的 runtime，然後重試。",
 	"timeline.emptySessionFile": "這個會話還沒有內容",
 	"timeline.emptySessionFileHint": "新建會話（包括微信、飛書等外部連線建立的會話）在收到第一條訊息之前不會寫入歷史檔案——訊息到達後內容會自動出現在這裡。",
 	"common.retry": "重試",
