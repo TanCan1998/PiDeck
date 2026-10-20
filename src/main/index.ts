@@ -11,6 +11,7 @@ import { downgradeRunningStartedBefore, downgradeStaleRunning } from "./pi/deriv
 import { SoundAlertService } from "./sounds/SoundAlertService";
 import { registerSoundIpc } from "./ipc/soundIpc";
 import { registerSoundProtocol } from "./sounds/soundProtocol";
+import { registerHtmlPreviewProtocol } from "./htmlPreviewProtocol";
 import { AnnouncementService } from "./announcements/AnnouncementService";
 import { registerAnnouncementIpc } from "./ipc/announcementIpc";
 import { CuaService } from "./cua/CuaService";
@@ -4004,6 +4005,8 @@ protocol.registerSchemesAsPrivileged([
 	{ scheme: "pideck-img", privileges: { secure: true, standard: true, corsEnabled: false, supportFetchAPI: true, stream: true } },
 	// 对话内本地图片（Markdown 正文引用白名单目录内的图片）：替代 file://，dev 与打包行为一致
 	{ scheme: "pideck-file", privileges: { secure: true, standard: true, corsEnabled: false, supportFetchAPI: true, stream: true } },
+	// 文件预览的 HTML：内容编码在 URL 里，CSP 由主进程响应头下发，与主窗口策略解耦（#377）
+	{ scheme: "pideck-html", privileges: { secure: true, standard: true, corsEnabled: false, supportFetchAPI: false, stream: false } },
 ]);
 
 app
@@ -5968,6 +5971,7 @@ app
 		// 声音提醒：纯主进程判定（settled/error 边沿/waiting 请求）+ 渲染层播放。
 		// 与宠物系统同构，独立开关，不依赖宠物是否启用。
 		registerSoundProtocol();
+		registerHtmlPreviewProtocol();
 		registerSoundIpc();
 		soundAlertService = new SoundAlertService({
 			agentManager,

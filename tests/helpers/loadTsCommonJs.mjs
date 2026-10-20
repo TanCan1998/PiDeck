@@ -86,6 +86,9 @@ export function loadTsCommonJs(filePath, options = {}) {
 				clearImmediate,
 				queueMicrotask,
 				crypto: globalThis.crypto,
+				// Node 自带的标准全局，vm 沙箱不会自动继承；shared/htmlPreview.ts 的 base64url 需要
+				btoa: globalThis.btoa,
+				atob: globalThis.atob,
 				// 构建期 define（electron.vite.config.ts）在沙箱里同样是编译期常量：
 				// 不给默认值，任何 import 到 deepLinkScheme / channelIdentity 的生产模块
 				// 都会在求值时整片 ReferenceError。默认 stable 通道；测 dev 通道的用例
