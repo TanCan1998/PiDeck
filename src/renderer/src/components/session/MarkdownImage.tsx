@@ -75,10 +75,16 @@ export const MarkdownImage = memo(function MarkdownImage(props: { destination: s
 			loading="lazy"
 			decoding="async"
 			referrerPolicy="no-referrer"
-			onClick={() => setOpen(true)}
+			onClick={(event) => {
+				// 图被链接包裹时（`[![](a.png)](url)`）：点图应当开预览，而不是跟着链接跳走
+				event.preventDefault();
+				event.stopPropagation();
+				setOpen(true);
+			}}
 			onKeyDown={(event) => {
 				if (event.key === "Enter" || event.key === " ") {
 					event.preventDefault();
+					event.stopPropagation();
 					setOpen(true);
 				}
 			}}

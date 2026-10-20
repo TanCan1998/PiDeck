@@ -1,6 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { localImageMimeType } from "../../shared/localImage";
-import { canonicalizeRoots, classifyLocalImagePath, isInsideAnyRoot, isLocalImageSizeAllowed } from "./localImageAccess";
+import { classifyLocalImagePath, isInsideAnyRoot, isLocalImageSizeAllowed } from "./localImageAccess";
+import type { CanonicalRootsProvider } from "./localImageRoots";
 import { nativeRealpath } from "./nativeRealpath";
 
 /**
@@ -28,14 +29,14 @@ export type LocalImageBytesResult = { bytes: Buffer; mimeType: string } | null;
 /**
  * 读一张白名单内的本地图片。
  * @param rawPath 渲染层给的绝对路径（不可信输入：所有闸门在这里重判一遍，不信任渲染层）。
- * @param resolveRoots 白名单根（与 `pideck-file://` 协议共用一个提供者）。
+ * @param resolveRoots 已规范化的白名单根（与 `pideck-file://` 协议共用一个提供者，见 `localImageRoots.ts`）。
  */
-export async function readLocalImageBytes(rawPath: string, resolveRoots: () => readonly string[]): Promise<LocalImageBytesResult> {
+export async function readLocalImageBytes(rawPath: string, resolveRoots: CanonicalRootsProvider): Promise<LocalImageBytesResult> {
 	const shape = classifyLocalImagePath(rawPath);
 	if (!shape.ok) return null;
 	const realPath = safeRealpath(shape.path);
 	if (!realPath) return null;
-	const roots = await canonicalizeRoots(resolveRoots(), async (root) => safeRealpath(root) ?? root);
+	const roots = await resolveRoots();
 	if (!isInsideAnyRoot(realPath, roots)) return null;
 	const info = await stat(realPath).catch(() => null);
 	if (!info?.isFile() || !isLocalImageSizeAllowed(info.size)) return null;

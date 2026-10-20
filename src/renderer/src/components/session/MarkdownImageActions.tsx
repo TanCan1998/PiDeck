@@ -1,5 +1,6 @@
 import { Check, Copy, Download } from "lucide-react";
 import { useCallback, useState } from "react";
+import { imageDownloadName } from "../../../../shared/imageFilename";
 import { parseLocalImageUrl } from "../../../../shared/localImage";
 import { t } from "../../i18n";
 import { writeClipboardImage } from "../../utils/clipboard";
@@ -20,25 +21,6 @@ import { Button } from "../ui-shadcn/button";
  * - 远程图只能 fetch（受 CORS 限制，失败提示而不是静默）。
  * 不把 base64 常驻内存：只在动作发生时取一次 blob。
  */
-
-function downloadExtension(mimeType: string): string {
-	if (mimeType.includes("jpeg") || mimeType.includes("jpg")) return "jpg";
-	if (mimeType.includes("webp")) return "webp";
-	if (mimeType.includes("gif")) return "gif";
-	if (mimeType.includes("svg")) return "svg";
-	if (mimeType.includes("avif")) return "avif";
-	if (mimeType.includes("bmp")) return "bmp";
-	return "png";
-}
-
-/** 文件名取 alt（去掉非法字符）→ 兜底 pideck-image；扩展名按真实 MIME 而不是 URL 后缀。 */
-function downloadName(alt: string, mimeType: string): string {
-	const base = alt
-		.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "")
-		.trim()
-		.slice(0, 40);
-	return `${base || "pideck-image"}.${downloadExtension(mimeType)}`;
-}
 
 function base64ToBlob(data: string, mimeType: string): Blob {
 	const binary = atob(data);
@@ -82,7 +64,7 @@ function useMarkdownImageActions(src: string, alt: string) {
 			const url = URL.createObjectURL(blob);
 			const link = document.createElement("a");
 			link.href = url;
-			link.download = downloadName(alt, blob.type);
+			link.download = imageDownloadName(alt, blob.type);
 			link.click();
 			// 下载由 Chromium 接管后立即释放，不常驻内存
 			window.setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -99,10 +81,10 @@ export function MarkdownImageToolbar(props: { src: string; alt: string }) {
 	const { copied, copy, save } = useMarkdownImageActions(props.src, props.alt);
 	return (
 		<div className="flex items-center overflow-hidden rounded-md border border-border/70 bg-background/85 shadow-sm backdrop-blur-sm">
-			<Button variant="ghost" size="icon-sm" className="size-7 rounded-none text-muted-foreground hover:bg-muted hover:text-foreground" type="button" onClick={() => void copy()} title={t("imagegen.copy")} aria-label={t("imagegen.copy")}>
+			<Button variant="ghost" size="icon-sm" className="size-7 rounded-none text-muted-foreground hover:bg-muted hover:text-foreground" type="button" data-testid="markdown-image-copy" onClick={() => void copy()} title={t("imagegen.copy")} aria-label={t("imagegen.copy")}>
 				{copied ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
 			</Button>
-			<Button variant="ghost" size="icon-sm" className="size-7 rounded-none border-l border-border/60 text-muted-foreground hover:bg-muted hover:text-foreground" type="button" onClick={() => void save()} title={t("imagegen.save")} aria-label={t("imagegen.save")}>
+			<Button variant="ghost" size="icon-sm" className="size-7 rounded-none border-l border-border/60 text-muted-foreground hover:bg-muted hover:text-foreground" type="button" data-testid="markdown-image-save" onClick={() => void save()} title={t("imagegen.save")} aria-label={t("imagegen.save")}>
 				<Download size={14} aria-hidden="true" />
 			</Button>
 		</div>
@@ -116,6 +98,7 @@ export function MarkdownImageHoverSave(props: { src: string; alt: string }) {
 		<button
 			type="button"
 			className="absolute right-2 top-2 flex size-8 cursor-pointer items-center justify-center rounded-md border border-border bg-background/90 text-muted-foreground opacity-0 shadow-sm backdrop-blur-sm transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+			data-testid="markdown-image-save-hover"
 			onClick={() => void save()}
 			title={t("imagegen.save")}
 			aria-label={t("imagegen.save")}

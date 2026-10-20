@@ -9,9 +9,10 @@
 import { ipcMain } from "electron";
 import { ipcChannels } from "../../shared/ipc";
 import type { LocalImageBytes } from "../../shared/localImage";
+import type { CanonicalRootsProvider } from "../media/localImageRoots";
 import { readLocalImageBytes } from "../media/localImageRead";
 
-export function registerLocalImageIpc(deps: { resolveRoots: () => readonly string[] }): void {
+export function registerLocalImageIpc(deps: { resolveRoots: CanonicalRootsProvider }): void {
 	ipcMain.handle(ipcChannels.localImageReadBytes, async (_event, rawPath: unknown): Promise<LocalImageBytes | null> => {
 		if (typeof rawPath !== "string" || rawPath.length === 0 || rawPath.length > 4096) return null;
 		const result = await readLocalImageBytes(rawPath, deps.resolveRoots);

@@ -1,7 +1,8 @@
 import { protocol } from "electron";
 import { readFile, stat } from "node:fs/promises";
 import { LOCAL_IMAGE_PROTOCOL, localImageMimeType, parseLocalImageUrl } from "../../shared/localImage";
-import { canonicalizeRoots, classifyLocalImagePath, isInsideAnyRoot, isLocalImageSizeAllowed, type LocalImageRejection } from "./localImageAccess";
+import { classifyLocalImagePath, isInsideAnyRoot, isLocalImageSizeAllowed, type LocalImageRejection } from "./localImageAccess";
+import type { CanonicalRootsProvider } from "./localImageRoots";
 import { nativeRealpath } from "./nativeRealpath";
 
 /**
@@ -44,9 +45,9 @@ function safeRealpath(path: string): string | null {
 
 /**
  * 注册协议处理器（必须在 `app.whenReady()` 之后调用；scheme 特权声明在 ready 前完成）。
- * @param resolveRoots 白名单根目录提供者。每次请求重新取：项目增删/切换聊天目录后立即生效，不缓存。
+ * @param resolveRoots 已规范化的白名单根提供者（带 5s 缓存，见 `localImageRoots.ts`）。
  */
-export function registerLocalImageProtocol(resolveRoots: () => readonly string[]): void {
+export function registerLocalImageProtocol(resolveRoots: CanonicalRootsProvider): void {
 	protocol.handle(LOCAL_IMAGE_PROTOCOL, async (request) => {
 		if (request.method !== "GET") return failure(403);
 
@@ -56,7 +57,7 @@ export function registerLocalImageProtocol(resolveRoots: () => readonly string[]
 		// realpath 一次解决两件事：短名/符号链接归一，以及逃逸检测（必须用真实路径判边界）
 		const realPath = safeRealpath(shape.path);
 		if (!realPath) return failure(404);
-		const roots = await canonicalizeRoots(resolveRoots(), async (root) => safeRealpath(root) ?? root);
+		const roots = await resolveRoots();
 		if (!isInsideAnyRoot(realPath, roots)) return failure(403);
 
 		const info = await stat(realPath).catch(() => null);

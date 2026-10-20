@@ -69,8 +69,12 @@ test("图片可下载：预览工具条注入 + hover 保存角标", () => {
 	assert.match(actions, /window\.piDesktop\.localImage\.readBytes\(localPath\)/);
 	// 远程图才 fallback 到 fetch；保存用 <a download>，复制走 writeClipboardImage
 	assert.match(actions, /await fetch\(src\)/);
-	assert.match(actions, /link\.download = downloadName\(alt, blob\.type\)/);
+	assert.match(actions, /link\.download = imageDownloadName\(alt, blob\.type\)/);
 	assert.match(actions, /writeClipboardImage\(blob\)/);
+	// 下载名走共享实现（与附件图/生图同一份映射），按钮带 testid 供 e2e 定位（不依赖中文文案）
+	assert.match(actions, /import \{ imageDownloadName \} from "\.\.\/\.\.\/\.\.\/\.\.\/shared\/imageFilename"/);
+	assert.match(actions, /data-testid="markdown-image-save"/);
+	assert.match(actions, /data-testid="markdown-image-copy"/);
 	// 展示仍靠协议（img-src），保存不再依赖 connect-src 放开自定义 scheme
 	assert.match(indexHtml, /img-src[^"]*pideck-file:/);
 	assert.ok(!/connect-src[^"]*pideck-file:/.test(indexHtml), "connect-src 不应再放行 pideck-file");
