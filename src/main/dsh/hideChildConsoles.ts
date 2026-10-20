@@ -33,8 +33,8 @@ type SpawnOptions = childProcessModule.SpawnOptions;
  * 1) host（utilityProcess）不 AllocConsole，自身不需要控制台。
  * 2) host 所有 child_process 注入 windowsHide（CREATE_NO_WINDOW）。
  * 3) 沙箱 runner 有 CUI node sidecar 时改写成 node.exe + windowsHide：
- *    runner 自建无窗口可继承控制台；第二级 ACL runner 的 process.execPath
- *    已是 node.exe，pwsh 经 CreateProcessAsUserW 继承即可。
+ *    runner 自建无窗口可继承控制台；第二级 ACL runner 由 host env 的 preload
+ *    兜住（它仍是 electron.exe），pwsh 经 CreateProcessAsUserW 继承即可。
  * 4) sidecar 不可用时仍走 electron.exe + runnerConsolePreload AllocConsole
  *    兜底（可能闪一帧；只覆盖老 runtime）。
  */
@@ -392,8 +392,8 @@ export function installHiddenConsolePatch(platform: NodeJS.Platform = process.pl
 	}
 
 	/**
-	 * 一次 spawn 的 options 决策：runner spawn 恒注入 preload + pwsh 启动环境；
-	 * 本地 pwsh 注入启动环境；win32 子进程一律 windowsHide。
+	 * 一次 spawn 的 options 决策：runner spawn 在无 sidecar 时注入 preload，pwsh 恒注入
+	 * 启动环境；win32 子进程一律 windowsHide。
 	 */
 	function resolveSpawnOptions(command: string, args: readonly string[] | undefined, options: childProcessModule.SpawnOptions | undefined): childProcessModule.SpawnOptions | undefined {
 		if (isRunnerSpawn(command, args)) {
@@ -403,9 +403,14 @@ export function installHiddenConsolePatch(platform: NodeJS.Platform = process.pl
 				console.error(`[dsh-host-entry] runner spawn policy: hostHiddenConsoleActive=${String(hostHiddenConsoleActive)} ` + `sidecar=${dshRunnerNodeSidecarPath ?? "none"} ` + `command=${command} preload=${runnerPreloadPath}`);
 			}
 			// CUI node sidecar：CREATE_NO_WINDOW 自建无窗口可继承控制台，不再依赖 host AllocConsole。
+			// 也不注入 preload：sidecar 是真 node.exe，没有 Electron 的 asar 读取能力，
+			// 打包后 preload 落在 app.asar 内 → --require 直接 MODULE_NOT_FOUND，第一级
+			// runner 启动即 exit 1（2026-10 线上实证：PTC run_code 与全部沙箱命令 6/6 失败，
+			// 报 `Windows Job runner exited with exit code 1 before proving its managed
+			// range empty`）。隐藏控制台由 host env 里的 preload（installRunnerPreloadEnv）
+			// 兜第二级 ACL runner —— 它仍是 electron.exe，能读 asar。
 			if (dshRunnerNodeSidecarPath) {
-				const hidden = { ...(options ?? {}), windowsHide: true };
-				return withRunnerPreload(withPwshStartupEnv(hidden, true), runnerPreloadPath);
+				return withPwshStartupEnv({ ...(options ?? {}), windowsHide: true }, true);
 			}
 			return withRunnerPreload(withRunnerRunAsNode(withPwshStartupEnv(hostHiddenConsoleActive ? options : withHiddenOptions(options), true)), runnerPreloadPath);
 		}
