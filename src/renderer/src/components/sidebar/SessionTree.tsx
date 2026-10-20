@@ -76,7 +76,19 @@ function renderRuntimeStatusDot(status?: string | null) {
 	return <span className={cn("size-1.5 shrink-0 rounded-full", dotClass, status === "error" ? "" : "animate-pulse")} aria-label={label} title={label} />;
 }
 
-export function SessionTree(props: { project: Project; sessions: readonly SessionRecord[]; agents: readonly AgentTab[]; currentSessionId?: string; controller: SidebarController; actions: SidebarActions; nested?: boolean; visibleChildCount?: number; onShowMore?: () => void }) {
+export function SessionTree(props: {
+	project: Project;
+	sessions: readonly SessionRecord[];
+	agents: readonly AgentTab[];
+	currentSessionId?: string;
+	controller: SidebarController;
+	actions: SidebarActions;
+	nested?: boolean;
+	visibleChildCount?: number;
+	onShowMore?: () => void;
+	/** 无行可渲染时的空态（仅聊天分组传入）：空列表必须有可见反馈，不能静默 return null。 */
+	emptyState?: ReactNode;
+}) {
 	const filter = props.controller.sourceFilterFor(props.project.id);
 	const search = props.controller.search.trim();
 	// 待确认 ask 以**会话**为粒度展示：同一项目下可能多个会话各自在等回答，
@@ -127,8 +139,9 @@ export function SessionTree(props: { project: Project; sessions: readonly Sessio
 	useEffect(() => {
 		if (hasRows) setRetainingExit(true);
 	}, [hasRows]);
-	// 最后一条也必须留到退场结束；空树最终仍不占 session-card 的空间。
-	if (!hasRows && !retainingExit) return null;
+	// 最后一条也必须留到退场结束；空树在调用方未提供空态时仍不占 session-card 的空间。
+	// 聊天分组提供 emptyState：展开且为空时显示「还没有聊天记录」，与「分组被折叠」区分开（#387）。
+	if (!hasRows && !retainingExit) return props.emptyState ? <>{props.emptyState}</> : null;
 
 	/** 单击走设置默认模式（App 层读 sessionTabOpenMode）；双击显式常驻。
 	 *  不设本地默认值：undefined 透传后由 App 的 sessions.open 用设置值兜底 */

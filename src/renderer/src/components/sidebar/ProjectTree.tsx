@@ -208,6 +208,8 @@ export function ProjectTree(props: {
 							title={t("app.newNormalSession")}
 							onClick={(event) => {
 								event.stopPropagation();
+								// 新建即揭示：折叠分组里建会话后列表仍收起 = 用户以为「没建上」（#387 同类现场）。
+								props.controller.revealProject(project.id);
 								void props.actions.sessions.createDraft(project.id);
 							}}
 						>
@@ -278,6 +280,9 @@ export function ProjectTree(props: {
 		const collapsed = props.controller.isProjectCollapsed(project.id);
 		const sourceFilter = props.controller.sourceFilterFor(project.id);
 		const sessions = props.controller.catalog.sessionsByProject[project.id] ?? [];
+		// 空态只在 catalog 已就绪（ready）时给：加载中/尚未加载时展示「还没有聊天记录」会闪错误信息，
+		// 这两态仍由 SessionTree 的 loading 行/占位承接（#387）。
+		const chatCatalogReady = props.controller.catalog.catalogLoadStateByProject[project.id]?.status === "ready";
 		// Chat 无独立的项目行，标题栏就是该项目的唯一身份入口，
 		// 因此待确认徽章必须挂在这里，否则 Chat 项目内的 ask 提问在侧栏完全不可见。
 		const pendingAskCount = countProjectPendingAsks(project.id, props.controller, sessionRuntimeUiById);
@@ -309,7 +314,19 @@ export function ProjectTree(props: {
 						>
 							<Filter size={14} />
 						</button>
-						<Button type="button" variant="ghost" size="icon-xs" className="grid size-6 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground" aria-label={t("app.newNormalSession")} title={t("app.newNormalSession")} onClick={() => void props.actions.sessions.createDraft(project.id)}>
+						<Button
+							type="button"
+							variant="ghost"
+							size="icon-xs"
+							className="grid size-6 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+							aria-label={t("app.newNormalSession")}
+							title={t("app.newNormalSession")}
+							onClick={() => {
+								// 新建即揭示：折叠态下建会话后列表仍收起 = 用户以为「新会话没记录」（#387）。
+								props.controller.revealProject(project.id);
+								void props.actions.sessions.createDraft(project.id);
+							}}
+						>
 							<Plus className="size-3.5" aria-hidden="true" />
 						</Button>
 						{/* Chat 无父项目行，折叠入口必须外露，否则展开后无法从标题栏恢复。 */}
@@ -323,7 +340,9 @@ export function ProjectTree(props: {
 							aria-expanded={!collapsed}
 							onClick={() => props.controller.toggleProject(project.id)}
 						>
-							<ChevronsDownUp size={14} aria-hidden="true" />
+							{/* 箭头必须随折叠态改变方向（#387）：旧实现展开/折叠共用同一个静态图标，
+                  用户无法从界面判断「列表为空」还是「分组被收起」，误报成「新会话没有会话记录」。 */}
+							<ChevronRight size={14} className={cn("transition-transform", !collapsed && "rotate-90")} aria-hidden="true" />
 						</Button>
 						{/* 三个点：与项目行同款完整菜单，不再单独维护精简版下拉；
                  Chat 项目无意义的操作（重命名/资源管理/工作区/导入/移除）
@@ -347,7 +366,22 @@ export function ProjectTree(props: {
 				</div>
 				{!collapsed && (
 					<div className="relative ml-3 space-y-0.5 pl-2">
-						<SessionTree project={project} sessions={sessions} agents={props.controller.catalog.agents} currentSessionId={props.currentSessionId} controller={props.controller} actions={props.actions} />
+						<SessionTree
+							project={project}
+							sessions={sessions}
+							agents={props.controller.catalog.agents}
+							currentSessionId={props.currentSessionId}
+							controller={props.controller}
+							actions={props.actions}
+							// 展开且为空时给明确空态（#387）：什么都不渲染会让用户把「空列表」当成「列表坏了」。
+							emptyState={
+								chatCatalogReady ? (
+									<div className="px-2 py-1 text-caption text-muted-foreground/70" data-testid="chat-empty-sessions">
+										{t("app.chatEmptySessions")}
+									</div>
+								) : undefined
+							}
+						/>
 					</div>
 				)}
 			</section>

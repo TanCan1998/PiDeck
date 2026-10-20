@@ -146,6 +146,7 @@ export const enUS: Record<TranslationKey, string> = {
 	"sidebar.pendingConfirmationCount": "Pending ({count})",
 	"sidebar.pendingConfirmationHint": "{count} pending confirmation(s) in this project",
 	"app.chatProject": "Chat",
+	"app.chatEmptySessions": "No chats yet. Click + above to start one.",
 	"pagination.label": "Pagination",
 	"pagination.page": "Page {page}",
 	"pagination.jumpTo": "Jump to page (press Enter)",

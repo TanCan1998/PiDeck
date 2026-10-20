@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: 459529eba7cda7aac4e14a28c53721a3f7d640f843533d4f9ce96eadb24fdb1b（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: fa0f9e6ec8f5410ed2fb619f3c3e010aa58b240249892958b485c25bde4ad538（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -151,6 +151,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"sidebar.pendingConfirmationCount": "待確認 ({count})",
 	"sidebar.pendingConfirmationHint": "該專案有 {count} 個待確認的提問",
 	"app.chatProject": "聊天",
+	"app.chatEmptySessions": "還沒有聊天記錄，點上方 + 新建會話",
 	"pagination.label": "分頁",
 	"pagination.page": "第 {page} 頁",
 	"pagination.jumpTo": "跳轉到指定頁（回車確認）",

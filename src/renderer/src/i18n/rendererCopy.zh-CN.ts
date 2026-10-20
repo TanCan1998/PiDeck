@@ -144,6 +144,7 @@ export const zhCN = {
 	"sidebar.pendingConfirmationCount": "待确认 ({count})",
 	"sidebar.pendingConfirmationHint": "该项目有 {count} 个待确认的提问",
 	"app.chatProject": "聊天",
+	"app.chatEmptySessions": "还没有聊天记录，点上方 + 新建会话",
 	"pagination.label": "分页",
 	"pagination.page": "第 {page} 页",
 	"pagination.jumpTo": "跳转到指定页（回车确认）",
