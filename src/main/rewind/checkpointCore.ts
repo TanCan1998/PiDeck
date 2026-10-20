@@ -19,10 +19,10 @@
  * spawn 更安全：路径全部走数组参数，无 shell 注入面。
  */
 
-import { mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, rm } from "node:fs/promises";
 import { statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 import type { RewindCheckpointSummary } from "../../shared/types/rewind.ts";
 import { runGitCommand } from "../git/gitRun.ts";
@@ -280,6 +280,20 @@ async function detectUnmerged(root: string): Promise<boolean> {
 }
 
 /**
+ * 把用户真实 index 复制到临时文件，供 index 快照的 write-tree 使用（#372）。
+ *
+ * 找不到 git 目录或 index 文件时静默跳过：空仓库/刚 clone 的仓库本来就没有 index，
+ * 此时 write-tree 对空 index 返回空树 SHA，与改动前行为一致。
+ */
+async function seedIndexFromUserIndex(root: string, target: string): Promise<void> {
+	const gitDir = (await gitOp(root, ["rev-parse", "--git-dir"]).catch(() => "")).trim();
+	if (!gitDir) return;
+	// --git-dir 可能是相对 cwd 的路径（.git），也可能是绝对路径（worktree/submodule 场景）
+	const source = isAbsolute(gitDir) ? join(gitDir, "index") : resolve(root, gitDir, "index");
+	await copyFile(source, target).catch(() => {});
+}
+
+/**
  * 把 HEAD + index + worktree 快照成一个 git ref，返回完整元数据。
  *
  * 临时 index 说明：worktree 树要包含未跟踪文件，但不能污染用户真实 index，
@@ -292,26 +306,36 @@ export async function createCheckpoint(opts: CreateCheckpointOpts): Promise<Chec
 	const iso = new Date(timestamp).toISOString();
 
 	// 空仓库（无提交）时 rev-parse HEAD 失败 → ZEROS，恢复时跳过 reset。
-	const headSha = await gitOp(root, ["rev-parse", "HEAD"]).catch(() => ZEROS);
-	const branch = await gitOp(root, ["rev-parse", "--abbrev-ref", "HEAD"]).catch(() => "unknown");
-	// merge 冲突（unmerged index）时 write-tree 必败；降级用 HEAD 树记录 index 快照，
-	// 恢复语义 = 把冲突态的 index 重置回 HEAD（回退到检查点时期望的正是干净态）。
-	// 快照不因此中断：冲突期间 agent 的文件回退能力比暂存区精度更重要。
-	let indexTreeDegraded = false;
-	const indexTreeSha = await gitOp(root, ["write-tree"]).catch(async (error: unknown) => {
-		if (headSha !== ZEROS && (await detectUnmerged(root))) {
-			indexTreeDegraded = true;
-			return headSha;
-		}
-		throw error;
-	});
-
+	// 临时目录必须在读取用户 index 之前建好：index 快照与 worktree 快照各用一份临时 index，
+	// 全程不碰用户仓库的 .git/index.lock（见下方 userIndexEnv 的说明）。
 	const tmpDir = await mkdtemp(join(tmpdir(), "pi-rewind-"));
 	// Windows 上 git 环境变量里的反斜杠路径偶尔有歧义，统一转正斜杠。
 	const tmpIndex = join(tmpDir, "index").replace(/\\/g, "/");
 	const tmpEnv = { GIT_INDEX_FILE: tmpIndex };
 
 	try {
+		const headSha = await gitOp(root, ["rev-parse", "HEAD"]).catch(() => ZEROS);
+		const branch = await gitOp(root, ["rev-parse", "--abbrev-ref", "HEAD"]).catch(() => "unknown");
+		// index 快照：先把用户真实 index 复制成临时文件，再对副本执行 write-tree。
+		//
+		// 为什么不能直接 write-tree（#372）：write-tree 会刷新 cache-tree 并写回 index，
+		// 因此需要 .git/index.lock；agent 或用户同时在跑 git（status/add/commit）时就撞锁，
+		// 报 fatal: Unable to create '.../.git/index.lock': File exists，checkpoint 整次失败。
+		// 读副本既避开锁，也保证读到的是一致快照（不会读到别人半写状态）。
+		const userIndexEnv = { GIT_INDEX_FILE: join(tmpDir, "user-index").replace(/\\/g, "/") };
+		await seedIndexFromUserIndex(root, userIndexEnv.GIT_INDEX_FILE);
+		// merge 冲突（unmerged index）时 write-tree 必败；降级用 HEAD 树记录 index 快照，
+		// 恢复语义 = 把冲突态的 index 重置回 HEAD（回退到检查点时期望的正是干净态）。
+		// 快照不因此中断：冲突期间 agent 的文件回退能力比暂存区精度更重要。
+		let indexTreeDegraded = false;
+		const indexTreeSha = await gitOp(root, ["write-tree"], userIndexEnv).catch(async (error: unknown) => {
+			if (headSha !== ZEROS && (await detectUnmerged(root))) {
+				indexTreeDegraded = true;
+				return headSha;
+			}
+			throw error;
+		});
+
 		const { filtered, allUntracked, skippedLargeFiles, skippedLargeDirs, skippedOverBudget } = await getFilesToAdd(root);
 
 		const largeDirsSet = new Set(skippedLargeDirs);

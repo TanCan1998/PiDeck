@@ -9,6 +9,9 @@ export interface RewindAgentSessionInfo {
 }
 
 /** 宿主注入：runtime 查询、WSL root 归一化、活跃会话枚举与日志（AgentManager 适配）。 */
+/** 非 git 仓库的打点重试冷却：目录可能后续才 git init，不能永久放弃。 */
+const NO_GIT_RETRY_INTERVAL_MS = 30 * 60 * 1000;
+
 export interface RewindCheckpointHost {
 	/** agent 的当前 runtime 投影；agent 不存在/已停止时返回 undefined。 */
 	getSessionInfo(agentId: string): RewindAgentSessionInfo | undefined;
@@ -46,6 +49,14 @@ export class RewindCheckpointCoordinator {
 	private readonly pruneAt = new Map<string, number>();
 	/** 自动打点健康状态（per 工作目录）：失败态上屏用。 */
 	private readonly healthByRoot = new Map<string, RewindCheckpointHealth>();
+	/**
+	 * 非 git 仓库的 root → 下次允许重试的时间戳（#373）。
+	 *
+	 * 这类目录的 write-tree 每轮必败且不会自愈，实测占全部打点失败的 70%（单日 52 次），
+	 * 日志被同一行刷满。这里跳过并隔一段时间再试，而不是永久放弃——用户可能后来才
+	 * git init，或在别的分支里继续工作。
+	 */
+	private readonly noGitRetryAt = new Map<string, number>();
 
 	constructor(private readonly host: RewindCheckpointHost) {}
 
@@ -114,6 +125,9 @@ export class RewindCheckpointCoordinator {
 		const sessionId = session?.sessionId;
 		// agent 已停止/换 runtime：丢弃补拍（节流 map 已随生命周期清理兜底）。
 		if (!root || !sessionId) return;
+		// 非 git 仓库：已在上一次失败时记过原因，重试只会重复同一次失败（#373）。
+		const retryAt = this.noGitRetryAt.get(root);
+		if (retryAt !== undefined && Date.now() < retryAt) return;
 		state.inFlight = true;
 		state.lastAt = Date.now();
 		try {
@@ -127,6 +141,8 @@ export class RewindCheckpointCoordinator {
 				toolName,
 			});
 			this.recordHealth(root, null);
+			// 目录后来变成 git 仓库了（用户 git init / 切到别的项目）：清掉跳过标记恢复打点
+			this.noGitRetryAt.delete(root);
 			// merge 冲突态降级快照：健康恢复但要留集，便于用户自查「为什么恢复后暂存区变了」。
 			if (result.indexTreeDegraded) {
 				this.host.logWarn("checkpoint index tree degraded (unmerged index), recorded HEAD tree instead", { agentId, toolName });
@@ -141,7 +157,21 @@ export class RewindCheckpointCoordinator {
 				});
 			}
 		} catch (error: unknown) {
+			const wasNoGit = this.healthByRoot.get(root)?.lastErrorKind === "no-git";
 			this.recordHealth(root, error);
+			// 非 git 仓库（#373）：失败原因不变、重试无收益，所以只说明一次并进入冷却，
+			// 不再每轮写一行同样的 warn（实测单日 52 次，占全部失败 70%）。
+			if (this.healthByRoot.get(root)?.lastErrorKind === "no-git") {
+				this.noGitRetryAt.set(root, Date.now() + NO_GIT_RETRY_INTERVAL_MS);
+				if (!wasNoGit) {
+					this.host.logWarn("checkpoint disabled: working directory is not a git repository", {
+						agentId,
+						root,
+						retryAfterMinutes: Math.round(NO_GIT_RETRY_INTERVAL_MS / 60000),
+					});
+				}
+				return;
+			}
 			// 错误串可能极长（git add 会把全部路径 + CRLF 警告写进一条消息，实测 9KB+），
 			// 截断后再进日志，防止失败风暴时日志膨胀（一天 2.4MB 的教训）。
 			const rawError = error instanceof Error ? error.message : String(error);
