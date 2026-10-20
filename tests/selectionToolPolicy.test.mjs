@@ -4,7 +4,23 @@ import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
 const policy = loadTsCommonJs("src/renderer/src/utils/selectionToolPolicy.ts");
 const { AGENT_TRANSLATE_TARGETS } = loadTsCommonJs("src/shared/types/agentProfile.ts");
-const { SELECTION_TOOL_MIN_CHARS, SELECTION_TOOL_MAX_CHARS, SELECTION_TOOL_UI_SELECTOR, SELECTION_TOOL_EDITABLE_SELECTOR, AGENT_TRANSLATE_TARGET_LABEL_KEYS, normalizeSelectionText, isSelectionToolAnchorElement, clampFloatingPosition, buildTranslateInstruction } = policy;
+const {
+	SELECTION_TOOL_MIN_CHARS,
+	SELECTION_TOOL_MAX_CHARS,
+	SELECTION_TOOL_UI_SELECTOR,
+	SELECTION_TOOL_EDITABLE_SELECTOR,
+	SELECTION_INLINE_WIDTH,
+	SELECTION_INLINE_MIN_WIDTH,
+	SELECTION_INLINE_MARGIN,
+	AGENT_TRANSLATE_TARGET_LABEL_KEYS,
+	SELECTION_INLINE_ACTION_LABEL_KEYS,
+	normalizeSelectionText,
+	isSelectionToolAnchorElement,
+	clampFloatingPosition,
+	resolveSelectionInlineWidth,
+	toSelectionAnchorRect,
+	buildTranslateInstruction,
+} = policy;
 
 test("normalizeSelectionText trims, enforces the minimum length and caps oversized selections", () => {
 	assert.equal(SELECTION_TOOL_MIN_CHARS, 2);
@@ -104,6 +120,39 @@ test("buildTranslateInstruction maps action/target/locale to short renderer-side
 	const autoEn = buildTranslateInstruction({ action: "translate", targetLanguage: "auto", targetLabel: "Auto", locale: "en" });
 	assert.match(autoEn, /Chinese into English/);
 	assert.match(autoEn, /anything else into Chinese/);
+});
+
+test("resolveSelectionInlineWidth keeps the browser-toolbar width but never overflows narrow viewports", () => {
+	assert.equal(SELECTION_INLINE_WIDTH, 400);
+	assert.equal(SELECTION_INLINE_MIN_WIDTH, 300);
+	assert.equal(SELECTION_INLINE_MARGIN, 8);
+	// 常规窗口：固定 400（头部动作一行放得下）
+	assert.equal(resolveSelectionInlineWidth(1280), 400);
+	// 中等窄窗：可用宽度 = 视口 - 两侧留白，仍大于下限
+	assert.equal(resolveSelectionInlineWidth(400), 384);
+	assert.equal(resolveSelectionInlineWidth(320), 304);
+	// 小于下限：贴满可用宽度，绝不横向溢出
+	assert.equal(resolveSelectionInlineWidth(250), 234);
+	// 退化视口：返回 0，由 clampFloatingPosition 兜住（不出现负宽度）
+	assert.equal(resolveSelectionInlineWidth(10), 0);
+	assert.equal(resolveSelectionInlineWidth(0), 0);
+});
+
+test("toSelectionAnchorRect converts the quote-toolbar rect into a four-edge fixed anchor", () => {
+	// 引用浮层只记 top/left/width/height；工具栏定位要 right/bottom（同一套换算只写一处）
+	const rect = toSelectionAnchorRect({ top: 120, left: 80, width: 200, height: 24 });
+	assert.deepEqual({ ...rect }, { left: 80, top: 120, right: 280, bottom: 144 });
+	// 零尺寸选区（折叠/未渲染）也要得到稳定锚点，不能出现 NaN
+	const collapsed = toSelectionAnchorRect({ top: 0, left: 0, width: 0, height: 0 });
+	assert.deepEqual({ ...collapsed }, { left: 0, top: 0, right: 0, bottom: 0 });
+});
+
+test("every invoke action has a selection-tool toolbar label key", () => {
+	// 键由 Lead 预置在 rendererCopy 两份词典里；这里守住「枚举与映射表同步」，
+	// 漏一个动作会让头部切换按钮渲染成 key 名（或 TS 直接报缺 key）。
+	assert.deepEqual(Object.keys(SELECTION_INLINE_ACTION_LABEL_KEYS).sort(), ["chat", "translate"]);
+	assert.equal(SELECTION_INLINE_ACTION_LABEL_KEYS.translate, "selectionTool.translate");
+	assert.equal(SELECTION_INLINE_ACTION_LABEL_KEYS.chat, "selectionTool.ask");
 });
 
 test("every translate target has a pre-added i18n label key", () => {

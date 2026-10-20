@@ -36,7 +36,8 @@ import type {
 } from "../shared/types/voiceTranscription";
 import type { WhisperInstallProgress, WhisperInstallResult, WhisperRuntimeStatus } from "../shared/types/whisperRuntime";
 import type { EnhanceEventPayload, EnhanceRunInput, EnhanceRunResult } from "../shared/types/enhance";
-import type { AgentChangedEvent, AgentInvokeEventPayload, AgentInvokeInput, AgentInvokeResult, AgentMarketSettings, AgentProfile, AgentProfileSnapshot, CreateAgentProfileInput, UpdateAgentMarketSettingsInput, UpdateAgentProfileInput } from "../shared/types/agentProfile";
+import type { AgentChangedEvent, AgentInvokeEventPayload, AgentInvokeInput, AgentInvokeResult, AgentMarketSettings, AgentProfile, AgentProfileSnapshot, BindAgentSessionInput, CreateAgentProfileInput, UpdateAgentMarketSettingsInput, UpdateAgentProfileInput } from "../shared/types/agentProfile";
+import type { SelectionToolInsertInput, SelectionToolShowPayload, SelectionToolWindowState } from "../shared/types/selectionTool";
 import type { QuickMessagesSaveResult, QuickMessagesSnapshot } from "../shared/types/quickMessages";
 import type { NoticeHistoryFileEntry, NoticeHistoryRecordInput } from "../shared/types/noticeHistory";
 import type { ReplyActionRule, ReplyActionsSaveResult, ReplyActionsSnapshot } from "../shared/types/replyActions";
@@ -1727,6 +1728,21 @@ const api = {
 		invoke: (input: AgentInvokeInput) => ipcRenderer.invoke(ipcChannels.agentProfilesInvoke, input) as Promise<AgentInvokeResult>,
 		cancelInvoke: () => ipcRenderer.invoke(ipcChannels.agentProfilesInvokeCancel) as Promise<{ ok: boolean }>,
 		onInvokeEvent: (callback: (payload: AgentInvokeEventPayload) => void) => subscribe<AgentInvokeEventPayload>(ipcChannels.agentProfilesInvokeEvent, callback),
+		/** 绑定/解绑会话与智能体：绑定后该会话每次发送由主进程注入隐藏角色设定。 */
+		bindSession: (input: BindAgentSessionInput) => ipcRenderer.invoke(ipcChannels.agentProfilesBindSession, input) as Promise<AgentMarketSettings>,
+	},
+
+	// ── 系统级划词浮窗（全局快捷键触发的独立窗口；与主窗口共用同一份 preload） ──
+	selectionTool: {
+		getState: () => ipcRenderer.invoke(ipcChannels.selectionToolGetState) as Promise<SelectionToolWindowState>,
+		hide: () => ipcRenderer.invoke(ipcChannels.selectionToolHide) as Promise<void>,
+		/** 浮窗「发送到 PiDeck」：把文本插入主窗口当前会话输入框。 */
+		insertToMain: (input: SelectionToolInsertInput) => ipcRenderer.invoke(ipcChannels.selectionToolInsertToMain, input) as Promise<boolean>,
+		/** 浮窗显示时主进程推送的捕获文本（空串 = 没读到，让用户手输）。 */
+		onCaptured: (callback: (payload: SelectionToolShowPayload) => void) => subscribe<SelectionToolShowPayload>(ipcChannels.selectionToolCaptured, callback),
+		onStateChanged: (callback: (state: SelectionToolWindowState) => void) => subscribe<SelectionToolWindowState>(ipcChannels.selectionToolStateChanged, callback),
+		/** 主窗口侧：系统浮窗点「发送到 PiDeck」时收到文本（插入当前会话输入框）。 */
+		onInserted: (callback: (payload: SelectionToolInsertInput) => void) => subscribe<SelectionToolInsertInput>(ipcChannels.selectionToolInserted, callback),
 	},
 
 	// ── CUA 审批门 ──

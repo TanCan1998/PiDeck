@@ -4,7 +4,7 @@ import { agentProfileSnapshotAtom } from "../../../atoms/agent-atoms";
 import { desktopApi } from "../../../desktopApi";
 import { t } from "../../../i18n";
 import { showNotice } from "../../../utils/notice";
-import type { AgentMarketSettings, AgentProfile, CreateAgentProfileInput, UpdateAgentMarketSettingsInput, UpdateAgentProfileInput } from "../../../../../shared/types/agentProfile";
+import type { AgentProfile, CreateAgentProfileInput, UpdateAgentProfileInput } from "../../../../../shared/types/agentProfile";
 
 /** 市场写操作的统一错误提示：IPC 抛出的 Error 只把 message 交给用户，其余类型兜底转字符串。 */
 function reportAgentMarketError(error: unknown): void {
@@ -18,11 +18,10 @@ export type AgentMarketActions = {
 	duplicateAgent: (agent: AgentProfile) => Promise<AgentProfile | null>;
 	resetBuiltinAgent: (agent: AgentProfile) => Promise<AgentProfile | null>;
 	setSelectionDefault: (agent: AgentProfile) => Promise<boolean>;
-	saveSettings: (patch: UpdateAgentMarketSettingsInput) => Promise<AgentMarketSettings | null>;
 };
 
 /**
- * 智能体市场写操作收口（卡片 / 编辑器 / 设置页共用）。
+ * 智能体市场写操作收口（卡片 / 详情 / 编辑器共用）。
  *
  * 为什么每次成功后主动重拉快照：主进程的 agent-profiles:changed 事件有往返延迟，
  * 预览/Web 桩更是没有事件推送；卡片/编辑器必须立刻反映结果，否则用户会看到
@@ -137,20 +136,5 @@ export function useAgentMarketActions(): AgentMarketActions {
 		[refreshSnapshot],
 	);
 
-	const saveSettings = useCallback(
-		async (patch: UpdateAgentMarketSettingsInput) => {
-			try {
-				const saved = await desktopApi.agentProfiles.updateSettings(patch);
-				await refreshSnapshot();
-				showNotice(t("agentMarket.settingsSaved"), 2000);
-				return saved;
-			} catch (error) {
-				reportAgentMarketError(error);
-				return null;
-			}
-		},
-		[refreshSnapshot],
-	);
-
-	return { createAgent, updateAgent, deleteAgent, duplicateAgent, resetBuiltinAgent, setSelectionDefault, saveSettings };
+	return { createAgent, updateAgent, deleteAgent, duplicateAgent, resetBuiltinAgent, setSelectionDefault };
 }

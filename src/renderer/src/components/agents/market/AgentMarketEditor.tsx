@@ -1,6 +1,17 @@
 import { useState, type FormEvent } from "react";
 import { ChevronDown, Info, X } from "lucide-react";
-import { AGENT_PROFILE_CATEGORIES, AGENT_PROFILE_DESCRIPTION_MAX_CHARS, AGENT_PROFILE_ICON_MAX_CHARS, AGENT_PROFILE_NAME_MAX_CHARS, AGENT_PROFILE_SYSTEM_PROMPT_MAX_CHARS, type AgentModelRef, type AgentProfile, type AgentProfileCategory } from "../../../../../shared/types/agentProfile";
+import {
+	AGENT_PROFILE_BACKENDS,
+	AGENT_PROFILE_CATEGORIES,
+	AGENT_PROFILE_DESCRIPTION_MAX_CHARS,
+	AGENT_PROFILE_ICON_MAX_CHARS,
+	AGENT_PROFILE_NAME_MAX_CHARS,
+	AGENT_PROFILE_SYSTEM_PROMPT_MAX_CHARS,
+	type AgentModelRef,
+	type AgentProfile,
+	type AgentProfileBackend,
+	type AgentProfileCategory,
+} from "../../../../../shared/types/agentProfile";
 import { useBackendModelCatalog } from "../../../hooks/useBackendModelCatalog";
 import { t } from "../../../i18n";
 import { showNotice } from "../../../utils/notice";
@@ -12,12 +23,13 @@ import { Label } from "../../ui-shadcn/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../ui-shadcn/select";
 import { Textarea } from "../../ui-shadcn/textarea";
 import { AGENT_CATEGORY_LABEL_KEYS } from "./AgentMarketCategoryChips";
+import { AGENT_BACKEND_LABEL_KEYS, FOLLOW_DEFAULT_BACKEND_VALUE, isAgentProfileBackend } from "./agentBackendOptions";
 import { useAgentMarketActions } from "./useAgentMarketActions";
 
 /**
- * 空模型引用 = 「清空模型」。UpdateAgentProfileInput.model 没有 null 形态，而 IPC/JSON
- * 会丢 undefined 键（省略键被主进程当成「保持原值」），因此与 AutomationTaskEditor
- * 同一约定：显式传空 provider/modelId，由主进程归一化成「未设置」。
+ * 空模型引用 = 「清空模型」。UpdateAgentProfileInput.model 没有 null 形态，主进程又把
+ * 省略键/undefined 当成「未提供、保持原值」，因此与 AutomationTaskEditor 同一约定：
+ * 显式传空 provider/modelId，由主进程归一化成「未设置」。
  */
 const EMPTY_AGENT_MODEL_REF: AgentModelRef = { provider: "", modelId: "" };
 
@@ -41,7 +53,7 @@ interface AgentMarketEditorProps {
 }
 
 /**
- * 智能体新建/编辑表单：名称、emoji 图标、简介、分类、可选模型、角色设定。
+ * 智能体新建/编辑表单：名称、emoji 图标、简介、分类、可选模型、「使用」新建会话的后端、角色设定。
  * 校验只拦两个必填项（名称 / 角色设定），提交后由 useAgentMarketActions 统一 toast 与刷新快照。
  */
 export function AgentMarketEditor({ agent, onSaved, onCancel }: AgentMarketEditorProps) {
@@ -52,10 +64,11 @@ export function AgentMarketEditor({ agent, onSaved, onCancel }: AgentMarketEdito
 	const [category, setCategory] = useState<AgentProfileCategory>(agent?.category ?? "general");
 	const [systemPrompt, setSystemPrompt] = useState(agent?.systemPrompt ?? "");
 	const [selectedModel, setSelectedModel] = useState<AgentModelRef | undefined>(() => initialModelOf(agent));
+	const [backend, setBackend] = useState<AgentProfileBackend | undefined>(agent?.backend);
 	const [modelPickerOpen, setModelPickerOpen] = useState(false);
 	const [saving, setSaving] = useState(false);
 
-	// 选择器打开才拉模型目录，避免弹框常驻轮询；sessionId 只满足 hook 签名（目录按项目加载，这里不绑项目）。
+	// 选择器打开才拉模型目录，避免页面常驻轮询；sessionId 只满足 hook 签名（目录按项目加载，这里不绑项目）。
 	const { models, report, loading, refreshing, reload } = useBackendModelCatalog({ sessionId: "agent-market-editor", enabled: modelPickerOpen });
 	const currentModel = models.find((model) => model.provider === selectedModel?.provider && model.id === selectedModel?.modelId);
 	const modelLabel = selectedModel ? (currentModel?.name ?? `${selectedModel.provider} / ${selectedModel.modelId}`) : t("agentMarket.modelUnset");
@@ -79,7 +92,9 @@ export function AgentMarketEditor({ agent, onSaved, onCancel }: AgentMarketEdito
 				category,
 				systemPrompt: systemPrompt.trim(),
 			};
-			const saved = agent ? await actions.updateAgent(agent.id, { ...base, model: selectedModel ?? EMPTY_AGENT_MODEL_REF }) : await actions.createAgent({ ...base, ...(selectedModel ? { model: selectedModel } : {}) });
+			// update 始终带上 backend 键（值为 undefined = 跟随默认）：IPC 结构化克隆保留自有键，
+			// 主进程据此删除字段；create 省略 backend 等价于未指定。
+			const saved = agent ? await actions.updateAgent(agent.id, { ...base, model: selectedModel ?? EMPTY_AGENT_MODEL_REF, backend }) : await actions.createAgent({ ...base, ...(selectedModel ? { model: selectedModel } : {}), ...(backend ? { backend } : {}) });
 			// 失败时 actions 已 toast 并返回 null：保留表单内容，用户改完可直接重试。
 			if (saved) onSaved();
 		} finally {
@@ -159,6 +174,37 @@ export function AgentMarketEditor({ agent, onSaved, onCancel }: AgentMarketEdito
 							</div>
 							<p className="text-micro leading-snug text-muted-foreground">{t("agentMarket.fieldModelHint")}</p>
 						</div>
+					</div>
+
+					<div className="flex flex-col gap-1.5">
+						<Label htmlFor="agent-market-backend" className="text-xs font-medium">
+							{t("agentMarket.backend")}
+						</Label>
+						<Select
+							value={backend ?? FOLLOW_DEFAULT_BACKEND_VALUE}
+							onValueChange={(value) => {
+								if (value === FOLLOW_DEFAULT_BACKEND_VALUE) {
+									setBackend(undefined);
+									return;
+								}
+								if (isAgentProfileBackend(value)) setBackend(value);
+							}}
+						>
+							<SelectTrigger id="agent-market-backend" size="sm" className="w-full text-xs">
+								<SelectValue />
+							</SelectTrigger>
+							<SelectContent>
+								<SelectItem value={FOLLOW_DEFAULT_BACKEND_VALUE} className="text-xs">
+									{t("agentMarket.backendFollow")}
+								</SelectItem>
+								{AGENT_PROFILE_BACKENDS.map((item) => (
+									<SelectItem key={item} value={item} className="text-xs">
+										{t(AGENT_BACKEND_LABEL_KEYS[item])}
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
+						<p className="text-micro leading-snug text-muted-foreground">{t("agentMarket.backendHint")}</p>
 					</div>
 
 					<div className="flex flex-col gap-1.5">

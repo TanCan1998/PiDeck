@@ -23,6 +23,10 @@ import { AutomationRunCoordinator } from "./automation/AutomationRunCoordinator"
 import { registerAutomationIpc } from "./ipc/automationIpc";
 import { registerAgentProfileIpc } from "./ipc/agentProfileIpc";
 import { registerAgentInvokeIpc } from "./ipc/agentInvokeIpc";
+import { registerSelectionToolIpc } from "./ipc/selectionToolIpc";
+import { SelectionToolService } from "./selection/SelectionToolService";
+import { SelectionToolWindow } from "./selection/SelectionToolWindow";
+import { resolveShortcutBindings } from "../shared/shortcuts";
 import { registerFeishuIpc } from "./ipc/feishuIpc";
 import { registerWeChatIpc } from "./ipc/wechatIpc";
 import { applyLinuxDisplayBackendWorkaround, isUsingLinuxXWaylandWorkaround } from "./linuxDisplayBackend";
@@ -682,6 +686,35 @@ let agentInvokeService: AgentInvokeService | null = null;
  * 让划词翻译把用户正在跑的输入框增强打断（见 AGENTS.md 例外四）。
  */
 let agentInvokeCompletionService: EnhancePromptService | null = null;
+/** 系统级划词浮窗（全局快捷键触发的独立 BrowserWindow）；null = 尚未装配/装配失败。 */
+let selectionToolWindow: SelectionToolWindow | null = null;
+/** 系统级划词服务：取词、浮窗展示与全局快捷键注册的唯一归属地。 */
+let selectionToolService: SelectionToolService | null = null;
+
+/**
+ * 同步系统级划词的全局快捷键（开关、键位、市场设置任一变化都调用）。
+ *
+ * globalShortcut 是应用级独占资源：关闭开关必须立刻注销，改键必须先释放旧键再注册
+ * （Electron 对同一 accelerator 重复注册返回 false）。注册失败只记日志——常见原因是
+ * 该组合被其他应用占用，此时设置页仍显示键位、用户可改键或关闭开关。
+ */
+function syncSelectionToolShortcut(): void {
+	const service = selectionToolService;
+	if (!service) return;
+	const systemEnabled = agentProfileStore?.getSnapshot().settings.systemSelectionEnabled === true;
+	if (!systemEnabled) {
+		service.unregisterShortcut();
+		return;
+	}
+	const accelerator = resolveShortcutBindings(settingsStore.get().shortcuts ?? {}, process.platform).openSelectionTool;
+	if (!accelerator) {
+		service.unregisterShortcut();
+		return;
+	}
+	if (service.getRegisteredShortcut() === accelerator) return;
+	const registered = service.setShortcut(accelerator);
+	if (!registered) void appLogger.warn("selection-tool", "Global shortcut registration failed", { accelerator });
+}
 /** 粘贴文件启动清理（registerIpc 阶段赋值；whenReady 后 fire-and-forget 执行） */
 let cleanupPasteFiles: (() => Promise<number>) | undefined;
 
@@ -2880,6 +2913,18 @@ function registerIpc() {
 		});
 	}
 	registerAgentInvokeIpc(ipcMain, agentInvokeService);
+	// 系统级划词浮窗：状态/隐藏/「发送到 PiDeck」（文本插入主窗口当前会话输入框）。
+	registerSelectionToolIpc({
+		service: selectionToolService,
+		window: selectionToolWindow,
+		insertToMain: (text) => {
+			const win = mainWindow;
+			if (!win || win.isDestroyed()) return false;
+			win.webContents.send(ipcChannels.selectionToolInserted, { text });
+			focusMainWindow();
+			return true;
+		},
+	});
 	// 数据环境（数据模式决策 / 目录归属校验）：业务在 dataEnvService，handler 只校验/适配。
 	// relaunchApp 复用 restartApp（先停常驻服务 + isQuitting，防止 closeToTray 吞掉 relaunch）；
 	// quitApp 先置 isQuitting，与托盘「退出」菜单同一写法，避免 closeToTray 把退出吞成隐藏到托盘。
@@ -3354,6 +3399,9 @@ function registerIpc() {
 		settingsStore,
 		sessionScanner,
 		sessionCatalog,
+		// 会话 ↔ 智能体绑定：绑定的会话每次发送注入角色设定（pi/acp 隐藏 agentMessage，
+		// dsh 退化为可见前缀，由 sessionIpc 的 composeAgentInstruction 统一组合）。
+		resolveSessionAgentInstruction: (sessionId) => agentProfileStore?.getBoundAgent(sessionId)?.systemPrompt,
 		sessionRuntimeCoordinator,
 		agentManager,
 		configManager,
@@ -3789,6 +3837,8 @@ function registerIpc() {
 		log: (message, detail) => void appLogger.info("tokendance", message, detail),
 	});
 	registerSystemIpc({
+		// 设置保存后的主进程副作用：系统级划词快捷键按新键位/开关重注册（appShortcuts 同一时机）。
+		afterSettingsUpdate: () => syncSelectionToolShortcut(),
 		piLocator,
 		settingsStore,
 		configManager,
@@ -5462,6 +5512,29 @@ app
 				error: (message) => void appLogger.error("agent-invoke", message),
 			},
 		});
+
+		// 系统级划词：独立浮窗（复用主 preload，渲染层与主窗口同一份 desktopApi）+ 服务 + 全局快捷键。
+		// 浮窗只在首次触发时创建；warmUp 预加载可把首次弹出延迟降到只剩 show。
+		const selectionToolPreloadPath = await prepareMainPreloadPath();
+		selectionToolWindow = new SelectionToolWindow({
+			preloadPath: selectionToolPreloadPath,
+			logger: appLogger,
+			devRendererUrl: process.env.ELECTRON_RENDERER_URL ?? null,
+		});
+		selectionToolService = new SelectionToolService({
+			window: selectionToolWindow,
+			logger: {
+				info: (scope, message, detail) => void appLogger.info(scope, message, detail),
+				warn: (scope, message, detail) => void appLogger.warn(scope, message, detail),
+				error: (scope, message, detail) => void appLogger.error(scope, message, detail),
+			},
+		});
+		// 预热放在 registerIpc 之后（见下方 assemble 段）：浮窗加载即会 settings.get / agentProfiles.getSnapshot，
+		// 提前 warmUp 会让首帧拿到「服务未就绪」的拒绝（只是闪一下默认主题，但没必要）。
+		quitCleanup.register("selection-tool", () => selectionToolService?.dispose());
+		// 市场设置的「系统级划词」开关保存后即时生效（不必重启应用）。
+		agentProfileStore.onChanged(() => syncSelectionToolShortcut());
+		syncSelectionToolShortcut();
 		// #354：身份归并会把被吸收的历史会话 ID 从 catalog 移除，而侧栏置顶按稳定 ID 存在
 		// settings.json 里，不迁移就是死链（用户看到置顶丢失）。必须在本行完成——它早于
 		// createWindow，渲染层首次 settings.get 拿到的就是迁移后的值。
@@ -5879,6 +5952,9 @@ app
 				void appLogger?.warn("app", "Model trace endpoint startup failed", error);
 			});
 		registerIpc();
+		// 系统级划词浮窗预热：必须在 registerIpc 之后——浮窗加载即会 settings.get /
+		// agentProfiles.getSnapshot，提前预热会让首帧读到「服务未就绪」的拒绝。
+		void selectionToolWindow?.warmUp().catch(() => undefined);
 		// 统一接口聚合层：注册全部域与导入器并冻结（deps 缺省在 domainAssembly.ts 收集，FIND-5）
 		registerAllDomains();
 		registerFeishuIpc({

@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Input } from "../../ui-shadcn/input";
 import { SettingsSection } from "./SettingsStorageTab";
 import { PromptEnhanceSettingsSection } from "./PromptEnhanceSettingsSection";
+import { SelectionToolSettingsSection } from "./SelectionToolSettingsSection";
 import { DirtyMarker, SettingBox, SettingRow, SettingSwitchRow } from "./SettingRows";
 import { VoiceTranscriptionSettingsSection } from "./VoiceTranscriptionSettingsSection";
 import { QuickTaskMenuSetting } from "./QuickTaskMenuSetting";
@@ -147,6 +148,9 @@ export const CommonTab = memo(function CommonTab(props: CommonTabProps) {
 
 			{/* 提示词增强：固定模型（默认跟随会话模型） */}
 			<PromptEnhanceSettingsSection />
+
+			{/* 划词工具：应用内/系统级开关、默认智能体（数据在 agent-profiles.json，自持即时保存） */}
+			<SelectionToolSettingsSection />
 
 			{/* 会话 */}
 			<SettingsSection id="settings-section-common-session" title={t("settings.sectionSession")}>

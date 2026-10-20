@@ -202,6 +202,8 @@ export default defineConfig({
           pet: resolve("src/renderer/pet.html"),
           web: resolve("src/renderer/web.html"),
           floater: resolve("src/renderer/floater.html"),
+          // 系统级划词浮窗：独立小窗口（全局快捷键触发），不加载主工作台
+          "selection-tool": resolve("src/renderer/selection-tool.html"),
         },
         output: {
           // 将大体积的第三方依赖拆分为独立 chunk，减少首屏需要加载和解析的 JS 体积。

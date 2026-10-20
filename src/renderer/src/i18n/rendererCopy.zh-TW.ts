@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: 7e03760d34c00a5005d2f0745b0ab6182ca50539bb6247529010fdadbde77fc6（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: 54ed0b112b4b61ba1355b14ffba1f284bc033872a046c1796cf417505ff5f2c9（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -6413,4 +6413,44 @@ export const zhTW: Record<TranslationKey, string> = {
 	"agentInvoke.noModel": "沒有可用的模型，請先在設定裡選擇模型",
 	"agentInvoke.errorTitle": "呼叫失敗",
 	"agentInvoke.charCount": "{count} 字",
+
+	// ── 二期：系统级划词 / 页面化 / 设置区 ──
+	"selectionTool.copy": "複製",
+	"selectionTool.insertToMain": "傳送到 PiDeck",
+	"selectionTool.inserted": "已傳送到 PiDeck 輸入框",
+	"selectionTool.captureFailed": "沒有讀取到選中的文本，請先在目標應用裡選中文字再按快捷鍵",
+	"selectionTool.unsupported": "當前系統不支援系統級劃詞（Linux Wayland 需要 X11 / xdotool）",
+	"selectionTool.globalHotkeyHint": "按 {accelerator} 觸發",
+	"selectionTool.translating": "翻譯中…",
+	"selectionTool.translate": "翻譯",
+	"selectionTool.ask": "問答",
+	"selectionTool.targetLabel": "目標語言",
+	"selectionTool.hide": "隱藏",
+	"selectionTool.windowTitle": "劃詞翻譯",
+	"selectionTool.windowEmpty": "選中文字後按快捷鍵，或直接輸入內容",
+	"selectionTool.insertEmpty": "沒有可傳送的文本",
+	"agentMarket.useInSession": "使用",
+	"agentMarket.useInSessionHint": "新建會話並繫結該智慧體：角色設定隱藏，只顯示你的輸入",
+	"agentMarket.backend": "後端",
+	"agentMarket.backendFollow": "跟隨預設",
+	"agentMarket.backendHint": "「使用」新建會話時採用該後端；劃詞一次性呼叫固定使用 pi 模型目錄",
+	"agentMarket.usedAgent": "已新建會話並繫結「{name}」",
+	"agentMarket.useFailed": "建立會話失敗：{error}",
+	"agentMarket.boundBadge": "智慧體會話",
+	"settings.selectionTool.title": "劃詞工具",
+	"settings.selectionTool.description": "選中文字即可用智慧體翻譯；開啟系統級劃詞後，在其他應用裡也能用",
+	"settings.selectionTool.enabled": "應用內劃詞",
+	"settings.selectionTool.enabledHint": "在 PiDeck 頁面內選中文字時浮出智慧體按鈕",
+	"settings.selectionTool.systemEnabled": "系統級劃詞（全域快捷鍵）",
+	"settings.selectionTool.systemEnabledHint": "在任意應用選中文字後按快捷鍵，在游標附近彈出翻譯浮窗",
+	"settings.selectionTool.hotkeyLabel": "系統級劃詞快捷鍵",
+	"settings.selectionTool.hotkeyHint": "當前快捷鍵：{accelerator}（可在「快捷鍵」頁修改）",
+	"settings.selectionTool.defaultAgent": "預設智慧體",
+	"settings.selectionTool.defaultAgentAuto": "自動（內建翻譯官）",
+	"settings.selectionTool.defaultAgentHint": "應用內浮鈕與系統浮窗預設使用這個智慧體",
+	"settings.selectionTool.manageAgents": "管理智慧體",
+	"settings.selectionTool.saved": "已儲存",
+	"settings.selectionTool.saveFailed": "儲存失敗，請重試",
+	"settings.shortcuts.openSelectionToolLabel": "系統級劃詞翻譯",
+	"settings.shortcuts.openSelectionToolDesc": "在任意應用中選中文字後按下，在游標附近彈出劃詞翻譯浮窗",
 };

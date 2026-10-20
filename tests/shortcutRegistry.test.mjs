@@ -197,6 +197,8 @@ test("resolveShortcutBindings：覆盖 ∪ 默认；非法覆盖回退默认；�
 		closeSessionTab: "Ctrl+W",
 		zoomIn: "Ctrl+=",
 		zoomOut: "Ctrl+-",
+		// 系统级划词（唯一 globalShortcut）：默认 Ctrl+Shift+X
+		openSelectionTool: "Ctrl+Shift+X",
 		toggleDevTools: "F12", // 非法裸键回退默认
 	});
 });
@@ -241,6 +243,7 @@ test("平台默认键列表完整（覆盖表之外不丢键）", () => {
 		closeSessionTab: "Ctrl+W",
 		zoomIn: "Ctrl+=",
 		zoomOut: "Ctrl+-",
+		openSelectionTool: "Ctrl+Shift+X",
 		toggleDevTools: "F12",
 	});
 	const mac = loadShortcuts({ platform: "darwin" });
@@ -262,6 +265,8 @@ test("平台默认键列表完整（覆盖表之外不丢键）", () => {
 		closeSessionTab: "Cmd+W",
 		zoomIn: "Cmd+=",
 		zoomOut: "Cmd+-",
+		// 系统级划词：macOS 用 ⌘⇧X
+		openSelectionTool: "Cmd+Shift+X",
 		toggleDevTools: "F12",
 	});
 });

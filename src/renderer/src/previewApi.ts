@@ -2032,7 +2032,7 @@ export function createPreviewApi(): PiDesktopApi {
 			getSnapshot: async () => ({
 				revision: 0,
 				agents: [],
-				settings: { selectionToolEnabled: true, selectionToolAgentId: null },
+				settings: { selectionToolEnabled: true, systemSelectionEnabled: false, selectionToolAgentId: null, sessionAgentBindings: {} },
 			}),
 			create: async () => {
 				throw new Error("preview stub");
@@ -2052,12 +2052,25 @@ export function createPreviewApi(): PiDesktopApi {
 			// 设置返回合并结果：预览里开关/下拉要能点，但不产生真实写入。
 			updateSettings: async (patch) => ({
 				selectionToolEnabled: patch.selectionToolEnabled ?? true,
+				systemSelectionEnabled: patch.systemSelectionEnabled ?? false,
 				selectionToolAgentId: patch.selectionToolAgentId ?? null,
+				sessionAgentBindings: {},
 			}),
+			/** 会话绑定在预览/Web 端没有落盘位置，返回空绑定表（不报错，避免「使用」路径炸掉）。 */
+			bindSession: async () => ({ selectionToolEnabled: true, systemSelectionEnabled: false, selectionToolAgentId: null, sessionAgentBindings: {} }),
 			onChanged: () => () => {},
 			invoke: async () => ({ ok: false as const, errorKind: "spawn-failed" as const, message: "unavailable" }),
 			cancelInvoke: async () => ({ ok: false }),
 			onInvokeEvent: () => () => {},
+		},
+		// 系统级划词浮窗：预览/Web 端没有独立窗口，全部 inert。
+		selectionTool: {
+			getState: async () => ({ visible: false }),
+			hide: async () => {},
+			insertToMain: async () => false,
+			onCaptured: () => () => {},
+			onStateChanged: () => () => {},
+			onInserted: () => () => {},
 		},
 		cua: {
 			onApprovalRequest: () => () => {},

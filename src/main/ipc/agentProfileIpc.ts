@@ -17,13 +17,15 @@ import {
 	type AgentMarketSettings,
 	type AgentModelRef,
 	type AgentProfile,
+	type AgentProfileBackend,
 	type AgentProfileCategory,
 	type AgentProfileSnapshot,
+	type BindAgentSessionInput,
 	type CreateAgentProfileInput,
 	type UpdateAgentMarketSettingsInput,
 } from "../../shared/types";
 import type { AgentProfileStore } from "../agents/AgentProfileStore";
-import { isAgentModelFieldValid, isAgentProfileCategory, type AgentProfilePatch } from "../agents/agentProfileNormalize";
+import { isAgentModelFieldValid, isAgentProfileBackend, isAgentProfileCategory, normalizeBindingId, type AgentProfilePatch } from "../agents/agentProfileNormalize";
 import type { AppLogger } from "../logging/AppLogger";
 
 export type AgentProfileIpcDeps = {
@@ -101,6 +103,17 @@ export function registerAgentProfileIpc(deps: AgentProfileIpcDeps): () => void {
 		});
 	});
 
+	ipcMain.handle(ipcChannels.agentProfilesBindSession, async (_event, input: unknown): Promise<AgentMarketSettings> => {
+		const parsed = parseBindSessionInput(input);
+		return runWithLog(appLogger, "bind agent to session", { sessionId: parsed.sessionId, agentId: parsed.agentId }, async () => {
+			// 不存在的智能体由 store 抛 "Agent not found: <id>"：IPC 不重复实现查找语义。
+			// 日志只记 id 与绑定数，绝不落角色设定（用户内容）。
+			const settings = await store.bindSession(parsed);
+			void appLogger.info(LOG_SCOPE, "Bound agent to session", { sessionId: parsed.sessionId, agentId: parsed.agentId, boundSessions: Object.keys(settings.sessionAgentBindings).length });
+			return settings;
+		});
+	});
+
 	ipcMain.handle(ipcChannels.agentProfilesUpdateSettings, async (_event, patch: unknown): Promise<AgentMarketSettings> => {
 		const parsed = parseSettingsPatch(patch);
 		return runWithLog(appLogger, "update agent market settings", { keys: Object.keys(parsed) }, async () => {
@@ -122,6 +135,7 @@ export function registerAgentProfileIpc(deps: AgentProfileIpcDeps): () => void {
 		ipcMain.removeHandler(ipcChannels.agentProfilesResetBuiltin);
 		ipcMain.removeHandler(ipcChannels.agentProfilesDuplicate);
 		ipcMain.removeHandler(ipcChannels.agentProfilesUpdateSettings);
+		ipcMain.removeHandler(ipcChannels.agentProfilesBindSession);
 	};
 }
 
@@ -186,6 +200,7 @@ function parseCreateInput(value: unknown): CreateAgentProfileInput {
 	const icon = parseOptionalText(value.icon, "icon", AGENT_PROFILE_ICON_MAX_CHARS);
 	const category = parseCategory(value.category);
 	const model = parseModelRef(value.model);
+	const backend = parseBackend(value.backend);
 	return {
 		name: parseRequiredText(value.name, "name", AGENT_PROFILE_NAME_MAX_CHARS),
 		systemPrompt: parseRequiredText(value.systemPrompt, "system prompt", AGENT_PROFILE_SYSTEM_PROMPT_MAX_CHARS),
@@ -193,6 +208,8 @@ function parseCreateInput(value: unknown): CreateAgentProfileInput {
 		...(icon === undefined ? {} : { icon }),
 		...(category === undefined ? {} : { category }),
 		...(model ? { model } : {}),
+		// 新建时 null 与缺省同义：没有「清除」语义，直接不写该字段（= 跟随默认后端）。
+		...(backend === null || backend === undefined ? {} : { backend }),
 	};
 }
 
@@ -207,15 +224,50 @@ function parseUpdatePatch(value: unknown): AgentProfilePatch {
 	if (value.category !== undefined) patch.category = parseCategory(value.category) ?? "general";
 	const model = parseModelRef(value.model);
 	if (model !== undefined) patch.model = model;
+	// 后端用 hasOwn 判定：编辑器「跟随默认」会把 backend 显式置 undefined（清除），
+	// 与「键缺失 = 保留原值」是两种语义（与 model 的 null 清空同一套约定）。
+	if (Object.hasOwn(value, "backend")) patch.backend = parseBackend(value.backend);
 	return patch;
+}
+
+/**
+ * 智能体后端：缺省 = 未提供；null/undefined = 清除（跟随默认后端）；
+ * 白名单外一律抛错（渲染层下拉正常不会命中，命中即旧版本/脏数据）。
+ */
+function parseBackend(value: unknown): AgentProfileBackend | null | undefined {
+	if (value === undefined) return undefined;
+	if (value === null) return null;
+	if (!isAgentProfileBackend(value)) throw new Error("Invalid agent profile: backend");
+	return value;
+}
+
+/**
+ * 会话绑定入参：sessionId 必填，agentId 为 null（解绑）或非空 id。
+ * 两端都卡长度与控制字符，并拒绝原型键（绑定表是普通对象，__proto__ 会污染原型）。
+ */
+function parseBindSessionInput(value: unknown): BindAgentSessionInput {
+	if (!isRecord(value)) throw new Error("Invalid bind session input");
+	const sessionId = normalizeBindingId(value.sessionId);
+	if (!sessionId) throw new Error("Invalid session id");
+	if (value.agentId === null) return { sessionId, agentId: null };
+	const agentId = normalizeBindingId(value.agentId);
+	if (!agentId) throw new Error("Invalid agent id");
+	return { sessionId, agentId };
 }
 
 function parseSettingsPatch(value: unknown): UpdateAgentMarketSettingsInput {
 	if (!isRecord(value)) throw new Error("Invalid agent market settings patch");
+	// 会话绑定只能经 bind-session 改：设置保存拿的是旧快照，静默接收会把其它窗口刚写入的
+	// 绑定整表覆盖。显式拒绝比忽略更好——渲染层一旦误传能在开发期立刻暴露。
+	if (Object.hasOwn(value, "sessionAgentBindings")) throw new Error("Invalid agent market settings: sessionAgentBindings");
 	const patch: UpdateAgentMarketSettingsInput = {};
 	if (value.selectionToolEnabled !== undefined) {
 		if (typeof value.selectionToolEnabled !== "boolean") throw new Error("Invalid agent market settings: selectionToolEnabled");
 		patch.selectionToolEnabled = value.selectionToolEnabled;
+	}
+	if (value.systemSelectionEnabled !== undefined) {
+		if (typeof value.systemSelectionEnabled !== "boolean") throw new Error("Invalid agent market settings: systemSelectionEnabled");
+		patch.systemSelectionEnabled = value.systemSelectionEnabled;
 	}
 	if (value.selectionToolAgentId !== undefined) {
 		if (value.selectionToolAgentId === null) patch.selectionToolAgentId = null;

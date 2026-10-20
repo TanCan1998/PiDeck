@@ -1,7 +1,7 @@
 import { useAtomValue } from "jotai";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { resolveEnhanceTargetModel } from "../../../shared/enhanceModelPreference";
-import { AGENT_INVOKE_TEXT_MAX_CHARS, type AgentInvokeAction, type AgentProfile, type AgentTranslateTarget } from "../../../shared/types/agentProfile";
+import { normalizeEnhanceModel, resolveEnhanceTargetModel } from "../../../shared/enhanceModelPreference";
+import { AGENT_INVOKE_TEXT_MAX_CHARS, type AgentInvokeAction, type AgentModelRef, type AgentProfile, type AgentTranslateTarget } from "../../../shared/types/agentProfile";
 import type { EnhanceErrorKind } from "../../../shared/types/enhance";
 import { enhanceModelAtom } from "../atoms/composer-atoms";
 import { currentSessionAtom } from "../atoms/session-atoms";
@@ -69,14 +69,18 @@ function invokeErrorText(kind: EnhanceErrorKind): string {
  * - 卸载/作用域变化必须取消进行中的 run，并与事件订阅成对清理（生命周期配对）。
  *
  * 模型解析优先级（产品要求，与提示词增强同一套回退函数）：
- * 智能体自身模型 > 当前会话记录模型 > 设置固定增强模型 > 引导页点选偏好。
+ * 智能体自身模型 > 当前会话记录模型 > 设置固定增强模型 > 引导页点选偏好 > 调用方兜底模型。
+ * fallbackModel 是 phase-2 新槽位（系统划词浮窗没有会话上下文，用它传主进程解析出的部署默认）；
+ * 它必须排在最后，不能抢会话/设置的显式选择。
  */
-export function useAgentInvoke(input: { agent: AgentProfile | null; scopeKey: string }) {
+export function useAgentInvoke(input: { agent: AgentProfile | null; scopeKey: string; fallbackModel?: AgentModelRef | null }) {
 	const currentSession = useAtomValue(currentSessionAtom);
 	const enhanceModel = useAtomValue(enhanceModelAtom);
 	const [state, setState] = useState<AgentInvokeViewState>(IDLE_STATE);
 	const runIdRef = useRef("");
 	const mountedRef = useRef(true);
+	/** 上一次真正发起的请求：restart() 重新生成时复用（含已裁剪的文本/动作/目标语言）。 */
+	const lastRequestRef = useRef<AgentInvokeRequest | null>(null);
 
 	const reset = useCallback(() => {
 		if (runIdRef.current) {
@@ -99,13 +103,16 @@ export function useAgentInvoke(input: { agent: AgentProfile | null; scopeKey: st
 		if (!agent) return null;
 		// resolveEnhanceTargetModel 只做「逐级取第一个双字段有效的候选」，槽位名沿用其文档语义；
 		// 这里把「设置固定增强模型」放进 welcome 槽，实现上面的产品优先级（不复制可用性校验）。
-		return resolveEnhanceTargetModel({
+		const preferred = resolveEnhanceTargetModel({
 			configured: agent.model,
 			recordModel: currentSession?.model,
 			welcomeModel: enhanceModel ?? undefined,
 			fallback: readWelcomeModelPreference()?.model,
 		});
-	}, [currentSession?.model, enhanceModel, input.agent]);
+		// 调用方兜底排在最后：normalizeEnhanceModel 与主进程共用同一套「双字段非空」校验，
+		// 半截数据（只有 provider 或 modelId）自然落空，不会被当成可用模型发出坏请求。
+		return preferred ?? normalizeEnhanceModel(input.fallbackModel ?? null);
+	}, [currentSession?.model, enhanceModel, input.agent, input.fallbackModel]);
 
 	const run = useCallback(
 		(request: AgentInvokeRequest) => {
@@ -130,6 +137,7 @@ export function useAgentInvoke(input: { agent: AgentProfile | null; scopeKey: st
 				targetLabel: t(AGENT_TRANSLATE_TARGET_LABEL_KEYS[request.targetLanguage]),
 				locale,
 			});
+			lastRequestRef.current = { text, action: request.action, targetLanguage: request.targetLanguage };
 			const candidateRunId = `pending-${Math.random().toString(36).slice(2)}`;
 			// 先占位：IPC 受理返回前用户再点直接忽略，也挡住连点双跑。
 			runIdRef.current = candidateRunId;
@@ -146,7 +154,9 @@ export function useAgentInvoke(input: { agent: AgentProfile | null; scopeKey: st
 				.then((result) => {
 					if (!mountedRef.current || runIdRef.current !== candidateRunId) {
 						// 等待受理期间已取消/切智能体/卸载：受理成功后立刻作废这次 run，避免后台空跑。
-						if (result.ok) void desktopApi.agentProfiles.cancelInvoke().catch(() => undefined);
+						// 只有当前没有新 run（runIdRef 为空）时才补发 cancel：cancelInvoke 不带 runId，
+						// 若此刻已有新 run 在受理/流式，这一发会取消掉新 run（换语言/动作自动重跑的竞态）。
+						if (result.ok && !runIdRef.current) void desktopApi.agentProfiles.cancelInvoke().catch(() => undefined);
 						return;
 					}
 					if (!result.ok) {
@@ -164,6 +174,18 @@ export function useAgentInvoke(input: { agent: AgentProfile | null; scopeKey: st
 		},
 		[captureModel, input.agent],
 	);
+
+	/**
+	 * 重新生成：按上一次请求重跑（结果区 retry 按钮）。
+	 * reset() 同步清空 runId 并作废旧 run，紧接着 run() 才能通过「运行中不重入」的守卫；
+	 * 先发 cancelInvoke 再发 invoke，主进程按 IPC 到达顺序处理，不会误杀新 run。
+	 */
+	const restart = useCallback(() => {
+		const request = lastRequestRef.current;
+		if (!request) return;
+		reset();
+		run(request);
+	}, [reset, run]);
 
 	// 事件订阅：按当前 runId 过滤（同一渲染进程只有本 hook 实例会命中自己的 run）。
 	useEffect(() => {
@@ -213,5 +235,5 @@ export function useAgentInvoke(input: { agent: AgentProfile | null; scopeKey: st
 		reset();
 	}, [input.scopeKey, reset]);
 
-	return { state, run, cancel, reset };
+	return { state, run, cancel, reset, restart };
 }

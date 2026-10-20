@@ -48,6 +48,8 @@ import {
 	openSettingsAtom,
 	openAutomationModalAtom,
 	agentProfilesAtom,
+	agentMarketPageOpenAtom,
+	closeAgentMarketPageAtom,
 	sessionRecordsAtom,
 	bumpNewTurnCollapseTickAtom,
 	rpcLoggingAgentIdsAtom,
@@ -58,7 +60,7 @@ import { AppSidebar } from "./components/sidebar/AppSidebar";
 import { AppBootstrap } from "./components/app/AppBootstrap";
 import { SettingsFeatureRoot } from "./components/app/SettingsFeatureRoot";
 import { AutomationModal } from "./components/automation/AutomationModal";
-import { AgentMarketModal } from "./components/agents/AgentMarketModal";
+import { AgentMarketPage } from "./components/agents/AgentMarketPage";
 import { SelectionToolHost } from "./components/selectionTool/SelectionToolHost";
 import { useRename } from "./hooks/useRename";
 import { useProjectRuntimeCapabilities } from "./hooks/useRuntimeCapabilities";
@@ -141,6 +143,7 @@ import {
 	setSessionMessageLoadStateAtom,
 	setSessionHistoryMutationOverlayAtom,
 	setSessionDraftAtom,
+	sessionDraftByIdAtom,
 	cacheSessionMessagesAtom,
 	upsertSessionAtom,
 	acpToolsAtom,
@@ -212,6 +215,7 @@ import type {
 	PiCommand,
 	Project,
 	AgentBackend,
+	AgentProfile,
 	SessionLaunchPreferences,
 	SessionRecord,
 	SessionSummary,
@@ -1354,6 +1358,76 @@ export function App() {
 		},
 		[activeProjectId, effectiveAgentBackend, projects, selectSessionCommand, showToast, store, upsertSession, workspaceChrome],
 	);
+
+	/**
+	 * 智能体市场「使用」：新建会话并绑定该智能体（会话页面复用）。
+	 *
+	 * 角色设定不预填、不显示：主进程在绑定的会话每次发送时把 systemPrompt 拼进
+	 * agentMessage（对 UI 隐藏，见 src/main/ipc/sessionIpc.ts 的 resolveSessionAgentInstruction），
+	 * 因此时间线里只有用户自己输入的内容。标题用智能体名，侧栏一眼可认。
+	 */
+	const handleAgentUseAgent = useCallback(
+		async (agent: AgentProfile): Promise<boolean> => {
+			const project = projects.find((candidate) => candidate.id === activeProjectId) ?? projects[0];
+			if (!project) {
+				showToast(t("agentMarket.useFailed", { error: t("feedback.ai.noProject") }), 4000, "error");
+				return false;
+			}
+			// 后端只允许 pi/dsh：acp 需要用户先点选外部 CLI，生图/生视频没有提示词 agent 语义。
+			const backend: AgentBackend = (agent.backend ?? effectiveAgentBackend) === "dsh" ? "dsh" : "pi";
+			try {
+				const title = `${agent.icon ? `${agent.icon} ` : ""}${agent.name}`.trim();
+				const session = await api.sessions.createDraft({
+					projectId: project.id,
+					title,
+					backend,
+					...(agent.model && backend === "pi" ? { model: agent.model } : {}),
+				});
+				upsertSession(session);
+				// 先绑定再打开：打开瞬间用户就可能发送，绑定必须已落盘（主进程按会话查角色设定）。
+				await api.agentProfiles.bindSession({ sessionId: session.id, agentId: agent.id });
+				selectSessionCommand(project.id, session.id, false);
+				workspaceChrome.registerOpenSession(session.id, "permanent");
+				showToast(t("agentMarket.usedAgent", { name: agent.name }), 2600);
+				return true;
+			} catch (error) {
+				showToast(t("agentMarket.useFailed", { error: error instanceof Error ? error.message : String(error) }), 5000, "error");
+				return false;
+			}
+		},
+		[activeProjectId, effectiveAgentBackend, projects, selectSessionCommand, showToast, upsertSession, workspaceChrome],
+	);
+
+	/**
+	 * 系统级划词浮窗的「发送到 PiDeck」：把浮窗里的文本追加到当前会话输入框。
+	 * 没有已选会话（引导页）时落到引导页草稿，行为与手动粘贴一致。
+	 */
+	useEffect(() => {
+		return api.selectionTool.onInserted(({ text }) => {
+			const trimmed = text.trim();
+			if (!trimmed) return;
+			const targetSessionId = currentSessionId ?? GUIDE_BOOTSTRAP_SESSION_ID;
+			const existing = store.get(sessionDraftByIdAtom)[targetSessionId] ?? "";
+			setSessionDraft({ sessionId: targetSessionId, value: existing ? `${existing}\n\n${trimmed}` : trimmed });
+			showToast(t("selectionTool.inserted"), 2400);
+		});
+	}, [currentSessionId, setSessionDraft, showToast, store]);
+
+	// 智能体市场页面属于「会话列」的覆盖层：用户点侧栏切会话/项目时收起，
+	// 否则会出现「点了另一个会话，页面还盖在上面」的错觉（与 HostPluginPageOverlay 同约定）。
+	const agentMarketPageOpen = useAtomValue(agentMarketPageOpenAtom);
+	const closeAgentMarketPage = useSetAtom(closeAgentMarketPageAtom);
+	const marketPageScopeRef = useRef<string | undefined>(undefined);
+	useEffect(() => {
+		const scope = `${activeProjectId ?? ""}|${currentSessionId ?? ""}`;
+		if (marketPageScopeRef.current === undefined) {
+			marketPageScopeRef.current = scope;
+			return;
+		}
+		if (scope === marketPageScopeRef.current) return;
+		marketPageScopeRef.current = scope;
+		if (agentMarketPageOpen) closeAgentMarketPage();
+	}, [activeProjectId, currentSessionId, agentMarketPageOpen, closeAgentMarketPage]);
 
 	/** 侧栏/分支打开：选中成功后按 preview|permanent 登记 Tab */
 	const openSidebarSessionByIdWithTab = useCallback(
@@ -2898,6 +2972,8 @@ export function App() {
 				<div className="relative flex h-full min-h-0 min-w-0 flex-col">
 					{chatPaneSessionNode}
 					<HostPluginPageOverlay projectId={activeProject?.id} sessionId={currentSessionId} />
+					{/* 智能体市场：非模态页面（覆盖会话列，侧栏/抽屉仍可交互），关闭即还原会话视图 */}
+					<AgentMarketPage onUseAgent={handleAgentUseAgent} />
 				</div>
 			}
 			content={workbenchContentNode}
@@ -3487,10 +3563,7 @@ export function App() {
 						}}
 					/>
 
-					{/* 智能体市场：与定时任务同级的独立模态管理面（配置 CRUD + 调用入口） */}
-					<AgentMarketModal />
-
-					{/* 划词工具：全局唯一挂载点（划选浮出按钮 + 智能体调用面板） */}
+					{/* 划词工具：全局唯一挂载点（划选浮出按钮 + 原地工具栏） */}
 					<SelectionToolHost onSendToSession={handleAgentSendToSession} />
 
 					{/* 并行问询结果弹框（AskPanel）：独立匿名会话的结果展示，根级渲染 */}

@@ -17,6 +17,8 @@ interface AgentMarketCardProps {
 	onUse: (agent: AgentProfile) => void;
 	onEdit: (agent: AgentProfile) => void;
 	onRequestDelete: (agent: AgentProfile) => void;
+	/** 「使用」正在建会话：按钮显示 loading，避免连点建出多个绑定会话。 */
+	usePending: boolean;
 }
 
 /**
@@ -26,7 +28,7 @@ interface AgentMarketCardProps {
  * 避免 button 套 button 的非法结构；悬停行默认 opacity-0，键盘 focus 时由
  * group-focus-within 显形，保证纯键盘也能操作。
  */
-export function AgentMarketCard({ agent, selectionDefault, active, onOpen, onUse, onEdit, onRequestDelete }: AgentMarketCardProps) {
+export function AgentMarketCard({ agent, selectionDefault, active, onOpen, onUse, onEdit, onRequestDelete, usePending }: AgentMarketCardProps) {
 	const actions = useAgentMarketActions();
 	const usage = agent.usageCount > 0 ? t("agentMarket.usage", { count: agent.usageCount }) : t("agentMarket.neverUsed");
 
@@ -57,7 +59,8 @@ export function AgentMarketCard({ agent, selectionDefault, active, onOpen, onUse
 			<div className="relative flex h-7 shrink-0 items-center">
 				<span className="absolute inset-y-0 left-0 flex max-w-full items-center truncate text-micro text-text-tertiary transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">{usage}</span>
 				<div className="absolute inset-y-0 right-0 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
-					<Button type="button" size="xs" className="mr-0.5 h-6 px-2 text-xs" onClick={() => onUse(agent)}>
+					{/* 「使用」不再是调用面板：新建一个绑定该智能体的会话并收起市场，角色设定对时间线隐藏。title 里说明这一点。 */}
+					<Button type="button" size="xs" className="mr-0.5 h-6 px-2 text-xs" title={t("agentMarket.useInSessionHint")} loading={usePending} onClick={() => onUse(agent)}>
 						{t("agentMarket.use")}
 					</Button>
 					<Button type="button" variant="ghost" size="icon-xs" title={t("agentMarket.setSelectionDefault")} aria-label={t("agentMarket.setSelectionDefault")} disabled={selectionDefault} onClick={() => void actions.setSelectionDefault(agent)}>

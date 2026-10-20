@@ -10,9 +10,10 @@ export type AgentInvokeAgentPickerProps = {
 };
 
 /**
- * 调用面板头部的智能体选择器：DropdownMenu 直接铺 agentProfilesAtom 的展示顺序
+ * 原地工具栏头部的智能体选择器：DropdownMenu 直接铺 agentProfilesAtom 的展示顺序
  * （内置翻译在前，其余按创建时间倒序），不另做搜索——列表通常只有个位数。
  * 触发按钮自身带 aria-label，空列表时禁用并显示「选择智能体」。
+ * 紧凑尺寸（h-6 / max-w-150）：头部一行还要放动作切换、目标语言与三个图标按钮。
  */
 export function AgentInvokeAgentPicker({ agents, selected, onSelect }: AgentInvokeAgentPickerProps) {
 	const disabled = agents.length === 0;
@@ -24,7 +25,7 @@ export function AgentInvokeAgentPicker({ agents, selected, onSelect }: AgentInvo
 					disabled={disabled}
 					aria-label={t("agentInvoke.selectAgent")}
 					title={t("agentInvoke.selectAgent")}
-					className="inline-flex h-7 max-w-[220px] min-w-0 shrink-0 items-center gap-1.5 rounded-md border border-border-subtle bg-transparent px-2 text-xs text-foreground transition-colors hover:bg-accent-soft disabled:pointer-events-none disabled:opacity-50"
+					className="inline-flex h-6 max-w-[150px] min-w-0 items-center gap-1 rounded-md border border-border-subtle bg-transparent px-1.5 text-xs text-foreground transition-colors hover:bg-accent-soft disabled:pointer-events-none disabled:opacity-50"
 				>
 					{selected?.icon ? (
 						<span className="text-sm leading-none" aria-hidden="true">

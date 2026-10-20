@@ -9,6 +9,7 @@
  *   对话正文仍只显示用户原文（agentMessage 对 pi 整体替换 message，对 UI 不可见）。
  */
 
+import type { AgentBackend } from "./agent";
 import type { EnhanceErrorKind } from "./enhance";
 
 /** 市场分类：只影响列表筛选与卡片分组，不参与任何运行时行为。 */
@@ -27,6 +28,16 @@ export const AGENT_TRANSLATE_TARGETS: readonly AgentTranslateTarget[] = ["auto",
 
 export type AgentModelRef = { provider: string; modelId: string };
 
+/**
+ * 智能体可指定的会话后端（「使用」新建会话时的后端）。
+ * 一次性划词调用始终走 pi 模型目录（侧车是 pi ModelRuntime，DSH 模型是 host route），
+ * 因此这里只开放两个对话后端；imagegen/videogen 没有提示词 agent 语义，acp 需要用户点选外部 CLI。
+ */
+export type AgentProfileBackend = Extract<AgentBackend, "pi" | "dsh">;
+
+/** 编辑器里可选的智能体后端（顺序即展示顺序；缺省 = 跟随设置里的默认后端）。 */
+export const AGENT_PROFILE_BACKENDS: readonly AgentProfileBackend[] = ["pi", "dsh"];
+
 export type AgentProfile = {
 	id: string;
 	name: string;
@@ -38,6 +49,8 @@ export type AgentProfile = {
 	systemPrompt: string;
 	/** 首选模型；缺省 = 跟随当前会话 / 设置链（与提示词增强同一优先级，见 shared/enhanceModelPreference）。 */
 	model?: AgentModelRef;
+	/** 「使用」新建会话时的 agent 后端；缺省 = 跟随设置里的默认后端。 */
+	backend?: AgentProfileBackend;
 	category: AgentProfileCategory;
 	/** 内置智能体：不可删除，可编辑、可恢复内置原文。 */
 	builtin?: boolean;
@@ -59,13 +72,24 @@ export const AGENT_PROFILE_SYSTEM_PROMPT_MAX_CHARS = 16_000;
 export const AGENT_INVOKE_TEXT_MAX_CHARS = 16_000;
 export const AGENT_INVOKE_INSTRUCTION_MAX_CHARS = 500;
 
-/** 市场全局设置：划词工具的开关与默认智能体（存 agent-profiles.json，与智能体同一次写入）。 */
+/** 市场全局设置：划词工具开关、默认智能体与会话绑定（存 agent-profiles.json，与智能体同一次写入）。 */
 export type AgentMarketSettings = {
-	/** 关闭后渲染层不再监听划选、也不显示浮出按钮。 */
+	/** 应用内划词：关闭后渲染层不再监听划选、也不显示浮出按钮。 */
 	selectionToolEnabled: boolean;
+	/** 系统级划词（全局快捷键 + 独立浮窗）：默认开，受快捷键冲突/平台能力影响时可关。 */
+	systemSelectionEnabled: boolean;
 	/** 划词工具默认智能体；null / 指向已删除的智能体时回退内置翻译智能体。 */
 	selectionToolAgentId: string | null;
+	/**
+	 * 会话 → 智能体绑定（sessionId → agentId）。
+	 * 「使用」智能体时写入；绑定的会话每次发送都会由主进程把角色设定拼进
+	 * SendPromptInput.agentMessage（对 UI 隐藏），因此对话时间线只显示用户输入。
+	 */
+	sessionAgentBindings: Record<string, string>;
 };
+
+/** agentProfiles:bind-session 入参：agentId=null 表示解除绑定。 */
+export type BindAgentSessionInput = { sessionId: string; agentId: string | null };
 
 export type AgentProfileSnapshot = {
 	revision: number;
@@ -80,10 +104,12 @@ export type CreateAgentProfileInput = {
 	systemPrompt: string;
 	category?: AgentProfileCategory;
 	model?: AgentModelRef;
+	backend?: AgentProfileBackend;
 };
 
 export type UpdateAgentProfileInput = Partial<CreateAgentProfileInput>;
-export type UpdateAgentMarketSettingsInput = Partial<AgentMarketSettings>;
+/** 设置 patch：会话绑定只能经 bindSession 改（避免一次 settings 保存误覆盖全部绑定）。 */
+export type UpdateAgentMarketSettingsInput = Partial<Omit<AgentMarketSettings, "sessionAgentBindings">>;
 export type AgentChangedEvent = { revision: number };
 
 /**

@@ -125,6 +125,10 @@ export const DOMAIN_CATALOG = [
 		channelPrefix: ["agent-profiles"],
 		aggregation: "aggregate",
 	},
+	// 裁决：系统级划词浮窗（SelectionToolWindow + SelectionToolService）。独立 BrowserWindow
+	// 复用主 preload（同一份 desktopApi），凭据/模型调用都走 agent-profiles:invoke 既有红线通道；
+	// 本行只认领浮窗自身的状态/隐藏/回填通道，不做任何聚合扩展。
+	{ id: "selection-tool", group: "integration", manager: "SelectionToolService + SelectionToolWindow（全局快捷键 + 系统级划词浮窗）", ipcFile: ["ipc/selectionToolIpc.ts"], preloadNamespaces: ["selectionTool"], channelPrefix: ["selection-tool"], aggregation: "aggregate" },
 	{ id: "channel-switch", group: "integration", manager: "ChannelSwitchService + UpdateService（更新通道切换）", ipcFile: ["ipc/channelSwitchIpc.ts"], preloadNamespaces: ["channelSwitch"], channelPrefix: ["channel-switch"], aggregation: "aggregate" },
 	{ id: "cua", group: "integration", manager: "CuaEngine + CuaGate + McpHttpHost + CuaService", ipcFile: ["ipc/cuaIpc.ts"], preloadNamespaces: ["cua"], channelPrefix: ["cua"], aggregation: "aggregate" },
 	{ id: "usage-stats", group: "integration", manager: "用量统计", ipcFile: ["ipc/usageStatsIpc.ts"], preloadNamespaces: ["usageStats"], channelPrefix: ["usage-stats"], aggregation: "aggregate" },

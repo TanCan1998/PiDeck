@@ -11,6 +11,8 @@ interface AgentMarketGridProps {
 	totalCount: number;
 	selectionDefaultId: string | null;
 	selectedAgentId: string | null;
+	/** 「使用」创建会话中的智能体 id：卡片按钮显示 loading 并忽略重复点击。 */
+	usePendingId: string | null;
 	onOpen: (agent: AgentProfile) => void;
 	onUse: (agent: AgentProfile) => void;
 	onEdit: (agent: AgentProfile) => void;
@@ -20,10 +22,10 @@ interface AgentMarketGridProps {
 
 /**
  * 响应式卡片网格 + 两种空态。
- * 列宽用 auto-fill/minmax：市场弹框宽度被 Dialog 限制在 960，详情面板展开后
- * 网格区会自动从 3 列降到 2 列，不需要为「详情是否展开」写第二套断点。
+ * 列宽用 auto-fill/minmax：市场现在是随会话列伸缩的页面（不再被 Dialog 限宽 960），
+ * 详情面板展开后网格自动减少列数，不需要为「详情是否展开」写第二套断点。
  */
-export function AgentMarketGrid({ agents, totalCount, selectionDefaultId, selectedAgentId, onOpen, onUse, onEdit, onRequestDelete, onCreate }: AgentMarketGridProps) {
+export function AgentMarketGrid({ agents, totalCount, selectionDefaultId, selectedAgentId, usePendingId, onOpen, onUse, onEdit, onRequestDelete, onCreate }: AgentMarketGridProps) {
 	if (agents.length === 0) {
 		if (totalCount === 0) {
 			return (
@@ -51,7 +53,7 @@ export function AgentMarketGrid({ agents, totalCount, selectionDefaultId, select
 	return (
 		<div className="grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-3">
 			{agents.map((agent) => (
-				<AgentMarketCard key={agent.id} agent={agent} selectionDefault={selectionDefaultId === agent.id} active={selectedAgentId === agent.id} onOpen={onOpen} onUse={onUse} onEdit={onEdit} onRequestDelete={onRequestDelete} />
+				<AgentMarketCard key={agent.id} agent={agent} selectionDefault={selectionDefaultId === agent.id} active={selectedAgentId === agent.id} usePending={usePendingId === agent.id} onOpen={onOpen} onUse={onUse} onEdit={onEdit} onRequestDelete={onRequestDelete} />
 			))}
 		</div>
 	);

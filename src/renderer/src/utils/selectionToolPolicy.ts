@@ -117,6 +117,46 @@ export function clampFloatingPosition(input: {
 	};
 }
 
+/**
+ * 应用内「原地工具栏」的宽度（浏览器划词扩展的惯用宽度 ~400px）：
+ * 头部一行要同时放下 智能体下拉 / 翻译-问答切换 / 目标语言 / 复制 / 发送 / 关闭，
+ * 再窄就会把动作挤成两行或截断智能体名。
+ */
+export const SELECTION_INLINE_WIDTH = 400;
+
+/** 视口过窄时的下限：工具栏宁可贴满视口（减两侧留白），也不横向溢出到屏幕外。 */
+export const SELECTION_INLINE_MIN_WIDTH = 300;
+
+/** 工具栏与视口边缘的最小留白（与 clampFloatingPosition 的 margin 同档）。 */
+export const SELECTION_INLINE_MARGIN = 8;
+
+/**
+ * 原地工具栏宽度（纯函数）：默认 400px，随视口收窄到可用宽度；
+ * 视口比下限还窄时返回可用宽度（可能为 0），调用方由 clampFloatingPosition 兜住定位。
+ */
+export function resolveSelectionInlineWidth(viewportWidth: number): number {
+	const available = Math.max(0, viewportWidth - SELECTION_INLINE_MARGIN * 2);
+	const floor = Math.min(SELECTION_INLINE_MIN_WIDTH, available);
+	return Math.max(floor, Math.min(SELECTION_INLINE_WIDTH, available));
+}
+
+/** 时间线「引用并提问」浮层的矩形形态（top/left/width/height，无 right/bottom）。 */
+export type SelectionInlineRect = { top: number; left: number; width: number; height: number };
+
+/**
+ * 浮层矩形 → fixed 定位锚点：引用浮层只记宽高，工具栏定位需要四边（right/bottom 由宽高换算）。
+ * 同一套换算只写在这里，避免调用点各写一份加减法。
+ */
+export function toSelectionAnchorRect(rect: SelectionInlineRect): SelectionAnchorRect {
+	return { left: rect.left, top: rect.top, right: rect.left + rect.width, bottom: rect.top + rect.height };
+}
+
+/** 「翻译 / 问答」切换的标签 key：phase-2 原地工具栏使用 selectionTool.translate / ask（与系统浮窗同文案）。 */
+export const SELECTION_INLINE_ACTION_LABEL_KEYS: Record<AgentInvokeAction, TranslationKey> = {
+	translate: "selectionTool.translate",
+	chat: "selectionTool.ask",
+};
+
 /** 目标语言 → i18n key 映射（面板 chips 与翻译指令共用一份，避免两处各写一份顺序/键名）。 */
 export const AGENT_TRANSLATE_TARGET_LABEL_KEYS: Record<AgentTranslateTarget, TranslationKey> = {
 	auto: "agentInvoke.target.auto",

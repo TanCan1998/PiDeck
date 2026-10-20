@@ -155,6 +155,11 @@ function parseMcpScopeRequest(value: unknown): McpScopeRequest {
 }
 
 export type SystemIpcDeps = {
+	/**
+	 * 设置保存后的主进程级副作用钩子（系统级划词全局快捷键等需要随设置即时重注册的能力）。
+	 * 与 refreshShortcutBindings 同一时机：保存即生效，无需重启。
+	 */
+	afterSettingsUpdate?: (settings: AppSettings) => void;
 	piLocator: PiLocator;
 	settingsStore: SettingsStore;
 	configManager: ConfigManager;
@@ -1667,6 +1672,8 @@ export function registerSystemIpc(deps: SystemIpcDeps): void {
 		if ("shortcuts" in patch) {
 			refreshShortcutBindings(settings);
 		}
+		// 主进程级副作用钩子：系统级划词快捷键等需要按新设置重注册（见 index.ts 装配）。
+		deps.afterSettingsUpdate?.(settings);
 		// Git 可执行文件路径：立即同步给 git 子进程解析器，保存后无需重启即生效。
 		if ("gitExecutablePath" in patch) {
 			setConfiguredGitPath(settings.gitExecutablePath);

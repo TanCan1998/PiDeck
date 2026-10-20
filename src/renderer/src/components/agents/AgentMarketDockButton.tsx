@@ -1,17 +1,17 @@
 import { useSetAtom } from "jotai";
 import { Bot } from "lucide-react";
-import { openAgentMarketModalAtom } from "../../atoms/agent-atoms";
+import { openAgentMarketPageAtom } from "../../atoms/agent-atoms";
 import { t } from "../../i18n";
 
 /**
  * 侧栏顶部动作区的智能体市场入口（定时任务下方，与 AutomationDockButton 同款行）。
- * 点击打开智能体市场弹框；行内不放徽标——市场没有「正在运行」这类需要行尾提示的状态。
+ * 点击进入市场页面（非模态覆盖会话列，侧栏保持可交互）；行内不放徽标——市场没有「正在运行」这类需要行尾提示的状态。
  */
 export function AgentMarketDockButton() {
-	const openAgentMarketModal = useSetAtom(openAgentMarketModalAtom);
+	const openAgentMarketPage = useSetAtom(openAgentMarketPageAtom);
 
 	return (
-		<button type="button" className="group flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-body text-foreground transition-colors hover:bg-muted/60" aria-label={t("agentMarket.title")} title={t("agentMarket.title")} onClick={() => openAgentMarketModal()}>
+		<button type="button" className="group flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-body text-foreground transition-colors hover:bg-muted/60" aria-label={t("agentMarket.title")} title={t("agentMarket.title")} onClick={() => openAgentMarketPage()}>
 			<Bot className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
 			<span className="min-w-0 flex-1 truncate font-medium">{t("agentMarket.title")}</span>
 		</button>

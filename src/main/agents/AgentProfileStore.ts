@@ -1,8 +1,23 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { AgentChangedEvent, AgentMarketSettings, AgentProfile, AgentProfileSnapshot, CreateAgentProfileInput, UpdateAgentMarketSettingsInput } from "../../shared/types";
-import { applyAgentProfilePatch, createEmptyState, normalizeCreateInput, normalizePersistedState, normalizeSettings, resolveSelectionAgent, seedMissingBuiltins, uniqueCopyName, type AgentProfilePatch, type PersistedAgentProfileState } from "./agentProfileNormalize";
+import type { AgentChangedEvent, AgentMarketSettings, AgentProfile, AgentProfileSnapshot, BindAgentSessionInput, CreateAgentProfileInput, UpdateAgentMarketSettingsInput } from "../../shared/types";
+import {
+	applyAgentProfilePatch,
+	createEmptyState,
+	MAX_SESSION_AGENT_BINDINGS,
+	normalizeBindingId,
+	normalizeCreateInput,
+	normalizePersistedState,
+	normalizeSettings,
+	resolveSelectionAgent,
+	resolveSessionBindings,
+	sanitizeSettingsPatch,
+	seedMissingBuiltins,
+	uniqueCopyName,
+	type AgentProfilePatch,
+	type PersistedAgentProfileState,
+} from "./agentProfileNormalize";
 import { createBuiltinAgentProfile, getBuiltinSeed } from "./builtinAgents";
 
 export type { AgentProfilePatch } from "./agentProfileNormalize";
@@ -44,9 +59,10 @@ export class AgentProfileStore {
 			this.state.agents = seeded;
 			shouldRepair = true;
 		}
-		// 默认智能体可能指向已被删除的 id；补种之后再校验，避免刚种回的内置智能体被误清空。
-		const settings = resolveSelectionAgent(this.state.settings, this.state.agents);
-		if (settings.selectionToolAgentId !== this.state.settings.selectionToolAgentId) {
+		// 默认智能体与会话绑定都可能指向已被删除的 id；补种之后再校验，避免刚种回的内置智能体被误清空。
+		const settings = resolveSessionBindings(resolveSelectionAgent(this.state.settings, this.state.agents), this.state.agents);
+		const settingsChanged = settings.selectionToolAgentId !== this.state.settings.selectionToolAgentId || JSON.stringify(settings.sessionAgentBindings) !== JSON.stringify(this.state.settings.sessionAgentBindings);
+		if (settingsChanged) {
 			this.state.settings = settings;
 			shouldRepair = true;
 		}
@@ -108,8 +124,12 @@ export class AgentProfileStore {
 		if (this.state.agents[index].builtin === true) return false;
 		await this.mutate(() => {
 			this.state.agents = this.state.agents.filter((candidate) => candidate.id !== id);
-			// 删除后默认划词智能体可能悬空：同一次写入里清掉，避免渲染层拿到死链。
-			if (this.state.settings.selectionToolAgentId === id) this.state.settings = { ...this.state.settings, selectionToolAgentId: null };
+			// 删除后默认划词智能体与会话绑定都可能悬空：同一次写入里清掉，避免渲染层拿到死链、
+			// 已绑定的会话每次发送都解析不到角色设定而静默退化。
+			const bindings = pruneAgentBindings(this.state.settings.sessionAgentBindings, id);
+			if (this.state.settings.selectionToolAgentId === id || bindings !== this.state.settings.sessionAgentBindings) {
+				this.state.settings = { ...this.state.settings, selectionToolAgentId: this.state.settings.selectionToolAgentId === id ? null : this.state.settings.selectionToolAgentId, sessionAgentBindings: bindings };
+			}
 		});
 		return true;
 	}
@@ -146,6 +166,7 @@ export class AgentProfileStore {
 			systemPrompt: source.systemPrompt,
 			category: source.category,
 			...(source.model ? { model: { ...source.model } } : {}),
+			...(source.backend ? { backend: source.backend } : {}),
 			createdAt: now,
 			updatedAt: now,
 			usageCount: 0,
@@ -157,11 +178,55 @@ export class AgentProfileStore {
 	}
 
 	async updateSettings(patch: UpdateAgentMarketSettingsInput): Promise<AgentMarketSettings> {
-		const settings = normalizeSettings({ ...this.state.settings, ...patch }, this.state.agents);
+		// 会话绑定只能经 bindSession 改：patch 先收敛到可写字段，绑定表沿用内存态，
+		// 否则一次设置保存（渲染层拿着旧快照）会把全部绑定覆盖成旧值。
+		const settings = normalizeSettings({ ...this.state.settings, ...sanitizeSettingsPatch(patch), sessionAgentBindings: this.state.settings.sessionAgentBindings }, this.state.agents);
 		await this.mutate(() => {
 			this.state.settings = settings;
 		});
 		return cloneSerializable(settings);
+	}
+
+	/**
+	 * 绑定/解绑会话与智能体（「使用」智能体时写入；agentId=null 解绑）。
+	 * - 非 null 的 agentId 必须存在：不存在的绑定会让会话发送时静默丢角色设定，宁可抛错让 UI 提示；
+	 * - 同一次写入里顺带清掉悬空绑定（手工改文件/旧版本残留），与 load 的 resolveSessionBindings 同语义；
+	 * - 绑定数达到 MAX_SESSION_AGENT_BINDINGS 后拒绝「新」绑定（更新已有绑定、解绑不受限），
+	 *   保证设置文件与 IPC 快照有界；
+	 * - 返回完整 AgentMarketSettings（渲染层直接替换 atom，不必再拉一次快照）。
+	 */
+	async bindSession(input: BindAgentSessionInput): Promise<AgentMarketSettings> {
+		const sessionId = normalizeBindingId(input.sessionId);
+		if (!sessionId) throw new Error("Invalid session id");
+		const agentId = input.agentId === null ? null : normalizeBindingId(input.agentId);
+		if (agentId === undefined) throw new Error("Invalid agent id");
+		if (agentId !== null && !this.state.agents.some((agent) => agent.id === agentId)) throw new Error(`Agent not found: ${agentId}`);
+		const bindings = { ...this.state.settings.sessionAgentBindings };
+		const known = new Set(this.state.agents.map((agent) => agent.id));
+		for (const [boundSessionId, boundAgentId] of Object.entries(bindings)) {
+			if (!known.has(boundAgentId)) delete bindings[boundSessionId];
+		}
+		if (agentId === null) {
+			delete bindings[sessionId];
+		} else {
+			if (!Object.hasOwn(bindings, sessionId) && Object.keys(bindings).length >= MAX_SESSION_AGENT_BINDINGS) {
+				throw new Error(`Session binding limit reached: ${MAX_SESSION_AGENT_BINDINGS}`);
+			}
+			bindings[sessionId] = agentId;
+		}
+		await this.mutate(() => {
+			this.state.settings = { ...this.state.settings, sessionAgentBindings: bindings };
+		});
+		return cloneSerializable(this.state.settings);
+	}
+
+	/**
+	 * 会话绑定的智能体（发送时注入角色设定用）：未绑定或悬空返回 undefined。
+	 * 返回深拷贝，调用方改字段不会污染内存态；找不到绑定不会写盘/推进 revision。
+	 */
+	getBoundAgent(sessionId: string): AgentProfile | undefined {
+		const agentId = this.state.settings.sessionAgentBindings[sessionId];
+		return agentId ? this.get(agentId) : undefined;
 	}
 
 	/**
@@ -202,6 +267,16 @@ export class AgentProfileStore {
 		const event: AgentChangedEvent = { revision: this.state.revision };
 		for (const listener of this.listeners) listener(event);
 	}
+}
+
+/**
+ * 删除智能体后剪掉指向它的会话绑定；无变化时返回原对象，
+ * 调用方据此判断「设置是否真的需要替换」（load 的修复判定同语义）。
+ */
+function pruneAgentBindings(bindings: Record<string, string>, agentId: string): Record<string, string> {
+	const entries = Object.entries(bindings).filter(([, boundAgentId]) => boundAgentId !== agentId);
+	if (entries.length === Object.keys(bindings).length) return bindings;
+	return Object.fromEntries(entries);
 }
 
 /** 深拷贝返回值：IPC 快照与渲染层共享结构，调用方改字段不会污染内存态。 */

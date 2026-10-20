@@ -89,7 +89,9 @@ test("selection quote: cross-paragraph selection keeps the toolbar and quotes th
 	expect(await selectedText(window), "回归组必须是真正的跨段落选区").toMatch(/.+\n+.+/s);
 	await expectToolbarSurvives(window, toolbar);
 
-	await toolbar.click();
+	// 浮层现在是「引用并提问 | 翻译」双动作胶囊：点容器中心可能落在按钮边界上，
+	// 直接命中引用按钮（data-quote-action）保证确定性。
+	await window.locator('[data-quote-action="quote"]').click();
 	const quoteChip = window.locator(".composer .input-chip--quote");
 	await expect(quoteChip).toHaveCount(1, { timeout: 5_000 });
 

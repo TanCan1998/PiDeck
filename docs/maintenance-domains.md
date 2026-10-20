@@ -143,15 +143,20 @@
 - `pideck-img://` 是自定义协议（`main/imagegen/ImageGenImageProtocol.ts`）：`registerSchemesAsPrivileged` 在 ready 前声明、`protocol.handle` 在 ready 后注册，`img-src` 已在 `src/renderer/index.html` 的 CSP 里放行。内容寻址 ⇒ ref 与内容一一对应，可长缓存。**别把 ref 回读成 base64 塞回消息对象**，那等于把 200 MB 字符串搬回渲染进程堆。
 - 孤儿 blob 回收（`pruneOrphanBlobs`）带 1 小时宽限期（`put` 落盘与引用写进 JSONL 之间有窗口），且**扫描失败整体放弃**（fail-closed：宁可留垃圾也不删掉读不到会话所引用的图）。
 
-## 智能体市场与划词工具（userData/agent-profiles.json + 一次性补全侧车）
+## 智能体市场与划词工具（agent-profiles.json + 一次性补全侧车 + 系统级划词浮窗）
 
-- 智能体是 PiDeck 层的「提示词预设」，不是 pi 的东西：名称 / 简介 / emoji 图标 / 分类 / 角色设定（systemPrompt）/ 可选模型，全部落 `<userData>/agent-profiles.json`（`{version,revision,settings,agents}`，`AgentProfileStore` 串行写 + 读盘归一化）。**内置智能体只在 id 缺失时补种，绝不覆盖用户编辑**；新增内置智能体只改 `src/main/agents/builtinAgents.ts` 的 `BUILTIN_AGENT_SEEDS`（id 一旦发布不可改；内置删除返回 false，可编辑、可用 `resetBuiltin` 恢复出厂内容）。
-- **清空可选模型**的约定与自动化任务一致：更新传 `model: null` 或成对空串 `{provider:"",modelId:""}`，归一化层丢字段（= 跟随会话模型）；半填/超长/控制字符的 ref 一律丢弃，绝不落半截值。
-- 一次性调用（划词翻译 / 市场「使用」）：`agent-profiles:invoke` → `AgentInvokeService` → 注入的**独立** `EnhancePromptService` → `resources/pi-enhance-host.mjs`（AGENTS.md 例外四）。边界：**systemPrompt 只能由主进程按 agentId 从 store 解析**，渲染层只传 agentId / 短 instruction / 目标语言 / provider+modelId；事件按 runId 配对（started|delta|done|aborted|error 恰好一次）；单飞语义（新 run 打断旧 run）意味着**不能与输入框增强共用实例**，否则划词会打断增强。
-- 智能体模型优先级复用 `shared/enhanceModelPreference.ts` 的解析链（agent.model > 会话记录 > 设置 enhanceModel > 引导页偏好），渲染层解析后显式传 `model`，主进程只校验形态。
-- 「发送到会话」是渲染层链路：`sessions.createDraft`（标题 = 智能体名，仅 pi 后端带 agent.model）+ `sessions.sendPrompt`；角色设定走 `agentMessage` 隐藏通道（pi 侧整体替换 message，时间线只显示用户原文），DSH 显式拒绝 agentMessage 且会拒收整条 prompt → 退化为可见前缀（与飞书/微信桥接同一条降级策略）；ACP 有同名通道可照常隐藏。PiDeck 不写 pi 的系统提示。
-- 划词工具：document 级 mouseup/keyup 捕获选区快照；**浮钮 mousedown 必须 preventDefault**，否则按下瞬间浏览器清掉选区；跳过 `INPUT/TEXTAREA/SELECT/contenteditable` 与 `[data-selection-tool-ui]` 子树；`settings.selectionToolEnabled=false` 时不挂任何监听。默认智能体 `settings.selectionToolAgentId` 指向已删除 id 时由主进程归一化清空、渲染层回退内置翻译官（`builtin-translate`）。
-- i18n：文案键分 `agentMarket.*` / `agentInvoke.*` / `selectionTool.*` 三组，zh-CN + en-US 同步、改完跑 `node scripts/genZhTwCopy.mjs`（生成物禁止手改）。
+- 智能体是 PiDeck 层的「提示词预设」，不是 pi 的东西：名称 / 简介 / emoji 图标 / 分类 / 角色设定（systemPrompt）/ 可选模型 / **会话后端（backend: pi|dsh）**，全部落 `<userData>/agent-profiles.json`（`{version,revision,settings,agents}`，`AgentProfileStore` 串行写 + 读盘归一化）。**内置智能体只在 id 缺失时补种，绝不覆盖用户编辑**；新增内置智能体只改 `src/main/agents/builtinAgents.ts` 的 `BUILTIN_AGENT_SEEDS`（id 一旦发布不可改；内置删除返回 false，可编辑、可用 `resetBuiltin` 恢复出厂内容）。
+- **清空可选模型**的约定与自动化任务一致：更新传 `model: null` 或成对空串 `{provider:"",modelId:""}`，归一化层丢字段（= 跟随会话模型）；半填/超长/控制字符的 ref 一律丢弃，绝不落半截值。**清空 backend** 同理：update patch 自带 `backend` 键且值为 `undefined/null` = 跟随设置默认（`Object.hasOwn` 判定，不能靠缺键）。
+- 市场是**页面覆盖层不是弹窗**：`AgentMarketPage` 挂在会话列（`absolute inset-0 z-30`，与 `HostPluginPageOverlay` 同约定），由 `agentMarketPageOpenAtom` 驱动；侧栏入口只切 atom，关闭/Esc/切会话即还原会话视图。**划词设置全部在「设置 → 通用」的 `SelectionToolSettingsSection`**（应用内开关 / 系统级开关 / 默认智能体 / 只读快捷键提示）；市场里不再有设置页。
+- 一次性调用（划词翻译 / 系统浮窗）：`agent-profiles:invoke` → `AgentInvokeService` → 注入的**独立** `EnhancePromptService` → `resources/pi-enhance-host.mjs`（AGENTS.md 例外四）。边界：**systemPrompt 只能由主进程按 agentId 从 store 解析**，渲染层只传 agentId / 短 instruction / 目标语言 / provider+modelId；事件按 runId 配对（started|delta|done|aborted|error 恰好一次）；单飞语义（新 run 打断旧 run）意味着**不能与输入框增强共用实例**，否则划词会打断增强。
+- 智能体模型优先级复用 `shared/enhanceModelPreference.ts` 的解析链（agent.model > 会话记录 > 设置 enhanceModel > 引导页偏好）；系统浮窗没有会话上下文，最后兜底 `sessions.resolveLaunchDefaults()` 的默认模型。
+- **「使用」= 会话页面复用 + 隐藏提示词**：市场「使用」→ `sessions.createDraft`（标题=智能体名，backend=agent.backend ?? 设置默认，仅 pi 带 agent.model）→ `agent-profiles:bind-session` 写 `settings.sessionAgentBindings` → 打开会话。绑定的会话每次发送，`sessionIpc` 用 `composeAgentInstruction` 把角色设定拼进 `SendPromptInput.agentMessage`（pi/acp 隐藏，时间线只显示用户输入；DSH 显式拒绝 agentMessage 且会拒收整条 prompt → 退化为可见前缀）。绑定表只能经 bind-session 改（`updateSettings` 的 patch 含 bindings 会被 IPC 拒绝）；上限 2000 条，删除智能体会同一次写入里清掉指向它的绑定，悬空/坏键在读盘时修复。PiDeck 不写 pi 的系统提示。
+- **应用内划词**：document 级 mouseup/keyup 捕获选区快照；**浮钮 mousedown 必须 preventDefault**，否则按下瞬间浏览器清掉选区；跳过 `INPUT/TEXTAREA/SELECT/contenteditable` 与 `[data-selection-tool-ui]` 子树。结果**在划词工具栏里内联输出**（紧凑工具栏 ~400px，打开即自动翻译，无「开始」按钮），不是弹窗。默认智能体 `settings.selectionToolAgentId` 悬空时主进程归一化清空、渲染层回退内置翻译官（`builtin-translate`）。
+- **与时间线「引用并提问」浮层共存**：会话消息里划选时，时间线自带的胶囊浮层渲染两个动作（`data-quote-action="quote"` / `"translate"`）；它可见期间（`quoteToolbarVisibleAtom`）全局划词浮钮不再出现，翻译动作写 `openSelectionInlineAtom({text, rect})` 由 `SelectionToolHost` 打开内联工具栏——同一时刻只有一个浮层。e2e 点击必须命中 `[data-quote-action="quote"]` 而不是容器中心。
+- **系统级划词**（其他应用也能用）：`shared/shortcuts.ts` 的 `openSelectionTool`（默认 Ctrl/Cmd+Shift+X）是**全应用唯一 `globalShortcut` 注册**；主进程 `syncSelectionToolShortcut()` 在启动、设置保存（`systemIpc` 的 afterSettingsUpdate）、市场设置变更（store changed）时同步——关开关立即注销、改键先释放旧键。取词 `src/main/selection/systemSelectionReader.ts`：保存剪贴板 → 写唯一哨兵 → 平台模拟复制（win32 走 CUA 的 SendInput，macOS osascript，Linux X11 xdotool；Wayland 无 xdotool → unsupported）→ 轮询剪贴板直到变化 → 恢复原剪贴板；失败返回 structured reason 绝不抛。浮窗 `SelectionToolWindow`（440x280 无边框透明置顶、独立 `selection-tool.html` 入口、复用主 preload）在光标附近弹出，等待加载完成再推 `selection-tool:captured`；失焦即藏。浮窗的「发送到 PiDeck」经 `selection-tool:insert-to-main` 把文本插入主窗口当前会话输入框（`selection-tool:inserted`）。
+- i18n：文案键分 `agentMarket.*` / `agentInvoke.*` / `selectionTool.*` / `settings.selectionTool.*` 四组，zh-CN + en-US 同步、改完跑 `node scripts/genZhTwCopy.mjs`（生成物禁止手改）。
+
+
 
 ## 会话 Markdown 渲染管线（MarkdownStream / streamdown 唯一引擎）
 
