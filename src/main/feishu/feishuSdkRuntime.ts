@@ -23,6 +23,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { gunzipSync } from "node:zlib";
 import { readTarFiles } from "../fs/tarRead";
 
@@ -99,6 +100,31 @@ async function writeEntries(root: string, entries: ReturnType<typeof readTarFile
 	await Promise.all(Array.from({ length: Math.min(EXTRACT_CONCURRENCY, entries.length) }, worker));
 }
 
+/** Windows 文件锁抖动：删除/换入失败按 100ms 退避重试三次。 */
+async function removeDirWithRetry(dir: string): Promise<void> {
+	for (let attempt = 0; ; attempt += 1) {
+		try {
+			await rm(dir, { recursive: true, force: true });
+			return;
+		} catch (error) {
+			if (attempt >= 2) throw error;
+			await delay(100 * (attempt + 1));
+		}
+	}
+}
+
+async function renameWithRetry(from: string, to: string): Promise<void> {
+	for (let attempt = 0; ; attempt += 1) {
+		try {
+			await rename(from, to);
+			return;
+		} catch (error) {
+			if (attempt >= 2) throw error;
+			await delay(100 * (attempt + 1));
+		}
+	}
+}
+
 /** 解压并原子换入缓存目录；返回 SDK 根路径。 */
 async function extractToCache(cacheDir: string, archiveBytes: Buffer): Promise<void> {
 	const tar = gunzipSync(archiveBytes, { maxOutputLength: MAX_EXPANDED_BYTES });
@@ -110,9 +136,11 @@ async function extractToCache(cacheDir: string, archiveBytes: Buffer): Promise<v
 		await mkdir(tempDir, { recursive: true });
 		await writeEntries(tempDir, entries);
 		// Windows 上 rename 到已存在的目录会失败：先删旧缓存（可能是半套/旧版本）。
-		await rm(cacheDir, { recursive: true, force: true });
+		// 杀毒/索引器常会短暂锁住刚写完的目录，删除与换入都按 100ms 退避重试三次——
+		// 否则首次启用飞书会偶发 extract-failed（用户只能靠重启碰运气）。
+		await removeDirWithRetry(cacheDir);
 		await mkdir(dirname(cacheDir), { recursive: true });
-		await rename(tempDir, cacheDir);
+		await renameWithRetry(tempDir, cacheDir);
 	} catch (error) {
 		await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
 		throw error;
