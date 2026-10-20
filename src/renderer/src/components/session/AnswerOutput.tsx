@@ -1,6 +1,7 @@
-import { memo } from "react";
+import { memo, useRef } from "react";
 import { useAtomValue } from "jotai";
 import { streamingTextBySessionIdAtomFamily } from "../../atoms/session-atoms";
+import { useHoldTextWhileSelecting } from "../../hooks/useHoldTextWhileSelecting";
 import { MarkdownStream } from "./MarkdownStream";
 import { RawToolCallFallback } from "./RawToolCallFallback";
 import { cleanAnswerText } from "./timeline/answerText.ts";
@@ -77,10 +78,16 @@ const LiveAnswerBody = memo(function LiveAnswerBody(props: { sessionId: string; 
 	const streaming = useAtomValue(streamingTextBySessionIdAtomFamily(props.sessionId));
 	const sourceText = streaming?.content ?? "";
 	const text = cleanAnswerText(sourceText);
+	// 划选期间冻结正文渲染：指针按下到松开之间只要来一个新 chunk，文本节点就会重挂，
+	// 浏览器会把正在拖选的 Selection 当场收掉（快照都来不及拍）。冻结只影响渲染用文本，
+	// streaming atom 照常接收；松手后立刻换回最新文本，打字机自己追平。
+	// 详见 useHoldTextWhileSelecting 头注释（这是刻意的产品行为：指针下的文字不能动）。
+	const liveRef = useRef<HTMLDivElement | null>(null);
+	const displayText = useHoldTextWhileSelecting(text, liveRef);
 	return (
-		<div className={answerOutputClassName("answer")} data-live-answer="true" data-is-streaming={props.isStreaming ? "1" : "0"} data-variant="answer" style={{ display: props.hidden ? "none" : undefined }}>
+		<div ref={liveRef} className={answerOutputClassName("answer")} data-live-answer="true" data-is-streaming={props.isStreaming ? "1" : "0"} data-variant="answer" style={{ display: props.hidden ? "none" : undefined }}>
 			{/* 兜底判定要求闭标记已到（见 detectLeakedToolCallXml）：流式半截 XML 仍走 markdown，落定后切换。 */}
-			{detectLeakedToolCallXml(text) ? <RawToolCallFallback text={text} /> : <MarkdownStream text={text} isStreaming={Boolean(props.isStreaming)} onOpenExternal={props.onOpenExternal} onOpenFile={props.onOpenFile} />}
+			{detectLeakedToolCallXml(displayText) ? <RawToolCallFallback text={displayText} /> : <MarkdownStream text={displayText} isStreaming={Boolean(props.isStreaming)} onOpenExternal={props.onOpenExternal} onOpenFile={props.onOpenFile} />}
 		</div>
 	);
 });

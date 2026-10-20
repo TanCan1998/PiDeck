@@ -7,6 +7,7 @@ import type { AgentBackend, ChatMessage, ImageContent } from "../../../../../sha
 import { liveTextActiveBySessionAtom, newTurnCollapseTickBySessionIdAtomFamily, runStepsVisibleMemoryBySessionIdAtomFamily, type RunStepsVisibleMemoryEntry } from "../../../atoms/session-atoms";
 import { turnFlowSettingsAtom } from "../../../atoms/app-ui-atoms";
 import { t } from "../../../i18n";
+import { useStreamSelectionPreserve } from "../../../hooks/useStreamSelectionPreserve";
 import { Button } from "../../ui-shadcn/button";
 import { Collapsible, CollapsibleContent } from "../../ui-shadcn/collapsible";
 import { formatDuration } from "../TimelineFormat";
@@ -95,6 +96,9 @@ export type TurnRowProps = {
 export const TurnRow = memo(function TurnRow(props: TurnRowProps) {
 	const { run } = props;
 	const rowRef = useRef<HTMLElement | null>(null);
+	// 流式期间保持划选（MarkdownStream 每帧重渲染会挤掉浏览器选区，见 hook 头注释）。
+	// 挂在本轮容器上：live 正文与 settled 正文都在 rowRef 内，流式 churn 与 settle 换树都能覆盖。
+	useStreamSelectionPreserve(rowRef);
 	const [editing, setEditing] = useState(false);
 	const [editText, setEditText] = useState("");
 	const editAreaRef = useRef<HTMLDivElement | null>(null);

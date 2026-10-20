@@ -68,6 +68,11 @@ function timelineHarness() {
 			"../../atoms/ask-echo-atoms": { askEchoBySessionIdAtomFamily: atomKey },
 			"../../utils/askUi": { injectAskEchoMessage: (items) => items },
 			"../../hooks/useTimelineSelection": { useTimelineSelection: () => ({ quote: null, clear: () => {}, toolbarRef: { current: null } }) },
+			// 消息右键菜单：时间线新增的两个 import 若不 stub 会去加载真实组件图
+			// （hook → SurfaceParts → SurfaceComponents → motion/preview-rail 的 "@/lib/ease"
+			// 以及 view → dropdown-menu 的 "@/lib/floatingWheelGuard" 都是沙箱解析不了的 alias）。
+			"../../hooks/useMessageContextMenu": { useMessageContextMenu: () => ({ state: null, handleContextMenu: () => {}, close: () => {}, copy: () => {}, selectAll: () => {} }) },
+			"./timeline/MessageContextMenu": {},
 			"../../hooks/useSessionVisionBridgeExpected": { useSessionVisionBridgeExpected: () => false },
 			"../../hooks/useSessionTimelineController": {
 				canLoadSessionTimelineMore: () => true,

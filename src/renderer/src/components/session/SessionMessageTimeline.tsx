@@ -12,7 +12,9 @@ import { getMultiSelectImageCaptureIds, groupToolMessages, reconcileRuns, type R
 import { liveThinkingIdBySessionIdAtomFamily, liveTextStreamingBySessionAtom, liveThinkingStreamingBySessionAtom, sessionMessageCacheBySessionIdAtomFamily, sessionMessageLoadStateAtom, sessionRecordByIdAtomFamily, sessionRuntimeBySessionIdAtomFamily, sessionSendStateByIdAtom } from "../../atoms";
 import { writeClipboardImage } from "../../utils/clipboard";
 import { useTimelineSelection } from "../../hooks/useTimelineSelection";
+import { useMessageContextMenu } from "../../hooks/useMessageContextMenu";
 import { SelectionToolbar } from "./timeline/SelectionToolbar";
+import { MessageContextMenu } from "./timeline/MessageContextMenu";
 import { deriveTimelineRunActivity } from "./timeline/timelineRunActivity";
 import { canLoadSessionTimelineMore, deriveSessionSurfaceRuntime, type SessionTimelineController } from "../../hooks/useSessionTimelineController";
 import { t } from "../../i18n";
@@ -171,6 +173,9 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 	const canLoadMoreMessages = canLoadSessionTimelineMore(modernSurfaceState.isStarting, activeMessages.length);
 	// 划选引用：选区落在同一条消息内时在选区上方提供「引用并提问」按钮
 	const { quote: selectionQuote, clear: clearSelectionQuote, toolbarRef: selectionToolbarRef } = useTimelineSelection(timelineRef);
+	// 消息右键菜单：复制来源（选区快照 / 命中消息 / live 正文回退）由 hook 解析，
+	// 这里只持有控制器并挂到消息列表容器上（消息、用户气泡、工具卡都在容器内）。
+	const messageContextMenu = useMessageContextMenu({ messages: activeMessages, scopeKey: sessionId });
 	const activeRuntimeState = runtime?.state;
 	const activeConversationStatus = modernSurfaceState.status;
 	// 只订 live id：思考正文由 ThinkingStep 叶子订阅，避免 50ms 戳醒整条 timeline。
@@ -865,7 +870,7 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
           - 学 Proma：总折叠压缩单行 DOM；另在贴底时只挂尾部 N 个 agent-run
             （见 turnRenderWindow），上滚放开。分页仍做数据窗口治理。 */}
 			{hasActiveConversation && !isConversationLoading && activeMessages.length > 0 && (
-				<div className="message-list min-w-0 w-full mx-auto transition-opacity duration-fast">
+				<div className="message-list min-w-0 w-full mx-auto transition-opacity duration-fast" onContextMenu={messageContextMenu.handleContextMenu}>
 					{displayRuns.map((item, index) => {
 						if (item.kind === "agent-run") {
 							// Only an active model turn keeps its latest run live. Context
@@ -992,6 +997,9 @@ export function SessionMessageTimeline(props: SessionMessageTimelineProps) {
 			<div aria-hidden="true" data-send-scroll-spacer="true" className="shrink-0" />
 
 			{multiSelectOpen && <MultiSelectModal renderedRuns={reconciledRuns} onClose={() => setMultiSelectOpen(false)} onCopy={copySelectedMessages} />}
+
+			{/* 消息右键菜单：portal 到 body、fixed 定位在右键坐标（见 MessageContextMenu） */}
+			<MessageContextMenu state={messageContextMenu.state} onCopy={messageContextMenu.copy} onSelectAll={messageContextMenu.selectAll} onClose={messageContextMenu.close} />
 
 			{/* 划选引用浮层：portal 到 body，fixed 定位；空会话起始页无消息不出现 */}
 			{!showSurfaceEmptyState && sessionId && <SelectionToolbar quote={selectionQuote} sessionId={sessionId} onConsume={clearSelectionQuote} toolbarRef={selectionToolbarRef} />}
