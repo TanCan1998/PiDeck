@@ -25,6 +25,9 @@ async function launchApp(userDataRoot: string): Promise<ElectronApplication> {
 	// 会话落盘走项目 cwd 的 .pi/sessions（mock 写 sessionDir），扫描不依赖全局 ~/.pi。
 	const env = {
 		...process.env,
+		// 自管双次 launch 也走 E2E 静默模式（屏幕外窗口），否则窗口会弹到用户桌面最前。
+		PIDECK_E2E: "1",
+		PIDECK_E2E_WINDOW_MODE: "quiet",
 		CI: "1",
 		...(process.platform === "win32" ? { APPDATA: userDataRoot } : process.platform === "darwin" ? { HOME: userDataRoot } : { XDG_CONFIG_HOME: userDataRoot, HOME: userDataRoot }),
 	};

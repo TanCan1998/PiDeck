@@ -21,6 +21,9 @@ export type AppFixture = {
 	userDataRoot: string;
 };
 
+/** E2E 窗口摆放：默认 quiet（屏幕外，不遮挡用户桌面）；需要真实几何的用例切 visible。 */
+export type E2EWindowMode = "quiet" | "visible";
+
 /** 测试文件可通过 test.use({ seedProjects }) 预置项目列表（写入 projects.json） */
 export type SeedProject = { id: string; name: string; path: string; pinned?: boolean };
 
@@ -34,9 +37,10 @@ const repoRoot = resolve(__dirname, "..");
  * 实现与原因见 `./win-profile.ts`（本文件与 `./mock-pi-fixture.ts` 共用同一份）。
  */
 
-export const test = base.extend<AppFixture & { seedProjects: SeedProject[] | undefined; seedSettings: SeedSettings | undefined }>({
+export const test = base.extend<AppFixture & { seedProjects: SeedProject[] | undefined; seedSettings: SeedSettings | undefined; e2eWindowMode: E2EWindowMode }>({
 	seedProjects: [undefined, { option: true }],
 	seedSettings: [undefined, { option: true }],
+	e2eWindowMode: ["quiet", { option: true }],
 	userDataRoot: async ({}, use) => {
 		const dir = mkdtempSync(join(tmpdir(), "pideck-e2e-"));
 		await use(dir);
@@ -45,7 +49,7 @@ export const test = base.extend<AppFixture & { seedProjects: SeedProject[] | und
 		// persistent cleanup failure instead of silently leaving test profiles behind.
 		await rm(dir, { recursive: true, force: true, maxRetries: 12, retryDelay: 250 });
 	},
-	app: async ({ userDataRoot, seedProjects, seedSettings }, use) => {
+	app: async ({ userDataRoot, seedProjects, seedSettings, e2eWindowMode }, use) => {
 		// 预置项目列表（ProjectStore.load 保留种子项目并追加内置 Chat 项目）；
 		// 写进 profile 目录（应用尊重 --user-data-dir，见 main/index.ts 注释）。
 		if (seedProjects && seedProjects.length > 0) {
@@ -88,6 +92,9 @@ export const test = base.extend<AppFixture & { seedProjects: SeedProject[] | und
 			// PIDECK_E2E enables both main-process profile isolation and the updater's
 			// temporary development configuration for the local generic feed.
 			PIDECK_E2E: "1",
+			// 默认把窗口摆到屏幕外，避免每个用例的新窗口弹到用户桌面最前打断其他工作。
+			// 需要真实窗口位置/几何断言的用例用 test.use({ e2eWindowMode: "visible" }) 关掉。
+			PIDECK_E2E_WINDOW_MODE: e2eWindowMode,
 			CI: "1",
 		};
 		delete env.ELECTRON_RENDERER_URL;

@@ -76,6 +76,14 @@ initializeAppBrand(app, app.isPackaged && __PIDECK_DEV_BUILD__ ? "PiDeck Dev" : 
 // E2E（Playwright 驱动）静默运行：窗口显示但不抢焦点、不最大化铺满屏，
 // 避免打断用户在其他软件的输入。fixture 通过 env PIDECK_E2E=1 标识。
 const isE2E = process.env.PIDECK_E2E === "1";
+// E2E 窗口默认摆到屏幕外（见 e2eWindowMode.ts）：不遮挡、不抢焦点、不进任务栏；
+// PIDECK_E2E_WINDOW_MODE=visible 给 window-memory / quick-task 这类需要真实几何的用例回退。
+const e2eWindowPlacement = resolveE2EWindowPlacement(isE2E, process.env.PIDECK_E2E_WINDOW_MODE);
+if (isE2E) {
+	// 屏幕外窗口会被 Windows 原生遮挡判定当成不可见 → 渲染/定时器节流，Playwright 点击与截图会卡住。
+	for (const switchName of E2E_RENDERING_SWITCHES) app.commandLine.appendSwitch(switchName);
+	app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
+}
 
 // 冷启动计时锚点（2026-10 流畅度审计）：里程碑在 whenReady 与 showMainWindowOnce 记录，
 // 日志对比 sinceModuleLoadMs / processUptimeMs 两个口径即可观测启动回归。
@@ -366,6 +374,7 @@ import { registerProjectsIpc } from "./ipc/projectsIpc";
 import { registerUsageStatsIpc } from "./ipc/usageStatsIpc";
 import { UsageStatsService } from "./usageStats/UsageStatsService";
 import { constrainWindowBoundsToWorkArea, type LastWindowBounds, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, readLastWindowBounds, saveLastWindowBounds } from "./windowState";
+import { applyE2EWindowPlacement, E2E_RENDERING_SWITCHES, resolveE2EWindowPlacement } from "./e2eWindowMode";
 import { createRendererCrashRecoveryGuard } from "./window/rendererCrashRecovery";
 import { registerBackgroundImageProtocol, registerBackgroundsIpc } from "./ipc/backgroundsIpc";
 import { registerThemesIpc } from "./ipc/themesIpc";
@@ -2191,6 +2200,8 @@ async function createWindow() {
 			contextIsolation: true,
 			nodeIntegration: false,
 			webviewTag: true,
+			// E2E 窗口在屏幕外/无系统焦点时也必须持续渲染：否则定时器与合成被动节流，用例会随机超时。
+			...(isE2E ? { backgroundThrottling: false } : {}),
 			// 渲染进程 V8 堆上限：必须覆盖 Chromium 透传的全局 `--js-flags`（#213）
 			additionalArguments: rendererHeapAdditionalArguments(),
 		},
@@ -2199,6 +2210,8 @@ async function createWindow() {
 	// Windows 建窗时可能裁掉工作区外的不可见 resize border；构造参数不足以精确还原贴边外框。
 	// 显示/最大化前显式设置已解析的几何，避免重启后高度再次被原生建窗流程缩短。
 	createdWindow.setBounds(startupWindowBounds);
+	// E2E：挪到屏幕外再显示（默认），避免每个用例的新窗口弹到用户桌面最前；失败保持原摆放。
+	applyE2EWindowPlacement(createdWindow, e2eWindowPlacement);
 	configureBrowserPanelWebviewHost(createdWindow);
 	let hasShownMainWindow = false;
 	function showMainWindowOnce() {

@@ -12,7 +12,7 @@ import { test, expect } from "./fixtures";
  *
  * last 是默认模式，直接用 seedSettings 落盘即可，不走设置页 UI（UI 路径由 settings 系列 E2E 覆盖）。
  */
-test.use({ seedSettings: { startupWindowMode: "last" } });
+test.use({ seedSettings: { startupWindowMode: "last" }, e2eWindowMode: "visible" });
 
 test("window memory: close writes position + size to userData", async ({ app, window }) => {
 	await expect(window.locator("#boot-overlay")).toHaveCount(0, { timeout: 20_000 });
@@ -67,6 +67,8 @@ test("window memory: edge-aligned native bounds survive full quit and restart", 
 		...process.env,
 		ELECTRON_RENDERER_URL: "",
 		PIDECK_E2E: "1",
+		// 本文件断言真实窗口位置/尺寸还原，必须保持窗口在屏幕上的正常摆放。
+		PIDECK_E2E_WINDOW_MODE: "visible",
 		PIDECK_E2E_USER_DATA_DIR: profileDir,
 		CI: "1",
 		...(process.platform === "win32" ? { APPDATA: userDataRoot, LOCALAPPDATA: userDataRoot, USERPROFILE: userDataRoot, HOME: userDataRoot } : process.platform === "darwin" ? { HOME: userDataRoot } : { XDG_CONFIG_HOME: userDataRoot, HOME: userDataRoot }),

@@ -74,10 +74,23 @@ function normalizeSeeds<T>(name: string, value: readonly T[] | T | undefined, re
 	throw new Error(`${name} 只收到单个对象（不是数组）——这几乎一定是 Playwright 把 >=2 元素的数组当成 [value, options] 元组截断了。${requirement} 多个种子请用函数式覆盖：test.use({ ${name}: async ({}, use) => use([a, b]) })`);
 }
 
+/** E2E 窗口摆放：默认 quiet（屏幕外，不遮挡用户桌面）；需要真实几何的用例切 visible。 */
+export type E2EWindowMode = "quiet" | "visible";
+
 export const test = base.extend<
-	MockPiFixture & { seedProjects: SeedProject[] | undefined; seedFeishuBots: SeedFeishuBot[] | undefined; seedSessionFiles: SeedSessionFile[] | undefined; seedSettings: SeedSettings | undefined; seedImageGenConfig: SeedImageGenConfig | undefined; launchArgs: string[]; mockSessionInProject: boolean }
+	MockPiFixture & {
+		seedProjects: SeedProject[] | undefined;
+		seedFeishuBots: SeedFeishuBot[] | undefined;
+		seedSessionFiles: SeedSessionFile[] | undefined;
+		seedSettings: SeedSettings | undefined;
+		seedImageGenConfig: SeedImageGenConfig | undefined;
+		launchArgs: string[];
+		mockSessionInProject: boolean;
+		e2eWindowMode: E2EWindowMode;
+	}
 >({
 	seedProjects: [undefined, { option: true }],
+	e2eWindowMode: ["quiet", { option: true }],
 	seedFeishuBots: [undefined, { option: true }],
 	seedSessionFiles: [undefined, { option: true }],
 	seedSettings: [undefined, { option: true }],
@@ -85,7 +98,7 @@ export const test = base.extend<
 	// Exercise real startup intents with the same isolated profile and mock RPC backend.
 	launchArgs: [[], { option: true }],
 	mockSessionInProject: [false, { option: true }],
-	app: async ({ seedProjects, seedFeishuBots, seedSessionFiles, seedSettings, seedImageGenConfig, launchArgs, mockSessionInProject }, use) => {
+	app: async ({ seedProjects, seedFeishuBots, seedSessionFiles, seedSettings, seedImageGenConfig, launchArgs, mockSessionInProject, e2eWindowMode }, use) => {
 		// 先归一化（元组陷阱见 normalizeSeeds 注释）：非法值在启动 Electron 之前就报错，
 		// 避免用例因「种子项目凭空消失」在后面超时。
 		const projects = normalizeSeeds("seedProjects", seedProjects, "项目需含 id / name / path（用 makeSeedProject 生成）。");
@@ -187,8 +200,10 @@ export const test = base.extend<
 			const env = {
 				...process.env,
 				CI: "1",
-				// PIDECK_E2E：主进程 isE2E 开关，窗口 showInactive 不抢焦点、不最大化（见 main/index.ts）
+				// PIDECK_E2E：主进程 isE2E 开关，窗口不抢焦点、不最大化，并默认摆到屏幕外（见 main/index.ts）
 				PIDECK_E2E: "1",
+				// quiet（默认）= 窗口屏幕外，不遮挡用户桌面；visible 给需要真实窗口几何的用例回退。
+				PIDECK_E2E_WINDOW_MODE: e2eWindowMode,
 				PIDECK_MOCK_SESSION_IN_PROJECT: mockSessionInProject ? "1" : "0",
 				// 主进程按 PIDECK_E2E_USER_DATA_DIR 覆写 userData（与 fixtures.ts 同源）。
 				// 缺了它 app.setPath("userData") 仍指向真实开发目录：seedProjects / seedSettings /

@@ -9,6 +9,8 @@ import { test as mockTest, expect } from "./mock-pi-fixture";
 // Launch through the real argument router. Every project, session and profile is disposable.
 const test = mockTest.extend<{ quickProject: string }>({
 	mockSessionInProject: true,
+	// 紧凑窗几何断言依赖真实窗口位置/尺寸，保持屏幕内可见摆放。
+	e2eWindowMode: "visible",
 	quickProject: async ({}, use) => {
 		const root = mkdtempSync(join(tmpdir(), "pideck-quick-task-"));
 		const project = join(root, "中文 project & task");
@@ -40,7 +42,7 @@ async function records(window: Page) {
 async function invokeAgain(app: ElectronApplication, path: string) {
 	const target = await app.evaluate(({ app }) => ({ executable: process.execPath, script: process.argv[1], profile: app.getPath("userData") }));
 	const root = dirname(target.profile);
-	const env = { ...process.env, PIDECK_E2E: "1", APPDATA: root, LOCALAPPDATA: root, USERPROFILE: root, HOME: root, XDG_CONFIG_HOME: root };
+	const env = { ...process.env, PIDECK_E2E: "1", PIDECK_E2E_WINDOW_MODE: "visible", APPDATA: root, LOCALAPPDATA: root, USERPROFILE: root, HOME: root, XDG_CONFIG_HOME: root };
 	delete env.ELECTRON_RENDERER_URL;
 	const code = await new Promise<number | null>((resolve, reject) => {
 		const child = spawn(target.executable, [target.script, `--user-data-dir=${target.profile}`, "--quick-task", path], { env, windowsHide: true, stdio: "ignore" });
