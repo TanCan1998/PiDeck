@@ -5,41 +5,15 @@ import { toSkillInvocationToken } from "../../composerBehavior";
 import { t } from "../../i18n";
 import { desktopApi } from "../../desktopApi";
 import { projectByIdAtomFamily } from "../../atoms";
-import type { AgentBackend, DshSkillView, PiSkillSummary, ProjectResourceDiscoveryResult } from "../../../../shared/types";
+import type { AgentBackend, DshSkillView } from "../../../../shared/types";
+import { emptyProjectResourceDiscovery, type SkillCatalogEntry, mergePiSkillCatalog } from "../../../../shared/skillCatalog";
 import { Command, CommandEmpty, CommandInput, CommandItem, CommandList } from "../ui-shadcn/command";
 import { Button } from "../ui-shadcn/button";
 import { PickerDialog } from "./ComposerComponents";
 import { showNotice } from "../../utils/notice";
 
-/** 技能选择面板展示用的统一条目（pi 项目技能 + 全局技能 / DSH 部署技能）。 */
-type SkillItem = {
-	/** 调用名（不含前导斜杠；pi/DshSkillView.name 已是 kebab-case）。 */
-	name: string;
-	description: string;
-	whenToUse?: string;
-	/** false = 用户专用技能（disable-model-invocation）：仅用户可调用。 */
-	userOnly?: boolean;
-	/** 来源归属：项目技能或全局技能（仅 pi 后端有意义，用于徽标区分）。 */
-	source?: "project" | "global";
-	/** 来源标识：项目禁用覆盖筛选全局技能时保留稳定 identity。 */
-	sourceId?: string;
-	/** 完整来源路径（徽标 title 提示，如 ~/.pi/agent/skills / .pi/skills）。 */
-	sourceLabel?: string;
-	/** SKILL.md 绝对路径（仅 pi 技能有；DSH 技能由宿主管理，无正文读取通道）。 */
-	path?: string;
-};
-
-function mapDiscoveredSkill(skill: ProjectResourceDiscoveryResult["skills"][number]): SkillItem {
-	const source = skill.sourceId === "settings-project" || skill.sourceId === "package-project" || skill.sourceId === "ancestor-agents" ? "project" : "global";
-	return {
-		name: skill.name,
-		description: skill.description,
-		userOnly: skill.userOnly,
-		source,
-		sourceId: skill.sourceId,
-		sourceLabel: skill.sourceLabel,
-	};
-}
+/** 选择面板条目直接复用 shared/skillCatalog 的统一模型（pi 与 DSH 同一形状）。 */
+type SkillItem = SkillCatalogEntry;
 
 /** 技能详情预览态：正文懒加载（点击眼睛/插入时才读 SKILL.md，列表加载不背文件 IO）。 */
 type SkillDetailState = {
@@ -98,54 +72,10 @@ export function ComposerSkillPicker(props: {
 		const load =
 			props.backend === "pi"
 				? Promise.all([
-						hasProjectResources
-							? desktopApi.projectResources.list(props.projectId as string).then((result) =>
-									result.skills
-										.filter((skill) => skill.enabled)
-										.map<SkillItem>((skill: PiSkillSummary) => ({
-											name: skill.name,
-											description: skill.description,
-											userOnly: skill.userOnly,
-											source: "project",
-											sourceId: skill.sourceId,
-											sourceLabel: skill.sourceLabel,
-											path: skill.path,
-										})),
-								)
-							: Promise.resolve<SkillItem[]>([]),
-						desktopApi.skills.list().then((result) =>
-							result.skills
-								.filter((skill) => skill.enabled)
-								.map<SkillItem>((skill) => ({
-									name: skill.name,
-									description: skill.description,
-									userOnly: skill.userOnly,
-									source: "global",
-									sourceId: skill.sourceId,
-									sourceLabel: skill.sourceLabel,
-									path: skill.path,
-								})),
-						),
-						desktopApi.projectResources.discovery(props.projectId).catch(() => ({ projectResourcesAllowed: false, overrides: { disabledGlobalExtensions: [], disabledGlobalSkills: [], disabledGlobalPrompts: [] }, skills: [], prompts: [], extensions: [] })),
-					]).then(([projectSkills, globalSkills, discovery]) => {
-						const projectResourcesAllowed = discovery.projectResourcesAllowed;
-						const visibleProjectSkills = projectResourcesAllowed ? projectSkills : [];
-						const disabledInheritedSkills = new Set(discovery.overrides.disabledGlobalSkills);
-						const visibleGlobalSkills = globalSkills.filter((skill) => !disabledInheritedSkills.has(`${skill.sourceId}:${skill.name.toLowerCase()}`));
-						const discoveredSkills = discovery.skills.filter((skill) => skill.enabled).map(mapDiscoveredSkill);
-						const discoveredProjectSkills = discoveredSkills.filter((skill) => skill.source === "project");
-						const discoveredGlobalSkills = discoveredSkills.filter((skill) => skill.source === "global");
-						// 同名去重：项目直接目录优先，其次项目 Pi 发现项，再到全局目录。
-						const seen = new Map<string, SkillItem>();
-						for (const skill of [...visibleProjectSkills, ...discoveredProjectSkills, ...visibleGlobalSkills, ...discoveredGlobalSkills]) {
-							const key = skill.name.toLowerCase();
-							const prev = seen.get(key);
-							if (!prev || (skill.source === "project" && prev.source === "global")) {
-								seen.set(key, skill);
-							}
-						}
-						return Array.from(seen.values()).sort((a, b) => a.name.localeCompare(b.name));
-					})
+						hasProjectResources ? desktopApi.projectResources.list(props.projectId as string).then((result) => result.skills) : Promise.resolve([]),
+						desktopApi.skills.list().then((result) => result.skills),
+						desktopApi.projectResources.discovery(props.projectId).catch(() => emptyProjectResourceDiscovery()),
+					]).then(([projectSkills, globalSkills, discovery]) => mergePiSkillCatalog({ projectSkills, globalSkills, discovery }))
 				: (async (): Promise<SkillItem[]> => {
 						// 运行中会话按 agentId 读（runtime 权威）；无 runtime 时按 catalog sessionId 读
 						// （文件扫描 + host 结果并集）。两者都没有时上面已提前 return。

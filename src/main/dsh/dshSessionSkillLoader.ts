@@ -1,5 +1,5 @@
 import type { AgentBackend, DshSkillView } from "../../shared/types";
-import { mergeSkillCatalog } from "../skills/skillCatalog";
+import { mergeSkillCatalog } from "../../shared/skillCatalog";
 
 /**
  * DSH 会话的技能目录加载器（共享文件系统扫描 + host 权威结果并集）。

@@ -98,23 +98,6 @@ test("scanSkillRoots：同名技能按 rank 小者胜，最终按 name 排序", 
 	]);
 });
 
-test("mergeSkillCatalog：host 结果优先，扫描只补缺，结果按 name 排序", () => {
-	const host = [
-		{ name: "beta", description: "host" },
-		{ name: "alpha", description: "host alpha" },
-	];
-	const scanned = [
-		{ name: "Alpha", description: "fs alpha" },
-		{ name: "gamma", description: "fs gamma" },
-	];
-	const merged = catalog.mergeSkillCatalog(host, scanned);
-	assert.deepEqual(plain(merged.map((skill) => [skill.name, skill.description])), [
-		["alpha", "host alpha"],
-		["beta", "host"],
-		["gamma", "fs gamma"],
-	]);
-});
-
 test("resolveSkillProjectRoot：向上找最近 .git；找不到时回退 cwd", async () => {
 	// 用 fromCharCode(92) 处理 Windows 分隔符，避免测试源码里的反斜杠转义噪音。
 	const sep = String.fromCharCode(92);

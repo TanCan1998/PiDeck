@@ -31,7 +31,7 @@ export type SkillRoot = {
 };
 
 /** 扫描得到的技能元数据（不读正文）。 */
-export type SkillCatalogEntry = {
+export type ScannedSkillEntry = {
 	name: string;
 	description: string;
 	whenToUse?: string;
@@ -113,14 +113,14 @@ const nodeSkillScanIo: SkillScanIo = {
  * 扫描单个技能根：目录 bundle（<dir>/SKILL.md）与根层扁平 markdown（<root>/x.md）。
  * 单个根/单条技能的 IO 错误只跳过该项，不让一个坏目录拖垮整套目录预览。
  */
-export async function scanSkillRoot(root: SkillRoot, io: SkillScanIo = nodeSkillScanIo): Promise<SkillCatalogEntry[]> {
+export async function scanSkillRoot(root: SkillRoot, io: SkillScanIo = nodeSkillScanIo): Promise<ScannedSkillEntry[]> {
 	let entries: Array<{ name: string; type: "directory" | "file" }>;
 	try {
 		entries = await io.listDirectory(root.path);
 	} catch {
 		return [];
 	}
-	const skills: SkillCatalogEntry[] = [];
+	const skills: ScannedSkillEntry[] = [];
 	for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
 		if (root.skipSystem && entry.name === ".system") continue;
 		const skillFile = entry.type === "directory" ? join(root.path, entry.name, "SKILL.md") : entry.type === "file" && entry.name.endsWith(".md") ? join(root.path, entry.name) : undefined;
@@ -150,8 +150,8 @@ export async function scanSkillRoot(root: SkillRoot, io: SkillScanIo = nodeSkill
 }
 
 /** 扫描多个根并按 rank 去重：同名技能 rank 小者胜（与 DSH provider 优先级一致）。 */
-export async function scanSkillRoots(roots: readonly SkillRoot[], io: SkillScanIo = nodeSkillScanIo): Promise<SkillCatalogEntry[]> {
-	const winner = new Map<string, SkillCatalogEntry>();
+export async function scanSkillRoots(roots: readonly SkillRoot[], io: SkillScanIo = nodeSkillScanIo): Promise<ScannedSkillEntry[]> {
+	const winner = new Map<string, ScannedSkillEntry>();
 	for (const root of [...roots].sort((a, b) => a.rank - b.rank)) {
 		for (const skill of await scanSkillRoot(root, io)) {
 			const key = skill.name.toLowerCase();
@@ -160,19 +160,6 @@ export async function scanSkillRoots(roots: readonly SkillRoot[], io: SkillScanI
 		}
 	}
 	return [...winner.values()].sort((a, b) => a.name.localeCompare(b.name));
-}
-
-/** 技能列表并集：primary 优先，fallback 只补 primary 里没有的名字（保证权威结果不被扫描覆盖）。 */
-export function mergeSkillCatalog<T extends { name: string }>(primary: readonly T[], fallback: readonly T[]): T[] {
-	const seen = new Set(primary.map((skill) => skill.name.toLowerCase()));
-	const merged = [...primary];
-	for (const skill of fallback) {
-		const key = skill.name.toLowerCase();
-		if (seen.has(key)) continue;
-		seen.add(key);
-		merged.push(skill);
-	}
-	return merged.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /** 从 cwd 向上找最近的 .git 祖先（DSH 的 project root 规则；找不到时回退 cwd 本身）。 */
