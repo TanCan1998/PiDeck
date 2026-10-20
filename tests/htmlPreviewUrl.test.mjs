@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
-const { HTML_PREVIEW_CSP, HTML_PREVIEW_SCHEME, MAX_HTML_PREVIEW_CHARS, decodeHtmlPreviewUrl, encodeHtmlPreviewUrl } = loadTsCommonJs("src/shared/htmlPreview.ts");
+const { HTML_PREVIEW_CSP, HTML_PREVIEW_SCHEME, MAX_HTML_PREVIEW_CHARS, MAX_HTML_PREVIEW_URL_CHARS, decodeHtmlPreviewUrl, encodeHtmlPreviewUrl } = loadTsCommonJs("src/shared/htmlPreview.ts");
 
 test("encode/decode round-trips plain HTML", () => {
 	const html = "<!doctype html><html><body><h1>hi</h1></body></html>";
@@ -40,6 +40,21 @@ test("encode returns null for empty or oversized content", () => {
 	assert.equal(encodeHtmlPreviewUrl(""), null);
 	const oversized = "x".repeat(MAX_HTML_PREVIEW_CHARS + 1);
 	assert.equal(encodeHtmlPreviewUrl(oversized), null);
+});
+
+test("URL 长度上限按编码后长度判定（CJK/emoji 会膨胀 4–5.33 倍）", () => {
+	// 回归（评审实测）：上限曾按 content.length（UTF-16）判，60 万汉字编码后是 2.4M 字符的 URL，
+	// 超过 Chromium 约 2MB 的 URL 上限 → 导航不发起、iframe 白屏，且不会回退 srcDoc。
+	const cjk = "中".repeat(600_000);
+	assert.ok(cjk.length <= MAX_HTML_PREVIEW_CHARS, "content.length 仍在旧上限内");
+	assert.equal(encodeHtmlPreviewUrl(cjk), null, "编码后 2.4M 字符必须拒绝，交给 srcDoc 回退");
+
+	// 1M ASCII → 约 1.33M URL 字符，仍在限内，能正常往返
+	const ascii = "a".repeat(1_000_000);
+	const url = encodeHtmlPreviewUrl(ascii);
+	assert.ok(url);
+	assert.ok(url.length <= MAX_HTML_PREVIEW_URL_CHARS + 32, "URL 总长必须落在 Chromium 上限内");
+	assert.equal(decodeHtmlPreviewUrl(url), ascii);
 });
 
 test("decode rejects foreign or malformed URLs", () => {

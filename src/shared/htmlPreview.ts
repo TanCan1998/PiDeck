@@ -16,8 +16,19 @@
 export const HTML_PREVIEW_SCHEME = "pideck-html";
 export const HTML_PREVIEW_HOST = "preview";
 
-/** 单次预览的内容字符上限：base64url 后约 1.34 倍膨胀，留足 Chromium 的 URL 长度余量。 */
+/** 单次预览的内容字符上限（粗筛，避免对超大内容做无谓编码）。 */
 export const MAX_HTML_PREVIEW_CHARS = 1_500_000;
+
+/**
+ * 编码后 URL 的长度上限。
+ *
+ * 为什么不能只按 {@link MAX_HTML_PREVIEW_CHARS} 判（评审实测）：content.length 是 UTF-16 码元数，
+ * 而 URL 承载的是 base64(UTF-8)——一个汉字 3 字节、emoji 4 字节，编码后分别膨胀到 4 / 5.33 个
+ * URL 字符。Chromium 的 URL 上限约 2MB（url::kMaxURLChars），超限时导航根本不会发起，iframe
+ * 直接白屏且不会走 srcDoc 回退：实测 60 万汉字（content.length 仍在限内）→ 2.4MB URL → 白屏。
+ * 因此以「编码后长度」为准，1.5MB 给 Chromium 上限留足余量。
+ */
+export const MAX_HTML_PREVIEW_URL_CHARS = 1_500_000;
 
 /**
  * 预览文档的 CSP。
@@ -64,12 +75,15 @@ function fromBase64Url(value: string): string {
 /**
  * 把 HTML 内容编码成 `pideck-html://preview/<base64url>`。
  *
- * 超过 {@link MAX_HTML_PREVIEW_CHARS} 时返回 null，由调用方决定降级方式
- * （预览大文件不值得为了跑脚本把整份内容塞进 URL）。
+ * 超过 {@link MAX_HTML_PREVIEW_CHARS}、或编码后长度超过 {@link MAX_HTML_PREVIEW_URL_CHARS}
+ * 时返回 null，由调用方决定降级方式（预览大文件不值得为了跑脚本把整份内容塞进 URL）。
  */
 export function encodeHtmlPreviewUrl(content: string): string | null {
 	if (!content || content.length > MAX_HTML_PREVIEW_CHARS) return null;
-	return `${HTML_PREVIEW_SCHEME}://${HTML_PREVIEW_HOST}/${toBase64Url(content)}`;
+	const encoded = toBase64Url(content);
+	// 编码后仍超上限：宁可退回 srcDoc（至少能看到静态内容），也不给一个导航不起来的 URL
+	if (encoded.length > MAX_HTML_PREVIEW_URL_CHARS) return null;
+	return `${HTML_PREVIEW_SCHEME}://${HTML_PREVIEW_HOST}/${encoded}`;
 }
 
 /** 从 `pideck-html://` URL 还原 HTML 内容；格式不符或解码失败返回 null。 */
