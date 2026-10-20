@@ -11,8 +11,10 @@
  * - pi：replaceAgentSession → agentManager.forkSession(agentId, entryId)；
  *   mutationFork && !branchMode（尾部重发/编辑替换）→ markSuperseded（旧会话从列表
  *   隐藏，文件保留可恢复）；显式分支/普通 fork → markForked（子会话带 (fork) 后缀）。
- * - DSH：withRuntimeReservation（dispatch lease + replacement 预留）→ forkDshAgentSession
- *   （runtime 原地换绑 + catalog dshSessionId 回写）；mutationFork 明确不支持 DSH。
+ * - DSH：replaceDshAgentSession（dshSessionFork.ts）→ 新建 catalog 条目（(fork) 标题、
+ *   forked 标记、新 dshSessionId），replacement 流程把 agentId 换绑到新条目；原条目保留。
+ *   旧实现只回写当前条目的 dshSessionId（原地换绑），侧栏始终一条 → issue #381 后续。
+ *   mutationFork 明确不支持 DSH。
  * - 成功后回调 notifyForkCatalogRefreshed：桌面主窗口收 sessionsCatalogRefreshed，
  *   Web SSE 由快照 diff 兜底（前端在命令返回后也会显式刷新）。
  */
@@ -42,7 +44,6 @@ export interface SessionForkCommandDeps {
 	/** 校验 runtime target 并取 lease 保护（与桌面 sessionIpc 同款入口）。 */
 	sessionRuntimeCoordinator: {
 		validateTarget(target: SessionRuntimeTarget): SessionCommandResult<SessionTargetedValue<unknown>> | { ok: true; value: unknown };
-		withRuntimeReservation<T>(sessionId: string, agentId: string, fn: () => Promise<T>): Promise<T>;
 	};
 	agentManager: {
 		forkSession(agentId: string, entryId: string): Promise<unknown>;
@@ -52,10 +53,10 @@ export interface SessionForkCommandDeps {
 	replaceAgentSession: (agentId: string, replace: () => Promise<unknown>, options?: { markForked?: boolean; markSuperseded?: boolean }) => Promise<unknown>;
 	/** 判断 agentId 是否属于 DSH 后端（fork 等 pi 专属命令按 backend 分流）。 */
 	isDshAgent: (agentId: string) => boolean;
-	/** DSH fork：session.fork 裁剪 + runtime 换绑 + catalog dshSessionId 回写。未装配时抛错。 */
-	forkDshAgentSession?: (target: SessionRuntimeTarget, entryId: string) => Promise<unknown>;
-	/** DSH clone：fork 无锚点（完整副本）+ runtime 换绑 + catalog dshSessionId 回写。未装配时抛错。 */
-	cloneDshAgentSession?: (target: SessionRuntimeTarget) => Promise<unknown>;
+	/** DSH fork：session.fork 裁剪 + 新建 catalog 条目 + runtime 换绑到新条目。未装配时抛错。 */
+	replaceDshAgentSession?: (target: SessionRuntimeTarget, entryId: string) => Promise<unknown>;
+	/** DSH clone：fork 无锚点（完整副本）+ 新建 catalog 条目 + runtime 换绑。未装配时抛错。 */
+	replaceDshCloneSession?: (target: SessionRuntimeTarget) => Promise<unknown>;
 	logger: { info(channel: string, message: string, data?: Record<string, unknown>): unknown };
 	/** fork/clone 成功后的 catalog 刷新广播（桌面主窗口；Web 走 SSE 快照 diff）。 */
 	notifyForkCatalogRefreshed: (sessionId: string) => void;
@@ -86,21 +87,20 @@ export function createSessionForkCommands(deps: SessionForkCommandDeps): Session
 		const mutationFork = options?.mutationFork === true;
 		const branchMode = options?.branchMode === true;
 		try {
-			// DSH 后端：fork = session.fork 裁剪 + runtime 换绑新会话（catalog 的
-			// dshSessionId 同步更新，重启后 attach 到 fork 结果）。
-			// withRuntimeReservation 提供完整保护——dispatch lease 检查（在途发送拒绝，
-			// 防 RPC 响应落到已废弃 mux）+ replacement 预留（fork 期间阻止并发 restart 等
-			// 命令交错）。
+			// DSH 后端：fork = session.fork 裁剪出新 host 会话 → 新建 catalog 条目（(fork)
+			// 后缀 + forked 标记 + 新 dshSessionId）→ replacement 把 runtime 换绑到新条目。
+			// 原条目保留原 dshSessionId，侧栏两条；replacement 内部自带 dispatch lease 检查
+			// 与 replacement 预留，fork 期间并发 restart 等命令交错会被拒绝。
 			if (deps.isDshAgent(target.agentId)) {
 				// 重发/编辑 fork 化迁移明确不覆盖 DSH：mutation fork 只服务 pi 后端
 				if (mutationFork) {
 					throw new Error("dsh does not support fork-mutation retry");
 				}
-				if (!deps.forkDshAgentSession) {
+				if (!deps.replaceDshAgentSession) {
 					throw new Error("dsh fork is not available");
 				}
-				const dshFork = deps.forkDshAgentSession;
-				const value = toForkValue(await deps.sessionRuntimeCoordinator.withRuntimeReservation(target.sessionId, target.agentId, () => dshFork(target, entryId)));
+				const dshFork = deps.replaceDshAgentSession;
+				const value = toForkValue(await dshFork(target, entryId));
 				void deps.logger.info("session", "Session forked (dsh)", {
 					sessionId: target.sessionId,
 					entryId,
@@ -132,15 +132,14 @@ export function createSessionForkCommands(deps: SessionForkCommandDeps): Session
 		const validated = deps.sessionRuntimeCoordinator.validateTarget(target);
 		if (!validated.ok) return validated;
 		try {
-			// DSH 后端：clone = fork 无锚点（完整副本）+ runtime 换绑新会话
-			// （catalog 的 dshSessionId 同步更新，重启后 attach 到 clone 结果）。
-			// withRuntimeReservation：lease 检查 + replacement 预留，与 fork 同约束。
+			// DSH 后端：clone = fork 无锚点（完整副本）→ 新建 catalog 条目 → runtime 换绑；
+			// 与 fork 共用 dshSessionFork 的 replacement 约束（lease 检查 + 预留）。
 			if (deps.isDshAgent(target.agentId)) {
-				if (!deps.cloneDshAgentSession) {
+				if (!deps.replaceDshCloneSession) {
 					throw new Error("dsh clone is not available");
 				}
-				const dshClone = deps.cloneDshAgentSession;
-				const value = toForkValue(await deps.sessionRuntimeCoordinator.withRuntimeReservation(target.sessionId, target.agentId, () => dshClone(target)));
+				const dshClone = deps.replaceDshCloneSession;
+				const value = toForkValue(await dshClone(target));
 				void deps.logger.info("session", "Session cloned (dsh)", {
 					sessionId: target.sessionId,
 				});

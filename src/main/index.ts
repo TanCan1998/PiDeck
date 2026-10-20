@@ -331,6 +331,7 @@ import { SessionCommandIpcError } from "./sessions/SessionCommandIpcError";
 import { appendSessionForkSuffix } from "./sessions/sessionForkTitle";
 import { sanitizeAutomaticTitle } from "./sessions/sessionTitleSanitize";
 import { createSessionForkCommands } from "./sessions/sessionForkCommands";
+import { createDshSessionFork } from "./sessions/dshSessionFork";
 import { registerAllDomains } from "./api/domainAssembly";
 import { CodexSessionImporter } from "./sessions/CodexSessionImporter";
 import { ClaudeSessionImporter } from "./sessions/ClaudeSessionImporter";
@@ -1391,36 +1392,38 @@ async function replaceAgentSession(agentId: string, replace: () => Promise<unkno
 }
 
 // ── fork/clone 统一命令层（桌面 IPC 与 Web HTTP 共用；W1 重发/编辑 fork 化统一）──
-// DSH fork/clone：runtime 已原地换绑到新会话（agentId 不变，焦点会话 id 不变），
-// 只需把 catalog 的 dshSessionId 同步为新 fork 会话，重启后 attach 正确。
-const forkDshAgentSessionImpl = async (target: SessionRuntimeTarget, entryId: string) => {
-	const result = await dshAgentManager.forkSession(target.agentId, entryId);
-	const tab = dshAgentManager.list().find((candidate) => candidate.id === target.agentId);
-	if (tab?.sessionId) {
-		await sessionCatalog.attachRuntime({
-			sessionId: target.sessionId,
-			dshSessionId: tab.sessionId,
-			promoteToActive: true,
+// DSH fork/clone：session.fork 出新 host 会话后**新建 catalog 条目**（(fork) 标题 + 新
+// dshSessionId + forked 标记），再把 runtime 换绑过去；原条目保留在侧栏。
+// 旧实现只把当前条目的 dshSessionId 原地改写，用户永远只看到一条会话（issue #381 后续）。
+// 懒装配：dshAgentManager / sessionCatalog / coordinator 都在 whenReady 后才赋值。
+let dshSessionForkInstance: ReturnType<typeof createDshSessionFork> | undefined;
+const getDshSessionFork = () => {
+	if (!dshSessionForkInstance) {
+		if (!dshAgentManager) throw new Error("DSH agent manager is not ready");
+		dshSessionForkInstance = createDshSessionFork({
+			catalog: sessionCatalog,
+			agents: dshAgentManager,
+			coordinator: sessionRuntimeCoordinator,
+			forkedSuffix: () => mainCopy("session.forkedSuffix"),
+			onDetached: emitSessionRuntimeDetach,
+			onAttached: (binding) => emitReplacementState(binding, true),
+			onRestored: (binding) => emitReplacementState(binding, false),
+			// host 改名失败不阻断 fork，但必须可见：与 pi 侧同一文案，引导手动重命名补后缀。
+			onTitleRenameFailed: () =>
+				emitAgentsNotice({
+					message: mainCopy("notice.sessionSuffixRenameFailed"),
+					i18nKey: "notice.sessionSuffixRenameFailed",
+					i18nParams: { mode: mainCopy("session.forkedSuffix") },
+					kind: "warning",
+				}),
+			logger: appLogger,
 		});
 	}
-	return { ...result };
+	return dshSessionForkInstance;
 };
-// DSH clone：fork 无锚点（完整副本），runtime 换绑到新会话，语义同 fork。
-const cloneDshAgentSessionImpl = async (target: SessionRuntimeTarget) => {
-	const result = await dshAgentManager.cloneSession(target.agentId);
-	const tab = dshAgentManager.list().find((candidate) => candidate.id === target.agentId);
-	if (tab?.sessionId) {
-		await sessionCatalog.attachRuntime({
-			sessionId: target.sessionId,
-			dshSessionId: tab.sessionId,
-			promoteToActive: true,
-		});
-	}
-	return { ...result };
-};
-/** fork/clone 成功后推送 catalog 刷新：pi 新建了 catalog 条目、DSH 换绑了 dshSessionId，
+/** fork/clone 成功后推送 catalog 刷新：pi/DSH 都会新建 catalog 条目（或回填标题/标记），
  * 侧栏只有收到 sessionsCatalogRefreshed 才会静默重拉列表（useProjectSync），否则
- * 新建/换绑后的会话要等下次手动刷新才出现。Web 端由 /api/events SSE 快照 diff 兜底。 */
+ * 新会话要等下次手动刷新才出现。Web 端由 /api/events SSE 快照 diff 兜底。 */
 const notifyForkCatalogRefreshed = (sessionId: string): void => {
 	const projectId = sessionCatalog.get(sessionId)?.projectId;
 	if (!projectId) return;
@@ -1439,8 +1442,8 @@ const getSessionForkCommands = () => {
 			agentManager,
 			replaceAgentSession,
 			isDshAgent: (agentId) => dshAgentManager?.list().some((tab) => tab.id === agentId) === true,
-			forkDshAgentSession: forkDshAgentSessionImpl,
-			cloneDshAgentSession: cloneDshAgentSessionImpl,
+			replaceDshAgentSession: (target, entryId) => getDshSessionFork().fork(target, entryId),
+			replaceDshCloneSession: (target) => getDshSessionFork().clone(target),
 			logger: appLogger,
 			notifyForkCatalogRefreshed,
 		});
