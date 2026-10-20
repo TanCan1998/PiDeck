@@ -13,6 +13,7 @@ import { canonicalizeSessionPath } from "../../shared/sessionIdentity";
 import { createSessionModelPreference } from "../../shared/modelDisplayName";
 import { modelThinkingLevelOf } from "../../shared/modelThinkingLevels";
 import { collectLatestTurnFileChanges } from "../../shared/fileChanges";
+import { isDshAgentPresetLocked } from "../../shared/dshAgentPresetLock";
 import type {
 	AvailableModel,
 	CreateSessionDraftInput,
@@ -905,8 +906,19 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			agentManager.releaseStandbyAgent(entry.projectId);
 		}
 		// DSH agent 预设同样创建即固定：激活会话的 preset 由 host 会话 header 权威持有，
-		// 渲染层只读展示，拒绝任何运行时改写（草稿期预选不受限）。
-		if (patch.agentPreset !== undefined && patch.agentPreset !== entry.agentPreset && entry.backend === "dsh" && (entry.status === "active" || sessionRuntimeCoordinator.getTarget(sessionId))) {
+		// 渲染层只读展示，拒绝任何运行时改写（未激活、还没有 host 会话的草稿才放行）。
+		// 判据与渲染层胶囊共用 shared/dshAgentPresetLock：两边同源才不会出现
+		// 「界面能点、主进程拒绝」的原始 IPC 报错。
+		if (
+			patch.agentPreset !== undefined &&
+			patch.agentPreset !== entry.agentPreset &&
+			isDshAgentPresetLocked({
+				backend: entry.backend,
+				status: entry.status,
+				dshSessionId: entry.dshSessionId,
+				hasRuntime: Boolean(sessionRuntimeCoordinator.getTarget(sessionId)),
+			})
+		) {
 			throw new Error(mainCopy("session.agentPresetLocked"));
 		}
 		const title = patch.title?.trim();

@@ -2100,6 +2100,7 @@ export const enUS: Record<TranslationKey, string> = {
 	"dshPermission.needRuntimeBody": "Permission presets apply to a DSH session. Send a message to start it, or change the default for new sessions under DSH config → Security.",
 	"dshPreset.menuTitle": "Agent mode",
 	"dshPreset.menuHint": "Choose the agent preset this session is composed from. The mode is fixed when the session starts and cannot be changed later.",
+	"dshPreset.lockedHint": "The mode was fixed when the session started (first message) and cannot be changed. Create a new session to switch modes.",
 	"dshPreset.presetPendingNotice": "Agent mode {name} staged; it will be applied when the session starts (send a message to start).",
 	"dshPreset.unset": "Follow default",
 	"sessionProxy.title": "Session proxy settings",

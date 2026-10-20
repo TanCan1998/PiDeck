@@ -2093,6 +2093,7 @@ export const zhCN = {
 	"dshPermission.needRuntimeBody": "权限预设作用于 DSH 会话，请先发送一条消息启动会话，或在「DSH 配置管理 → 安全」中修改新会话默认预设。",
 	"dshPreset.menuTitle": "Agent 模式",
 	"dshPreset.menuHint": "选择本会话组合使用的 Agent 预设。模式在会话创建时固定，创建后不可更改。",
+	"dshPreset.lockedHint": "模式在会话创建（首次发送）时已固定，不能再更改；如需切换模式，请新建会话。",
 	"dshPreset.presetPendingNotice": "已预选 Agent 模式 {name}，会话创建时生效（发送消息即创建）。",
 	"dshPreset.unset": "跟随默认",
 	"sessionProxy.title": "会话代理设置",

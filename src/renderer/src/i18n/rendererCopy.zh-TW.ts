@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: 8b2f09aa9eb39f36d1b0468cec1e00d73ae59bee788856f486740c94bedf99c0（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: 459529eba7cda7aac4e14a28c53721a3f7d640f843533d4f9ce96eadb24fdb1b（来自 src/renderer/src/i18n/rendererCopy.zh-CN.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import { mainProcessZhTW } from "../../../shared/i18n/mainProcessCopy.zh-TW";
 import type { TranslationKey } from "./rendererCopy.zh-CN";
@@ -2100,6 +2100,7 @@ export const zhTW: Record<TranslationKey, string> = {
 	"dshPermission.needRuntimeBody": "權限預設作用於 DSH 會話，請先發送一條訊息啟動會話，或在「DSH 配置管理 → 安全」中修改新會話預設預設。",
 	"dshPreset.menuTitle": "Agent 模式",
 	"dshPreset.menuHint": "選擇本會話組合使用的 Agent 預設。模式在會話建立時固定，建立後不可更改。",
+	"dshPreset.lockedHint": "模式在會話建立（首次傳送）時已固定，不能再更改；如需切換模式，請新建會話。",
 	"dshPreset.presetPendingNotice": "已預選 Agent 模式 {name}，會話建立時生效（傳送訊息即建立）。",
 	"dshPreset.unset": "跟隨預設",
 	"sessionProxy.title": "會話代理設定",

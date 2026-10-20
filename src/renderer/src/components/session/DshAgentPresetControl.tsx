@@ -5,17 +5,22 @@
  * 一次性组合（运行中会话一律 agent-preset-locked）。所以同一个胶囊按会话状态
  * 呈现两种形态（对齐 dsh-web 的 new-session chip + session-header label 合并到
  * 会话头一处）：
- * - 草稿（未激活，无 runtime）：可点击，弹出目录选择器，选择写会话记录预选，
- *   激活新建 host 会话时随 sessions.create 应用；
- * - 已激活：只读 Badge，展示 host 会话 header 回写的实际 preset（创建即固定）。
+ * - 未激活草稿（无 runtime、还没 host 会话）：可点击，弹出目录选择器，选择写会话
+ *   记录预选，激活新建 host 会话时随 sessions.create 应用；
+ * - 已固定（有 runtime / 有 dshSessionId / 已 active）：只读 Badge，展示 host
+ *   会话 header 回写的实际 preset（创建即固定）。
+ *
+ * 两个形态共用 shared/dshAgentPresetLock 判据：锁定时不再发出注定被主进程拒绝的
+ * catalog-update，避免「界面能点、点了报错」的假开关。
  *
  * 取值优先级：会话记录回写的实际 preset > host 目录 isDefault（部署默认）；
  * 目录未装配（空 roster）或两者皆无时不渲染。
  */
 import { useEffect, useMemo, useState } from "react";
 import { Check } from "lucide-react";
-import { getDefaultStore, useAtomValue, useSetAtom } from "jotai";
-import { dshAgentPresetsAtom, dshDefaultPresetId, type DshAgentPresetIdentity, sessionRecordByIdAtomFamily, sessionRuntimeBySessionIdAtomFamily, upsertSessionAtom } from "../../atoms";
+import { useAtomValue, useSetAtom } from "jotai";
+import { dshAgentPresetsAtom, dshDefaultPresetId, sessionRecordByIdAtomFamily, sessionRuntimeBySessionIdAtomFamily, upsertSessionAtom } from "../../atoms";
+import { isDshAgentPresetLocked } from "../../../../shared/dshAgentPresetLock";
 import { Badge } from "../ui-shadcn/badge";
 import { Button } from "../ui-shadcn/button";
 import { Dialog, DialogContent } from "../ui-shadcn/dialog";
@@ -23,6 +28,7 @@ import { CommandItem } from "../ui-shadcn/command";
 import { CommandPickerPanel } from "../ui-shadcn/command-picker";
 import { AgentPresetLogo } from "./SessionSourceBadge";
 import { presetDisplayDescription, presetDisplayName } from "../../config/dshPresetDisplay";
+import { loadDshAgentPresets } from "../../utils/dshAgentPresets";
 import { desktopApi } from "../../desktopApi";
 import { cn } from "../../lib/utils";
 import { t } from "../../i18n";
@@ -69,40 +75,22 @@ function presetTone(presetId?: string): PresetTone {
 	return (presetId ? PRESET_TONES[presetId] : undefined) ?? FALLBACK_PRESET_TONE;
 }
 
+/**
+ * catalog-update 失败文案：Electron IPC 拒绝会把主进程错误包成
+ * `Error invoking remote method 'x': Error: …`，原样弹给用户既像崩溃又没信息量，
+ * 这里只保留主进程真实原因（与 GitPanel 等处的清洗同一语义）。
+ */
+function presetUpdateErrorMessage(error: unknown): string {
+	const raw = error instanceof Error ? error.message : String(error);
+	return raw.replace(/^Error invoking remote method ['"][^'"]+['"]:\s*(?:Error:\s*)?/i, "");
+}
+
 /** 胶囊尺寸/字号：比标题栏 caption 再小一档，让项目名/标题仍是视觉主体。
  *  必须带 has-[>svg] 的 padding：Button size=sm 自带 has-[>svg]:px-2.5（直接子 svg 即命中），
  *  不覆盖的话 10px 字旁边会撑出 10px 横向内边距。
  *  min-w-0：embedded 时胶囊落在 .chat-header-actions 内，legacy 规则给那里的 button
  *  加了 min-width:60px（topbar 快捷钮定制），会把胶囊撑成固定宽度。 */
 const PRESET_CHIP_BASE = "h-[18px] min-w-0 shrink-0 gap-1 rounded-full border px-1.5 has-[>svg]:px-1.5 text-[10px] font-semibold leading-none";
-
-/**
- * 触发一次目录加载（幂等合并）：已缓存（含确认空名单）直接返回；失败不落缓存
- *（保持 null），调用方可重试。放组件模块而不是 atoms：desktopApi 顶层依赖
- * window，atoms/index.ts 会被 Node 测试加载，不能引入（见 dsh-atoms.ts 注释）。
- * 模块级 promise 合并多组件并发首拉；完成后重置，下次调用可再拉。
- */
-let presetsLoadPromise: Promise<DshAgentPresetIdentity[] | null> | null = null;
-function loadDshAgentPresets(): Promise<DshAgentPresetIdentity[] | null> {
-	const store = getDefaultStore();
-	const cached = store.get(dshAgentPresetsAtom);
-	if (cached) return Promise.resolve(cached);
-	if (presetsLoadPromise) return presetsLoadPromise;
-	presetsLoadPromise = desktopApi.sessions
-		.listDshAgentPresets()
-		.then((list) => {
-			store.set(dshAgentPresetsAtom, list);
-			return list;
-		})
-		.catch(() => {
-			// host 首次启动可能数秒、或 DSH 环境未就绪：失败不缓存，保留重试机会
-			return null;
-		})
-		.finally(() => {
-			presetsLoadPromise = null;
-		});
-	return presetsLoadPromise;
-}
 
 export function DshAgentPresetControl(props: { sessionId: string; disabled?: boolean }) {
 	const record = useAtomValue(sessionRecordByIdAtomFamily(props.sessionId));
@@ -112,11 +100,29 @@ export function DshAgentPresetControl(props: { sessionId: string; disabled?: boo
 	const [open, setOpen] = useState(false);
 	const [saving, setSaving] = useState(false);
 
-	useEffect(() => {
-		void loadDshAgentPresets();
-	}, []);
-
 	const hasRuntime = Boolean(runtime?.agentId);
+	// 只给「未激活、还没 host 会话、也没有 runtime」的草稿开着色按钮；其余一律只读。
+	// record 未就绪时按 dsh 处理（本组件只挂在 dsh 会话头上），避免闪一下可点胶囊。
+	const locked = isDshAgentPresetLocked({
+		backend: record?.backend ?? "dsh",
+		status: record?.status,
+		dshSessionId: record?.dshSessionId,
+		hasRuntime,
+	});
+	const unsentDraft = record?.status === "draft" && !record?.dshSessionId;
+
+	useEffect(() => {
+		// 未激活草稿是「默认预设马上就会生效」的唯一场景：强制重拉目录。否则刚改完
+		// 默认（设置页保存 / dsh-web / 配置文件）的新会话仍显示旧默认，发出去才变成
+		// 实际组合 —— 显示与实际两端分叉。
+		void loadDshAgentPresets(unsentDraft ? { force: true } : undefined);
+	}, [props.sessionId, unsentDraft]);
+
+	// 胶囊还在选择器里时会话被激活（发送/挂起等）：直接收起弹层，避免继续点一个
+	// 注定被主进程拒绝的选项。
+	useEffect(() => {
+		if (locked) setOpen(false);
+	}, [locked]);
 	// 生效预设：会话记录回写/预选 > 部署默认（isDefault）；目录未就绪时不猜。
 	const presetId = record?.agentPreset ?? (presets ? dshDefaultPresetId(presets) : undefined);
 	const identity = presetId ? (presets ?? []).find((preset) => preset.id === presetId) : undefined;
@@ -129,11 +135,12 @@ export function DshAgentPresetControl(props: { sessionId: string; disabled?: boo
 
 	const tone = presetTone(presetId);
 
-	// 已激活：模式创建即固定，只读展示（不提供假开关）；record 无值时（极端情况）不渲染。
-	if (hasRuntime) {
+	// 已固定：模式创建即固定，只读展示（不提供假开关）；record 无值时（极端情况）不渲染。
+	if (locked) {
 		if (!presetId) return null;
+		const lockedHint = t("dshPreset.lockedHint");
 		return (
-			<Badge variant="outline" aria-label={`${t("dshPreset.menuTitle")}: ${label}`} title={tooltip} data-agent-preset={presetId} size="sm" className={cn(PRESET_CHIP_BASE, tone.chip)}>
+			<Badge variant="outline" aria-label={`${t("dshPreset.menuTitle")}: ${label}`} title={`${tooltip}\n${lockedHint}`} data-agent-preset={presetId} size="sm" className={cn(PRESET_CHIP_BASE, tone.chip)}>
 				<AgentPresetLogo className="size-3 shrink-0" />
 				<span className="max-w-28 truncate">{label}</span>
 			</Badge>
@@ -158,7 +165,7 @@ export function DshAgentPresetControl(props: { sessionId: string; disabled?: boo
 			);
 			setOpen(false);
 		} catch (error) {
-			showNotice(error instanceof Error ? error.message : String(error), 4000);
+			showNotice(presetUpdateErrorMessage(error), 4000);
 		} finally {
 			setSaving(false);
 		}
@@ -173,7 +180,7 @@ export function DshAgentPresetControl(props: { sessionId: string; disabled?: boo
 
 	return (
 		<>
-			<Button type="button" variant="ghost" size="sm" className={cn(PRESET_CHIP_BASE, tone.chip, tone.hover)} disabled={props.disabled || saving} aria-label={t("dshPreset.menuTitle")} title={`${t("dshPreset.menuTitle")}: ${label}`} onClick={openPicker}>
+			<Button type="button" variant="ghost" size="sm" className={cn(PRESET_CHIP_BASE, tone.chip, tone.hover)} disabled={props.disabled || saving} aria-label={t("dshPreset.menuTitle")} title={`${t("dshPreset.menuTitle")}: ${tooltip}`} onClick={openPicker}>
 				<AgentPresetLogo className="size-3 shrink-0" />
 				<span className="max-w-28 truncate">{label}</span>
 			</Button>

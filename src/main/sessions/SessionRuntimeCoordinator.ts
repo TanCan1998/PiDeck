@@ -1540,7 +1540,9 @@ export class SessionRuntimeCoordinator {
 				// 激活失败兜底：DSH 的 host 会话已在 $DSH_HOME 创建，先落 dshSessionId
 				// 再停运行时，避免每次重试新建孤儿。保持 draft——还没开聊，不能抬成 active。
 				if (tab.backend === "dsh" && tab.sessionId) {
-					await this.catalog.attachRuntime({ sessionId, dshSessionId: tab.sessionId }).catch(() => undefined);
+					// 连同 host 实际 preset 一起回写：host 会话已存在，胶囊要展示真实模式而不是
+					// 回落默认值（否则界面显示一种、重试时用的又是另一种）。
+					await this.catalog.attachRuntime({ sessionId, dshSessionId: tab.sessionId, ...(tab.agentPreset ? { agentPreset: tab.agentPreset } : {}) }).catch(() => undefined);
 				}
 				// ACP 同理：agent 侧会话可能已创建，先落 acpSessionId 再停，避免重试新建孤儿。
 				if (tab.backend === "acp" && tab.sessionId) {
