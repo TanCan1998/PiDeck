@@ -1,5 +1,6 @@
 import { Check, Copy, Download } from "lucide-react";
 import { useCallback, useState } from "react";
+import { parseLocalImageUrl } from "../../../../shared/localImage";
 import { t } from "../../i18n";
 import { writeClipboardImage } from "../../utils/clipboard";
 import { showNotice } from "../../utils/notice";
@@ -12,9 +13,12 @@ import { Button } from "../ui-shadcn/button";
  * 按钮；换成 `MarkdownImage` 后这个能力被静默丢掉了（用户反馈「我的图还能下载吗」）。
  * 现在按同一套语义补回，并放到更稳的位置：预览浮层工具条 + 大图 hover。
  *
- * 取字节走 `fetch(src)`：本地图是 `pideck-file://`（scheme 已在 CSP `connect-src` 放行），
- * 远程图受 CORS 限制，失败时只能提示（不静默吞掉）。不把 base64 常驻内存：只在动作发生时
- * 取一次 blob。
+ * 取字节分两条路：
+ * - 本地图（`pideck-file://`）走 IPC `localImage.readBytes`。**不能 fetch**：该自定义 scheme
+ *   是 `corsEnabled: false`，渲染层 fetch 直接 `TypeError: Failed to fetch`（2026-10-20 e2e
+ *   实测：保存按钮只会弹失败提示）。主进程用与协议同一份白名单判定后再返回字节。
+ * - 远程图只能 fetch（受 CORS 限制，失败提示而不是静默）。
+ * 不把 base64 常驻内存：只在动作发生时取一次 blob。
  */
 
 function downloadExtension(mimeType: string): string {
@@ -36,7 +40,21 @@ function downloadName(alt: string, mimeType: string): string {
 	return `${base || "pideck-image"}.${downloadExtension(mimeType)}`;
 }
 
+function base64ToBlob(data: string, mimeType: string): Blob {
+	const binary = atob(data);
+	const bytes = new Uint8Array(binary.length);
+	for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+	return new Blob([bytes], { type: mimeType });
+}
+
 async function loadImageBlob(src: string): Promise<Blob> {
+	// 本地图必须走 IPC：pideck-file:// 是 corsEnabled:false 的自定义 scheme，fetch 会被拦
+	const localPath = parseLocalImageUrl(src);
+	if (localPath !== null) {
+		const payload = await window.piDesktop.localImage.readBytes(localPath);
+		if (!payload) throw new Error("local image rejected");
+		return base64ToBlob(payload.data, payload.mimeType);
+	}
 	const response = await fetch(src);
 	if (!response.ok) throw new Error(`HTTP ${response.status}`);
 	return response.blob();

@@ -393,6 +393,7 @@ import { ImageSessionStore } from "./imagegen/ImageSessionStore";
 import { ImageBlobStore } from "./imagegen/ImageBlobStore";
 import { registerImageGenImageProtocol } from "./imagegen/ImageGenImageProtocol";
 import { registerLocalImageProtocol } from "./media/LocalImageProtocol";
+import { registerLocalImageIpc } from "./ipc/localImageIpc";
 import { ImageGenConfigStore } from "./imagegen/ImageGenConfigStore";
 import { registerVideoGenIpc } from "./ipc/videogenIpc";
 import { VideoGenConfigStore } from "./videogen/VideoGenConfigStore";
@@ -3042,7 +3043,11 @@ function registerIpc() {
 	// pideck-file://：对话内本地图片只读通道。白名单根=项目目录（含 worktree）+ 聊天工作区
 	// + userData + 专属临时图片目录。**不放行整个 %TEMP%**：安装器/解压/其它程序的临时文件
 	// 不该被消息内容当图床读（取舍见 docs/markdown-image-rendering-plan.md）。
-	registerLocalImageProtocol(() => [app.getPath("userData"), join(app.getPath("temp"), "pideck-shots"), projectStore.getChatProjectPath(), ...projectStore.list().map((project) => project.path)]);
+	const resolveLocalImageRoots = () => [app.getPath("userData"), join(app.getPath("temp"), "pideck-shots"), projectStore.getChatProjectPath(), ...projectStore.list().map((project) => project.path)];
+	registerLocalImageProtocol(resolveLocalImageRoots);
+	// 保存/复制要在渲染层拿字节：fetch(pideck-file://) 在该 scheme 上会被拦（corsEnabled: false），
+	// 所以字节走 IPC，白名单与体积判定跟协议同一份实现。
+	registerLocalImageIpc({ resolveRoots: resolveLocalImageRoots });
 	registerImageGenIpc({
 		imageGen: new ImageGenService({
 			getProviderCredentials: async (provider) => {

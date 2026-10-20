@@ -89,6 +89,18 @@ test("markdown 图片布局：同段多图并排瓷砖、单图限高、点击�
 	expect(single?.width).toBeCloseTo(360, 0);
 	expect(single?.width ?? 0).toBeLessThanOrEqual(641);
 
+	// 保存/复制要在渲染层拿到字节。pideck-file:// 是 corsEnabled:false 的自定义 scheme，
+	// fetch 会被拦（曾经就是这么坏的），所以字节必须走 IPC；这条断言把「点保存没反应」挡在合并前。
+	const probe = await window.evaluate(async () => {
+		const node = document.querySelector(".message-timeline img") as HTMLImageElement | null;
+		if (!node) return { error: "no image" };
+		const path = new URL(node.src).searchParams.get("path") ?? "";
+		const payload = await window.piDesktop.localImage.readBytes(path);
+		return payload ? { bytes: payload.data.length, mimeType: payload.mimeType } : { error: "rejected" };
+	});
+	expect(probe).toMatchObject({ mimeType: "image/png" });
+	expect(probe.bytes ?? 0).toBeGreaterThan(0);
+
 	// 点击瓷砖 → 全屏预览；Esc 关闭（焦点管理见 modalKeyboardAccess 契约测试）
 	await images.nth(0).click();
 	const dialog = window.getByRole("dialog");

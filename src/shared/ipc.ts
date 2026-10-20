@@ -978,6 +978,13 @@ export const ipcChannels = {
 	 */
 	imagegenReadImageBlob: "imagegen:read-image-blob",
 
+	// ===== 对话内本地图片（pideck-file:// 的按需读取） =====
+	/**
+	 * 按绝对路径读取白名单内的本地图片字节（保存 / 复制用）。
+	 * 展示走 pideck-file:// 协议；渲染层 fetch 该 scheme 会被拦，所以字节从主进程拿。
+	 */
+	localImageReadBytes: "local-image:read-bytes",
+
 	// ===== 生视频（VideoGen）：提交-轮询-下载异步协议 =====
 	/** 提交生视频任务：受理后返回 jobId，产物经轮询事件推送 */
 	videogenSubmit: "videogen:submit",

@@ -1860,6 +1860,10 @@ export function createPreviewApi(): PiDesktopApi {
 			saveConfig: async (config) => ({ ok: true, config }),
 			readImageBlob: async () => null,
 		},
+		// 本地图片预览桩：没有主进程白名单，取不到字节（保存/复制降级为失败提示）
+		localImage: {
+			readBytes: async () => null,
+		},
 		// 生视频预览桩：与生图同策略（LAN web 模式继承此桩，远程暂不支持生视频任务）
 		videogen: {
 			submit: async () => ({ ok: false, error: "notConfigured" }),
