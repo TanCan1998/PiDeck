@@ -36,6 +36,7 @@ import type {
 } from "../shared/types/voiceTranscription";
 import type { WhisperInstallProgress, WhisperInstallResult, WhisperRuntimeStatus } from "../shared/types/whisperRuntime";
 import type { EnhanceEventPayload, EnhanceRunInput, EnhanceRunResult } from "../shared/types/enhance";
+import type { AgentChangedEvent, AgentInvokeEventPayload, AgentInvokeInput, AgentInvokeResult, AgentMarketSettings, AgentProfile, AgentProfileSnapshot, CreateAgentProfileInput, UpdateAgentMarketSettingsInput, UpdateAgentProfileInput } from "../shared/types/agentProfile";
 import type { QuickMessagesSaveResult, QuickMessagesSnapshot } from "../shared/types/quickMessages";
 import type { NoticeHistoryFileEntry, NoticeHistoryRecordInput } from "../shared/types/noticeHistory";
 import type { ReplyActionRule, ReplyActionsSaveResult, ReplyActionsSnapshot } from "../shared/types/replyActions";
@@ -715,8 +716,12 @@ const api = {
 		listSessionFileChanges: (sessionId: string) => ipcRenderer.invoke(ipcChannels.sessionsListFileChanges, sessionId) as Promise<import("../shared/types").SessionFileChange[]>,
 		/** 会话级 todo 快照（pi-deck-todo custom 条目重建，历史会话任务 tab）。 */
 		listSessionTodo: (sessionId: string) => ipcRenderer.invoke(ipcChannels.sessionsListSessionTodo, sessionId) as Promise<import("../shared/types").SessionTodoSnapshot | undefined>,
-		/** DSH 技能目录（skill.list 只读；/name 斜杠调用，G7）。 */
-		listDshSkills: (agentId: string) => ipcRenderer.invoke(ipcChannels.dshListSkills, agentId) as Promise<import("../shared/types").DshSkillView[]>,
+		/**
+		 * DSH 技能目录（skill.list 只读；/name 斜杠调用，G7）。
+		 * 运行中会话传 agentId；草稿会话传 { sessionId }：主进程懒建/复用 host 会话后读取
+		 * （不启动 agent），会话启动前也能看到技能列表。
+		 */
+		listDshSkills: (target: string | { sessionId: string }) => ipcRenderer.invoke(ipcChannels.dshListSkills, target) as Promise<import("../shared/types").DshSkillView[]>,
 		/** DSH 孤儿会话 id 列表（host 有但 catalog 无映射；G3/D11 清理提示用）。 */
 		listDshOrphans: () => ipcRenderer.invoke(ipcChannels.dshListOrphans) as Promise<string[]>,
 		/** DSH 外部会话清单（dsh-web 等其他工具创建的 host 根会话，跨工具导入用）。 */
@@ -1704,6 +1709,24 @@ const api = {
 		updateSettings: (patch: UpdateAutomationSettingsInput) => ipcRenderer.invoke(ipcChannels.automationUpdateSettings, patch) as Promise<AutomationSettings>,
 		previewCron: (expression: string, count?: number) => ipcRenderer.invoke(ipcChannels.automationPreviewCron, expression, count) as Promise<AutomationCronPreview>,
 		onChanged: (callback: (event: AutomationChangedEvent) => void) => subscribe<AutomationChangedEvent>(ipcChannels.automationChanged, callback),
+	},
+
+	// ── 智能体市场（Agent Market）：配置 CRUD + 一次性调用（划词工具共用同一协议） ──
+	agentProfiles: {
+		getSnapshot: () => ipcRenderer.invoke(ipcChannels.agentProfilesGetSnapshot) as Promise<AgentProfileSnapshot>,
+		create: (input: CreateAgentProfileInput) => ipcRenderer.invoke(ipcChannels.agentProfilesCreate, input) as Promise<AgentProfile>,
+		update: (agentId: string, patch: UpdateAgentProfileInput) => ipcRenderer.invoke(ipcChannels.agentProfilesUpdate, agentId, patch) as Promise<AgentProfile>,
+		/** 删除自定义智能体；内置智能体返回 false（不抛错，UI 用同一路径提示不可删）。 */
+		remove: (agentId: string) => ipcRenderer.invoke(ipcChannels.agentProfilesDelete, agentId) as Promise<boolean>,
+		/** 把内置智能体恢复到内置原文（用户改坏了可一键回退）。 */
+		resetBuiltin: (agentId: string) => ipcRenderer.invoke(ipcChannels.agentProfilesResetBuiltin, agentId) as Promise<AgentProfile>,
+		duplicate: (agentId: string) => ipcRenderer.invoke(ipcChannels.agentProfilesDuplicate, agentId) as Promise<AgentProfile>,
+		updateSettings: (patch: UpdateAgentMarketSettingsInput) => ipcRenderer.invoke(ipcChannels.agentProfilesUpdateSettings, patch) as Promise<AgentMarketSettings>,
+		onChanged: (callback: (event: AgentChangedEvent) => void) => subscribe<AgentChangedEvent>(ipcChannels.agentProfilesChanged, callback),
+		/** 一次性调用：受理后流式事件经 onInvokeEvent 推送（与提示词增强同一协议形态）。 */
+		invoke: (input: AgentInvokeInput) => ipcRenderer.invoke(ipcChannels.agentProfilesInvoke, input) as Promise<AgentInvokeResult>,
+		cancelInvoke: () => ipcRenderer.invoke(ipcChannels.agentProfilesInvokeCancel) as Promise<{ ok: boolean }>,
+		onInvokeEvent: (callback: (payload: AgentInvokeEventPayload) => void) => subscribe<AgentInvokeEventPayload>(ipcChannels.agentProfilesInvokeEvent, callback),
 	},
 
 	// ── CUA 审批门 ──

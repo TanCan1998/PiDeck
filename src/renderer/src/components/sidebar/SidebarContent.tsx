@@ -24,6 +24,7 @@ import { Dock, DockItem } from "../motion/dock";
 import { UpdateDotHint } from "./UpdateDotHint";
 import { AnnouncementCenter } from "./AnnouncementCenter";
 import { AutomationDockButton } from "../automation/AutomationDockButton";
+import { AgentMarketDockButton } from "../agents/AgentMarketDockButton";
 import { HostPluginDockButtons } from "../plugins/HostPluginDockButtons";
 import { MorphingSearch, type MorphingSearchItem } from "../motion/morphing-search";
 import { parseSidebarNavTab } from "../../utils/sidebarNavTab";
@@ -313,6 +314,8 @@ export function SidebarContent(props: SidebarContentProps) {
 					</button>
 					{/* 定时任务入口：放在新建/搜索下面，避免藏在底栏 Dock 里不好找 */}
 					<AutomationDockButton />
+					{/* 智能体市场入口：紧随定时任务，市场管理与划词调用同一个入口 */}
+					<AgentMarketDockButton />
 					{/* 宿主插件面板入口：与定时任务同区，无已启用面板时组件自身不渲染 */}
 					<HostPluginDockButtons projectId={props.currentProjectId} sessionId={props.currentSessionId} />
 				</div>

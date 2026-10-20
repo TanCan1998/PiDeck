@@ -2024,6 +2024,41 @@ export function createPreviewApi(): PiDesktopApi {
 			previewCron: async () => ({ valid: true, nextRuns: [] }),
 			onChanged: () => () => {},
 		},
+		// 智能体市场预览桩：预览模式没有 userData/agent-profiles.json 可读，市场显示空态；
+		// 写操作按邻近桩的惯例直接抛错（不伪造成功，避免预览里以为真存了盘）。
+		// 一次性调用（划词/市场面板）在预览环境必然失败，返回结构化错误而不是 reject，
+		// 让调用面板走正常错误提示路径。
+		agentProfiles: {
+			getSnapshot: async () => ({
+				revision: 0,
+				agents: [],
+				settings: { selectionToolEnabled: true, selectionToolAgentId: null },
+			}),
+			create: async () => {
+				throw new Error("preview stub");
+			},
+			update: async () => {
+				throw new Error("preview stub");
+			},
+			remove: async () => {
+				throw new Error("preview stub");
+			},
+			resetBuiltin: async () => {
+				throw new Error("preview stub");
+			},
+			duplicate: async () => {
+				throw new Error("preview stub");
+			},
+			// 设置返回合并结果：预览里开关/下拉要能点，但不产生真实写入。
+			updateSettings: async (patch) => ({
+				selectionToolEnabled: patch.selectionToolEnabled ?? true,
+				selectionToolAgentId: patch.selectionToolAgentId ?? null,
+			}),
+			onChanged: () => () => {},
+			invoke: async () => ({ ok: false as const, errorKind: "spawn-failed" as const, message: "unavailable" }),
+			cancelInvoke: async () => ({ ok: false }),
+			onInvokeEvent: () => () => {},
+		},
 		cua: {
 			onApprovalRequest: () => () => {},
 			sendApprovalResponse: async () => {},

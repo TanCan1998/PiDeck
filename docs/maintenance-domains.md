@@ -143,6 +143,16 @@
 - `pideck-img://` 是自定义协议（`main/imagegen/ImageGenImageProtocol.ts`）：`registerSchemesAsPrivileged` 在 ready 前声明、`protocol.handle` 在 ready 后注册，`img-src` 已在 `src/renderer/index.html` 的 CSP 里放行。内容寻址 ⇒ ref 与内容一一对应，可长缓存。**别把 ref 回读成 base64 塞回消息对象**，那等于把 200 MB 字符串搬回渲染进程堆。
 - 孤儿 blob 回收（`pruneOrphanBlobs`）带 1 小时宽限期（`put` 落盘与引用写进 JSONL 之间有窗口），且**扫描失败整体放弃**（fail-closed：宁可留垃圾也不删掉读不到会话所引用的图）。
 
+## 智能体市场与划词工具（userData/agent-profiles.json + 一次性补全侧车）
+
+- 智能体是 PiDeck 层的「提示词预设」，不是 pi 的东西：名称 / 简介 / emoji 图标 / 分类 / 角色设定（systemPrompt）/ 可选模型，全部落 `<userData>/agent-profiles.json`（`{version,revision,settings,agents}`，`AgentProfileStore` 串行写 + 读盘归一化）。**内置智能体只在 id 缺失时补种，绝不覆盖用户编辑**；新增内置智能体只改 `src/main/agents/builtinAgents.ts` 的 `BUILTIN_AGENT_SEEDS`（id 一旦发布不可改；内置删除返回 false，可编辑、可用 `resetBuiltin` 恢复出厂内容）。
+- **清空可选模型**的约定与自动化任务一致：更新传 `model: null` 或成对空串 `{provider:"",modelId:""}`，归一化层丢字段（= 跟随会话模型）；半填/超长/控制字符的 ref 一律丢弃，绝不落半截值。
+- 一次性调用（划词翻译 / 市场「使用」）：`agent-profiles:invoke` → `AgentInvokeService` → 注入的**独立** `EnhancePromptService` → `resources/pi-enhance-host.mjs`（AGENTS.md 例外四）。边界：**systemPrompt 只能由主进程按 agentId 从 store 解析**，渲染层只传 agentId / 短 instruction / 目标语言 / provider+modelId；事件按 runId 配对（started|delta|done|aborted|error 恰好一次）；单飞语义（新 run 打断旧 run）意味着**不能与输入框增强共用实例**，否则划词会打断增强。
+- 智能体模型优先级复用 `shared/enhanceModelPreference.ts` 的解析链（agent.model > 会话记录 > 设置 enhanceModel > 引导页偏好），渲染层解析后显式传 `model`，主进程只校验形态。
+- 「发送到会话」是渲染层链路：`sessions.createDraft`（标题 = 智能体名，仅 pi 后端带 agent.model）+ `sessions.sendPrompt`；角色设定走 `agentMessage` 隐藏通道（pi 侧整体替换 message，时间线只显示用户原文），DSH 显式拒绝 agentMessage 且会拒收整条 prompt → 退化为可见前缀（与飞书/微信桥接同一条降级策略）；ACP 有同名通道可照常隐藏。PiDeck 不写 pi 的系统提示。
+- 划词工具：document 级 mouseup/keyup 捕获选区快照；**浮钮 mousedown 必须 preventDefault**，否则按下瞬间浏览器清掉选区；跳过 `INPUT/TEXTAREA/SELECT/contenteditable` 与 `[data-selection-tool-ui]` 子树；`settings.selectionToolEnabled=false` 时不挂任何监听。默认智能体 `settings.selectionToolAgentId` 指向已删除 id 时由主进程归一化清空、渲染层回退内置翻译官（`builtin-translate`）。
+- i18n：文案键分 `agentMarket.*` / `agentInvoke.*` / `selectionTool.*` 三组，zh-CN + en-US 同步、改完跑 `node scripts/genZhTwCopy.mjs`（生成物禁止手改）。
+
 ## 会话 Markdown 渲染管线（MarkdownStream / streamdown 唯一引擎）
 
 - 唯一引擎是 `src/renderer/src/components/session/MarkdownStream.tsx`（streamdown 2.x + gfm/codeMeta/remarkLinkifyPaths）。公告详情、diff 预览、便签等静态 markdown 场景复用同一套管线（公告走 light 模式），**禁止再引一套 marked/react-markdown**，也禁止 `dangerouslySetInnerHTML` 绕过 sanitize。

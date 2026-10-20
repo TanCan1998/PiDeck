@@ -47,6 +47,7 @@ import {
 	dshRuntimeStatusAtom,
 	openSettingsAtom,
 	openAutomationModalAtom,
+	agentProfilesAtom,
 	sessionRecordsAtom,
 	bumpNewTurnCollapseTickAtom,
 	rpcLoggingAgentIdsAtom,
@@ -57,6 +58,8 @@ import { AppSidebar } from "./components/sidebar/AppSidebar";
 import { AppBootstrap } from "./components/app/AppBootstrap";
 import { SettingsFeatureRoot } from "./components/app/SettingsFeatureRoot";
 import { AutomationModal } from "./components/automation/AutomationModal";
+import { AgentMarketModal } from "./components/agents/AgentMarketModal";
+import { SelectionToolHost } from "./components/selectionTool/SelectionToolHost";
 import { useRename } from "./hooks/useRename";
 import { useProjectRuntimeCapabilities } from "./hooks/useRuntimeCapabilities";
 import { useSessionRuntimeBridge } from "./hooks/useSessionRuntimeBridge";
@@ -1296,6 +1299,60 @@ export function App() {
 			return true;
 		},
 		[createSessionDraftWithTab, setSessionDraft],
+	);
+
+	/**
+	 * 划词工具「发送到会话」：在活动项目新建草稿会话（标题 = 智能体名），把角色设定经
+	 * agentMessage 隐藏通道后发送。
+	 * - message 是用户可见原文（会话气泡），agentMessage 是实际发给 pi 的载荷；AgentManager
+	 *   在 agentMessage 非空时**整体替换** message，因此角色设定必须与原文拼在一起提交，
+	 *   时间线仍只显示原文（与 AutomationRunCoordinator / 飞书桥接的同一写法）。
+	 * - DSH 后端没有 agentMessage 通道且会拒收整条 prompt，角色设定退化为可见前缀；
+	 *   ACP 走 acpTurnSettlement 的同名通道，可以照常隐藏。
+	 * - 智能体偏好模型只在 pi 后端带入：DSH 的模型是 host route、ACP 由外部 CLI 决定，
+	 *   直接塞 pi 的 provider/modelId 会把草稿偏好写成无效值。
+	 * - 后端只保留 pi / dsh：ACP 需要用户先在草稿里点选外部 CLI 工具（这里没有该上下文，
+	 *   硬塞 acp 会建出无法激活的草稿），生图/生视频后端没有「提示词 agent」语义。
+	 *   其余后端一律回落 pi——智能体角色设定本来就是 pi 原生 agentMessage 的语言。
+	 */
+	const handleAgentSendToSession = useCallback(
+		async ({ agentId, text }: { agentId: string; text: string }): Promise<boolean> => {
+			const agent = store.get(agentProfilesAtom).find((profile) => profile.id === agentId);
+			const project = projects.find((candidate) => candidate.id === activeProjectId);
+			const trimmed = text.trim();
+			if (!agent || !project || !trimmed) return false;
+			const backend: AgentBackend = effectiveAgentBackend === "dsh" ? "dsh" : "pi";
+			try {
+				const title = `${agent.icon ? `${agent.icon} ` : ""}${agent.name}`.trim();
+				const session = await api.sessions.createDraft({
+					projectId: project.id,
+					title,
+					backend,
+					...(agent.model && backend === "pi" ? { model: agent.model } : {}),
+				});
+				upsertSession(session);
+				selectSessionCommand(project.id, session.id, false);
+				workspaceChrome.registerOpenSession(session.id, "permanent");
+				const persona = agent.systemPrompt.trim();
+				const hiddenPersona = session.backend !== "dsh";
+				const payload = `${persona}\n\n${trimmed}`;
+				const result = await api.sessions.sendPrompt({
+					sessionId: session.id,
+					requestId: crypto.randomUUID(),
+					message: hiddenPersona ? trimmed : payload,
+					...(hiddenPersona ? { agentMessage: payload } : {}),
+				});
+				if (!result.accepted) {
+					showToast(result.error || t("agentInvoke.errorTitle"), 4000, "error");
+					return false;
+				}
+				return true;
+			} catch (error) {
+				showToast(error instanceof Error ? error.message : String(error), 4000, "error");
+				return false;
+			}
+		},
+		[activeProjectId, effectiveAgentBackend, projects, selectSessionCommand, showToast, store, upsertSession, workspaceChrome],
 	);
 
 	/** 侧栏/分支打开：选中成功后按 preview|permanent 登记 Tab */
@@ -3429,6 +3486,12 @@ export function App() {
 							void openSidebarSessionByIdWithTab(projectId, sessionId, "permanent");
 						}}
 					/>
+
+					{/* 智能体市场：与定时任务同级的独立模态管理面（配置 CRUD + 调用入口） */}
+					<AgentMarketModal />
+
+					{/* 划词工具：全局唯一挂载点（划选浮出按钮 + 智能体调用面板） */}
+					<SelectionToolHost onSendToSession={handleAgentSendToSession} />
 
 					{/* 并行问询结果弹框（AskPanel）：独立匿名会话的结果展示，根级渲染 */}
 					<AskPanelOverlay />

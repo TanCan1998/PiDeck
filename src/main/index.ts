@@ -16,9 +16,13 @@ import { AnnouncementService } from "./announcements/AnnouncementService";
 import { registerAnnouncementIpc } from "./ipc/announcementIpc";
 import { CuaService } from "./cua/CuaService";
 import { AutomationStore } from "./automation/AutomationStore";
+import { AgentProfileStore } from "./agents/AgentProfileStore";
+import { AgentInvokeService } from "./agents/AgentInvokeService";
 import { AutomationScheduler } from "./automation/AutomationScheduler";
 import { AutomationRunCoordinator } from "./automation/AutomationRunCoordinator";
 import { registerAutomationIpc } from "./ipc/automationIpc";
+import { registerAgentProfileIpc } from "./ipc/agentProfileIpc";
+import { registerAgentInvokeIpc } from "./ipc/agentInvokeIpc";
 import { registerFeishuIpc } from "./ipc/feishuIpc";
 import { registerWeChatIpc } from "./ipc/wechatIpc";
 import { applyLinuxDisplayBackendWorkaround, isUsingLinuxXWaylandWorkaround } from "./linuxDisplayBackend";
@@ -631,6 +635,16 @@ let usageStatsService: UsageStatsService | null = null;
 let piAuthService: PiAuthService | null = null;
 /** 提示词增强服务（输入框增强按钮的后端）：常驻助手进程复用用户那套 pi 的 ModelRuntime。 */
 let enhancePromptService: EnhancePromptService | null = null;
+/** 智能体市场配置存储（<userData>/agent-profiles.json）；null = 尚未初始化。 */
+let agentProfileStore: AgentProfileStore | null = null;
+/** 智能体一次性调用服务（划词工具 / 市场面板）：业务在 service，侧车进程在下面的 completion。 */
+let agentInvokeService: AgentInvokeService | null = null;
+/**
+ * 智能体调用专用侧车实例。与提示词增强共用同一套 pi-enhance-host 协议，但必须是
+ * **独立进程**：EnhancePromptService 是「新 run 打断旧 run」的单飞语义，共用实例会
+ * 让划词翻译把用户正在跑的输入框增强打断（见 AGENTS.md 例外四）。
+ */
+let agentInvokeCompletionService: EnhancePromptService | null = null;
 /** 粘贴文件启动清理（registerIpc 阶段赋值；whenReady 后 fire-and-forget 执行） */
 let cleanupPasteFiles: (() => Promise<number>) | undefined;
 
@@ -2816,6 +2830,19 @@ function registerIpc() {
 	registerPiAuthIpc(ipcMain, piAuthService);
 	// 提示词增强（输入框增强按钮）：只做校验/适配，进程与协议在 EnhancePromptService
 	registerEnhanceIpc(ipcMain, enhancePromptService);
+	// 智能体市场：配置 CRUD + 一次性调用（划词工具）。store 在 whenReady 里已 load，
+	// 这里只按域注册边界 handler；直接调用走独立侧车实例（见 agentInvokeCompletionService）。
+	if (agentProfileStore) {
+		registerAgentProfileIpc({
+			store: agentProfileStore,
+			appLogger,
+			onNotifyChanged: (event) => {
+				const win = mainWindow;
+				if (win && !win.isDestroyed()) win.webContents.send(ipcChannels.agentProfilesChanged, event);
+			},
+		});
+	}
+	registerAgentInvokeIpc(ipcMain, agentInvokeService);
 	// 数据环境（数据模式决策 / 目录归属校验）：业务在 dataEnvService，handler 只校验/适配。
 	// relaunchApp 复用 restartApp（先停常驻服务 + isQuitting，防止 closeToTray 吞掉 relaunch）；
 	// quitApp 先置 isQuitting，与托盘「退出」菜单同一写法，避免 closeToTray 把退出吞成隐藏到托盘。
@@ -5361,7 +5388,41 @@ app
 		);
 		automationStore = new AutomationStore(join(app.getPath("userData"), "automation.json"));
 		const automationStorePreload = automationStore.load();
-		await Promise.all([sessionCatalog.load(), automationStorePreload]);
+		// 智能体市场：配置存储（userData/agent-profiles.json）。load 内部做旧数据归一化与
+		// 内置翻译智能体补种；与 sessionCatalog 并行加载，不额外拖慢启动。
+		agentProfileStore = new AgentProfileStore(join(app.getPath("userData"), "agent-profiles.json"));
+		const agentProfileStorePreload = agentProfileStore.load();
+		await Promise.all([sessionCatalog.load(), automationStorePreload, agentProfileStorePreload]);
+		// 智能体一次性调用（划词工具 / 市场面板）：复用提示词增强侧车协议，但**独立实例**。
+		// 侧车进程常驻、首次调用才拉起（EnhancePromptService 的现有语义），启动期只做装配。
+		agentInvokeCompletionService = new EnhancePromptService({
+			resolveLaunch: () =>
+				resolvePiAuthHostLaunch({
+					settings: settingsStore.get(),
+					locator: piLocator as PiLocator,
+					userDataPath: app.getPath("userData"),
+					appPath: app.getAppPath(),
+					resourcesPath: process.resourcesPath,
+					isPackaged: app.isPackaged,
+					helperFilename: PI_ENHANCE_HOST_FILENAME,
+				}),
+			logger: {
+				debug: (message) => void appLogger.debug("agent-invoke", message),
+				info: (message) => void appLogger.info("agent-invoke", message),
+				warn: (message) => void appLogger.warn("agent-invoke", message),
+				error: (message) => void appLogger.error("agent-invoke", message),
+			},
+		});
+		// C12：常驻子进程，退出时必须回收（与 enhance-prompt 同一清理登记表）。
+		quitCleanup.register("agent-invoke", () => agentInvokeCompletionService?.dispose());
+		agentInvokeService = new AgentInvokeService({
+			profiles: agentProfileStore,
+			completion: agentInvokeCompletionService,
+			logger: {
+				warn: (message) => void appLogger.warn("agent-invoke", message),
+				error: (message) => void appLogger.error("agent-invoke", message),
+			},
+		});
 		// #354：身份归并会把被吸收的历史会话 ID 从 catalog 移除，而侧栏置顶按稳定 ID 存在
 		// settings.json 里，不迁移就是死链（用户看到置顶丢失）。必须在本行完成——它早于
 		// createWindow，渲染层首次 settings.get 拿到的就是迁移后的值。
