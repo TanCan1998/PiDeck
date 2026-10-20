@@ -24,8 +24,8 @@ const twCopy = readFileSync("src/renderer/src/i18n/rendererCopy.zh-TW.ts", "utf8
 test("解析不出 URL 时渲染 alt 原文，不产出空 src", () => {
 	// 单图态：直接显示 alt（或原路径）
 	assert.match(image, /<span className="text-text-tertiary">\{label\}<\/span>/);
-	// 瓷砖态（同段多图）：给一个 64px 占位，避免一段文字把整行瓷砖撞散
-	assert.match(image, /<ImageOff\s+size=\{16\}\s*\/>/);
+	// 解不出地址时不再渲染占位框：流式期间会先闪一下占位框再变真图，改回纯 alt 文本
+	assert.ok(!image.includes("ImageOff"), "不应再引入 ImageOff 占位图标");
 });
 
 test("加载失败：失败文案 + alt（或原路径）+ 可重试", () => {

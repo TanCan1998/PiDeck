@@ -1,7 +1,7 @@
 import { protocol } from "electron";
-import { readFile, stat } from "node:fs/promises";
-import { LOCAL_IMAGE_PROTOCOL, localImageMimeType, parseLocalImageUrl } from "../../shared/localImage";
-import { classifyLocalImagePath, isInsideAnyRoot, isLocalImageSizeAllowed, type LocalImageRejection } from "./localImageAccess";
+import { LOCAL_IMAGE_MAX_BYTES, LOCAL_IMAGE_PROTOCOL, localImageMimeType, parseLocalImageUrl } from "../../shared/localImage";
+import { classifyLocalImagePath, isInsideAnyRoot, type LocalImageRejection } from "./localImageAccess";
+import { readBoundedImageFile } from "./localImageRead";
 import type { CanonicalRootsProvider } from "./localImageRoots";
 import { nativeRealpath } from "./nativeRealpath";
 
@@ -60,15 +60,12 @@ export function registerLocalImageProtocol(resolveRoots: CanonicalRootsProvider)
 		const roots = await resolveRoots();
 		if (!isInsideAnyRoot(realPath, roots)) return failure(403);
 
-		const info = await stat(realPath).catch(() => null);
-		if (!info || !info.isFile()) return failure(404);
-		if (!isLocalImageSizeAllowed(info.size)) return failure(413);
-
 		const mediaType = localImageMimeType(realPath);
 		if (!mediaType) return failure(403);
 
-		const data = await readFile(realPath).catch(() => null);
-		if (!data) return failure(404);
+		// 有界读取：stat 与内容读取之间文件可能被换（TOCTOU），定长读 + 长度校验兜住
+		const data = await readBoundedImageFile(realPath, LOCAL_IMAGE_MAX_BYTES);
+		if (!data) return failure(413);
 		return new Response(data, {
 			headers: {
 				...BASE_HEADERS,

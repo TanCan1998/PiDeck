@@ -97,7 +97,7 @@ export function MarkdownImageHoverSave(props: { src: string; alt: string }) {
 	return (
 		<button
 			type="button"
-			className="absolute right-2 top-2 flex size-8 cursor-pointer items-center justify-center rounded-md border border-border bg-background/90 text-muted-foreground opacity-0 shadow-sm backdrop-blur-sm transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+			className="absolute right-2 top-2 flex size-8 cursor-pointer items-center justify-center rounded-md border border-border bg-background/90 text-muted-foreground opacity-0 shadow-sm backdrop-blur-sm transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/image:opacity-100"
 			data-testid="markdown-image-save-hover"
 			onClick={() => void save()}
 			title={t("imagegen.save")}

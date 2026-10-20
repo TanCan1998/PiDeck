@@ -17,6 +17,6 @@ export function registerLocalImageIpc(deps: { resolveRoots: CanonicalRootsProvid
 		if (typeof rawPath !== "string" || rawPath.length === 0 || rawPath.length > 4096) return null;
 		const result = await readLocalImageBytes(rawPath, deps.resolveRoots);
 		if (!result) return null;
-		return { data: result.bytes.toString("base64"), mimeType: result.mimeType };
+		return { data: Buffer.from(result.bytes).toString("base64"), mimeType: result.mimeType };
 	});
 }
