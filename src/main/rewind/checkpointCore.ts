@@ -19,13 +19,14 @@
  * spawn 更安全：路径全部走数组参数，无 shell 注入面。
  */
 
-import { copyFile, mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, rm, stat } from "node:fs/promises";
 import { statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 import type { RewindCheckpointSummary } from "../../shared/types/rewind.ts";
 import { runGitCommand } from "../git/gitRun.ts";
+import { resolveWslGitTarget, toHostGitOutputPath } from "../git/gitWsl.ts";
 import { DEFAULT_MAX_CHECKPOINTS, MAX_UNTRACKED_DIR_FILES, MAX_UNTRACKED_FILE_SIZE, MAX_UNTRACKED_TOTAL_BYTES, REF_BASE, ZEROS } from "./checkpointConstants.ts";
 import { detectLargeDirs, isPathWithinAny, normalizeGitPath, shouldIgnoreForSnapshot } from "./checkpointFilter.ts";
 
@@ -282,15 +283,22 @@ async function detectUnmerged(root: string): Promise<boolean> {
 /**
  * 把用户真实 index 复制到临时文件，供 index 快照的 write-tree 使用（#372）。
  *
- * 找不到 git 目录或 index 文件时静默跳过：空仓库/刚 clone 的仓库本来就没有 index，
- * 此时 write-tree 对空 index 返回空树 SHA，与改动前行为一致。
+ * git-path 能定位 linked worktree 的独立 index；WSL 的绝对 Linux 路径必须先
+ * 回译为宿主 UNC/盘符路径，再交给 Node 文件 API。否则复制失败可能被误当成空 index。
+ * 仅允许「无 HEAD 且源 index 不存在」使用空树；权限错误、复制失败等一律抛出，
+ * 由调用方记录失败，不发布可能清空暂存区的错误快照。
  */
-async function seedIndexFromUserIndex(root: string, target: string): Promise<void> {
-	const gitDir = (await gitOp(root, ["rev-parse", "--git-dir"]).catch(() => "")).trim();
-	if (!gitDir) return;
-	// --git-dir 可能是相对 cwd 的路径（.git），也可能是绝对路径（worktree/submodule 场景）
-	const source = isAbsolute(gitDir) ? join(gitDir, "index") : resolve(root, gitDir, "index");
-	await copyFile(source, target).catch(() => {});
+async function seedIndexFromUserIndex(root: string, target: string, allowMissing: boolean): Promise<void> {
+	const indexPath = await gitOp(root, ["rev-parse", "--git-path", "index"]);
+	const source = resolve(root, toHostGitOutputPath(indexPath, resolveWslGitTarget(root)));
+	try {
+		await stat(source);
+	} catch (error: unknown) {
+		if (allowMissing && error instanceof Error && "code" in error && error.code === "ENOENT") return;
+		throw error;
+	}
+	// 不吞复制异常：即便错误码为 ENOENT，也可能是目标目录失效，而非合法的空仓库。
+	await copyFile(source, target);
 }
 
 /**
@@ -307,7 +315,7 @@ export async function createCheckpoint(opts: CreateCheckpointOpts): Promise<Chec
 
 	// 空仓库（无提交）时 rev-parse HEAD 失败 → ZEROS，恢复时跳过 reset。
 	// 临时目录必须在读取用户 index 之前建好：index 快照与 worktree 快照各用一份临时 index，
-	// 全程不碰用户仓库的 .git/index.lock（见下方 userIndexEnv 的说明）。
+	// index 快照不再抢用户仓库的 .git/index.lock（status 仍可能容忍式刷新用户 index）。
 	const tmpDir = await mkdtemp(join(tmpdir(), "pi-rewind-"));
 	// Windows 上 git 环境变量里的反斜杠路径偶尔有歧义，统一转正斜杠。
 	const tmpIndex = join(tmpDir, "index").replace(/\\/g, "/");
@@ -323,7 +331,7 @@ export async function createCheckpoint(opts: CreateCheckpointOpts): Promise<Chec
 		// 报 fatal: Unable to create '.../.git/index.lock': File exists，checkpoint 整次失败。
 		// 读副本既避开锁，也保证读到的是一致快照（不会读到别人半写状态）。
 		const userIndexEnv = { GIT_INDEX_FILE: join(tmpDir, "user-index").replace(/\\/g, "/") };
-		await seedIndexFromUserIndex(root, userIndexEnv.GIT_INDEX_FILE);
+		await seedIndexFromUserIndex(root, userIndexEnv.GIT_INDEX_FILE, headSha === ZEROS);
 		// merge 冲突（unmerged index）时 write-tree 必败；降级用 HEAD 树记录 index 快照，
 		// 恢复语义 = 把冲突态的 index 重置回 HEAD（回退到检查点时期望的正是干净态）。
 		// 快照不因此中断：冲突期间 agent 的文件回退能力比暂存区精度更重要。

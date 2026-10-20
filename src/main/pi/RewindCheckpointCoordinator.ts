@@ -8,10 +8,10 @@ export interface RewindAgentSessionInfo {
 	sessionId?: string;
 }
 
-/** 宿主注入：runtime 查询、WSL root 归一化、活跃会话枚举与日志（AgentManager 适配）。 */
 /** 非 git 仓库的打点重试冷却：目录可能后续才 git init，不能永久放弃。 */
 const NO_GIT_RETRY_INTERVAL_MS = 30 * 60 * 1000;
 
+/** 宿主注入：runtime 查询、WSL root 归一化、活跃会话枚举与日志（AgentManager 适配）。 */
 export interface RewindCheckpointHost {
 	/** agent 的当前 runtime 投影；agent 不存在/已停止时返回 undefined。 */
 	getSessionInfo(agentId: string): RewindAgentSessionInfo | undefined;

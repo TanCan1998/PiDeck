@@ -11,7 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -50,6 +50,8 @@ test("#372 用户 index 被锁（.git/index.lock 存在）时 checkpoint 仍应�
 	// 暂存区有真实内容：indexTreeSha 必须能反映它，而不是退化成 HEAD
 	writeFileSync(join(dir, "a.txt"), "v2\n");
 	git(["add", "a.txt"]);
+	const stagedTree = git(["write-tree"]).toString().trim();
+	const headTree = git(["rev-parse", "HEAD^{tree}"]).toString().trim();
 
 	// 模拟「用户/agent 的 git 正在写 index」：锁文件存在
 	const lockPath = join(dir, ".git", "index.lock");
@@ -61,7 +63,8 @@ test("#372 用户 index 被锁（.git/index.lock 存在）时 checkpoint 仍应�
 	assert.ok(cp, "checkpoint should succeed even when user index is locked");
 	// 且 index 树仍是「暂存后的真实状态」，没有偷懒退化成 HEAD 树
 	assert.ok(!cp.indexTreeDegraded, "index tree must not degrade when only the lock is the obstacle");
-	assert.notEqual(cp.indexTreeSha, cp.headSha, "staged change must be captured, not silently replaced by HEAD");
+	assert.equal(cp.indexTreeSha, stagedTree, "必须准确捕获暂存树");
+	assert.notEqual(cp.indexTreeSha, headTree, "暂存树不能降级为 HEAD 树");
 
 	rmSync(lockPath, { force: true });
 });
@@ -84,7 +87,7 @@ test("#372 未暂存的工作区修改不影响 index 树语义", async (t) => {
 });
 
 /** 造一个只记录日志的 host，session 固定指向给定 cwd。 */
-function makeCoordinator(cwd) {
+function makeCoordinator(cwd, onWarn = () => {}) {
 	const warns = [];
 	const infos = [];
 	const host = {
@@ -92,7 +95,10 @@ function makeCoordinator(cwd) {
 		hostRoot: (value) => value,
 		listAgentSessions: () => [{ cwd, sessionId: UUID }],
 		logInfo: (message, meta) => infos.push({ message, meta }),
-		logWarn: (message, meta) => warns.push({ message, meta }),
+		logWarn: (message, meta) => {
+			warns.push({ message, meta });
+			onWarn();
+		},
 	};
 	return { coordinator: new RewindCheckpointCoordinator(host), warns, infos };
 }
@@ -120,6 +126,34 @@ test("#373 非 git 目录：首次失败说明原因，后续轮次不再刷屏"
 	assert.equal(coordinator.healthForRoot(dir)?.consecutiveFailures, 1, "跳过时不应累计失败次数");
 });
 
+test("#373 公开调度入口：同 root 的不同 agent 共享冷却，只告警一次", async (t) => {
+	const dir = mkdtempSync(join(tmpdir(), "rewind-schedule-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	let notify;
+	const warned = new Promise((resolve) => {
+		notify = resolve;
+	});
+	const { coordinator, warns } = makeCoordinator(dir, () => notify());
+	t.after(() => {
+		coordinator.clearAgent("a1");
+		coordinator.clearAgent("a2");
+	});
+	coordinator.scheduleToolCheckpoint("a1", "bash", 1);
+	await Promise.race([
+		warned,
+		new Promise((_, reject) => {
+			const timer = setTimeout(() => reject(new Error("等待自动打点告警超时")), 15000);
+			timer.unref();
+			t.after(() => clearTimeout(timer));
+		}),
+	]);
+	// a2 的新调度状态没有时间节流，必须由 root 级冷却直接跳过。
+	coordinator.scheduleToolCheckpoint("a2", "write", 2);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(warns.length, 1);
+	assert.equal(coordinator.healthForRoot(dir)?.consecutiveFailures, 1);
+});
+
 test("#373 冷却期结束后重新尝试，成功即恢复打点", async (t) => {
 	const { dir, git } = makeRepo();
 	t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -140,7 +174,7 @@ test("#373 冷却期结束后重新尝试，成功即恢复打点", async (t) =>
 	assert.ok(!coordinator.noGitRetryAt.has(dir), "成功后应清除冷却标记");
 });
 
-test("#372 多次 checkpoint 后用户 .git/index 未被改动", async (t) => {
+test("#372 多次 checkpoint 后用户暂存内容保持不变", async (t) => {
 	const { dir, git } = makeRepo();
 	t.after(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -149,15 +183,12 @@ test("#372 多次 checkpoint 后用户 .git/index 未被改动", async (t) => {
 	writeFileSync(join(dir, "b.txt"), "staged\n");
 	git(["add", "b.txt"]);
 
-	const indexBefore = readFileSync(join(dir, ".git", "index"));
+	const stagedTreeBefore = git(["write-tree"]).toString().trim();
 
 	await createCheckpoint({ root: dir, id: cpId(1), sessionId: UUID, trigger: "turn", turnIndex: 1 });
 	await createCheckpoint({ root: dir, id: cpId(2), sessionId: UUID, trigger: "turn", turnIndex: 2 });
 
-	const indexAfter = readFileSync(join(dir, ".git", "index"));
-	// 允许 git 内部刷新（cache-tree）造成字节差异，但暂存内容必须一致：
-	// 用 git diff --cached --name-only 对比更直观，这里直接看暂存文件仍存在
-	const staged = execFileSync("git", ["diff", "--cached", "--name-only"], { cwd: dir, stdio: "pipe" }).toString().trim();
-	assert.equal(staged, "b.txt");
-	assert.ok(indexAfter.length > 0);
+	// status 可能刷新 index 字节；比较树和 blob 内容，不把缓存更新误判为暂存区改动。
+	assert.equal(git(["write-tree"]).toString().trim(), stagedTreeBefore);
+	assert.equal(git(["show", ":b.txt"]).toString(), "staged\n");
 });
