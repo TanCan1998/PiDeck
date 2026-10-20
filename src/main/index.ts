@@ -307,6 +307,7 @@ import { testPiProxy } from "./pi/PiProxyTester";
 import { SessionScanner } from "./sessions/SessionScanner";
 import { resolveLaunchDefaultOptions, isModelInModelsConfig } from "./sessions/launchDefaults";
 import { mergeCatalogModels } from "./pi/catalogModelsForValidation";
+import { pickStandbyWarmupProject } from "./pi/standbyWarmupTarget";
 import { createSessionModelPreference } from "../shared/modelDisplayName";
 import { modelThinkingLevelOf } from "../shared/modelThinkingLevels";
 import { SessionCatalog, canAttachRuntimeMetadata } from "./sessions/SessionCatalog";
@@ -2581,12 +2582,54 @@ async function stopDshHostForRuntimeDiskOperation(): Promise<boolean> {
 }
 
 /**
- * DSH 后台预热是否允许：默认后端是 dsh、runtime 可用，且用户没有手动停止过 host。
- * 手动停止优先级最高——即使用户把默认后端切成 dsh，也不该把用户明确停掉的 host
- * 又悄悄拉起来（预热失败只记日志，用户无感，所以这里必须直接不开）。
+ * DSH 后台预热是否允许：runtime 已安装可用，且用户没有手动停止过 host。
+ *
+ * 刻意不再要求 `defaultAgentBackend === "dsh"`：runtime 需要用户单独下载/安装（几十 MB），
+ * 它出现在 userData 里本身就是「用户要用 DSH」的显式信号；host boot 实测约 20s，装了却
+ * 不预热会让第一次打开 DSH 会话/配置页白等一轮 boot。只要装了、又没手动停过，就提前拉起。
+ *
+ * 内存取舍：host 常驻约 200MB。手动停止（dshManualStopped）优先级最高——用户表达过
+ * 「不想让它运行」时一律不预热；runtime 未安装时不预热（boot 必然失败，白起进程）。
  */
 function dshWarmupEnabled(): boolean {
-	return settingsStore.get().defaultAgentBackend === "dsh" && dshRuntimeStatus.canCreateDshSession() && settingsStore.get().dshManualStopped !== true;
+	return dshRuntimeStatus.canCreateDshSession() && settingsStore.get().dshManualStopped !== true;
+}
+
+/**
+ * 启动期 pi standby 预热（fire-and-forget）：把「首次新会话要付的完整 pi 启动」提前挪进
+ * 应用启动/用户阅读历史的空窗。
+ *
+ * 为什么需要：一次 pi RPC 启动实测 8~25s（耗时几乎全在 pi 加载用户 npm 扩展），而现有
+ * 预热只在草稿创建/激活完成之后触发——应用刚启动后从引导页发的第一条消息是「建草稿 +
+ * 立刻发送」，standby 还没握手完，只能再 spawn 一个（实测两个 pi 进程并行冷启动，更慢）。
+ * 这里按 catalog 最近活跃项目提前起一个待命进程。
+ *
+ * 触发条件收敛在 pickStandbyWarmupProject：默认后端 pi 取最近活跃项目，非 pi 默认只在
+ * 近期确实用过 pi 时预热，避免纯 DSH/ACP 用户为用不到的能力常驻约 300MB。
+ * 必须在 syncWslConfig 之后调用：WSL 项目的 spawn 参数依赖 agentManager 的 WSL 快照，
+ * 抢跑会用错环境，认领时指纹不符又白起一个进程。
+ * 失败一律只记日志：预热是启动期优化，绝不阻断启动。
+ */
+function warmStandbyAgentAtStartup(): void {
+	try {
+		if (settingsStore.get().standbyRuntimeEnabled === false) return;
+		// 已有 pi 会话正在启动时让路：并行 spawn 会互相拖慢（磁盘/CPU 竞争），而且该会话激活
+		// 结束后自己的链路还会补热一个 standby。
+		if (agentManager.list().some((tab) => tab.status === "starting")) return;
+		const target = pickStandbyWarmupProject({
+			entries: sessionCatalog.listEntries(),
+			projectIds: new Set(projectStore.list().map((project) => project.id)),
+			defaultBackend: settingsStore.get().defaultAgentBackend,
+			now: Date.now(),
+		});
+		if (!target) return;
+		void appLogger?.info("agent", "Startup standby warmup requested", { projectId: target });
+		agentManager.ensureStandbyAgent(target);
+	} catch (error) {
+		void appLogger?.warn("agent", "Startup standby warmup target resolution failed", {
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 }
 
 /**
@@ -5799,7 +5842,7 @@ app
 			},
 			appVersion: () => app.getVersion(),
 			isPackaged: () => app.isPackaged,
-			// 自动更新完成前 warmup 因 outdated 被跳过：装好且默认后端是 dsh 时补一次预热。
+			// 自动更新完成前 warmup 因 outdated 被跳过：装好后补一次预热（门控见 dshWarmupEnabled）。
 			onRuntimeReady: () => {
 				startDshHostInBackground(dshHost, appLogger, {
 					enabled: dshWarmupEnabled(),
@@ -5812,10 +5855,10 @@ app
 			});
 		});
 
-		// 窗口已可用后再按需预热 DSH：默认后端是 dsh 且 runtime 可用才后台 boot，
-		// 避免纯 pi 用户空转 utilityProcess（约 200MB），也避免 runtime 不在时 boot 必然失败。
-		// 用户手动停止过 DSH（dshManualStopped）时也跳过——不弹错误，用户下次显式启动即可。
-		// 发送/历史/配置路径仍由 ensureStarted 兜底。
+		// 窗口已可用后预热 DSH：runtime 已安装且用户没手动停止过 host 才后台 boot。
+		// 不再要求默认后端是 dsh——装 runtime 本身就是显式选择，host boot 约 20s，装了就该提前拉起；
+		// 未安装时 boot 必然失败（白起 utilityProcess），手动停止（dshManualStopped）优先级最高，
+		// 两种情况都不预热（不弹错误，用户下次显式启动即可）。发送/历史/配置路径仍由 ensureStarted 兜底。
 		startDshHostInBackground(dshHost, appLogger, {
 			enabled: dshWarmupEnabled(),
 		});
@@ -5824,6 +5867,10 @@ app
 		// 使用同一套 WSL HOME/config 目录；不阻塞首帧。
 		void syncWslConfig()
 			.then(async () => {
+				// pi standby 启动预热放在这里：必须晚于 syncWslConfig（WSL 项目的 spawn 参数依赖
+				// agentManager 的 WSL 快照），但早于模型目录刷新/能力 hydration——三者互不依赖，
+				// 先让 pi 进程开始加载扩展，越早开始越能把启动耗时藏进启动空窗。
+				warmStandbyAgentAtStartup();
 				// 冷启动先刷 pi 模型目录缓存（models-store.json）再 hydration：PiDeck 的 RPC
 				// 进程都带 --offline，pi 启动时的自动目录网络刷新被跳过；目录若不主动刷新
 				// 只能靠 TUI 更新，可能长期滞后（官方 provider 新模型导致「列表有、Agent

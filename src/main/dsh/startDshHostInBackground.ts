@@ -12,8 +12,9 @@ export type DshHostStartupLogger = {
 export type DshHostWarmupOptions = {
 	/**
 	 * 是否后台预热。缺省 true 保持旧语义；false 时本函数直接返回。
-	 * 默认后端为 pi 的用户不该为 DSH host 常驻付出 ~200MB，真正打开 DSH 会话/
-	 * 配置页/发消息时仍由 ensureStarted() 幂等拉起。
+	 * 由装配层按「runtime 已安装 && 用户没手动停止过 host」判定：装了 runtime 就是用户
+	 * 要用 DSH 的显式信号（host boot 约 20s，常驻约 200MB）；未安装或手动停止都不预热，
+	 * 真正打开 DSH 会话/配置页/发消息时仍由 ensureStarted() 幂等拉起。
 	 */
 	enabled?: boolean;
 };

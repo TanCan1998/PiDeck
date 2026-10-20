@@ -53,6 +53,7 @@ import { resolveBuiltInExtensionsOverlayDir } from "../extensions/builtInExtensi
 import { getModelTraceServer } from "./modelTrace/ModelTraceServer";
 import { StandbyAgentPool, STANDBY_TTL_MS } from "./StandbyAgentPool";
 import { computeStandbyFingerprint } from "./standbyFingerprint";
+import { STANDBY_CLAIM_WAIT_MS, StandbyWarmupTracker } from "./standbyWarmup";
 import type { ModelTraceInput } from "../../shared/types/modelTrace";
 import { describeExtensionFallbackSkip, formatExtensionFallbackDebug, resolveDisabledExtensionsCopy, resolveDisabledExtensionsReason, shouldRetryWithoutExtensions } from "./extensionStartupFallback";
 import type { DisabledExtensionsReason } from "./extensionStartupFallback";
@@ -407,8 +408,8 @@ export class AgentManager {
 			void this.stop(agentId);
 		},
 	});
-	/** standby 创建去重：池只在握手成功后登记，创建期间靠本标记挡住并发 ensure。 */
-	private standbySpawnPending = false;
+	/** 进行中的 standby 预热跟踪：ensure 去重、claim 等待、目标接力、取消（见 standbyWarmup.ts）。 */
+	private readonly standbyWarmup = new StandbyWarmupTracker();
 	private wslEnvironment: WslEnvironment | null = null;
 
 	/**
@@ -912,29 +913,67 @@ export class AgentManager {
 	}
 
 	/**
-	 * standby 池入口（会话链路在「用户可能马上要新建会话」的时机调用：草稿创建/激活完成等）。
-	 * 幂等：池里已有同项目条目或创建进行中时直接返回；真正的 spawn 在后台完成。
+	 * standby 池入口（会话链路在「用户可能马上要新建会话」的时机调用：草稿创建/激活完成、
+	 * 启动期补热等）。幂等且「单飞」：池里已有同项目+同指纹条目直接返回；已有预热在跑时
+	 * 不再并行 spawn——请求目标（项目/指纹）不同则记为「最新期望目标」，当前预热 settle
+	 * （无论成败/取消）后接力补热（单槽池只留最新一个待命进程）。
 	 */
 	ensureStandbyAgent(projectId: string): void {
 		if (!this.settingsStore.get().standbyRuntimeEnabled) return;
-		if (this.standbyPool.has(projectId) || this.standbySpawnPending) return;
-		this.standbySpawnPending = true;
-		void this.createStandbyAgent(projectId).finally(() => {
-			this.standbySpawnPending = false;
-		});
+		const project = this.getProject(projectId);
+		if (!project) return;
+		const fingerprint = this.computeStandbyFingerprintFor(project);
+		const pooled = this.standbyPool.peek(projectId);
+		if (pooled && pooled.fingerprint === fingerprint) return;
+		if (this.standbyWarmup.hasPending()) {
+			// 已有预热在跑：绝不再并行 spawn 第二个 pi（两次冷启动互相拖慢且双倍内存）。
+			// 取消中的预热同样按「进行中」处理——等它 settle 再补热，避免取消/补热交错时漏掉最新请求。
+			if (!this.standbyWarmup.matches(projectId, fingerprint) || this.standbyWarmup.isCancelled()) {
+				this.standbyWarmup.requestProject(projectId, fingerprint);
+				void this.appLogger?.info("agent", "Standby warmup target queued", { projectId, pendingCancelled: this.standbyWarmup.isCancelled() });
+			}
+			return;
+		}
+		this.startStandbyWarmup(projectId, fingerprint);
+	}
+
+	/** 登记并启动一次后台预热；begin 幂等，已有预热在跑时不重复 spawn。 */
+	private startStandbyWarmup(projectId: string, fingerprint: string): void {
+		if (!this.standbyWarmup.begin(projectId, fingerprint)) {
+			// 竞态兜底：settle 与 finally 接力之间若有人先开始了新预热，把本次目标留在队列里，
+			// 等那一次 settle 后再接力——不能静默丢掉「预热进行中又切项目」的最新请求。
+			this.standbyWarmup.requestProject(projectId, fingerprint);
+			return;
+		}
+		void this.createStandbyAgent(projectId, fingerprint)
+			.catch(() => undefined) // createStandbyAgent 内部已兜底日志，这里只防未处理 rejection
+			.finally(() => this.warmLatestRequestedStandby());
+	}
+
+	/** 接力：当前预热 settle（无论成败/取消）后，为等待期间记录的最新目标补热一次。 */
+	private warmLatestRequestedStandby(): void {
+		const requested = this.standbyWarmup.takeRequestedProject();
+		if (!requested) return;
+		const pooled = this.standbyPool.peek(requested.projectId);
+		if (pooled && pooled.fingerprint === requested.fingerprint) return;
+		void this.appLogger?.info("agent", "Standby warmup relayed to latest target", { projectId: requested.projectId });
+		this.startStandbyWarmup(requested.projectId, requested.fingerprint);
 	}
 
 	/**
 	 * 丢弃指定项目未被认领的 standby 进程（回收，不是消费）：草稿会话切到非 pi 后端
 	 * （生图/生视频/DSH/ACP）时调用——该进程已经服务不了这个会话，继续挂着只能等
 	 * 10min TTL 自然到期（用户反馈的「没用到的预加载进程占着内存」）。
-	 * 只丢项目匹配的条目：池是单槽位，同项目另一个新草稿仍可能认领它。
-	 * 返回是否真的丢掉了条目（调用方无需关心失败：没池子/项目不符都当无事发生）。
+	 * 进行中的预热同样取消：它完成时绝不入池，只会被 stop（否则 TTL 到期前泄漏一个不可见进程）。
+	 * 只动项目匹配的条目/预热：池是单槽位，同项目另一个新草稿仍可能认领它。
+	 * 返回是否真的有条目或预热被丢弃（调用方无需关心失败：没池子/项目不符都当无事发生）。
 	 */
 	releaseStandbyAgent(projectId: string): boolean {
-		if (this.standbyPool.status()?.projectId !== projectId) return false;
+		const cancelledWarmup = this.standbyWarmup.cancelPending(projectId);
+		if (cancelledWarmup) void this.appLogger?.info("agent", "Standby warmup cancelled", { projectId });
+		if (this.standbyPool.status()?.projectId !== projectId) return cancelledWarmup;
 		const agentId = this.standbyPool.clear();
-		if (!agentId) return false;
+		if (!agentId) return cancelledWarmup;
 		// 与 TTL 到期同一条回收路径（stop 会顺带从 agents map 移除，standby 标记进程对 UI 本就不可见）
 		void this.stop(agentId);
 		void this.appLogger?.info("agent", "Standby agent released", { agentId, projectId });
@@ -955,7 +994,30 @@ export class AgentManager {
 		if (proxyMode === "on" || proxyMode === "off") return null;
 		if (this.isFeishuSession?.(input.sessionId) === true) return null;
 		if ((await this.projectTrust.resolveTrustWithoutPrompt(project)) === null) return null;
-		const entry = this.standbyPool.take(input.projectId, this.computeStandbyFingerprintFor(project));
+		const fingerprint = this.computeStandbyFingerprintFor(project);
+		let entry = this.standbyPool.take(input.projectId, fingerprint);
+		// 池里还没有条目，但后台正在为同一项目+同指纹预热：等它 settle 后直接认领，
+		// 等待期间绝不再发起第二次 spawn（否则就是「真会话 spawn 与 standby spawn 并行」的原缺陷）。
+		// 取消中的预热等不出结果（完成即 stop），直接回退普通 spawn。
+		if (!entry && this.standbyWarmup.matches(input.projectId, fingerprint) && !this.standbyWarmup.isCancelled()) {
+			void this.appLogger?.info("agent", "Standby claim waiting for in-flight warmup", { projectId: input.projectId, sessionId: input.sessionId, waitMs: STANDBY_CLAIM_WAIT_MS });
+			// 记录真实等待时长：这一对事件（waiting → adopted / fell back）是「认领等待省掉了
+			// 一次并行 spawn」的唯一直接证据，scripts/standbyWarmupReport.mjs 用它算收益。
+			const waitStartedAt = Date.now();
+			const settlement = await this.standbyWarmup.waitForClaim(input.projectId, fingerprint, STANDBY_CLAIM_WAIT_MS);
+			const waitedMs = Date.now() - waitStartedAt;
+			if (settlement?.ok) entry = this.standbyPool.take(input.projectId, fingerprint);
+			void this.appLogger?.info("agent", entry ? "Standby claim adopted in-flight warmup" : "Standby claim wait fell back to regular spawn", {
+				projectId: input.projectId,
+				sessionId: input.sessionId,
+				waitedMs,
+				// 预热进程已经等了多久才被认领：区分「启动期预热早已就绪」（收益最大）
+				// 与「草稿刚触发的预热」（等待时间短、收益小）。
+				...(entry ? { warmAgeMs: Date.now() - entry.createdAt } : {}),
+				timedOut: settlement === null,
+				cancelled: settlement?.cancelled === true,
+			});
+		}
 		if (!entry) return null;
 		const runtime = this.agents.get(entry.agentId);
 		if (!runtime || runtime.tab.status !== "idle") {
@@ -964,24 +1026,48 @@ export class AgentManager {
 			return null;
 		}
 		runtime.tab.standby = undefined;
-		void this.appLogger?.info("agent", "Standby agent claimed", { agentId: entry.agentId, projectId: input.projectId, sessionId: input.sessionId });
+		// warmAgeMs = 进程从握手完成到被认领的闲置时长；启动期预热被首个新会话认领时通常最大。
+		void this.appLogger?.info("agent", "Standby agent claimed", { agentId: entry.agentId, projectId: input.projectId, sessionId: input.sessionId, warmAgeMs: Date.now() - entry.createdAt });
 		this.emitState();
 		return runtime.tab;
 	}
 
 	/** 后台 spawn 一个 standby：完整走 createUnlocked（信任/扩展回退/握手），成功后登记进池。 */
-	private async createStandbyAgent(projectId: string): Promise<void> {
+	private async createStandbyAgent(projectId: string, fingerprint: string): Promise<void> {
 		try {
 			const project = this.getProject(projectId);
-			if (!project) return;
+			if (!project) {
+				this.standbyWarmup.settle(null);
+				return;
+			}
 			// 需要用户交互决策信任的项目不做后台池化（绝不后台弹窗）。
-			if ((await this.projectTrust.resolveTrustWithoutPrompt(project)) === null) return;
-			const fingerprint = this.computeStandbyFingerprintFor(project);
+			if ((await this.projectTrust.resolveTrustWithoutPrompt(project)) === null) {
+				this.standbyWarmup.settle(null);
+				return;
+			}
 			const tab = await this.createUnlocked({ projectId, standby: true });
+			if (this.standbyWarmup.isCancelled()) {
+				// 取消路径时序：先 settle(null) 唤醒等待者（它们会回退普通 spawn），再 stop 进程；
+				// 绝不 put 进池——否则 TTL 到期前会泄漏一个不可见、也不会被任何人认领的 pi 进程。
+				this.standbyWarmup.settle(null);
+				void this.stop(tab.id);
+				void this.appLogger?.info("agent", "Standby warmup cancelled", { agentId: tab.id, projectId });
+				return;
+			}
+			if (tab.status !== "idle") {
+				// createUnlocked 握手失败会带着 error 状态返回 tab：不入池，按失败唤醒等待者。
+				this.standbyWarmup.settle(null);
+				void this.stop(tab.id);
+				void this.appLogger?.warn("agent", "Standby agent spawn failed", { projectId, error: `handshake status: ${tab.status}` });
+				return;
+			}
+			// 成功路径时序关键：先 put 再 settle——等待者被唤醒后会立刻 take，顺序反了就永远 miss。
 			this.standbyPool.put({ projectId, fingerprint, agentId: tab.id });
+			this.standbyWarmup.settle(tab.id);
 			void this.appLogger?.info("agent", "Standby agent ready", { agentId: tab.id, projectId });
 		} catch (error) {
 			// 预热失败静默降级：下次 ensure 再试，绝不影响正常创建链路。
+			this.standbyWarmup.settle(null);
 			void this.appLogger?.warn("agent", "Standby agent spawn failed", { projectId, error: error instanceof Error ? error.message : String(error) });
 		}
 	}
@@ -4068,6 +4154,10 @@ export class AgentManager {
 
 	stopAll() {
 		// 应用退出时统一清理所有 pi 子进程，避免后台 agent 残留占用模型或文件句柄。
+		// 进行中的预热先标取消：它完成时必须直接 stop、绝不 put 回池；接力目标一并丢弃，
+		// 否则退出流程结束后还会补热出一个无人认领的进程。
+		this.standbyWarmup.cancelPending();
+		this.standbyWarmup.clearRequestedProject();
 		// standby 也在 agents map 里会被下面循环停掉；清池只为防 TTL 到期后再重复 stop。
 		this.standbyPool.clear();
 		for (const runtime of this.agents.values()) {

@@ -42,8 +42,9 @@ import type { DshCommandView, DshPluginBridgeResponse, DshPluginInstallInput, Ds
  * 形态说明（docs/dsh-agent-backend-plan.md §3.2 形态 b）：
  * - host 在 utilityProcess 里 boot（无 web/无 HTTP/无端口），原生 ABI 与崩溃面
  *   不污染主进程；hostEntry 产物经 electron-vite 多入口打包到 out/main/。
- * - 按需启动：默认后端为 dsh 时窗口首帧后后台预热；纯 pi 用户不 fork host。
- *   发送/历史/配置链路调用 ensureStarted() 幂等兜底。
+ * - 启动预热：runtime 已安装且用户没手动停止过 host 时，窗口首帧后后台预热（不等用户
+ *   先把默认后端切成 dsh——装 runtime 本身就是显式选择，boot 约 20s，装了就该提前拉起）；
+ *   纯 pi 且未装 runtime 的用户不 fork host，发送/历史/配置链路调用 ensureStarted() 幂等兜底。
  * - 桥协议：dshHostBridge.ts（fetch-request/response/chunk/end/error）。
  *
  * DSH_HOME：直接使用用户真实 ~/.dsh（与 dsh CLI 行为一致，配置/凭证/会话
