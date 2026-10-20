@@ -20,7 +20,7 @@ import { randomBytes } from "node:crypto";
 import type { BrowserWindow } from "electron";
 import { CuaEngine } from "./CuaEngine";
 import { CuaGate } from "./CuaGate";
-import { CuaMcpHttpHost } from "./CuaMcpHttpHost";
+import type { CuaMcpHttpHost } from "./CuaMcpHttpHost";
 import { ensureCuaMcpRegistered, unregisterCuaMcp } from "./CuaMcpRegistration";
 import { CuaIpcManager, type CuaIpcDeps } from "../ipc/cuaIpc";
 
@@ -78,7 +78,11 @@ export class CuaService {
 		this.running = true;
 
 		const authToken = randomBytes(32).toString("hex");
-		this.host = new CuaMcpHttpHost(
+		// 按需加载（2026-10 启动审计）：`@modelcontextprotocol/sdk` 是启动路径上最重的静态第三方
+		// 依赖（冷 require 实测 ≈100ms），但 CUA 默认关闭、http host 只有这里用。改成动态 import 后，
+		// 未开 CUA 的启动不再为它付模块解析成本；首次开启多一次性加载延迟（用户可感知为「点了稍等」）。
+		const { CuaMcpHttpHost: CuaMcpHttpHostCtor } = await import("./CuaMcpHttpHost");
+		this.host = new CuaMcpHttpHostCtor(
 			{ port: 0, authToken },
 			{
 				engine: this.engine,

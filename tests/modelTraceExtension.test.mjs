@@ -6,7 +6,7 @@
 //    env 缺失整体不工作、请求帧字段与截断、请求↔响应按会话配对、fetch 失败不冒泡、
 //    并发上限丢弃；以及 handler **必须返回 undefined**（pi 的 runner 串行 await，
 //    返回非 undefined 会替换 provider payload）。
-// 2. **契约**：扩展帧里的字段名必须是 src/shared/types/bridge.ts 的
+// 2. **契约**：扩展帧里的字段名必须是 src/shared/types/modelTrace.ts 的
 //    ModelTraceRequestInput / ModelTraceResponseInput 声明过的子集——扩展是自包含 .ts
 //    （不能 import 共享类型，只能 import type），字段漂移不会有编译错误兜底。
 import assert from "node:assert/strict";
@@ -14,11 +14,11 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createTsSandbox } from "./helpers/createTsSandbox.mjs";
 
-const BRIDGE_URL = "http://127.0.0.1:45999/bridge/token-abc";
-const BRIDGE_TOKEN = "token-abc";
+const TRACE_URL = "http://127.0.0.1:45999/trace/token-abc";
+const TRACE_TOKEN = "token-abc";
 
 /** 载入扩展并注册到假 pi API，返回捕获的 handler 与 fetch 调用记录。 */
-function loadExtension({ env = { PIDECK_BRIDGE_URL: BRIDGE_URL, PIDECK_BRIDGE_TOKEN: BRIDGE_TOKEN }, fetchImpl } = {}) {
+function loadExtension({ env = { PIDECK_MODEL_TRACE_URL: TRACE_URL, PIDECK_MODEL_TRACE_TOKEN: TRACE_TOKEN }, fetchImpl } = {}) {
 	const handlers = new Map();
 	const pi = {
 		on(event, handler) {
@@ -51,10 +51,10 @@ function parseFrame(call) {
 	return JSON.parse(call.options.body);
 }
 
-test("env 缺失时整体不工作（纯终端跑 pi / 桥未就绪）", () => {
+test("env 缺失时整体不工作（纯终端跑 pi / trace 端点未就绪）", () => {
 	const noUrl = loadExtension({ env: {} });
-	assert.equal(noUrl.handlers.size, 0, "没有桥环境变量就不该注册任何 handler");
-	const noToken = loadExtension({ env: { PIDECK_BRIDGE_URL: BRIDGE_URL } });
+	assert.equal(noUrl.handlers.size, 0, "没有 trace 环境变量就不该注册任何 handler");
+	const noToken = loadExtension({ env: { PIDECK_MODEL_TRACE_URL: TRACE_URL } });
 	assert.equal(noToken.handlers.size, 0, "缺 token 同样整体不工作");
 });
 
@@ -66,9 +66,9 @@ test("before_provider_request：推请求帧且返回 undefined（不得替换 p
 	await new Promise((resolve) => setTimeout(resolve, 0));
 
 	assert.equal(fetchCalls.length, 1);
-	assert.equal(fetchCalls[0].url, `${BRIDGE_URL}/model-trace`);
+	assert.equal(fetchCalls[0].url, TRACE_URL);
 	assert.equal(fetchCalls[0].options.method, "POST");
-	assert.equal(fetchCalls[0].options.headers["x-pideck-bridge-token"], BRIDGE_TOKEN);
+	assert.equal(fetchCalls[0].options.headers["x-pideck-model-trace-token"], TRACE_TOKEN);
 	const frame = parseFrame(fetchCalls[0]);
 	assert.equal(frame.kind, "request");
 	assert.match(frame.traceId, /^[A-Za-z0-9_-]{1,64}$/);
@@ -133,7 +133,7 @@ test("循环引用等无法序列化的 payload：这一条缺席，不抛错", 
 	);
 });
 
-test("桥不可用时（fetch 拒绝）不产生未处理拒绝，pi 照常", async () => {
+test("trace 端点不可用时（fetch 拒绝）不产生未处理拒绝，pi 照常", async () => {
 	const { handlers } = loadExtension({ fetchImpl: () => Promise.reject(new Error("ECONNREFUSED")) });
 	handlers.get("before_provider_request")({ payload: { messages: [] } }, makeContext());
 	handlers.get("after_provider_response")({ status: 200, headers: {} }, makeContext());
@@ -154,9 +154,9 @@ test("并发上限：宿主迟滞时丢弃后续快照而不是无限堆积", as
 });
 
 test("扩展帧字段是共享类型 ModelTraceRequestInput/ResponseInput 的子集", async () => {
-	const bridgeTypes = readFileSync("src/shared/types/bridge.ts", "utf8");
+	const traceTypes = readFileSync("src/shared/types/modelTrace.ts", "utf8");
 	const typeKeys = (typeName) => {
-		const block = bridgeTypes.match(new RegExp(`export type ${typeName} = \\{([\\s\\S]*?)\\n\\};`));
+		const block = traceTypes.match(new RegExp(`export type ${typeName} = \\{([\\s\\S]*?)\\n\\};`));
 		assert.ok(block, `${typeName} 未找到`);
 		return new Set([...block[1].matchAll(/(\w+)\??:/g)].map((match) => match[1]));
 	};
@@ -175,18 +175,18 @@ test("扩展帧字段是共享类型 ModelTraceRequestInput/ResponseInput 的子
 	const unknownResponseKeys = Object.keys(response).filter((key) => !responseTypeKeys.has(key));
 	assert.deepEqual(unknownRequestKeys, [], "请求帧有共享类型未声明的字段");
 	assert.deepEqual(unknownResponseKeys, [], "响应帧有共享类型未声明的字段");
-	// 宿主校验器（BridgeServer.isModelTraceInput）依赖的必填字段必须真的发出去
+	// 宿主校验器（ModelTraceServer.isModelTraceInput）依赖的必填字段必须真的发出去
 	for (const required of ["kind", "traceId", "ts", "payloadJson", "payloadBytes", "truncated"]) assert.ok(required in request, `请求帧缺必填字段 ${required}`);
 	for (const required of ["kind", "traceId", "ts", "status"]) assert.ok(required in response, `响应帧缺必填字段 ${required}`);
 	// 完整请求体绝不能以字段形式混进响应帧（响应只有状态与耗时）
 	assert.equal("payloadJson" in response, false);
 });
 
-test("宿主路由与扩展的端点约定一致（/model-trace 子路由 + token 头）", () => {
-	const bridgeServer = readFileSync("src/main/pi/bridge/BridgeServer.ts", "utf8");
-	assert.match(bridgeServer, /ui\|model-trace/, "桥端点必须解析 model-trace 子路由");
-	assert.match(bridgeServer, /x-pideck-bridge-token/, "桥端点强校验 token 头");
+test("宿主路由与扩展的端点约定一致（/trace/<token> 直连 + token 头）", () => {
+	const server = readFileSync("src/main/pi/modelTrace/ModelTraceServer.ts", "utf8");
+	assert.match(server, /\\\/trace\\\//, "宿主必须解析 /trace/<token> 路径");
+	assert.match(server, /x-pideck-model-trace-token/, "宿主强校验 token 头");
 	const extension = readFileSync("resources/extensions/pi-deck-model-trace.ts", "utf8");
-	assert.match(extension, /\/model-trace`/);
-	assert.match(extension, /x-pideck-bridge-token/);
+	assert.match(extension, /PIDECK_MODEL_TRACE_URL/);
+	assert.match(extension, /x-pideck-model-trace-token/);
 });

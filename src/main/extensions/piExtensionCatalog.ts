@@ -9,7 +9,7 @@ import { getAppLogger } from "../logging/sharedLogger";
 import { compareVersions } from "../utils/versionCompare";
 import { readConfiguredNpmCommand } from "../resourceWhitelist";
 import { discoverExtensionEntries } from "./extensionDiscovery";
-import { BUILT_IN_EXTENSIONS, INTERNAL_BUILT_IN_EXTENSIONS, isBuiltInExtensionName, isDefaultDisabledBuiltInExtension, isHiddenBuiltInExtension, readEffectiveBuiltInExtensionsVersion, resolveBuiltInExtensionPath, type BuiltInExtensionPathRoots } from "./builtInExtensions";
+import { BUILT_IN_EXTENSIONS, INTERNAL_BUILT_IN_EXTENSIONS, isBuiltInExtensionName, readEffectiveBuiltInExtensionsVersion, resolveBuiltInExtensionPath, type BuiltInExtensionPathRoots } from "./builtInExtensions";
 import { createNpmRegistryVersionResolver } from "./npmRegistryVersion";
 
 /**
@@ -150,7 +150,7 @@ export type PiExtensionCatalogDeps = {
 	runPi: (args: string[], timeout: number, options?: { offline?: boolean; cwd?: string; projectInstall?: boolean; settings?: AppSettings; version?: string }) => Promise<string>;
 	locator: PiLocator;
 	getSettings: () => AppSettings;
-	/** PiDeck 桌面设置（removedBuiltInExtensions / disabledExtensions / enabledBuiltInExtensions）。 */
+	/** PiDeck 桌面设置（removedBuiltInExtensions / disabledExtensions）。 */
 	getPiDeckSettings: () => AppSettings;
 	translate: PiExtensionCatalogTranslate;
 	/** 扩展目录所在 home（WSL 下是宿主 home；目录扫描走 Linux 侧时的映射见 toHostPath）。 */
@@ -296,15 +296,13 @@ export class PiExtensionCatalog {
 		const removedBuiltIn = new Set(this.getPiDeckSettings().removedBuiltInExtensions ?? []);
 		// 用户禁用的非内置扩展：按 scope+source 匹配（同名可在 user/project 两级独立开关）。
 		const disabledExtKeys = new Set((this.getPiDeckSettings().disabledExtensions ?? []).map((entry) => `${entry.scope}:${entry.source}`));
-		// 默认关闭（opt-in）的内置扩展：仅当用户显式开启（enabledBuiltInExtensions）才视为启用。
-		const optInBuiltIn = new Set(this.getPiDeckSettings().enabledBuiltInExtensions ?? []);
 		// 内置扩展版本：包级版本号（extensions-manifest.json，不跟 PiDeck 应用版本走），
 		// 覆盖层（热更新）优先。逐行写入而非只在补齐分支赋值——内置条目可能来自
 		// pi list、本地目录扫描、兜底补齐三条路径，版本只认「当前生效的那一份」。
 		const builtInVersion = options.refreshBuiltInVersion === false || !this.builtInRoots ? null : readEffectiveBuiltInExtensionsVersion(this.builtInRoots);
 		for (const ext of extensions) {
 			if (ext.builtIn) {
-				ext.enabled = !removedBuiltIn.has(ext.source) && (!isDefaultDisabledBuiltInExtension(ext.source) || optInBuiltIn.has(ext.source));
+				ext.enabled = !removedBuiltIn.has(ext.source);
 				if (builtInVersion) ext.currentVersion = builtInVersion;
 			} else {
 				// 原生投影优先（迁移后 disabledExtensions 已清空）；未装配时退回旧列表。
@@ -350,10 +348,8 @@ export class PiExtensionCatalog {
 		}
 
 		// 补充：将已禁用/文件缺失的内置扩展也纳入列表，确保用户可在 UI 中重新启用。
-		// 已隐藏的内置扩展（HIDDEN_BUILT_IN_EXTENSIONS）除外：它们不上扩展页，也没法在这里重新开启。
 		const existingSources = new Set(merged.map((ext) => ext.source));
 		for (const builtIn of BUILT_IN_EXTENSIONS) {
-			if (isHiddenBuiltInExtension(builtIn)) continue;
 			if (!existingSources.has(builtIn)) {
 				// 内置扩展经 -e 从应用资源目录注入；提供 builtInRoots 时补真实磁盘路径，
 				// 让「打开目录」按钮可用（否则 path 为 undefined，UI 无法定位）。

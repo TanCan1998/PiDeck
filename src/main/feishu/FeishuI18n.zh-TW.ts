@@ -2,7 +2,7 @@
  * 本文件由 `node scripts/genZhTwCopy.mjs` 生成，请勿手改。
  * 文案改动请修改对应的 zh-CN 源文件后重新生成；转换规则见该脚本的 OVERRIDES。
  * 注释刻意保留简体：属于开发者视角文本，不面向用户。
- * source-sha256: ba7817973a09b08be898fb39911b9437aa30d598d01cd647685ffec9492fdcbb（来自 src/main/feishu/FeishuI18n.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
+ * source-sha256: a71c3f52a50fb0891e58cde366ef3588e4a10b5a616816be683a1725ad19649e（来自 src/main/feishu/FeishuI18n.ts 的词典区块指纹，由 tests/zhTwCopy.test.mjs 校验新鲜度）
  */
 import type { FeishuTranslationKey } from "./FeishuI18n";
 
@@ -12,6 +12,7 @@ export const feishuZhTW: Record<FeishuTranslationKey, string> = {
 	"bridge.defaultBotName": "飛書機器人",
 	"bridge.botMissing": "Bot 配置不存在",
 	"bridge.botAddFailed": "新增飛書 Bot 失敗，請檢查配置後重試。",
+	"bridge.sdkUnavailable": "飛書元件不可用（{reason}），請重啟 PiDeck 後重試。",
 	"connection.success": "連線成功！",
 	"connection.failed": "連線失敗，請檢查 App ID、App Secret 和網路連線。",
 	"connection.apiFailed": "飛書 API 校驗失敗，請檢查應用配置和權限。",

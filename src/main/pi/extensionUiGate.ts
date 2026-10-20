@@ -1,6 +1,6 @@
 import { clearTimeout, setTimeout } from "node:timers";
 import { ipcChannels } from "../../shared/ipc";
-import { stripBridgeAnsi } from "../../shared/bridgeText";
+import { stripAnsiText } from "../../shared/ansiText";
 import { looksLikePiSessionFileStem } from "./agentUtils";
 
 /** AgentManager 拆分 Wave 4B：宿主回调只暴露事件广播、runtime 访问与 abort 标记。 */
@@ -42,7 +42,7 @@ type PendingUiRequest = {
  * **扩展文本在此统一剥 ANSI**：这些字段最终都渲染成 GUI 文本（toast / 输入框 /
  * 输入框上下方的 widget 卡 / 提问卡），而扩展常顺手 `ctx.ui.theme.fg()` 上色 ——
  * pi 的 `Theme.fg` 产的是真 ANSI，透传就是界面上的一行 `[38;2;…m` 乱码
- * （2026-09 事故，事故现场见 `shared/bridgeText.ts`）。用 `stripBridgeAnsi`
+ * （2026-09 事故，事故现场见 `shared/ansiText.ts`）。用 `stripAnsiText`
  * 而不是 `stripAnsi`：后者只认 CSI，OSC 超链接 / 字符集切换会残留。
  */
 export class ExtensionUiGate {
@@ -88,7 +88,7 @@ export class ExtensionUiGate {
 				// 扩展的 notify 消息常带终端颜色转义（如 billion-context-pi 的更新通知
 				// `\x1B[32m✔ ACP auto-updated ...\x1B[0m`），toast 不是终端，直接透传会显示乱码转义符，
 				// 在进程边界统一清洗后再交给渲染层。
-				message: stripBridgeAnsi(String(typed.message ?? "")),
+				message: stripAnsiText(String(typed.message ?? "")),
 				notifyType: typed.notifyType,
 			});
 			return;
@@ -101,7 +101,7 @@ export class ExtensionUiGate {
 				method,
 				title: "",
 				// 写进 composer 输入框的文本：同样不能带转义码
-				text: stripBridgeAnsi(String(typed.text ?? "")),
+				text: stripAnsiText(String(typed.text ?? "")),
 			});
 			return;
 		}
@@ -117,7 +117,7 @@ export class ExtensionUiGate {
 				method,
 				title: "",
 				widgetKey: String(typed.widgetKey ?? requestId),
-				widgetLines: Array.isArray(typed.widgetLines) ? typed.widgetLines.map((line) => stripBridgeAnsi(String(line))) : undefined,
+				widgetLines: Array.isArray(typed.widgetLines) ? typed.widgetLines.map((line) => stripAnsiText(String(line))) : undefined,
 				widgetPlacement: typed.widgetPlacement,
 			});
 			return;

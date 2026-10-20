@@ -7,8 +7,7 @@ import type { AppSettings } from "../../shared/types/settings";
 import { emptyPiDeckMcpConfig, piDeckMcpAccessSchema, readPiDeckMcpConfig, writePiDeckMcpConfig, type PiDeckMcpConfig } from "../config/piDeckMcpConfig";
 import type { HostPluginSessions } from "../plugins/HostPluginSessions";
 import { buildPiDeckMcpExtensionsView, buildPiDeckMcpRuntimeView, buildPiDeckMcpSettingsView } from "./piDeckMcpViews";
-import { createPiDeckMcpServer } from "./piDeckMcpTools";
-import { PiDeckMcpHttpServer } from "./PiDeckMcpHttpServer";
+import type { PiDeckMcpHttpServer } from "./PiDeckMcpHttpServer";
 
 export class PiDeckMcpService {
 	private config: PiDeckMcpConfig = emptyPiDeckMcpConfig();
@@ -123,7 +122,11 @@ export class PiDeckMcpService {
 			if (this.disposed || epoch !== this.epoch || !this.config.enabled || !this.endpoint) throw new Error("access-revoked");
 			if (projectId && !this.isProjectAuthorized(projectId)) throw new Error("project-not-authorized");
 		};
-		const listener = new PiDeckMcpHttpServer(
+		// 按需加载（2026-10 启动审计）：`@modelcontextprotocol/sdk` 冷 require 实测 ≈100ms，是启动路径上
+		// 最重的静态第三方依赖；而 PiDeck MCP 默认不开启（config.enabled=false 时 initialize 不会进这里）。
+		// 改成动态 import 后，未开启的启动不再加载 SDK；开启时在 start() 一次性付加载延迟。
+		const [{ PiDeckMcpHttpServer: PiDeckMcpHttpServerCtor }, { createPiDeckMcpServer }] = await Promise.all([import("./PiDeckMcpHttpServer"), import("./piDeckMcpTools")]);
+		const listener = new PiDeckMcpHttpServerCtor(
 			config.token,
 			() =>
 				createPiDeckMcpServer({

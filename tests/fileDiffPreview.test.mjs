@@ -14,7 +14,10 @@ test("HTML preview remains isolated from the renderer origin and popup capabilit
 	const start = source.indexOf("function HtmlPreview(");
 	assert.ok(start >= 0, "HtmlPreview should be defined");
 	const preview = source.slice(start);
-	assert.match(preview, /srcDoc=\{content\}/);
+	// 内容经 pideck-html: 协议 URL 承载（CSP 由主进程响应头下发，与主窗口解耦）；
+	// 超过 URL 上限时回退 srcDoc——两种写法都不得放宽下面三条隔离断言。
+	assert.match(preview, /encodeHtmlPreviewUrl\(content\)/);
+	assert.match(preview, /srcDoc: content/);
 	assert.match(preview, /sandbox="allow-scripts allow-forms"/);
 	assert.match(preview, /referrerPolicy="no-referrer"/);
 	assert.doesNotMatch(preview, /allow-same-origin|allow-popups|allow-top-navigation/);

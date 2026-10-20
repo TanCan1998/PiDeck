@@ -10,7 +10,7 @@
 - 核对方式：静态 diff + 源码核对。`dist/modes/rpc/rpc-types.js`、`dist/modes/rpc/rpc-mode.js`、`dist/core/package-manager.js` 与 1.2.0 **逐字节相同**；`dist/core/extensions/types.d.ts` 与 `@earendil-works/pi-tui@1.3.0` 的 `dist` 同样逐字节相同；`dist/index.js` / `index.d.ts` 只新增 `formatReadLineRange` 导出。**1.3.0 未在真实会话上跑回归**；本机 pi CLI 已升级到 1.3.0（2026-10-16 核对，RPC 会话与桥/扩展在本机实际使用中），1.2.0 的扩展 API 真实回归同样待做（见 1.2.0 矩阵的扩展 API 行与 1.3.0 矩阵末节）
 - PiDeck 通信方式：`pi --mode rpc`，stdio JSON-RPC
 - 本记录范围：Pi 后端（`src/main/pi/`）以及 PiDeck 对 Pi 配置/事件的适配
-- 不包含：DSH 的 `pwsh_persistent`、Electron 自带终端、PiDeck 自己的应用更新器
+- 不包含：DSH 后端工具（原持久 pwsh 工具已于 0.2.1 下线）、Electron 自带终端、PiDeck 自己的应用更新器
 - 当前原则：工具选择由用户决定，PiDeck 的图形编辑器写 pi 原生 `settings.json`，解析与执行仍归 pi；不自动安装 PowerShell 7，不向 Pi 传硬编码 `--tools` 白名单。
 
 ## 白名单机制移除核对（2026-10-01 终态，源码逐项验证）
@@ -53,8 +53,8 @@
 | kimi-coding：`api` 由 `anthropic-messages` 改为 `openai-completions`，baseUrl 由 `api.kimi.com/coding` 改为 `api.kimi.com/coding/v1` | PiDeck 的用量探针用 host 前缀 `api.kimi.com` 匹配，两种形态都命中；catalog 的 `api`/`baseUrl` 只作为 DSH 用量档案与 endpoint 兜底回退，不写死到会话链路 | 无需改动 | `src/main/config/providerUsageProbe.ts`、`ConfigManager`（`profile.api ?? catalogSnapshot?.api`）、`tests/providerUsageProbe.test.mjs` | — |
 | opencode / opencode-go：provider baseUrl 由 `opencode.ai/zen` 改为 `opencode.ai/inference`（catalog 里 82 + 27 条） | 实测两 host 都可访问（别名，`/v1/models` 与 `/go/v1/models` 四种组合均 200），且 DSH 自带的 pi-ai 仍用 `zen`；PiDeck 侧把 `inference` 加入用量探针的 host 白名单并保留 `zen` 兼容既有配置，`KNOWN_PROVIDER_ENDPOINTS` 的模型发现端点改用官方注册表的 `inference`（存量 `models.json` 不动） | **本轮已适配** | `src/main/config/providerUsageProbe.ts`、`tests/providerUsageProbe.test.mjs`、`src/renderer/src/config/providerHeaders.ts`（`KNOWN_PROVIDER_ENDPOINTS`） | `zen` 域名彻底下线后删掉 zen 分支 |
 | PiDeck 静态模型目录来源更新 | 构建期 `pi-ai` 精确锁定从 1.2.0 更新到 1.3.0；42 个 provider、1714 条模型（chat 1614 / image 60 / classifier 40），相较 1.2.0 目录新增 84、移除 19、字段变更 185。仅更新静态资源，不改 OpenRouter 联网刷新或 DSH 独立依赖 | 已更新（本轮） | `package.json` / lock、`resources/pi-ai-catalog*.json`、目录生成/读取/打包与能力补全测试 | 无 |
-| TUI 侧变化（`modes/interactive/*`、`core/tools/renderers/read.js` 行号标签、`export-html`、`credential-print`、`bundle/*`、`extensions/codemode/execute.js` 等） | 只影响 TUI/CLI 呈现；PiDeck 走 `pi --mode rpc`，`bundle/rpc-entry.js` 路径未变。`ctx.ui.custom({ overlay: true })` 的 `done()` 修复（#10648）也只在 TUI：RPC 下 `ctx.ui` 是空实现，桥只提供 `ctx.gui`/`ctx.ui.gui` | 无需改动 | `diff -rq` 文件清单 + `pi-deck-gui-bridge.ts` 头注核对 | — |
-| 扩展 API 与 pi-tui | `dist/core/extensions/types.d.ts` 与 1.2.0 逐字节相同；`@earendil-works/pi-tui@1.3.0` 的 `dist` 与 1.2.0 逐字节相同；ext-points 种子定位的 `dist/core/extensions/types.d.ts` 仍在 | **已核对无变化** | `cmp` + `pi-deck-ext-points.ts` 路径核对 | — |
+| TUI 侧变化（`modes/interactive/*`、`core/tools/renderers/read.js` 行号标签、`export-html`、`credential-print`、`bundle/*`、`extensions/codemode/execute.js` 等） | 只影响 TUI/CLI 呈现；PiDeck 走 `pi --mode rpc`，`bundle/rpc-entry.js` 路径未变。`ctx.ui.custom({ overlay: true })` 的 `done()` 修复（#10648）也只在 TUI：RPC 下 `ctx.ui` 是空实现，PiDeck 只在扩展里读模型快照 | 无需改动 | `diff -rq` 文件清单 + `pi-deck-model-trace.ts` 头注核对 | — |
+| 扩展 API 与 pi-tui | `dist/core/extensions/types.d.ts` 与 1.2.0 逐字节相同；`@earendil-works/pi-tui@1.3.0` 的 `dist` 与 1.2.0 逐字节相同 | **已核对无变化** | `cmp` + `tests/extensionEntry*.test.mjs` | — |
 | codemode worker 全局上限 2、取消占用到退出（#10748）与 Bun 中断修复 | pi 运行时；PiDeck 不管理 codemode worker | 无需改动 | — | — |
 | 其余 pi 运行时修复：Anthropic/Bedrock 错误 tool result 图片移到工具结果之后（#10794）、自动重试触发条件（#10920/#10965）、OpenAI 兼容流 thinking 顺序（#10926）、Gemini 4 Argon thinking budget（#10890）、模型切换丢弃异模型 thinking 块（#10995）与 GPT-6 缓存保留（#10853） | 均为请求构造/重试行为，会话 JSONL 与 RPC 事件形状不变；thinking 块仍存盘并在时间线显示，只是不再发给不同模型的请求 | 无需改动 | `addProviderDraft.ts`、`ConfigManager`（未知 compat 字段展开保留）核对 | — |
 | 内部 pi 依赖改为精确版本锁定 | pi 自身打包行为，不影响 RPC 协议面 | 无需改动 | — | — |
@@ -266,7 +266,7 @@ Pi 负责执行器选择：优先 `pwsh.exe`，否则 `powershell.exe`。因此 
 
 ### DSH 例外
 
-PiDeck 的 `pwsh_persistent` 是 DSH 独立工具。其当前实现默认指向 Windows PowerShell 7 路径；这不代表 Pi 原生 `powershell` 工具要求安装 PS7。本记录不把两者合并。
+PiDeck 曾内置 DSH 持久 pwsh 工具（`pwsh_persistent`，本地 file: 包 `packages/dsh-tool-pwsh-persistent`），0.2.1 起下线，DSH 会话只用官方预设工具；这不代表 Pi 原生 `powershell` 工具要求安装 PS7。本记录不把两者合并。
 
 ## PiDeck 后续工作清单
 

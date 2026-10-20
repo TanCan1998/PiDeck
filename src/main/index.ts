@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, ne
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
-import { homedir, release as osRelease } from "node:os";
+import { release as osRelease } from "node:os";
 import { createWriteStream, existsSync } from "node:fs";
 import { copyFile, readFile, readdir, rm, stat } from "node:fs/promises";
 import { is } from "@electron-toolkit/utils";
@@ -11,6 +11,7 @@ import { downgradeRunningStartedBefore, downgradeStaleRunning } from "./pi/deriv
 import { SoundAlertService } from "./sounds/SoundAlertService";
 import { registerSoundIpc } from "./ipc/soundIpc";
 import { registerSoundProtocol } from "./sounds/soundProtocol";
+import { registerHtmlPreviewProtocol } from "./htmlPreviewProtocol";
 import { AnnouncementService } from "./announcements/AnnouncementService";
 import { registerAnnouncementIpc } from "./ipc/announcementIpc";
 import { CuaService } from "./cua/CuaService";
@@ -270,7 +271,7 @@ import { defaultPathCheck } from "./projects/projectPresence";
 import { FileSystemService } from "./fs/FileSystemService";
 import { AgentManager } from "./pi/AgentManager";
 import { PiProcess } from "./pi/PiProcess";
-import { getBridgeServer, stopBridgeServer } from "./pi/bridge/BridgeServer";
+import { getModelTraceServer, stopModelTraceServer } from "./pi/modelTrace/ModelTraceServer";
 import { PiModelCapabilityCache, watchPiConfigDirectory } from "./pi/PiModelCapabilityCache";
 // 生图消息不走 Agent 消息流，改名前需判断标题是否仍是占位名
 import { isDefaultAgentTitle } from "./pi/agentUtils";
@@ -369,7 +370,6 @@ import { constrainWindowBoundsToWorkArea, type LastWindowBounds, MIN_WINDOW_HEIG
 import { createRendererCrashRecoveryGuard } from "./window/rendererCrashRecovery";
 import { registerBackgroundImageProtocol, registerBackgroundsIpc } from "./ipc/backgroundsIpc";
 import { registerThemesIpc } from "./ipc/themesIpc";
-import { registerPluginDevIpc } from "./ipc/pluginDevIpc";
 import { registerHostPluginsIpc } from "./ipc/hostPluginsIpc";
 import { registerPiDeckMcpIpc } from "./ipc/piDeckMcpIpc";
 import { PiDeckMcpService } from "./mcp/PiDeckMcpService";
@@ -381,7 +381,6 @@ import { LocalServiceRegistry } from "./localServices/LocalServiceRegistry";
 import { createLocalServiceCli, killLocalServiceProcess } from "./localServices/localServiceCli";
 import { HOST_PLUGIN_SCHEME } from "./plugins/hostPluginPolicy";
 import { hostPluginPartitionId, hostPluginWebviewBridge } from "./plugins/hostPluginWebviewPolicy";
-import { PluginDevService } from "./extensions/PluginDevService";
 import { registerGitIpc } from "./ipc/gitIpc";
 import { registerStoreIpc } from "./ipc/storeIpc";
 import { registerTerminalIpc } from "./ipc/terminalIpc";
@@ -395,6 +394,8 @@ import { ImageSessionStore } from "./imagegen/ImageSessionStore";
 import { ImageBlobStore } from "./imagegen/ImageBlobStore";
 import { registerImageGenImageProtocol } from "./imagegen/ImageGenImageProtocol";
 import { registerLocalImageProtocol } from "./media/LocalImageProtocol";
+import { registerLocalImageIpc } from "./ipc/localImageIpc";
+import { createCanonicalRootsProvider } from "./media/localImageRoots";
 import { ImageGenConfigStore } from "./imagegen/ImageGenConfigStore";
 import { registerVideoGenIpc } from "./ipc/videogenIpc";
 import { VideoGenConfigStore } from "./videogen/VideoGenConfigStore";
@@ -2903,13 +2904,6 @@ function registerIpc() {
 	});
 	// 内置示例插件（billion-context）首次启动落位；目录已存在则不覆盖。
 	void hostPlugins.initialize(resolveBuiltinHostPluginDirectory(resolveBuiltInExtensionRoots())).catch(() => appLogger.warn("host-plugins", "Optional plugin host initialization failed"));
-	// 插件开发支持：demo/指南落 ~/.pi/agent/extensions（与扩展列表同一 home 来源）
-	const pluginDevService = new PluginDevService(resolveBuiltInExtensionRoots(), () => extensionManager?.userHomeDir ?? homedir());
-	registerPluginDevIpc(pluginDevService, {
-		// demo 是落进用户扩展目录的普通扩展：落盘后同步失效扩展列表缓存，
-		// 避免已打开的扩展页/缓存读看不到新行（与安装包后失效缓存同一语义）。
-		onExtensionFilesChanged: () => extensionManager?.invalidateListCache(),
-	});
 	registerProjectsIpc({
 		projectStore,
 		settingsStore,
@@ -3051,12 +3045,14 @@ function registerIpc() {
 	// pideck-file://：对话内本地图片只读通道。白名单根=项目目录（含 worktree）+ 聊天工作区
 	// + userData + 专属临时图片目录。**不放行整个 %TEMP%**：安装器/解压/其它程序的临时文件
 	// 不该被消息内容当图床读（取舍见 docs/markdown-image-rendering-plan.md）。
-	registerLocalImageProtocol(() => [
-		app.getPath("userData"),
-		join(app.getPath("temp"), "pideck-shots"),
-		projectStore.getChatProjectPath(),
-		...projectStore.list().map((project) => project.path),
-	]);
+	const resolveLocalImageRoots = () => [app.getPath("userData"), join(app.getPath("temp"), "pideck-shots"), projectStore.getChatProjectPath(), ...projectStore.list().map((project) => project.path)];
+	// 协议与 IPC 共用同一份「已规范化 + 5s 缓存」的根列表：realpathSync.native 是同步调用，
+	// 一条消息几十张图时不能每次请求都把全部项目根重算一遍。
+	const canonicalLocalImageRoots = createCanonicalRootsProvider(resolveLocalImageRoots);
+	registerLocalImageProtocol(canonicalLocalImageRoots);
+	// 保存/复制要在渲染层拿字节：fetch(pideck-file://) 在该 scheme 上会被拦（corsEnabled: false），
+	// 所以字节走 IPC，白名单与体积判定跟协议同一份实现。
+	registerLocalImageIpc({ resolveRoots: canonicalLocalImageRoots });
 	registerImageGenIpc({
 		imageGen: new ImageGenService({
 			getProviderCredentials: async (provider) => {
@@ -4009,6 +4005,8 @@ protocol.registerSchemesAsPrivileged([
 	{ scheme: "pideck-img", privileges: { secure: true, standard: true, corsEnabled: false, supportFetchAPI: true, stream: true } },
 	// 对话内本地图片（Markdown 正文引用白名单目录内的图片）：替代 file://，dev 与打包行为一致
 	{ scheme: "pideck-file", privileges: { secure: true, standard: true, corsEnabled: false, supportFetchAPI: true, stream: true } },
+	// 文件预览的 HTML：内容编码在 URL 里，CSP 由主进程响应头下发，与主窗口策略解耦（#377）
+	{ scheme: "pideck-html", privileges: { secure: true, standard: true, corsEnabled: false, supportFetchAPI: false, stream: false } },
 ]);
 
 app
@@ -4717,8 +4715,8 @@ app
 		// RPC 日志是合并落盘的（250ms / 256 行刷一批），退出前把缓冲刷干净。
 		// 必须排在 pi-agents 之后：runAll 顺序执行，先停进程（最后几条日志在这里产生）再刷盘。
 		quitCleanup.register("rpc-logs-flush", () => rpcLogger?.flushPending());
-		// GUI 扩展桥端点：关掉监听，释放端口（桥随 pi 子进程一起结束）
-		quitCleanup.register("gui-bridge", () => stopBridgeServer());
+		// 模型请求快照端点：关掉监听，释放端口（快照随 pi 子进程一起结束）
+		quitCleanup.register("model-trace", () => stopModelTraceServer());
 		// 开发诊断必须在 registerIpc 之前创建：systemIpc 闭包捕获这个实例。
 		diagnosticsMonitor = new DiagnosticsMonitor({
 			logger: appLogger,
@@ -5712,17 +5710,17 @@ app
 
 		// 先注册 IPC 并创建窗口：WSL 探测 / pi settings / 代理 / Web 服务都可能卡住或抛错，
 		// 不能挡在 createWindow 前面（打包便携版表现为「启动没反应」，dev 因热路径较短不易复现）。
-		// GUI 扩展桥端点：只绑 127.0.0.1，起不来就静默跳过（桥不工作，pi 与 PiDeck 照常）。
-		// 必须在任何 Agent spawn 之前启动，否则首个 agent 拿不到 PIDECK_BRIDGE_URL。
+		// 模型请求快照端点：只绑 127.0.0.1，起不来就静默跳过（快照不工作，pi 与 PiDeck 照常）。
+		// 必须在任何 Agent spawn 之前启动，否则首个 agent 拿不到 PIDECK_MODEL_TRACE_URL。
 		// 放在 registerIpc 之前：端点与 IPC 注册无依赖，早启动早就绪。
-		void getBridgeServer()
+		void getModelTraceServer()
 			.start()
 			.then((info) => {
 				if (!info) return;
-				void appLogger?.info("app", "GUI bridge endpoint ready", { baseUrl: info.baseUrl });
+				void appLogger?.info("app", "Model trace endpoint ready", { baseUrl: info.baseUrl });
 			})
 			.catch((error: unknown) => {
-				void appLogger?.warn("app", "GUI bridge endpoint startup failed", error);
+				void appLogger?.warn("app", "Model trace endpoint startup failed", error);
 			});
 		registerIpc();
 		// 统一接口聚合层：注册全部域与导入器并冻结（deps 缺省在 domainAssembly.ts 收集，FIND-5）
@@ -5973,6 +5971,7 @@ app
 		// 声音提醒：纯主进程判定（settled/error 边沿/waiting 请求）+ 渲染层播放。
 		// 与宠物系统同构，独立开关，不依赖宠物是否启用。
 		registerSoundProtocol();
+		registerHtmlPreviewProtocol();
 		registerSoundIpc();
 		soundAlertService = new SoundAlertService({
 			agentManager,

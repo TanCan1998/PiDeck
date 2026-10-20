@@ -7,13 +7,14 @@ import type { AnnouncementState } from "../shared/types/announcement";
 import type { HostPluginContext, HostPluginDesktopApi } from "../shared/types/hostPlugin";
 import type { PiDeckMcpDesktopApi } from "../shared/types/piDeckMcp";
 import type { RpcLogBatch, RpcLogEntry } from "../shared/types/rpcLog";
-import type { ModelTraceRecord } from "../shared/types/bridge";
+import type { ModelTraceRecord } from "../shared/types/modelTrace";
 import type { DshRuntimeStatus, DshRuntimeInstallProgress } from "../shared/types/dshRuntime";
 import type { DshHomeSharingState } from "../shared/types/dshHome";
 import type { UserDataNameMigrationNotice } from "../shared/types/userDataMigration";
 import type { DataEnvChoiceFailure, DataEnvChoiceResult, DataEnvInfo, DataEnvMode, ImportPreviewResult, ImportProgress, ImportStartResult } from "../shared/types/dataEnv";
 import type { GitExecutableInfo } from "../shared/types/git";
 import type { DshRunnerNodeInfo, DshRunnerNodeInstallResult } from "../shared/types/dshRunnerNode";
+import type { LocalImageBytes } from "../shared/localImage";
 import type { ImageBlobPayload, ImageGenConfigFile, ImageGenRequest, ImageGenResult, ImageGenSaveResult } from "../shared/types/imagegen";
 import type { VideoGenConfigFile, VideoGenRequest, VideoGenSaveResult, VideoGenSubmitResult, VideoGenJobSnapshot } from "../shared/types/videogen";
 import type { CustomThemeListItem } from "../shared/customThemes";
@@ -234,6 +235,7 @@ const hostPlugins: HostPluginDesktopApi = {
 	openDirectory: () => ipcRenderer.invoke(ipcChannels.hostPluginsOpenDirectory),
 	install: () => ipcRenderer.invoke(ipcChannels.hostPluginsInstall),
 	installDirectory: () => ipcRenderer.invoke(ipcChannels.hostPluginsInstallDirectory),
+	installGitHub: (url: string) => ipcRenderer.invoke(ipcChannels.hostPluginsInstallGitHub, url),
 	scaffold: (input) => ipcRenderer.invoke(ipcChannels.hostPluginsScaffold, input),
 	mount: (input) => ipcRenderer.invoke(ipcChannels.hostPluginsMount, input),
 	update: (instanceId: string, context: HostPluginContext) => ipcRenderer.invoke(ipcChannels.hostPluginsUpdate, instanceId, context),
@@ -489,14 +491,6 @@ const api = {
 		remove: (id: string) => ipcRenderer.invoke(ipcChannels.deleteCustomTheme, id) as Promise<void>,
 		/** 把 AI 主题开发指南写入主题目录并在资源管理器定位，返回文件路径 */
 		writeGuide: (locale: "zh-CN" | "en-US") => ipcRenderer.invoke(ipcChannels.writeCustomThemeGuide, locale) as Promise<string>,
-	},
-	pluginDev: {
-		/** 插件开发支持状态：用户扩展目录 + demo/指南是否已就位 */
-		status: () => ipcRenderer.invoke(ipcChannels.pluginDevStatus) as Promise<{ userExtensionsDir: string; demoInstalled: boolean; guideInstalled: boolean }>,
-		/** 把 AI 插件开发指南写入用户扩展目录并定位，返回文件路径 */
-		writeGuide: (locale: "zh-CN" | "en-US") => ipcRenderer.invoke(ipcChannels.pluginDevWriteGuide, locale) as Promise<string>,
-		/** 复制内置 demo 插件（已存在不覆盖，返回 exists 让 UI 提示） */
-		copyDemo: () => ipcRenderer.invoke(ipcChannels.pluginDevCopyDemo) as Promise<{ status: "copied" | "exists"; path: string }>,
 	},
 	sessions: {
 		list: (projectId?: string) => ipcRenderer.invoke(ipcChannels.sessionsList, projectId) as Promise<SessionSummary[]>,
@@ -767,16 +761,6 @@ const api = {
 		uninstallDshPlugin: (input: import("../shared/types").DshPluginLifecycleInput) => ipcRenderer.invoke(ipcChannels.dshPluginUninstall, input) as Promise<unknown>,
 		sendPrompt: (input: SendSessionPromptInput) => ipcRenderer.invoke(ipcChannels.sessionsSendPrompt, input) as Promise<SendSessionPromptResult>,
 		sendUiResponse: (input: SessionUiResponseInput) => ipcRenderer.invoke(ipcChannels.sessionsUiResponse, input) as Promise<void>,
-		/**
-		 * GUI 扩展桥：回灌一次交互事件（点列表项 / 按按钮 / 输入…）。
-		 * 返回 false 表示事件被丢弃（旧 runtime 或桥未连接），渲染层静默忽略。
-		 */
-		sendBridgeEvent: (input: import("../shared/types/bridge").BridgeEventInput) => ipcRenderer.invoke(ipcChannels.sessionsBridgeEvent, input) as Promise<boolean>,
-		/**
-		 * GUI 扩展桥：请求桥**全量重推一次**（§9.4）。
-		 * 返回 false 表示请求被丢弃（旧 runtime / 桥未连），渲染层静默忽略。
-		 */
-		requestBridgeResync: (input: import("../shared/types/bridge").BridgeResyncInput) => ipcRenderer.invoke(ipcChannels.sessionsBridgeResync, input) as Promise<boolean>,
 		onRuntimeEvent: (callback: (event: SessionRuntimeEvent) => void) => subscribe(ipcChannels.sessionsRuntimeEvent, callback),
 		listRuntimes: () => ipcRenderer.invoke(ipcChannels.sessionsRuntimeList) as Promise<SessionRuntimeInfo[]>,
 		activateRuntime: (sessionId: string) => ipcRenderer.invoke(ipcChannels.sessionsRuntimeActivate, sessionId) as Promise<SessionCommandResult<SessionRuntimeInfo>> /** 汇报当前聚焦的会话（主进程据此决定非聚焦会话的 Ask 桌面通知） */,
@@ -1622,6 +1606,12 @@ const api = {
 		saveConfig: (config: ImageGenConfigFile) => ipcRenderer.invoke(ipcChannels.imagegenSaveConfig, config) as Promise<ImageGenSaveResult>,
 		/** 按 blob 引用名取回落盘图片 base64（历史消息只带 ref，展示走 pideck-img://） */
 		readImageBlob: (ref: string) => ipcRenderer.invoke(ipcChannels.imagegenReadImageBlob, ref) as Promise<ImageBlobPayload | null>,
+	},
+
+	// ── 对话内本地图片：保存/复制按需取字节（展示走 pideck-file://，不经这里） ──
+	localImage: {
+		/** 按绝对路径读取白名单内的图片字节；主进程拒绝（越界/超限/非图片）时返回 null */
+		readBytes: (path: string) => ipcRenderer.invoke(ipcChannels.localImageReadBytes, path) as Promise<LocalImageBytes | null>,
 	},
 
 	// ── 生视频：独立 videogen.json 凭据 + 提交/轮询异步协议（与生图同域不同生命周期） ──

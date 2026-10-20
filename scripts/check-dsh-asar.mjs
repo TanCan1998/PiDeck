@@ -98,18 +98,7 @@ const REQUIRED = [
  *  0.1.5：dsh-host-apiproxy 已废，传输半在 dsh-client-connection，
  *  网关/端点在 dsh-api-gateway / dsh-api-session-controller（见
  *  docs/dsh-remote-contract.md）。 */
-const ENTRY_PACKAGES = ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-app-boot", "@deepseek-ai/dsh-cmdline", "@deepseek-ai/dsh-client-connection", "@deepseek-ai/dsh-api-gateway", "@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-api-session-controller", "dsh-bill", "dsh-tool-pwsh-persistent"];
-
-/**
- * 已知「运行时代码在 src/」的包，归档里必须带这些文件（见 runtime-prune-rules.mjs
- * KEEP_SRC_PACKAGES）。koffi 的入口在根 index.cjs，但内部 require('./src/koffi/…')，
- * 入口解析校验看不到这一层间接引用，这里显式钉死。
- */
-const MUST_HAVE_FILES = [
-	// node-pty 是 dsh-tool-pwsh-persistent 的运行时依赖；入口解析校验覆盖不到
-	// 「依赖包整个缺席」的场景（曾因 appOwnDeps 过滤被挡在归档外）。
-	"node_modules/node-pty/package.json",
-];
+const ENTRY_PACKAGES = ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-app-boot", "@deepseek-ai/dsh-cmdline", "@deepseek-ai/dsh-client-connection", "@deepseek-ai/dsh-api-gateway", "@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-api-session-controller", "dsh-bill"];
 
 /** 归一化入口（处理 ./ 与 ../），返回相对包目录的规范路径。 */
 function normalizeEntry(entry) {
@@ -136,7 +125,6 @@ function resolveEntry(entry, presentRel) {
 }
 
 const present = new Set(); // 顶层包名（去重，归档校验用）
-const topLevel = new Map(); // 顶层包名 → 该包目录下文件相对路径集合
 const presentRelByDir = new Map(); // 包目录 → 该目录下文件相对路径集合（含嵌套）
 const pkgJsonByDir = new Map(); // 包目录 → 该包第一个 package.json 内容
 let manifest = null;
@@ -179,11 +167,9 @@ await tar.t({
 				}
 			});
 		}
-		// 顶层包（prefix 不含 node_modules 段 = 归档根下直接一级）计入包名单与顶层文件映射
+		// 顶层包（prefix 不含 node_modules 段 = 归档根下直接一级）计入包名单
 		if (!prefix.includes("node_modules/")) {
 			present.add(pkgName);
-			if (!topLevel.has(pkgName)) topLevel.set(pkgName, new Set());
-			if (rest && !rest.endsWith("/")) topLevel.get(pkgName).add(rest);
 		}
 	},
 });
@@ -258,15 +244,6 @@ for (const dir of koffiDirs) {
 	if (!presentRelByDir.get(dir).has("src/koffi/index.cjs")) failures.push(`missing critical file: ${dir}/src/koffi/index.cjs`);
 }
 
-// 已知关键文件（见 MUST_HAVE_FILES 注释）
-for (const file of MUST_HAVE_FILES) {
-	const [pkgName, ...relParts] = file.slice("node_modules/".length).split("/");
-	const rel = relParts.join("/");
-	if (!topLevel.get(pkgName)?.has(rel)) {
-		failures.push(`missing critical file: ${file}`);
-	}
-}
-
 /**
  * 原生包在位断言：按目标平台检查三类原生资产的目录在位。
  * 这是交叉解析模式独有的门禁——libc 缺包（linux）或 --os/--cpu 参数错误时
@@ -289,14 +266,27 @@ for (const nativePkg of expectedNativePackages) {
 	const found = [...presentRelByDir.keys()].some((dir) => dir.endsWith(`/${nativePkg}`));
 	if (!found) failures.push(`native package missing for ${targetPlatform}-${targetArch}: ${nativePkg}`);
 }
-// node-pty 的目标平台 prebuild 目录（win32 上 conpty.dll 是硬运行时依赖）。
-// prebuilds/<platform>-<arch>/ 结构由 node-gyp-build 运行时选择；node-pty 可能
-// 顶层与嵌套各一份（版本不同），任一份带有目标平台 prebuild 即可。
-const ptyPrebuildPrefix = `prebuilds/${targetPlatform}-${targetArch}/`;
+// node-pty 是 @deepseek-ai/dsh-subprocess-local 的运行时依赖（win32 上 conpty.dll 是
+// 硬运行时依赖）。它可能被 npm 提升到顶层，也可能嵌套在依赖它的包下，所以按「任意
+// 位置的完整包」判定，不要求顶层：包目录存在但缺 package.json 仍是坏包（只留
+// prebuilds 会让入口解析与 prebuild 断言都看不到缺口）。
+// 2026-10 事故：本地 pwsh 工具下线后，项目自身那份 node-pty@1.1.0 不再进 runtime
+// 闭包，归档里只剩 dsh-subprocess-local 的嵌套副本；旧的「必须顶层 package.json」
+// 断言把正常归档判红。
 const ptyDirs = [...presentRelByDir.keys()].filter((dir) => dir.endsWith("/node-pty"));
-const ptyHasPrebuild = ptyDirs.some((dir) => [...(presentRelByDir.get(dir) ?? new Set())].some((rel) => rel.startsWith(ptyPrebuildPrefix)));
-if (!ptyHasPrebuild) {
-	failures.push(`node-pty prebuilds/${targetPlatform}-${targetArch}/ missing（原生模块缺平台二进制）`);
+if (ptyDirs.length === 0) {
+	failures.push("missing critical package: node-pty（@deepseek-ai/dsh-subprocess-local 的运行时依赖）");
+} else {
+	if (!ptyDirs.some((dir) => presentRelByDir.get(dir)?.has("package.json"))) {
+		failures.push("missing critical file: node-pty/package.json");
+	}
+	// prebuilds/<platform>-<arch>/ 结构由 node-gyp-build 运行时选择；任一份副本带有
+	// 目标平台 prebuild 即可。
+	const ptyPrebuildPrefix = `prebuilds/${targetPlatform}-${targetArch}/`;
+	const ptyHasPrebuild = ptyDirs.some((dir) => [...(presentRelByDir.get(dir) ?? new Set())].some((rel) => rel.startsWith(ptyPrebuildPrefix)));
+	if (!ptyHasPrebuild) {
+		failures.push(`node-pty prebuilds/${targetPlatform}-${targetArch}/ missing（原生模块缺平台二进制）`);
+	}
 }
 
 console.log(`entries: ${entryCount} | packages: ${present.size}`);

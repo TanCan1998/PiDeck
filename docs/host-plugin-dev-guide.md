@@ -6,7 +6,7 @@ title: 宿主插件开发指南
 
 > **宿主插件（Host Plugin）** 是挂在 **PiDeck 桌面壳**上的本地静态扩展：一组 HTML / CSS / JS 文件放进一个目录，配一个 `pideck-plugin.json` 声明，就能在 PiDeck 里拥有自己的面板，读取当前项目的会话数据。
 >
-> 它属于 **PiDeck 的能力域**（不依赖 pi 进程、不执行命令）。页面不能直接联网，但可在声明目的地并获用户授权后，通过 `window.pideck.network.request()` 调用 HTTPS API 或已启动的本地服务。需要拦截模型请求、深度接入 pi 会话流的场景，请改用 pi 扩展 + GUI 桥，见 `docs/plugin-dev-guide.md`。
+> 它属于 **PiDeck 的能力域**（不依赖 pi 进程、不执行命令）。页面不能直接联网，但可在声明目的地并获用户授权后，通过 `window.pideck.network.request()` 调用 HTTPS API 或已启动的本地服务。需要拦截模型请求、深度接入 pi 会话流的场景，请改用 pi 扩展（`resources/extensions/` 的自包含 `.ts`，随会话 `-e` 注入）。
 
 ---
 
@@ -541,6 +541,9 @@ await pideck.services.openUi("billion-context"); // PiDeck 内置浏览器打开
 | `plugin-changed` / `plugin-code-changed` | 内容变了，授权失效 → 重新授权 |
 | `plugin-in-use` | 启用中的插件拒绝被安装替换 → 先禁用 |
 | `archive-*` | 分发归档格式/哈希/预算问题（`archive-hash-mismatch` 等） |
+| `invalid-github-url` / `plugin-not-found` | GitHub 链接不合法 / 仓库里找不到可安装的包（见 9.2） |
+| `plugin-manifest-ambiguous` | 仓库里有多个 `pideck-plugin.json` 且无法唯一定位 → 用 `/tree/<分支>/<子目录>` 链接指定 |
+| `download-failed` | 下载失败或超 24 MiB |
 
 ## 8. 调试
 
@@ -570,9 +573,18 @@ node scripts/pack-host-plugin.mjs <插件目录> [输出.pideck-plugin]
 ```
 
 - 格式：单文件 NDJSON（header 行 + 每文件一行 base64 + sha256），与目录包同一套预算；归档上限 24 MiB。
-- 安装（两条路径信任判定完全一致，装完都是**禁用 + 需重新授权**）：
+- 安装（三条路径信任判定完全一致，装完都是**禁用 + 需重新授权**）：
   - **「从文件安装…」**：选 `.pideck-plugin` 归档（文件选择在主进程完成，渲染层不传路径）；
   - **「从文件夹安装…」**：直接选**已解压的插件目录**（就是含 `pideck-plugin.json` 的那一层），适合开发目录；`.git`、`node_modules` 整棵跳过，路径形状不合法（带空格/中文名）或超限的文件也跳过而不会让整包失败。
+  - **「从 GitHub 安装…」**：粘贴仓库或 `/tree/` 链接（见 9.2），主进程直接拉 `codeload` 的 tar.gz 解包，无需作者先打归档。
+
+### 9.2 从 GitHub 链接安装
+
+- 支持的链接形态：`https://github.com/<owner>/<repo>`、`.../tree/<分支>`、`.../tree/<分支>/<插件子目录>`（分支名可含 `/`，下载时会从最长候选逐段缩短，把剩余部分当子目录）。
+- 安装源固定 `https://codeload.github.com/<owner>/<repo>/tar.gz/<ref>`；不带 `ref` 时先问 `api.github.com` 的默认分支，失败回退 `main`/`master`。只识别 HTTP 404 为「该 ref 不存在」，其余失败按 `download-failed` 报错，不静默换分支。
+- 包根定位：仓库根或子目录里必须有 `pideck-plugin.json`；整份仓库只有一个包时自动定位，多个同深度包报 `plugin-manifest-ambiguous`（用 `/tree/<分支>/<子目录>` 精确指定）。
+- 预算：下载 24 MiB、解包 96 MiB、成品包 16 MiB / 100 文件 / 单文件 4 MiB——与归档安装同一套上限，超出即 `package-too-large` / `asset-too-large`。
+- 只取常规文件：符号链接、`.git`、`node_modules`、路径非法的条目在解包阶段被丢弃，不会让整包失败；不执行任何仓库里的脚本（无 `npm install`、无构建步骤），所以仓库里必须是**可直接运行的静态文件**，需要构建的插件请自行提交产物或提供 `.pideck-plugin` 归档。
 - 更新语义：启用中的插件拒绝被替换（`plugin-in-use`），先禁用再装；禁用状态下重装同 id，字节一致则指纹不变、内容变化则旧授权失效。
 
 ## 10. 复用现有工具：转换 pi-context

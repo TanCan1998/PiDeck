@@ -1,4 +1,4 @@
-import { app, dialog, shell, type BrowserWindow, Notification } from "electron";
+import { app, shell, type BrowserWindow, Notification } from "electron";
 import { randomUUID } from "node:crypto";
 import { stat, unlink, writeFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
@@ -33,12 +33,10 @@ import type {
 	SessionTodoSnapshot,
 } from "../../shared/types";
 import { ipcChannels } from "../../shared/ipc";
-import { sanitizeBridgeUpdate, stripBridgeAnsi } from "../../shared/bridgeText";
 import { collectSessionFileChanges } from "../../shared/fileChanges";
 import { extractPiToolTruncation } from "../../shared/formatToolDetail";
 import { COMPACT_CANCELLED_BY_OWNER, COMPACT_CANCELLED_BY_USER_ABORT, COMPACT_HOOK_REJECT_MAX_MS, COMPACT_OBSERVATION_MAX_AGE_MS, COMPACT_ROUTED_TO_OWNER, COMPACT_USER_ABORT_WINDOW_MS, COMPACT_WAIT_TIMEOUT } from "../../shared/compactFeedback";
 import { PiProcess } from "./PiProcess";
-import { createBridgeServiceHandler } from "./bridge/bridgeServices";
 import { APP_DISPLAY_NAME } from "../utils/appBrand";
 import { isMainWindowFocused, shouldAlertNow } from "../notifications/alertFocusGate";
 import { buildToastXml, notificationLaunchUrl, resolveNotificationLogoUri } from "../notifications/notificationToast";
@@ -52,10 +50,10 @@ import { piVersionAtLeast } from "../extensions/extensionVersionGate";
 import { resolveLoadableExtensionPaths } from "../extensions/enabledExtensionResolver";
 import { collectEntryRendererTypes } from "./extensionEntryRendererScan";
 import { resolveBuiltInExtensionsOverlayDir } from "../extensions/builtInExtensions";
-import { getBridgeServer } from "./bridge/BridgeServer";
+import { getModelTraceServer } from "./modelTrace/ModelTraceServer";
 import { StandbyAgentPool, STANDBY_TTL_MS } from "./StandbyAgentPool";
 import { computeStandbyFingerprint } from "./standbyFingerprint";
-import type { BridgeEvent, BridgeUpdate, ModelTraceInput } from "../../shared/types/bridge";
+import type { ModelTraceInput } from "../../shared/types/modelTrace";
 import { describeExtensionFallbackSkip, formatExtensionFallbackDebug, resolveDisabledExtensionsCopy, resolveDisabledExtensionsReason, shouldRetryWithoutExtensions } from "./extensionStartupFallback";
 import type { DisabledExtensionsReason } from "./extensionStartupFallback";
 import { StartupDiagnosticsQueue } from "./startupDiagnosticsQueue";
@@ -158,8 +156,6 @@ export class AgentManager {
 	/** pi 后端支持全部可选能力。 */
 	readonly capabilities: ReadonlySet<AgentGatewayCapability> = new Set(["compact", "fork", "getForkMessages", "editMessage", "deleteMessage", "getCommands", "reloadResources", "exportHtml"]);
 	private readonly agents = new Map<string, AgentRuntime>();
-	/** 桥原生服务是否已注入（幂等标记，见 registerBridgeSession）。 */
-	private bridgeServicesInstalled = false;
 	private readonly messages = new Map<string, ChatMessage[]>();
 	/** 工具完整结果 LRU 缓存：截断下发后完整文本仅存于此（运行期「查看完整输出」走内存，
 	 *  历史会话回退读会话文件）。键为 pi message id，agent 停止时随 clearAgentState 释放。 */
@@ -582,9 +578,9 @@ export class AgentManager {
 	 * 安全管理：确保策略快照已落盘（小 JSON 写，等完成后启动，保证扩展首次拦截即可读到）。
 	 * settingsOverride 仅用于本次 spawn（如扩展加载失败后强制 --no-extensions），不改持久设置。
 	 *
-	 * `agentId` 可选：提供时同时注册 GUI 扩展桥会话（§9.2），把
-	 * `PIDECK_BRIDGE_URL` / `PIDECK_BRIDGE_TOKEN` 注入 pi 子进程环境。
-	 * 不提供（如临时会话）则不注册 —— 桥在该进程里静默不工作。
+	 * `agentId` 可选：提供时同时注册模型快照会话，把
+	 * `PIDECK_MODEL_TRACE_URL` / `PIDECK_MODEL_TRACE_TOKEN` 注入 pi 子进程环境。
+	 * 不提供（如临时会话）则不注册 —— 扩展在该进程里静默不工作。
 	 */
 	private createPiProcess(cwd: string, sessionPath?: string, securitySessionKey?: string, settingsOverride?: Partial<Pick<AppSettings, "piRpcNoExtensions" | "piRpcNoSkills" | "removedBuiltInExtensions">>, agentId?: string): PiProcess {
 		const settings = settingsOverride ? { ...this.settingsStore.get(), ...settingsOverride } : this.settingsStore.get();
@@ -592,9 +588,9 @@ export class AgentManager {
 			void this.securityStore.ensureSnapshotWritten();
 		}
 		return new PiProcess(cwd, settings, undefined, {
-			// GUI 扩展桥：注册本 agent 的端点会话，拿到注入用的 URL/token。
-			// 端点未就绪时返回 undefined → 不注入 → 桥静默不工作（fail-safe）。
-			bridgeEnv: agentId ? this.registerBridgeSession(agentId) : undefined,
+			// 模型快照端点：注册本 agent 的会话，拿到注入用的 URL/token。
+			// 端点未就绪时返回 undefined → 不注入 → 扩展静默不工作（fail-safe）。
+			modelTraceEnv: agentId ? this.registerModelTraceSession(agentId) : undefined,
 			// 扩展解析器与模型能力缓存共用（piProcessExtensionResolvers）：
 			// 保证「选择器能看到扩展贡献的模型」与「运行时实际加载的扩展」同源。
 			// 技能/模板解析器同源：禁用的技能与提示词模板在 RPC 启动时以白名单剔除。
@@ -616,38 +612,19 @@ export class AgentManager {
 	}
 
 	/**
-	 * 注册 GUI 扩展桥会话，返回要注入 pi 子进程的环境变量（§9.2）。
+	 * 注册模型快照会话，返回要注入 pi 子进程的环境变量。
 	 *
-	 * 桥扩展读 `PIDECK_BRIDGE_URL` / `PIDECK_BRIDGE_TOKEN`，把 pi 侧被 RPC 丢弃的
-	 * 声明式 UI 扩展点推给 PiDeck。端点未就绪（起不来）时返回 undefined，
-	 * 调用方不注入 → 桥静默不工作，pi 与 PiDeck 都照常（fail-safe，§14.5）。
-	 *
-	 * 同一 token 也承载 `pi-deck-model-trace` 的模型请求快照（/model-trace 子路由），
-	 * 与会话一体注册、一体注销。
+	 * 端点未就绪（起不来）时返回 undefined，调用方不注入 → 扩展静默不工作，
+	 * pi 与 PiDeck 都照常（fail-safe）。
 	 */
-	private registerBridgeSession(agentId: string): Record<string, string> | undefined {
+	private registerModelTraceSession(agentId: string): Record<string, string> | undefined {
 		try {
-			const server = getBridgeServer();
+			const server = getModelTraceServer();
 			if (!server.ready) return undefined;
-			// 宿主原生服务（gui.filePicker/gui.openPath）注入一次：BridgeServer 不 import electron，
-			// 这里组装真实实现（幂等，重复注入无害）。
-			if (!this.bridgeServicesInstalled) {
-				server.setServiceHandler(
-					createBridgeServiceHandler({
-						showOpenDialog: (options) => dialog.showOpenDialog(options),
-						openPath: (path) => shell.openPath(path),
-					}),
-				);
-				this.bridgeServicesInstalled = true;
-			}
-			const { url, token } = server.registerAgent(
-				agentId,
-				(update) => this.handleBridgeUpdate(agentId, update),
-				(trace) => this.handleModelTrace(agentId, trace),
-			);
-			return { PIDECK_BRIDGE_URL: url, PIDECK_BRIDGE_TOKEN: token };
+			const { url, token } = server.registerAgent(agentId, (trace) => this.handleModelTrace(agentId, trace));
+			return { PIDECK_MODEL_TRACE_URL: url, PIDECK_MODEL_TRACE_TOKEN: token };
 		} catch (error) {
-			void this.appLogger?.warn("agent", "GUI bridge session registration failed; bridge stays idle", {
+			void this.appLogger?.warn("agent", "Model trace session registration failed; tracing stays idle", {
 				agentId,
 				error: error instanceof Error ? error.message : String(error),
 			});
@@ -656,7 +633,7 @@ export class AgentManager {
 	}
 
 	/**
-	 * 处理 pi 推来的一条模型请求快照（pi-deck-model-trace，走桥端点同链路）。
+	 * 处理 pi 推来的一条模型请求快照（pi-deck-model-trace）。
 	 *
 	 * 与 RPC 日志**同一开关**：未开启记录的 agent 直接丢弃（不落盘、不广播）。
 	 * 完整请求体写 model-traces 目录并在时间线里只留紧凑条目 —— 上百 KB 的
@@ -687,59 +664,11 @@ export class AgentManager {
 	}
 
 	/**
-	 * 桥推来的一帧更新 → 转发给渲染进程。
-	 *
-	 * 复用 `agents:ui-request` 通道（method 前缀 `bridge:`），与 `setWidget` 等
-	 * 现有 UI 请求走同一条落点链路 —— 不新开通道，也不落会话 JSONL
-	 * （桥状态是纯内存的运行时 UI，§7.7 要求 2）。
+	 * 注销某 agent 的快照会话（agent 停止 / 会话删除时调用）。
 	 */
-	private handleBridgeUpdate(agentId: string, update: BridgeUpdate): void {
-		const runtime = this.agents.get(agentId);
-		if (!runtime) return;
-		// 桥帧是**本机 HTTP 端点**收来的外部输入：出这道边界前统一净化字符串字段
-		// （2026-09 ANSI 泄漏事故的兜底；规则见 shared/bridgeText.ts）。
-		// 渲染层 atom 侧还有一次同源净化 —— 两层都只是「保险」，不是规则的第二份实现。
-		const payload = sanitizeBridgeUpdate(update);
-		this.emit(ipcChannels.agentsUiRequest, {
-			agentId,
-			requestId: `bridge-${payload.type}`,
-			method: "bridge:update",
-			title: "",
-			bridgeUpdate: payload,
-		});
-	}
-
-	/**
-	 * 渲染层来的交互事件 → 排入桥的待回灌队列。
-	 *
-	 * 桥在下次轮询（~100ms）时取走并在 pi 进程内调扩展注册的回调（§8.3）。
-	 */
-	pushBridgeEvent(agentId: string, event: BridgeEvent): boolean {
+	unregisterModelTraceSession(agentId: string): void {
 		try {
-			return getBridgeServer().pushEvent(agentId, event);
-		} catch {
-			return false;
-		}
-	}
-
-	/**
-	 * 请求桥在下一次轮询时全量重推一次（§9.4）。
-	 *
-	 * 渲染层丢过桥状态时调用（换绑定 / 切会话 / 开设置弹窗 / 应用启动）。
-	 * 与 `pushBridgeEvent` 同构：任何失败都只返回 false，**不抛错**（§14.5）。
-	 */
-	requestBridgeResync(agentId: string): boolean {
-		try {
-			return getBridgeServer().requestResync(agentId);
-		} catch {
-			return false;
-		}
-	}
-
-	/** 注销某 agent 的桥会话（agent 停止 / 会话删除时调用）。 */
-	unregisterBridgeSession(agentId: string): void {
-		try {
-			getBridgeServer().unregisterAgent(agentId);
+			getModelTraceServer().unregisterAgent(agentId);
 		} catch {
 			// 注销失败无副作用（token 会随端点关闭一起清掉）
 		}
@@ -1085,13 +1014,13 @@ export class AgentManager {
 	}
 
 	/**
-	 * spawn 指纹：快照所有「只能 spawn 时注入」的输入（PiProcessSettings/扩展列表/桥/WSL/cwd）。
+	 * spawn 指纹：快照所有「只能 spawn 时注入」的输入（PiProcessSettings/扩展列表/模型快照端点/WSL/cwd）。
 	 * claim 时不一致即废弃池化进程回退正常创建——这就是「改设置/扩展后何时生效」的答案：
 	 * 已在跑的会话照旧（本来就是），下一个 spawn（含新预热）自动用新值。
 	 */
 	private computeStandbyFingerprintFor(project: Project): string {
 		const settings = this.settingsStore.get();
-		const bridge = getBridgeServer();
+		const modelTrace = getModelTraceServer();
 		return computeStandbyFingerprint({
 			projectPath: project.path,
 			trustMarker: "prompt-free",
@@ -1107,8 +1036,8 @@ export class AgentManager {
 			disabledPrompts: settings.disabledPrompts ?? [],
 			extensionRoots: createPiProcessExtensionResolvers(project.path, settings).resolveBuiltInExtensionPaths(),
 			wsl: this.wslEnvironment ? { distro: this.wslEnvironment.distro, user: this.wslEnvironment.user, projectPath: this.toSessionProtocolPath(project.path) } : undefined,
-			bridgeAvailable: bridge.ready,
-			bridgeUrl: bridge.ready ? String(bridge.listeningPort) : "",
+			modelTraceAvailable: modelTrace.ready,
+			modelTracePort: modelTrace.ready ? String(modelTrace.listeningPort) : "",
 			autoSessionTitle: Boolean(settings.autoSessionTitle),
 		});
 	}
@@ -3668,9 +3597,9 @@ export class AgentManager {
 		this.captureRuntimeMessageIdentities(agentId);
 		runtime.process.stop();
 		this.agents.delete(agentId);
-		// restart 会换一个 agentId：旧 agentId 的桥会话（token → agentId 反查表 + 端点会话表）
-		// 必须在这里注销，否则每重启一次就多留一条永不回收的记录（PR 评审 §2）。
-		this.unregisterBridgeSession(agentId);
+		// restart 会换一个 agentId：旧 agentId 的模型快照会话必须在这里注销，
+		// 否则每重启一次就多留一条永不回收的记录。
+		this.unregisterModelTraceSession(agentId);
 		this.messages.delete(agentId);
 		this.activeToolCallsByAgent.delete(agentId);
 		this.toolExecutingByAgent.delete(agentId);
@@ -4027,8 +3956,8 @@ export class AgentManager {
 		const process = runtime.process;
 		this.captureRuntimeMessageIdentities(agentId);
 		this.agents.delete(agentId);
-		// 桥会话与 agent 生命周期配对：stop / 会话删除路径都走这里（PR 评审 §2）。
-		this.unregisterBridgeSession(agentId);
+		// 快照会话与 agent 生命周期配对：stop / 会话删除路径都走这里。
+		this.unregisterModelTraceSession(agentId);
 		this.messages.delete(agentId);
 		this.activeToolCallsByAgent.delete(agentId);
 		this.toolExecutingByAgent.delete(agentId);
@@ -4144,8 +4073,8 @@ export class AgentManager {
 		for (const runtime of this.agents.values()) {
 			this.userInitiatedStop.add(runtime.tab.id);
 			this.clearAgentState(runtime.tab.id);
-			// 桥会话同步注销（quit 时 stopBridgeServer 会兜底，但按 agent 配对清理更早释放）
-			this.unregisterBridgeSession(runtime.tab.id);
+			// 快照会话同步注销（quit 时 stopModelTraceServer 会兜底，但按 agent 配对清理更早释放）
+			this.unregisterModelTraceSession(runtime.tab.id);
 			runtime.process.stop();
 		}
 		this.agents.clear();

@@ -59,7 +59,7 @@
   "main": "out/main/index.js",
   "scripts": {
     "dev": "node scripts/dev.js",
-    "build": "npm run sync:dsh-version && npm run build:packages && npm run generate:pi-ai-catalog && npm run generate:extensions-manifest && npm run generate:prompts-manifest && npm run generate:skills-manifest && npm run runtime:pack && npm run runtime:check && npm run check:xueprompts && npm run build:xue-index && npm run build:session-index && npm run build:file-index && npm run build:session-store && tsc --noEmit --skipLibCheck --incremental && electron-vite build",
+    "build": "npm run sync:dsh-version && npm run build:packages && npm run generate:pi-ai-catalog && npm run generate:extensions-manifest && npm run generate:prompts-manifest && npm run generate:skills-manifest && npm run runtime:pack && npm run runtime:check && npm run check:xueprompts && npm run build:feishu-sdk && npm run build:xue-index && npm run build:session-index && npm run build:file-index && npm run build:session-store && tsc --noEmit --skipLibCheck --incremental && electron-vite build",
     "build:packages": "node scripts/build-local-packages.js",
     "build:fast": "npm run generate:pi-ai-catalog && npm run generate:extensions-manifest && npm run generate:prompts-manifest && npm run generate:skills-manifest && electron-vite build",
     "build:main": "electron-vite build --config electron.vite.main.mjs",
@@ -78,6 +78,7 @@
     "generate:skills-manifest": "node scripts/generate-content-manifests.mjs --domain skills",
     "check:skills-manifest": "node scripts/generate-content-manifests.mjs --domain skills --check",
     "build:xue-index": "node scripts/build-xue-index.mjs",
+    "build:feishu-sdk": "node scripts/pack-feishu-sdk.mjs",
     "build:session-index": "node scripts/build-session-index.mjs",
     "build:file-index": "node scripts/build-file-index.mjs",
     "build:session-store": "node scripts/build-session-store.mjs",
@@ -157,7 +158,6 @@
       "out/main/hostEntry.js",
       "node_modules/node-pty/**",
       "node_modules/@deepseek-ai/dsh-subprocess-local/node_modules/node-pty/**",
-      "node_modules/dsh-tool-pwsh-persistent/node_modules/node-pty/**",
       "node_modules/**/@img/sharp-*/**",
       "node_modules/@koromix/koffi-win32-x64/**",
       "node_modules/@koromix/koffi-linux-x64/**",
@@ -178,7 +178,26 @@
       "!node_modules/sql.js/dist/*-debug*",
       "!node_modules/sql.js/dist/*browser*",
       "!node_modules/sql.js/dist/worker*",
-      "!node_modules/@larksuiteoapi/node-sdk/es/**"
+      "!node_modules/@larksuiteoapi/node-sdk/es/**",
+      "!node_modules/@larksuiteoapi/**",
+      "!node_modules/@protobufjs/**",
+      "!node_modules/protobufjs/**",
+      "!node_modules/axios/**",
+      "!node_modules/long/**",
+      "!node_modules/lodash.identity/**",
+      "!node_modules/lodash.merge/**",
+      "!node_modules/lodash.pickby/**",
+      "!node_modules/form-data/**",
+      "!node_modules/asynckit/**",
+      "!node_modules/combined-stream/**",
+      "!node_modules/delayed-stream/**",
+      "!node_modules/follow-redirects/**",
+      "!node_modules/proxy-from-env/**",
+      "!node_modules/ws/**",
+      "!node_modules/has-tostringtag/**",
+      "!node_modules/es-set-tostringtag/**",
+      "!node_modules/@types/node/**",
+      "!node_modules/undici-types/**"
     ],
     "extraResources": [
       {
@@ -201,13 +220,6 @@
         "to": "prompts",
         "filter": [
           "**/*"
-        ]
-      },
-      {
-        "from": "resources/plugin-dev",
-        "to": "plugin-dev",
-        "filter": [
-          "*.ts"
         ]
       },
       {
@@ -293,6 +305,14 @@
         "to": "dsh-runtime",
         "filter": [
           "**/*"
+        ]
+      },
+      {
+        "from": "resources/feishu-sdk",
+        "to": "feishu-sdk",
+        "filter": [
+          "*.tar.gz",
+          "manifest.json"
         ]
       }
     ],
@@ -449,7 +469,6 @@
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
     "dsh-bill": "^0.14.0",
-    "dsh-tool-pwsh-persistent": "file:packages/dsh-tool-pwsh-persistent",
     "electron": "^43.4.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^4.0.0",

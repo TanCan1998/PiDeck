@@ -73,3 +73,37 @@ test("runtime adapter is always injected and listed in the extension manifest", 
 	assert.ok(entry, "extensions-manifest.json 必须包含 pi-deck-runtime.ts");
 	assert.equal(entry.bytes > 0, true);
 });
+
+test("hot reload animates only the reload button, not the start/restart button", () => {
+	const control = read("src/renderer/src/components/session/SessionActionsControl.tsx");
+	// 用户可见症状：点「重载」后旁边的启动/重启钮也变成了旋转 loader，看起来像点错了按钮。
+	// 热重载会把 capabilities.pending 置真（busy），必须显式排除它，只让重载钮自己转。
+	assert.match(control, /const\s+primaryPending\s*=\s*Boolean\(\s*runControl\?\.isRestarting\s*\|\|\s*\(\s*capabilities\?\.pending\s*&&\s*!runControl\?\.isReloading\s*\)\s*\)/);
+	assert.doesNotMatch(control, /Boolean\(\s*runControl\?\.isRestarting\s*\|\|\s*runControl\?\.isReloading/);
+	assert.match(control, /runControl\?\.isReloading\s*\?\s*<LoaderCircle[^>]*animate-pideck-spin/);
+});
+
+test("hot reload paints a reloading overlay on the session surface", () => {
+	const view = read("src/renderer/src/components/session/SessionView.tsx");
+	const stage = read("src/renderer/src/components/session/SessionSurfaceStage.tsx");
+	const copyZh = read("src/renderer/src/i18n/rendererCopy.zh-CN.ts");
+	const copyEn = read("src/renderer/src/i18n/rendererCopy.en-US.ts");
+	// 只转小按钮时会话侧没有任何变化，用户无法确认重载是否生效：时间线同样要有「正在重载…」遮罩。
+	assert.match(view, /isReloading=\{Boolean\(runControl\?\.isReloading\)\}/);
+	assert.match(stage, /isReloading\?\s*:\s*boolean/);
+	assert.match(stage, /overlayVisible\s*=\s*isRestarting\s*\|\|\s*isReloading\s*\|\|/);
+	assert.match(stage, /t\("message\.historyOverlay\.reloadingResources"\)/);
+	assert.match(copyZh, /"message\.historyOverlay\.reloadingResources":/);
+	assert.match(copyEn, /"message\.historyOverlay\.reloadingResources":/);
+	// 成功提示只报结果本身，不再复述「扩展与技能」这类实现细节。
+	assert.match(copyZh, /"app\.sessionResourcesReloaded":\s*"重载成功"/);
+});
+
+test("pi settings tab tells users that running sessions need a reload", () => {
+	const tab = read("src/renderer/src/config/SettingsTab.tsx");
+	const copyZh = read("src/renderer/src/i18n/rendererCopy.zh-CN.ts");
+	// 用户可见症状：在 Pi 配置页改了「默认工具」再回到会话，pi 的行为没变（settingsManager
+	// 只在会话启动与 /reload 时重读 settings.json），没有任何提示会让人以为保存失败。
+	assert.match(tab, /t\("config\.settings\.applyNote"\)/);
+	assert.match(copyZh, /"config\.settings\.applyNote":\s*"[^"]*重载/);
+});

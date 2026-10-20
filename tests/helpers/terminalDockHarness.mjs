@@ -141,7 +141,6 @@ export function dockHarness(initialTabs = [tab("A"), tab("B")], settings = {}) {
 			"lucide-react": { ChevronDown: "icon", ChevronUp: "icon", MoreHorizontal: "icon", Plus: "icon", X: "icon" },
 			"../ui-shadcn/ConfirmDialog": { ConfirmDialog: "confirm" },
 			"../ui-shadcn/button": { Button: "button" },
-			"../bridge/BridgeSlot": { BridgeGuiSlot: "bridge", useBridgeSessionId: () => undefined },
 			"../ui-shadcn/popover": { Popover: "popover", PopoverContent: "popover-content", PopoverTrigger: "popover-trigger" },
 			"../../i18n": { t: (key) => key },
 			"../i18n": { t: (key) => key },

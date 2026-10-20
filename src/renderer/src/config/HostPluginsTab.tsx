@@ -1,27 +1,39 @@
 import { useState } from "react";
 import { useAtomValue, useSetAtom } from "jotai";
-import { FolderOpen, FolderPlus, PackagePlus, RefreshCw, Puzzle, BookOpen, FilePlus2, Trash2, ChevronDown, Power, PowerOff, PanelTop } from "lucide-react";
-import type { HostPluginInfo, HostPluginPermission } from "../../../shared/types/hostPlugin";
+import { FolderOpen, FolderPlus, PackagePlus, RefreshCw, Puzzle, BookOpen, FilePlus2, ChevronDown, Link2, Plus, LoaderCircle } from "lucide-react";
+import type { HostPluginCatalog, HostPluginInfo, HostPluginPermission } from "../../../shared/types/hostPlugin";
 import { LOCAL_SERVICE_IDS } from "../../../shared/localServices";
 import { hostPluginCatalogAtom, hostPluginPanelAtom } from "../atoms/host-plugin-atoms";
 import { settingsOpenAtom } from "../atoms/app-ui-atoms";
 import { desktopApi } from "../desktopApi";
-import { t } from "../i18n";
+import { t, type TranslationKey } from "../i18n";
 import { showNotice } from "../utils/notice";
 import { Alert, AlertDescription } from "../components/ui-shadcn/alert";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "../components/ui-shadcn/alert-dialog";
-import { Badge } from "../components/ui-shadcn/badge";
 import { Button } from "../components/ui-shadcn/button";
-import { ButtonGroup } from "../components/ui-shadcn/button-group";
 import { Checkbox } from "../components/ui-shadcn/checkbox";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "../components/ui-shadcn/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../components/ui-shadcn/dropdown-menu";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../components/ui-shadcn/dialog";
 import { Input } from "../components/ui-shadcn/input";
 import { Label } from "../components/ui-shadcn/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui-shadcn/select";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui-shadcn/table";
+import { HostPluginRow } from "./HostPluginRow";
 import { HOST_PLUGIN_PERMISSION_OPTIONS, HostPluginPermissionDetails } from "./HostPluginPermissionDetails";
 import { hostPluginScaffoldInput, initialHostPluginScaffoldDraft } from "./hostPluginScaffoldDraft";
+
+/** 安装/操作失败码 → 可执行的中文提示；未列出的码回退到带码的通用文案。 */
+const PLUGIN_ERROR_KEYS: Record<string, TranslationKey> = {
+	"invalid-github-url": "hostPlugins.errorInvalidGitHubUrl",
+	"plugin-not-found": "hostPlugins.errorPluginNotFound",
+	"missing-manifest": "hostPlugins.errorMissingManifest",
+	"plugin-manifest-ambiguous": "hostPlugins.errorAmbiguousManifest",
+	"download-failed": "hostPlugins.errorDownloadFailed",
+	"archive-too-large": "hostPlugins.errorArchiveTooLarge",
+	"package-too-large": "hostPlugins.errorPackageTooLarge",
+	"plugin-in-use": "hostPlugins.errorPluginInUse",
+	"invalid-package-file": "hostPlugins.errorInvalidPackageFile",
+	"asset-too-large": "hostPlugins.errorAssetTooLarge",
+};
 
 /** Desktop-owned plugins are global packages with project-scoped data grants, separate from pi extensions. */
 export function HostPluginsTab() {
@@ -34,14 +46,21 @@ export function HostPluginsTab() {
 	const [removing, setRemoving] = useState<HostPluginInfo | null>(null);
 	const [busy, setBusy] = useState(false);
 	const [createOpen, setCreateOpen] = useState(false);
+	// GitHub 安装：链接只能由用户粘贴（渲染层不能传路径），失败码单独给可执行提示。
+	const [githubOpen, setGithubOpen] = useState(false);
+	const [githubUrl, setGithubUrl] = useState("");
 	// 默认勾上一个最常见的权限：新手生成的示例直接能看到内容，而不是一打开就报权限错误。
 	const [draft, setDraft] = useState(initialHostPluginScaffoldDraft);
-	const fail = (code: string) => showNotice(t("hostPlugins.failed", { code }), 4500, "error");
+	const fail = (code: string) => {
+		const key = PLUGIN_ERROR_KEYS[code];
+		showNotice(key ? t(key) : t("hostPlugins.failed", { code }), 4500, "error");
+	};
+	const applyCatalog = (catalog: HostPluginCatalog) => setCatalog({ catalog });
 	const rescan = async () => {
 		setBusy(true);
 		try {
 			const result = await desktopApi.hostPlugins.rescan();
-			if (result.ok) setCatalog({ catalog: result.value });
+			if (result.ok) applyCatalog(result.value);
 			else fail(result.code);
 		} catch {
 			fail("plugin-host-unavailable");
@@ -49,15 +68,42 @@ export function HostPluginsTab() {
 			setBusy(false);
 		}
 	};
+	const openPluginDirectory = () => {
+		void desktopApi.hostPlugins
+			.openDirectory()
+			.then((result) => {
+				if (!result.ok) fail(result.code);
+			})
+			.catch(() => fail("plugin-host-unavailable"));
+	};
 	/** 归档与目录两个来源共用：失败码里只有 canceled 是正常取消，不弹错误。 */
 	const install = async (source: "archive" | "directory") => {
 		setBusy(true);
 		try {
 			const result = source === "archive" ? await desktopApi.hostPlugins.install() : await desktopApi.hostPlugins.installDirectory();
 			if (result.ok) {
-				setCatalog({ catalog: result.value });
+				applyCatalog(result.value);
 				showNotice(t("hostPlugins.installSuccess"), 4500, "info");
 			} else if (result.code !== "canceled") fail(result.code);
+		} catch {
+			fail("plugin-host-unavailable");
+		} finally {
+			setBusy(false);
+		}
+	};
+	/** GitHub：下载与解包全在主进程，这里只把链接递过去；成功后关闭弹窗并清空输入。 */
+	const installFromGitHub = async () => {
+		const url = githubUrl.trim();
+		if (!url) return;
+		setBusy(true);
+		try {
+			const result = await desktopApi.hostPlugins.installGitHub(url);
+			if (result.ok) {
+				applyCatalog(result.value);
+				setGithubOpen(false);
+				setGithubUrl("");
+				showNotice(t("hostPlugins.installSuccess"), 4500, "info");
+			} else fail(result.code);
 		} catch {
 			fail("plugin-host-unavailable");
 		} finally {
@@ -68,7 +114,7 @@ export function HostPluginsTab() {
 		setBusy(true);
 		try {
 			const result = await desktopApi.hostPlugins.setEnabled(plugin.manifest.id, enabled, plugin.fingerprint);
-			if (result.ok) setCatalog({ catalog: result.value });
+			if (result.ok) applyCatalog(result.value);
 			else fail(result.code);
 		} catch {
 			fail("plugin-host-unavailable");
@@ -82,7 +128,7 @@ export function HostPluginsTab() {
 		try {
 			const result = await desktopApi.hostPlugins.remove(plugin.manifest.id);
 			if (result.ok) {
-				setCatalog({ catalog: result.value });
+				applyCatalog(result.value);
 				showNotice(t("hostPlugins.removed", { name: plugin.manifest.name }), 4500, "info");
 			} else fail(result.code);
 		} catch {
@@ -100,7 +146,7 @@ export function HostPluginsTab() {
 		try {
 			const result = await desktopApi.hostPlugins.scaffold(input);
 			if (result.ok) {
-				setCatalog({ catalog: result.value });
+				applyCatalog(result.value);
 				setCreateOpen(false);
 				showNotice(t("hostPlugins.scaffoldCreated", { id: draft.id }), 6000, "info");
 			} else fail(result.code);
@@ -125,18 +171,30 @@ export function HostPluginsTab() {
 				<AlertDescription>{t("hostPlugins.description")}</AlertDescription>
 			</Alert>
 			<div className="flex flex-wrap items-center gap-2">
-				<Button variant="outline" size="sm" disabled={busy} onClick={() => void rescan()}>
-					<RefreshCw data-icon="inline-start" />
-					{t("hostPlugins.rescan")}
-				</Button>
-				<Button variant="outline" size="sm" disabled={busy} onClick={() => void install("archive")}>
-					<PackagePlus data-icon="inline-start" />
-					{t("hostPlugins.install")}
-				</Button>
-				<Button variant="outline" size="sm" disabled={busy} onClick={() => void install("directory")}>
-					<FolderPlus data-icon="inline-start" />
-					{t("hostPlugins.installDirectory")}
-				</Button>
+				{/* 安装是主操作：三种来源共用一个入口，避开四个同权重按钮排成一行。 */}
+				<DropdownMenu>
+					<DropdownMenuTrigger asChild>
+						<Button size="sm" disabled={busy}>
+							<Plus data-icon="inline-start" />
+							{t("hostPlugins.installMenu")}
+							<ChevronDown size={14} aria-hidden="true" />
+						</Button>
+					</DropdownMenuTrigger>
+					<DropdownMenuContent align="start" className="min-w-[13rem]">
+						<DropdownMenuItem onClick={() => void install("archive")}>
+							<PackagePlus size={14} aria-hidden="true" />
+							{t("hostPlugins.install")}
+						</DropdownMenuItem>
+						<DropdownMenuItem onClick={() => void install("directory")}>
+							<FolderPlus size={14} aria-hidden="true" />
+							{t("hostPlugins.installDirectory")}
+						</DropdownMenuItem>
+						<DropdownMenuItem onClick={() => setGithubOpen(true)}>
+							<Link2 size={14} aria-hidden="true" />
+							{t("hostPlugins.installGitHub")}
+						</DropdownMenuItem>
+					</DropdownMenuContent>
+				</DropdownMenu>
 				<Button
 					variant="outline"
 					size="sm"
@@ -149,28 +207,10 @@ export function HostPluginsTab() {
 					<FilePlus2 data-icon="inline-start" />
 					{t("hostPlugins.scaffold")}
 				</Button>
-				<Button
-					variant="outline"
-					size="sm"
-					disabled={!catalog}
-					onClick={() =>
-						void desktopApi.hostPlugins
-							.openDirectory()
-							.then((result) => {
-								if (!result.ok) fail(result.code);
-							})
-							.catch(() => fail("plugin-host-unavailable"))
-					}
-				>
-					<FolderOpen data-icon="inline-start" />
-					{t("hostPlugins.openDirectory")}
+				<Button variant="ghost" size="sm" disabled={busy} onClick={() => void rescan()}>
+					<RefreshCw data-icon="inline-start" />
+					{t("hostPlugins.rescan")}
 				</Button>
-				{/* 路径可能很长：truncate 让它在工具行内收口（overflow:hidden 使 flex 自动最小宽度归 0），完整值放 title */}
-				{catalog && (
-					<span className="min-w-40 truncate text-xs text-muted-foreground" title={catalog.directory}>
-						{catalog.directory}
-					</span>
-				)}
 				<span className="flex-1" />
 				{/* 开发指南外链：指向仓库内的单一数据源（docs/host-plugin-dev-guide.md），与插件作者所见一致 */}
 				<Button
@@ -184,103 +224,52 @@ export function HostPluginsTab() {
 					{t("hostPlugins.devGuide")}
 				</Button>
 			</div>
+			{/* 安装目录满宽单独一行：路径完整可读、可就地打开，不再和按钮抢一行宽度。 */}
+			{catalog && (
+				<div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+					<span className="min-w-0 truncate font-mono" title={catalog.directory}>
+						{catalog.directory}
+					</span>
+					<Button variant="link" size="sm" className="h-auto shrink-0 gap-1 px-0 text-xs font-normal" onClick={openPluginDirectory}>
+						<FolderOpen size={12} aria-hidden="true" />
+						{t("hostPlugins.openDirectory")}
+					</Button>
+				</div>
+			)}
 			{error && (
 				<Alert variant="destructive">
 					<AlertDescription>{t("hostPlugins.failed", { code: error })}</AlertDescription>
 				</Alert>
 			)}
-			{/* 三列宽度靠表头约束：插件列吃掉剩余空间、权限列给固定占比、动作列收缩到内容宽，
-			    单元格一律允许换行—— TableCell 基类是 whitespace-nowrap，长描述会把表格顶出横向滚动条。 */}
-			<Table>
-				<TableHeader>
-					<TableRow>
-						<TableHead className="w-full">{t("hostPlugins.plugin")}</TableHead>
-						<TableHead className="w-[34%]">{t("hostPlugins.permission")}</TableHead>
-						<TableHead className="w-px text-right">{t("hostPlugins.actions")}</TableHead>
-					</TableRow>
-				</TableHeader>
-				<TableBody>
-					{catalog?.plugins.map((plugin) => (
-						<TableRow key={plugin.manifest.id}>
-							<TableCell className="w-full break-words whitespace-normal align-top">
-								<div className="flex flex-col gap-1">
-									<strong className="break-words">{plugin.manifest.name}</strong>
-									<span className="break-all text-xs text-muted-foreground">
-										{plugin.manifest.id} / {plugin.manifest.version}
-									</span>
-									{plugin.manifest.description && (
-										<span className="line-clamp-3 text-xs leading-relaxed text-muted-foreground" title={plugin.manifest.description}>
-											{plugin.manifest.description}
-										</span>
-									)}
-								</div>
-							</TableCell>
-							<TableCell className="whitespace-normal align-top">
-								<div className="flex flex-col items-start gap-2">
-									<HostPluginPermissionDetails manifest={plugin.manifest} />
-									<Badge variant="secondary">{t(plugin.enabled ? "hostPlugins.enabled" : plugin.requiresConsent ? "hostPlugins.changed" : "hostPlugins.disabled")}</Badge>
-								</div>
-							</TableCell>
-							<TableCell className="text-right align-top">
-								{/* 拆分按钮（split button）形态：主钮直接露出唯一高频且可逆的动作（启用/禁用），
-								    不可逆的卸载与面板入口收进右侧下拉，避免误点卸载、也不必先点开菜单才能启停。 */}
-								<ButtonGroup>
-									<Button
-										variant="outline"
-										size="sm"
-										disabled={busy}
-										onClick={() => {
-											if (plugin.enabled) void toggle(plugin, false);
-											else setConsent(plugin);
-										}}
-									>
-										{plugin.enabled ? <PowerOff data-icon="inline-start" /> : <Power data-icon="inline-start" />}
-										{t(plugin.enabled ? "hostPlugins.disable" : "hostPlugins.enableShort")}
-									</Button>
-									<DropdownMenu>
-										<DropdownMenuTrigger asChild>
-											{/* 高度必须与主钮的 sm(h-8) 对齐：icon-sm 是 size-7（28px），ButtonGroup 的 items-stretch 压不过显式高度，
-											    不覆盖会顶端对齐、右侧下拉段矮一截（拆分按钮也就断了）。 */}
-											<Button variant="outline" size="icon-sm" className="h-8 w-7" disabled={busy} aria-label={t("hostPlugins.moreActions")} title={t("hostPlugins.moreActions")}>
-												<ChevronDown size={14} aria-hidden="true" />
-											</Button>
-										</DropdownMenuTrigger>
-										<DropdownMenuContent align="end" className="min-w-[10rem]">
-											{plugin.enabled && plugin.manifest.contributes.panels.length > 0 && (
-												<>
-													<DropdownMenuLabel>{t("hostPlugins.panels")}</DropdownMenuLabel>
-													{plugin.manifest.contributes.panels.map((panel) => (
-														<DropdownMenuItem
-															key={panel.id}
-															onClick={() => {
-																setSettingsOpen(false);
-																openPanel({ pluginId: plugin.manifest.id, panelId: panel.id });
-															}}
-														>
-															<PanelTop size={14} aria-hidden="true" />
-															{panel.title}
-														</DropdownMenuItem>
-													))}
-													<DropdownMenuSeparator />
-												</>
-											)}
-											<DropdownMenuItem variant="destructive" onClick={() => setRemoving(plugin)}>
-												<Trash2 size={14} aria-hidden="true" />
-												{t("hostPlugins.remove")}
-											</DropdownMenuItem>
-										</DropdownMenuContent>
-									</DropdownMenu>
-								</ButtonGroup>
-							</TableCell>
-						</TableRow>
-					))}
-					{catalog && catalog.plugins.length === 0 && (
-						<TableRow>
-							<TableCell colSpan={3}>{t("hostPlugins.empty")}</TableCell>
-						</TableRow>
-					)}
-				</TableBody>
-			</Table>
+			{/* 行式列表而非表格：权限只列标签名，长描述/多标签/操作按钮都能自然换行，不再被三列比例挤压。 */}
+			<div className="flex flex-col gap-2">
+				{catalog?.plugins.map((plugin) => (
+					<HostPluginRow
+						key={plugin.manifest.id}
+						plugin={plugin}
+						busy={busy}
+						onToggle={(target) => {
+							if (target.enabled) void toggle(target, false);
+							else setConsent(target);
+						}}
+						onRemove={setRemoving}
+						onOpenPanel={(pluginId, panelId) => {
+							setSettingsOpen(false);
+							openPanel({ pluginId, panelId });
+						}}
+					/>
+				))}
+				{catalog && catalog.plugins.length === 0 && (
+					<div className="flex flex-col items-center gap-3 rounded-lg border border-dashed border-border px-4 py-10 text-center">
+						<Puzzle size={20} className="text-muted-foreground" aria-hidden="true" />
+						<span className="max-w-[36rem] text-xs leading-relaxed text-muted-foreground">{t("hostPlugins.empty")}</span>
+						<Button variant="outline" size="sm" disabled={busy} onClick={() => void install("archive")}>
+							<PackagePlus data-icon="inline-start" />
+							{t("hostPlugins.install")}
+						</Button>
+					</div>
+				)}
+			</div>
 			{catalog?.issues.map((issue) => (
 				<Alert key={`${issue.directory}:${issue.code}`} variant="destructive">
 					<AlertDescription>{t("hostPlugins.packageRejected", { directory: issue.directory, code: issue.code })}</AlertDescription>
@@ -336,6 +325,48 @@ export function HostPluginsTab() {
 					</AlertDialogFooter>
 				</AlertDialogContent>
 			</AlertDialog>
+			{/* GitHub 安装：链接只在主进程解析与下载，渲染层只负责输入与结果反馈；仓库里的其他内容不会被执行。 */}
+			<Dialog
+				open={githubOpen}
+				onOpenChange={(open) => {
+					setGithubOpen(open);
+					if (!open) setGithubUrl("");
+				}}
+			>
+				<DialogContent className="max-w-[min(560px,calc(100vw-48px))]">
+					<DialogHeader>
+						<DialogTitle>{t("hostPlugins.githubTitle")}</DialogTitle>
+						<DialogDescription>{t("hostPlugins.githubDescription")}</DialogDescription>
+					</DialogHeader>
+					<div className="flex flex-col gap-1.5">
+						<Label htmlFor="host-plugin-github-url">{t("hostPlugins.githubUrlLabel")}</Label>
+						<Input
+							id="host-plugin-github-url"
+							spellCheck={false}
+							className="font-mono"
+							placeholder={t("hostPlugins.githubUrlPlaceholder")}
+							aria-describedby="host-plugin-github-url-hint"
+							value={githubUrl}
+							onChange={(event) => setGithubUrl(event.target.value)}
+							onKeyDown={(event) => {
+								if (event.key === "Enter" && githubUrl.trim() && !busy) void installFromGitHub();
+							}}
+						/>
+						<span id="host-plugin-github-url-hint" className="text-xs text-muted-foreground">
+							{t("hostPlugins.githubUrlHint")}
+						</span>
+					</div>
+					<DialogFooter>
+						<Button variant="ghost" size="sm" onClick={() => setGithubOpen(false)}>
+							{t("common.cancel")}
+						</Button>
+						<Button size="sm" disabled={busy || !githubUrl.trim()} onClick={() => void installFromGitHub()}>
+							{busy ? <LoaderCircle className="size-4 animate-pideck-spin" aria-hidden="true" /> : <Link2 className="size-4" aria-hidden="true" />}
+							{t("hostPlugins.githubInstall")}
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
 			{/* 只生成静态页面与示例 JS，不执行生成物、不启动服务；网络目的地随后仍需显式授权。 */}
 			<Dialog open={createOpen} onOpenChange={setCreateOpen}>
 				<DialogContent className="flex max-h-[calc(100vh-64px)] max-w-[min(600px,calc(100vw-48px))] flex-col gap-4 overflow-y-auto">

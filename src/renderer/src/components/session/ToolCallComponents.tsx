@@ -20,7 +20,6 @@ import { FileDiff } from "../agents/file-diff";
 import { desktopApi } from "../../desktopApi";
 import { copyTextWithCopiedNotice } from "../../utils/clipboardNotice";
 import { formatDuration, getToolDetailText, getToolDiffTarget, getToolExitCode, getToolLiveStartTimestamp, getToolName, getToolStatus, fileChangeToDiffLines } from "./TimelineFormat";
-import { BridgeGuiSlot } from "../bridge/BridgeSlot";
 import { useInsideProcessGroupBody } from "./turn/processGroupScrollContext";
 
 export type DiffFileHandler = (path: string, originalContent?: string, content?: string) => void;
@@ -453,10 +452,6 @@ export const ToolCard = memo(function ToolCard(props: {
 						)}
 					</div>
 				)}
-				{/* GUI 扩展桥：工具卡附加落点（ctx.gui.setToolExtra，key = toolName）。
-				    **在默认内容下方追加**，不顶替默认工具卡（§7.1-B / §7.4 只追加）。
-				    无该 toolName 的贡献时返回 null，不占位。 */}
-				<BridgeGuiSlot sessionId={props.sessionId} slot="tool.extra" matchKey={toolName} className="ml-5 mt-1 flex flex-col gap-1 pl-3" />
 			</section>
 		</TimelineMarker>
 	);

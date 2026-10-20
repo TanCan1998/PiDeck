@@ -40,7 +40,7 @@ export default defineConfig({
 				// `@deepseek-ai/dsh-app-boot`。打进 out/main 后 import.meta.url
 				// 变成产物路径，createRequire(...)("../package.json") 会报
 				// Cannot find module '../package.json'（发送 DSH 消息即触发）。
-				external: [/^@deepseek-ai\//, "dsh-tool-pwsh-persistent", "dsh-bill"],
+				external: [/^@deepseek-ai\//, "dsh-bill"],
 			},
 		},
 		define: {

@@ -5,11 +5,11 @@
  * 请求体（system prompt / 上下文消息 / 工具表）在 pi 进程内组装后直接走 HTTP，
  * 从不经过 stdio —— 排查「模型到底收到了什么」时是盲区。
  * pi 的扩展钩子 `before_provider_request` 能在请求发出**之前**拿到完整 payload，
- * 这是唯一观测点；本扩展把它转发给 PiDeck 桥端点落盘。
+ * 这是唯一观测点；本扩展把它转发给 PiDeck 的模型快照端点落盘。
  *
- * **协议**（宿主侧唯一来源 `src/shared/types/bridge.ts` 的 `ModelTraceInput`，逐字段对齐；
- * 宿主处理见 `src/main/pi/bridge/BridgeServer.ts` 的 `/model-trace` 路由）：
- * - 请求帧：POST `<PIDECK_BRIDGE_URL>/model-trace`，头带 `x-pideck-bridge-token`
+ * **协议**（宿主侧唯一来源 `src/shared/types/modelTrace.ts` 的 `ModelTraceInput`，逐字段对齐；
+ * 宿主处理见 `src/main/pi/modelTrace/ModelTraceServer.ts`）：
+ * - 请求帧：POST `<PIDECK_MODEL_TRACE_URL>`，头带 `x-pideck-model-trace-token`
  *   `{kind:"request", traceId, ts, model?, provider?, sessionId?, payloadJson, payloadBytes, truncated, messageCount?, toolCount?}`
  * - 响应帧：`{kind:"response", traceId, ts, status, durationMs}`
  *
@@ -18,7 +18,7 @@
  *    且非 undefined 返回值会**替换 payload**（`runner.js` emitBeforeProviderRequest）。
  *    fetch 一律 fire-and-forget，绝不 await。
  * 2. fail-safe：本扩展的任何失败只表现为「这一条快照缺席」，绝不影响 pi 会话。
- *    env 缺失（纯终端跑 pi / 桥端点未就绪）→ 整体不工作。
+ *    env 缺失（纯终端跑 pi / 宿主端点未就绪）→ 整体不工作。
  * 3. 只推 payload 本体：请求头（含鉴权）**从不采集**；payload 里的系统提示词与消息
  *    是本地诊断数据，只发回本机回环端点（127.0.0.1，同一 token）。
  * 4. payload 超 1.5MB（UTF-8 字节）按**头部**截断：桥端点 body 上限 4MB，而 JSON
@@ -100,11 +100,11 @@ function resolveSessionKey(ctx: ExtensionContext): string {
 }
 
 export default function piDeckModelTrace(pi: ExtensionAPI): void {
-	const url = process.env.PIDECK_BRIDGE_URL?.trim();
-	const token = process.env.PIDECK_BRIDGE_TOKEN?.trim();
-	// 纯终端跑 pi / 桥端点未就绪：整体不工作（与 gui-bridge 同一 fail-safe 纪律）
+	const url = process.env.PIDECK_MODEL_TRACE_URL?.trim();
+	const token = process.env.PIDECK_MODEL_TRACE_TOKEN?.trim();
+	// 纯终端跑 pi / 宿主端点未就绪：整体不工作（fail-safe）
 	if (!url || !token) return;
-	const endpoint = `${url.replace(/\/+$/, "")}/model-trace`;
+	const endpoint = url.replace(/\/+$/, "");
 
 	const pendingBySession = new Map<string, PendingRequest[]>();
 	let inFlight = 0;
@@ -124,7 +124,7 @@ export default function piDeckModelTrace(pi: ExtensionAPI): void {
 		timer.unref?.();
 		void fetch(endpoint, {
 			method: "POST",
-			headers: { "content-type": "application/json", "x-pideck-bridge-token": token },
+			headers: { "content-type": "application/json", "x-pideck-model-trace-token": token },
 			body: JSON.stringify(frame),
 			signal: controller.signal,
 		})

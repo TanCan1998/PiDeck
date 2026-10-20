@@ -19,9 +19,7 @@ export function resolveLocale(mode: AppLanguageMode, systemLanguage = typeof nav
 	return isTraditionalChineseLanguageTag(normalized) ? "zh-TW" : "zh-CN";
 }
 
-import { enUS } from "./i18n/rendererCopy.en-US";
 import { zhCN } from "./i18n/rendererCopy.zh-CN";
-import { zhTW } from "./i18n/rendererCopy.zh-TW";
 import type { TranslationKey } from "./i18n/rendererCopy.zh-CN";
 
 export type { TranslationKey } from "./i18n/rendererCopy.zh-CN";
@@ -36,14 +34,52 @@ function makePseudoDictionary(source: Record<TranslationKey, string>): Record<Tr
 	return Object.fromEntries(entries) as Record<TranslationKey, string>;
 }
 
-const dictionaries: Record<SupportedLocale, Record<TranslationKey, string>> = {
-	"zh-CN": zhCN,
-	"zh-TW": zhTW,
-	"en-US": enUS,
-	pseudo: makePseudoDictionary(enUS),
+type Dictionary = Record<TranslationKey, string>;
+
+/**
+ * 词典按需加载（体积优化，2026-10）。
+ *
+ * 三份词典各约 430KB；原先全部静态 import 会被 rollup 提进首屏静态 chunk（实测该 chunk
+ * 1.42MB，其中约 1.31MB 是词典）。现在 zh-CN 常驻（同时是所有 key 的类型基准与缺失回退），
+ * en-US / zh-TW 改成 `ensureI18nLocale()` 的 `import()`：首屏只加载当前 locale 一份，
+ * 切语言时再加载另一份；两份都只在首次用到时进内存。
+ *
+ * 纪律：`setI18nLocale` 仍是同步的（大量 `t()` 调用点不能变成 async），但只有在词典
+ * 已注册后调用才生效——启动入口（main.tsx / floater）必须先 await ensureI18nLocale。
+ */
+const dictionaries: Partial<Record<SupportedLocale, Dictionary>> = { "zh-CN": zhCN };
+const pendingLoads = new Map<SupportedLocale, Promise<void>>();
+
+const dictionaryLoaders: Record<SupportedLocale, () => Promise<Dictionary>> = {
+	"zh-CN": async () => zhCN,
+	"en-US": async () => (await import("./i18n/rendererCopy.en-US")).enUS,
+	"zh-TW": async () => (await import("./i18n/rendererCopy.zh-TW")).zhTW,
+	// pseudo 是调试用「伪本地化」：直接由 en-US 派生，不单独维护词典。
+	pseudo: async () => makePseudoDictionary((await import("./i18n/rendererCopy.en-US")).enUS),
 };
 
-let currentLocale: SupportedLocale = resolveLocale("system");
+/** 该 locale 的词典是否已注册（调用方可据此决定「同步生效」还是「加载后再刷新」）。 */
+export function isI18nLocaleLoaded(locale: SupportedLocale): boolean {
+	return Boolean(dictionaries[locale]);
+}
+
+/** 动态加载并注册 locale 词典；同一 locale 并发调用只加载一次。 */
+export function ensureI18nLocale(locale: SupportedLocale): Promise<void> {
+	if (dictionaries[locale]) return Promise.resolve();
+	const existing = pendingLoads.get(locale);
+	if (existing) return existing;
+	const load = dictionaryLoaders[locale]()
+		.then((dictionary) => {
+			dictionaries[locale] = dictionary;
+		})
+		.finally(() => {
+			pendingLoads.delete(locale);
+		});
+	pendingLoads.set(locale, load);
+	return load;
+}
+
+let currentLocale: SupportedLocale = "zh-CN";
 
 export function setI18nLocale(locale: SupportedLocale) {
 	currentLocale = locale;
@@ -55,8 +91,10 @@ export function getI18nLocale(): SupportedLocale {
 }
 
 export function t(key: TranslationKey, params?: Params) {
-	const dictionary = dictionaries[currentLocale] ?? dictionaries["en-US"];
-	let text = dictionary[key] ?? dictionaries["en-US"][key] ?? key;
+	// 当前 locale 的词典未注册（ensure 还没完成）时回退 zh-CN：这是常驻基准，
+	// 宁可短暂显示中文，也不要显示 key 名或 crash。
+	const dictionary = dictionaries[currentLocale] ?? zhCN;
+	let text = dictionary[key] ?? zhCN[key] ?? key;
 	if (!params) return text;
 	return text.replace(/\{(\w+)\}/g, (match, name: string) => {
 		const value = params[name];

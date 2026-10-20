@@ -5,7 +5,7 @@ import { App } from "./App";
 import { AppErrorBoundary } from "./components/app/AppErrorBoundary";
 import { TooltipProvider } from "./components/ui-shadcn/tooltip";
 import { Toaster } from "./components/ui-shadcn/sonner";
-import { t } from "./i18n";
+import { ensureI18nLocale, resolveLocale, setI18nLocale, t } from "./i18n";
 import { dismissBootOverlay } from "./utils/bootOverlay";
 import { showNotice } from "./utils/notice";
 import "./styles.css";
@@ -96,29 +96,43 @@ if (isMiniOverlayMode) {
 	document.body.classList.add("mini-overlay-mode");
 }
 
-ReactDOM.createRoot(rootElement).render(
-	<React.StrictMode>
-		<AppErrorBoundary>
-			{/* shadcn Tooltip 必须在 Provider 树内使用（#115 U1） */}
-			<TooltipProvider>
-				<App />
-				{/* 全局 toast 出口（#115）：showNotice 经 sonner 在此渲染 */}
-				<Toaster />
-			</TooltipProvider>
-		</AppErrorBoundary>
-	</React.StrictMode>,
-);
-
 /**
- * React 首次渲染完成只记里程碑，**不在这里撤遮罩**：首帧工作区尚未恢复会话
- * （currentSessionId/sessionTabIds 异步到位），按挂载帧撤除会露出「无会话空态
- * = 引导页」那一帧。撤除时机由内容就绪信号决定（hooks/app/useBootOverlayReady.ts），
- * 这里只保留硬兜底超时——不依赖 rAF（Electron 隐藏/后台窗口可将 rAF 长时间节流），
- * 也保证任何异常路径下已挂载的工作台不会被遮罩永久盖住。
- * 保留 rAF 包裹：此里程碑语义是「首帧已提交」，启动诊断时间线按它读节点。
+ * 首屏词典按系统语言（navigator）预加载，加载完再挂载 React：
+ * 三份词典不再静态进首屏 chunk（见 i18n.ts 的按需加载说明），只加载当前一份。
+ * 加载失败不阻塞启动——t() 会回退常驻的 zh-CN；设置里的语言由 useAppAppearance 校正。
  */
-requestAnimationFrame(() => {
-	writeStartupLog("info", "Renderer React tree mounted");
-});
+const initialLocale = resolveLocale("system");
+void ensureI18nLocale(initialLocale)
+	.catch(() => undefined)
+	.then(() => {
+		setI18nLocale(initialLocale);
+		ReactDOM.createRoot(rootElement).render(
+			<React.StrictMode>
+				<AppErrorBoundary>
+					{/* shadcn Tooltip 必须在 Provider 树内使用（#115 U1） */}
+					<TooltipProvider>
+						<App />
+						{/* 全局 toast 出口（#115）：showNotice 经 sonner 在此渲染 */}
+						<Toaster />
+					</TooltipProvider>
+				</AppErrorBoundary>
+			</React.StrictMode>,
+		);
 
-window.setTimeout(dismissBootOverlay, 1500);
+		/**
+		 * React 首次渲染完成只记里程碑，**不在这里撤遮罩**：首帧工作区尚未恢复会话
+		 * （currentSessionId/sessionTabIds 异步到位），按挂载帧撤除会露出「无会话空态
+		 * = 引导页」那一帧。撤除时机由内容就绪信号决定（hooks/app/useBootOverlayReady.ts），
+		 * 这里只保留硬兜底超时——不依赖 rAF（Electron 隐藏/后台窗口可将 rAF 长时间节流），
+		 * 也保证任何异常路径下已挂载的工作台不会被遮罩永久盖住。
+		 * 保留 rAF 包裹：此里程碑语义是「首帧已提交」，启动诊断时间线按它读节点。
+		 *
+		 * 放在 render 之后而不是模块顶层：词典 chunk 是异步加载的，若从模块求值起算，
+		 * 1.5s 兜底可能在挂载前就到点，撤掉遮罩后露出空白。
+		 */
+		requestAnimationFrame(() => {
+			writeStartupLog("info", "Renderer React tree mounted");
+		});
+
+		window.setTimeout(dismissBootOverlay, 1500);
+	});

@@ -85,7 +85,7 @@ function probeVersion() {
 	});
 }
 
-// 只传真正导出 factory 的入口扩展；gui-bridge 的支撑模块（types/serialize/...）由入口内部 import，
+// 只传真正导出 factory 的入口扩展；支撑模块（如 pi-deck-todo-state.ts）由入口内部 import，
 // 误传给 -e 会因「没有默认导出」直接让 pi 启动失败（已踩过）。
 const extFiles = readdirSync(EXT_DIR)
 	.filter((f) => f.endsWith(".ts") && readFileSync(path.join(EXT_DIR, f), "utf8").includes("export default"))

@@ -148,8 +148,8 @@ function fingerprintInput(overrides = {}) {
 		disabledPrompts: [],
 		extensionRoots: ["C:/ext/a", "C:/ext/b"],
 		wsl: undefined,
-		bridgeAvailable: true,
-		bridgeUrl: "54321",
+		modelTraceAvailable: true,
+		modelTracePort: "54321",
 		autoSessionTitle: true,
 		...overrides,
 	};
@@ -182,8 +182,8 @@ test("fingerprint: 每个 spawn 输入字段翻转都改变指纹", () => {
 		fingerprintInput({ disabledPrompts: ["p1"] }),
 		fingerprintInput({ extensionRoots: ["C:/ext/a"] }),
 		fingerprintInput({ wsl: { distro: "Ubuntu", user: "root", projectPath: "/home/x" } }),
-		fingerprintInput({ bridgeAvailable: false }),
-		fingerprintInput({ bridgeUrl: "54322" }),
+		fingerprintInput({ modelTraceAvailable: false }),
+		fingerprintInput({ modelTracePort: "54322" }),
 		fingerprintInput({ autoSessionTitle: false }),
 	];
 	for (const [index, variant] of variants.entries()) {

@@ -107,7 +107,6 @@ export default defineConfig({
         // electron-vite 多入口：lib.entry 对象形式输出到 out/main。
         // hostEntry 是 utilityProcess 的 DSH host 入口，独立 chunk 供 DshHostProcess fork；
         // runnerConsolePreload 经 host 补丁 NODE_OPTIONS=--require 注入沙箱 runner。
-        // 持久 pwsh 已抽成独立包 dsh-tool-pwsh-persistent，不再打进 out/main。
         entry: {
           index: resolve(__dirname, "src/main/index.ts"),
           hostEntry: resolve(__dirname, "src/main/dsh/hostEntry.ts"),
@@ -128,7 +127,7 @@ export default defineConfig({
         // `@deepseek-ai/dsh-app-boot`。打进 out/main 后 import.meta.url
         // 变成产物路径，createRequire(...)("../package.json") 会报
         // Cannot find module '../package.json'（发送 DSH 消息即触发）。
-        external: [/^@deepseek-ai\//, "dsh-tool-pwsh-persistent", "dsh-bill"],
+        external: [/^@deepseek-ai\//, "dsh-bill"],
       },
     },
     define: {

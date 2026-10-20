@@ -27,9 +27,9 @@ export interface StandbyFingerprintInput {
 	extensionRoots: string[];
 	/** WSL 模式时 cwd/distro/user 都会进 spawn 命令行。 */
 	wsl?: { distro: string; user: string; projectPath: string };
-	/** 桥可用性与端口会影响注入子进程的 PIDECK_BRIDGE_URL/TOKEN。 */
-	bridgeAvailable: boolean;
-	bridgeUrl: string;
+	/** 宿主模型快照端点的可用性与端口会影响注入子进程的 PIDECK_MODEL_TRACE_URL/TOKEN。 */
+	modelTraceAvailable: boolean;
+	modelTracePort: string;
 	autoSessionTitle: boolean;
 }
 
@@ -49,8 +49,8 @@ export function computeStandbyFingerprint(input: StandbyFingerprintInput): strin
 		disabledPrompts: [...input.disabledPrompts].sort(),
 		extensionRoots: [...input.extensionRoots].sort(),
 		wsl: input.wsl ?? null,
-		bridgeAvailable: input.bridgeAvailable,
-		bridgeUrl: input.bridgeUrl,
+		modelTraceAvailable: input.modelTraceAvailable,
+		modelTracePort: input.modelTracePort,
 		autoSessionTitle: input.autoSessionTitle,
 	};
 	return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");

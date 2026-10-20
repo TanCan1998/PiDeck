@@ -657,25 +657,6 @@ export const ipcChannels = {
 
 	/** Agent Extension UI 协议：主进程 → 渲染进程，推送扩展的 UI 请求（select/confirm/input/editor） */
 	agentsUiRequest: "agents:ui-request",
-	/**
-	 * GUI 扩展桥：渲染进程 → 主进程，回灌交互事件（select/navigate/input/key/action）。
-	 *
-	 * 命名归 `sessions:*` 而不是 `agents:*`，理由有两条：
-	 * 1. 它与 `sessionsUiResponse` 同族 —— 都是「渲染层把用户对扩展 UI 的操作送回 pi」；
-	 * 2. 入参带 `sessionId + agentId + runtimeGeneration` 三个身份字段，
-	 *    语义上是会话级 runtime 命令（AGENTS.md 硬性要求），不是 agent 直发事件。
-	 * （`agents:*` 在 preload 侧另有「订阅必须进 DIRECT_EMIT_CHANNELS 白名单」的契约，
-	 * 而本通道是 invoke 不是订阅，放错族会误导后来者。）
-	 */
-	sessionsBridgeEvent: "sessions:bridge-event",
-	/**
-	 * GUI 扩展桥：渲染进程 → 主进程，请求桥全量重推一次（规格书 §9.4）。
-	 *
-	 * 与 `sessionsBridgeEvent` 同族：都是「渲染层把需求送回桥」，
-	 * 同样带 `sessionId + agentId + runtimeGeneration` 三个身份字段。
-	 * 主进程只在下一轮桥轮询的响应体里带一个 `resync: true`，不新开路由。
-	 */
-	sessionsBridgeResync: "sessions:bridge-resync",
 	/** 项目信任确认：主进程 → 渲染进程，启动 Agent 前请求用户对含 .pi 资源的项目做信任决策 */
 	projectsTrustRequest: "projects:trust-request",
 	/** 项目信任确认：渲染进程 → 主进程，回传用户的信任选择（trust-remember/trust-session/deny） */
@@ -954,6 +935,11 @@ export const ipcChannels = {
 	 * （2026-10，同 dshRuntimeInstallLocalDir）。
 	 */
 	hostPluginsInstallDirectory: "host-plugins:install-directory",
+	/**
+	 * 从 GitHub 仓库安装：渲染层只给一个 https://github.com/... 链接，主进程下载源码 tar.gz、
+	 * 定位 pideck-plugin.json 所在包根后走与归档/目录一致的重扫描与授权门（不执行仓库内任何代码）。
+	 */
+	hostPluginsInstallGitHub: "host-plugins:install-github",
 	/** 脚手架：在插件目录里生成 <id>/ 模板（已存在就拒经，不覆盖作者代码）。 */
 	hostPluginsScaffold: "host-plugins:scaffold",
 	hostPluginsSetEnabled: "host-plugins:set-enabled",
@@ -970,11 +956,6 @@ export const ipcChannels = {
 	hostPluginNavigate: "host-plugin:navigate",
 	/** 插件要求打开本地服务的 Web UI：地址由主进程适配器给，渲染层只负责开内置浏览器 */
 	hostPluginOpenBrowser: "host-plugin:open-browser",
-	pluginDevStatus: "plugin-dev:status",
-	/** 把 AI 插件开发指南写入用户扩展目录并在资源管理器定位 */
-	pluginDevWriteGuide: "plugin-dev:write-guide",
-	/** 复制内置 demo 插件到用户扩展目录（已存在不覆盖） */
-	pluginDevCopyDemo: "plugin-dev:copy-demo",
 
 	// ===== 内置浏览器 =====
 	browserOpenExternal: "browser:open-external",
@@ -996,6 +977,13 @@ export const ipcChannels = {
 	 * 展示走 pideck-img:// 协议流式加载，这个通道只服务「复制 / 保存 / 重发带回参考图」。
 	 */
 	imagegenReadImageBlob: "imagegen:read-image-blob",
+
+	// ===== 对话内本地图片（pideck-file:// 的按需读取） =====
+	/**
+	 * 按绝对路径读取白名单内的本地图片字节（保存 / 复制用）。
+	 * 展示走 pideck-file:// 协议；渲染层 fetch 该 scheme 会被拦，所以字节从主进程拿。
+	 */
+	localImageReadBytes: "local-image:read-bytes",
 
 	// ===== 生视频（VideoGen）：提交-轮询-下载异步协议 =====
 	/** 提交生视频任务：受理后返回 jobId，产物经轮询事件推送 */

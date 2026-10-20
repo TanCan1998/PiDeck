@@ -284,7 +284,7 @@ test("preload exposes getLive/save/onLog with unsubscribe", () => {
 // ── 模型请求快照（pi-deck-model-trace → 桥 /model-trace → RPC 日志「模型」视图）──
 // 覆盖：面板的模型筛选与展开回读、主进程同开关闸门与落盘、IPC 边界（含保存路径放行 model 方向）。
 const modelTrace = readFileSync("src/main/logging/ModelTrace.ts", "utf8");
-const bridgeTypes = readFileSync("src/shared/types/bridge.ts", "utf8");
+const traceTypes = readFileSync("src/shared/types/modelTrace.ts", "utf8");
 
 test("viewer exposes a model filter and lazily loads full request bodies", () => {
 	// 第四个筛选项：模型行与 stdio 两个方向分开看
@@ -334,9 +334,9 @@ test("ModelTraceStore keeps retention and per-file layout for full payloads", ()
 	// 时间线条目：direction "model"，请求体只留 traceId 引用
 	assert.match(modelTrace, /direction: "model"/);
 	assert.match(modelTrace, /export function buildModelTraceLogEntry/);
-	// 宿主侧唯一来源仍是 shared/types/bridge.ts
-	assert.match(bridgeTypes, /export type ModelTraceRequestInput/);
-	assert.match(bridgeTypes, /export type ModelTraceResponseInput/);
+	// 宿主侧唯一来源仍是 shared/types/modelTrace.ts
+	assert.match(traceTypes, /export type ModelTraceRequestInput/);
+	assert.match(traceTypes, /export type ModelTraceResponseInput/);
 });
 
 test("model trace IPC: on-demand read + save path accepts the model direction", () => {

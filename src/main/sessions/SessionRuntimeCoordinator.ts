@@ -35,7 +35,6 @@ import { buildSessionOriginKey } from "../../shared/sessionIdentity";
 import { descriptorFromThrownError } from "../../shared/errorI18n";
 import { createSessionModelPreference } from "../../shared/modelDisplayName";
 import { isRewindCheckpointId, isRewindRestoreScope } from "../../shared/types";
-import type { BridgeEvent } from "../../shared/types/bridge";
 import type { SessionCatalogEntry } from "./SessionCatalog";
 import { sessionFileSizeMb } from "./sessionFileSizeCopy";
 
@@ -152,16 +151,6 @@ export interface SessionAgentGateway {
 	getForkMessages(agentId: string): Promise<Array<{ entryId: string; text: string }>>;
 	forkSession(agentId: string, entryId: string): Promise<unknown>;
 	sendUIResponse(agentId: string, requestId: string, response: SessionUiResponseInput["response"]): Promise<unknown> | unknown;
-	/**
-	 * GUI 扩展桥：把渲染层回灌的交互事件排入该 agent 的桥队列（可选能力）。
-	 * 未实现（如 DSH 后端）时返回 false，渲染层静默丢弃。
-	 */
-	pushBridgeEvent?(agentId: string, event: BridgeEvent): boolean;
-	/**
-	 * GUI 扩展桥：请求桥下一次轮询时全量重推一次（§9.4，可选能力）。
-	 * 未实现（如 DSH 后端）时返回 false，渲染层静默忽略。
-	 */
-	requestBridgeResync?(agentId: string): boolean;
 	/** 会话收到 Ask 类 UI 请求时触发桌面通知（由 AgentManager 实现，不再区分会话是否聚焦）
 	 * 参数：agentId（去重/日志）、sessionId（点击跳转目标）、sessionTitle、question（提问内容，可空） */
 	notifyAskPending(agentId: string, sessionId: string, sessionTitle: string, question: string): void;
@@ -1142,27 +1131,6 @@ export class SessionRuntimeCoordinator {
 	}
 
 	/**
-	 * GUI 扩展桥：把渲染层回灌的交互事件排入该 agent 的桥队列。
-	 *
-	 * 与 `respondToUi` 不同，这里**不要求**存在 pending UI 请求 ——
-	 * 桥的交互（点列表项、按按钮）不是 pi 的 ask 请求，而是扩展自己组件的回调。
-	 * 后端未实现该能力（如 DSH）时返回 false。
-	 */
-	pushBridgeEvent(agentId: string, event: BridgeEvent): boolean {
-		return this.agents.pushBridgeEvent?.(agentId, event) ?? false;
-	}
-
-	/**
-	 * GUI 扩展桥：请求桥下一次轮询时全量重推一次（§9.4）。
-	 *
-	 * 渲染层丢过桥状态时调用（换绑定 / 切会话 / 开设置弹窗 / 应用启动）。
-	 * 后端未实现该能力（如 DSH）时返回 false。
-	 */
-	requestBridgeResync(agentId: string): boolean {
-		return this.agents.requestBridgeResync?.(agentId) ?? false;
-	}
-
-	/**
 	 * 激活前合成事件用的当前代数（bind 递增前的值）：IPC 层在激活窗口发 session 级
 	 * starting 事件时，需要与渲染层已存的代数对齐才能压住旧 runtime 的迟到事件。
 	 */
@@ -1572,7 +1540,9 @@ export class SessionRuntimeCoordinator {
 				// 激活失败兜底：DSH 的 host 会话已在 $DSH_HOME 创建，先落 dshSessionId
 				// 再停运行时，避免每次重试新建孤儿。保持 draft——还没开聊，不能抬成 active。
 				if (tab.backend === "dsh" && tab.sessionId) {
-					await this.catalog.attachRuntime({ sessionId, dshSessionId: tab.sessionId }).catch(() => undefined);
+					// 连同 host 实际 preset 一起回写：host 会话已存在，胶囊要展示真实模式而不是
+					// 回落默认值（否则界面显示一种、重试时用的又是另一种）。
+					await this.catalog.attachRuntime({ sessionId, dshSessionId: tab.sessionId, ...(tab.agentPreset ? { agentPreset: tab.agentPreset } : {}) }).catch(() => undefined);
 				}
 				// ACP 同理：agent 侧会话可能已创建，先落 acpSessionId 再停，避免重试新建孤儿。
 				if (tab.backend === "acp" && tab.sessionId) {

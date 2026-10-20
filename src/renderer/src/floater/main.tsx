@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { PiTuiLogoMark } from "../components/app/PiTuiLogo";
-import { setI18nLocale, t } from "../i18n";
+import { ensureI18nLocale, setI18nLocale, t } from "../i18n";
 import type { MiniOverlayLocale } from "../../../shared/types/miniOverlay";
 import "./floater.css";
 
@@ -51,8 +51,15 @@ function FloaterApp() {
 		let cancelled = false;
 		const update = (next: FloatingBallState) => {
 			if (cancelled) return;
-			setI18nLocale(next.locale);
-			setState(next);
+			// 词典按需加载：先等词典就绪再首次渲染，避免浮窗标题先中文后英文闪一下。
+			// 加载失败也必须渲染（t() 回退 zh-CN），否则浮窗永远空白。
+			void ensureI18nLocale(next.locale)
+				.catch(() => undefined)
+				.then(() => {
+					if (cancelled) return;
+					setI18nLocale(next.locale);
+					setState(next);
+				});
 		};
 		void api.floatingBall
 			.getState()

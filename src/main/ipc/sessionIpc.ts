@@ -13,6 +13,7 @@ import { canonicalizeSessionPath } from "../../shared/sessionIdentity";
 import { createSessionModelPreference } from "../../shared/modelDisplayName";
 import { modelThinkingLevelOf } from "../../shared/modelThinkingLevels";
 import { collectLatestTurnFileChanges } from "../../shared/fileChanges";
+import { isDshAgentPresetLocked } from "../../shared/dshAgentPresetLock";
 import type {
 	AvailableModel,
 	CreateSessionDraftInput,
@@ -42,7 +43,6 @@ import type {
 	ArchivedDshSession,
 	SessionSearchResult,
 } from "../../shared/types";
-import type { BridgeEventInput, BridgeResyncInput } from "../../shared/types/bridge";
 import { parseSessionProcessEventsFromFile } from "../sessions/sessionProcessEventsFile";
 import type { SessionForkCommands } from "../sessions/sessionForkCommands";
 import { dshUnavailablePageFor } from "../dsh/dshManualStop";
@@ -610,6 +610,13 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		}
 	};
 
+	/**
+	 * 冷启动里程碑（3/3）：首个会话列表返回。前两个里程碑（app ready / first window shown）
+	 * 记在 index.ts，但用户真正看到内容要等这次扫描结束；scanMs 单独拆出来，才能区分
+	 * 「窗口起得慢」和「会话扫描慢」（侧栏扫描是唯一未进 sidecar 的机械成本，见
+	 * docs/session-data-plane-plan.md §7）。只在首个请求记录一次，切项目不再刷屏。
+	 */
+	let firstSessionListMilestoneLogged = false;
 	ipcMain.handle(ipcChannels.sessionsList, async (_event, projectId?: string) => {
 		const project = projectId ? projectStore.get(projectId) : undefined;
 		let projectPath = project?.path;
@@ -618,7 +625,18 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		if (projectPath && settingsStore.get().wslEnabled && settingsStore.get().wslDistro) {
 			projectPath = projectPath.replace(/^([A-Za-z]):\\/, (_: string, d: string) => `/mnt/${d.toLowerCase()}/`).replace(/\\/g, "/");
 		}
-		return sessionScanner.list(projectPath);
+		const startedAt = Date.now();
+		const sessions = await sessionScanner.list(projectPath);
+		if (!firstSessionListMilestoneLogged) {
+			firstSessionListMilestoneLogged = true;
+			void appLogger.info("app", "Cold start milestone: first session list", {
+				scanMs: Date.now() - startedAt,
+				sessions: sessions.length,
+				projectId: projectId ?? null,
+				processUptimeMs: Math.round(process.uptime() * 1000),
+			});
+		}
+		return sessions;
 	});
 	// 跨会话正文搜索：sidecar 不可用/boot 中/失败一律返回 null，渲染层回退标题过滤
 	ipcMain.handle(ipcChannels.sessionsSearchContent, async (_event, query: unknown) => {
@@ -907,8 +925,19 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 			agentManager.releaseStandbyAgent(entry.projectId);
 		}
 		// DSH agent 预设同样创建即固定：激活会话的 preset 由 host 会话 header 权威持有，
-		// 渲染层只读展示，拒绝任何运行时改写（草稿期预选不受限）。
-		if (patch.agentPreset !== undefined && patch.agentPreset !== entry.agentPreset && entry.backend === "dsh" && (entry.status === "active" || sessionRuntimeCoordinator.getTarget(sessionId))) {
+		// 渲染层只读展示，拒绝任何运行时改写（未激活、还没有 host 会话的草稿才放行）。
+		// 判据与渲染层胶囊共用 shared/dshAgentPresetLock：两边同源才不会出现
+		// 「界面能点、主进程拒绝」的原始 IPC 报错。
+		if (
+			patch.agentPreset !== undefined &&
+			patch.agentPreset !== entry.agentPreset &&
+			isDshAgentPresetLocked({
+				backend: entry.backend,
+				status: entry.status,
+				dshSessionId: entry.dshSessionId,
+				hasRuntime: Boolean(sessionRuntimeCoordinator.getTarget(sessionId)),
+			})
+		) {
 			throw new Error(mainCopy("session.agentPresetLocked"));
 		}
 		const title = patch.title?.trim();
@@ -1683,47 +1712,6 @@ export function registerSessionIpc(deps: SessionIpcDeps): void {
 		}
 	});
 	ipcMain.handle(ipcChannels.sessionsUiResponse, (_event, input: SessionUiResponseInput) => sessionRuntimeCoordinator.respondToUi(input));
-	/**
-	 * GUI 扩展桥：渲染进程回灌交互事件 → 排入该 agent 的桥队列。
-	 *
-	 * 边界校验（AGENTS.md「输入校验在边界」）：
-	 * - 三个身份字段必填（sessionId / agentId / runtimeGeneration）
-	 * - runtimeGeneration 必须与该会话当前 runtime 一致，拒绝旧 runtime 的迟到事件
-	 * 失败一律返回 false（渲染层据此静默丢弃），**不抛错跨 IPC**。
-	 */
-	ipcMain.handle(ipcChannels.sessionsBridgeEvent, (_event, input: BridgeEventInput) => {
-		if (!input || typeof input !== "object") return false;
-		const { sessionId, agentId, runtimeGeneration, event } = input;
-		if (typeof sessionId !== "string" || !sessionId) return false;
-		if (typeof agentId !== "string" || !agentId) return false;
-		if (typeof runtimeGeneration !== "number" || !Number.isFinite(runtimeGeneration)) return false;
-		if (!event || typeof event !== "object" || typeof event.type !== "string") return false;
-		const current = sessionRuntimeCoordinator.getTarget(sessionId);
-		if (!current || current.agentId !== agentId || current.runtimeGeneration !== runtimeGeneration) {
-			// 旧 runtime 的迟到事件：丢弃，不报错
-			return false;
-		}
-		return sessionRuntimeCoordinator.pushBridgeEvent(agentId, event);
-	});
-	/**
-	 * GUI 扩展桥：渲染进程要求桥**全量重推一次**（§9.4）。
-	 *
-	 * 边界校验与 `sessionsBridgeEvent` 完全一致（三个身份字段 + runtime 一致性）——
-	 * 不新写一套规则，避免两处漂移。失败一律返回 false，**不抛错跨 IPC**。
-	 */
-	ipcMain.handle(ipcChannels.sessionsBridgeResync, (_event, input: BridgeResyncInput) => {
-		if (!input || typeof input !== "object") return false;
-		const { sessionId, agentId, runtimeGeneration } = input;
-		if (typeof sessionId !== "string" || !sessionId) return false;
-		if (typeof agentId !== "string" || !agentId) return false;
-		if (typeof runtimeGeneration !== "number" || !Number.isFinite(runtimeGeneration)) return false;
-		const current = sessionRuntimeCoordinator.getTarget(sessionId);
-		if (!current || current.agentId !== agentId || current.runtimeGeneration !== runtimeGeneration) {
-			// 旧 runtime 的迟到请求：忽略，不报错
-			return false;
-		}
-		return sessionRuntimeCoordinator.requestBridgeResync(agentId);
-	});
 	ipcMain.handle(ipcChannels.sessionsRuntimeList, () => sessionRuntimeCoordinator.listRuntimes());
 	ipcMain.handle(ipcChannels.sessionsRuntimeActivate, async (_event, sessionId: string) => {
 		const startedAt = Date.now();

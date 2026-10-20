@@ -6,7 +6,7 @@ import { readRendererStyles } from "./helpers/rendererStyles.mjs";
 import { mergeAgentRuntimeState } from "../src/renderer/src/utils/agentRuntimeState.ts";
 import { loadTsCommonJs } from "./helpers/loadTsCommonJs.mjs";
 
-const { setI18nLocale, t } = loadTsCommonJs("src/renderer/src/i18n.ts");
+const { ensureI18nLocale, setI18nLocale, t } = loadTsCommonJs("src/renderer/src/i18n.ts");
 
 const appSource = readFileSync("src/renderer/src/App.tsx", "utf8");
 const sessionViewSource = readFileSync("src/renderer/src/components/session/SessionView.tsx", "utf8");
@@ -196,14 +196,16 @@ test("retract edit restores text, attachments, and composer mode to the owning S
 	assert.match(queuedPromptHookSource, /livePrompt\.status === "sending"/);
 });
 
-test("retract edit uses action-oriented copy", () => {
+test("retract edit uses action-oriented copy", async () => {
+	await ensureI18nLocale("en-US");
 	setI18nLocale("zh-CN");
 	assert.equal(t("app.retractToInput"), "撤回修改");
 	setI18nLocale("en-US");
 	assert.equal(t("app.retractToInput"), "Retract to edit");
 });
 
-test("queued image count uses the standard i18n interpolation syntax", () => {
+test("queued image count uses the standard i18n interpolation syntax", async () => {
+	await ensureI18nLocale("en-US");
 	setI18nLocale("zh-CN");
 	assert.equal(t("app.queuedImageCount", { count: 3 }), "3 图");
 	setI18nLocale("en-US");

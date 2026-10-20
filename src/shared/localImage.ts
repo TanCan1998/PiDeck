@@ -44,6 +44,9 @@ export function isLocalImageExtension(path: string): boolean {
 	return localImageMimeType(path) !== null;
 }
 
+/** 按需读取的本地图片字节（保存/复制用；展示走协议，不经过这里）。 */
+export type LocalImageBytes = { data: string; mimeType: string };
+
 /** 绝对路径 → 可直接放进 `<img src>` 的协议 URL。 */
 export function localImageUrl(absolutePath: string): string {
 	return `${LOCAL_IMAGE_PROTOCOL}://local/?path=${encodeURIComponent(absolutePath)}`;

@@ -715,12 +715,6 @@ export type AppSettings = {
 	removedBuiltInExtensions: string[];
 
 	/**
-	 * 用户显式开启的「默认关闭」内置扩展（GUI 扩展桥/扩展点面板等 opt-in）。
-	 * 这些扩展不进 removedBuiltInExtensions——默认不注入，列表存在才随 -e 注入。
-	 */
-	enabledBuiltInExtensions: string[];
-
-	/**
 	 * 旧版扩展禁用记录（source 标识 + 作用域）。
 	 * 现代版本已改为写 pi 原生 `settings.json` 过滤规则；此字段仅由启动迁移读取并清理，
 	 * 迁移完成前它仍会被扩展运行时查询与压缩归属启发式读取（见执行计划 A5）。
@@ -983,7 +977,6 @@ export function createDefaultAppSettings(): AppSettings {
 		piEnvironmentChecked: false,
 		/** 扩展禁用白名单：与 SettingsStore 默认一致，空数组 = 不启用白名单（首屏未拉到真实设置前的默认值） */
 		disabledExtensions: [],
-		enabledBuiltInExtensions: [],
 		/** 技能禁用列表：与 SettingsStore 默认一致，空数组 = 不启用技能白名单 */
 		disabledSkills: [],
 		/** 提示词模板禁用列表：与 SettingsStore 默认一致，空数组 = 不启用模板白名单 */

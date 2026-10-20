@@ -415,7 +415,7 @@ test("设置页：遗留字段不再被渲染层直接读写（App 也不再往 
 	assert.match(hook, /desktopApi\.quickMessages\.save\(items\)/);
 });
 
-test("文案：入口/设置项关键 key 中英都有（缺一个界面就露出 key 名）", () => {
+test("文案：入口/设置项关键 key 中英都有（缺一个界面就露出 key 名）", async () => {
 	const keys = [
 		"app.quickMessagesTitle",
 		"app.quickMessagesHint",
@@ -443,6 +443,8 @@ test("文案：入口/设置项关键 key 中英都有（缺一个界面就露�
 		"settings.quickMessagesDefaultsUnavailable",
 	];
 	for (const locale of ["zh-CN", "en-US"]) {
+		// 词典按需加载：非 zh-CN 必须先 ensure，否则 t() 回退 zh-CN 让「缺文案」断言假绿。
+		await i18n.ensureI18nLocale(locale);
 		i18n.setI18nLocale(locale);
 		for (const key of keys) {
 			const text = i18n.t(key);
@@ -551,8 +553,9 @@ test("接线：ComposerArea 把本栏 sessionId 传给浮层（快捷键归属�
 	assert.match(readSource("src/renderer/src/components/session/ComposerArea.tsx"), /<QuickMessageMenu sessionId=\{props\.sessionId\}/);
 });
 
-test("文案：快捷键设置项中英都有（缺一个设置页就露出 key 名）", () => {
+test("文案：快捷键设置项中英都有（缺一个设置页就露出 key 名）", async () => {
 	for (const locale of ["zh-CN", "en-US"]) {
+		await i18n.ensureI18nLocale(locale);
 		i18n.setI18nLocale(locale);
 		for (const key of ["settings.shortcuts.openQuickMessagesLabel", "settings.shortcuts.openQuickMessagesDesc"]) {
 			const text = i18n.t(key);

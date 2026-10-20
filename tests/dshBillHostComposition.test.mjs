@@ -20,7 +20,7 @@ test("package.json keeps dsh-bill in devDependencies and the runtime archive see
 	const checkScript = readFileSync(join(repoRoot, "scripts/check-dsh-asar.mjs"), "utf8");
 	const packScript = readFileSync(join(repoRoot, "scripts/pack-dsh-runtime.mjs"), "utf8");
 	assert.match(checkScript, /"dsh-bill"/);
-	assert.match(packScript, /EXTRA_SEED_NAMES = \["dsh-bill", "dsh-tool-pwsh-persistent"\]/);
+	assert.match(packScript, /EXTRA_SEED_NAMES = \["dsh-bill"\]/);
 });
 
 test("dsh-bill is resolvable from the app root (hostEntry require.resolve)", () => {

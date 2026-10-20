@@ -161,88 +161,9 @@ test("list purges residual built-in file already marked removed", async () => {
 	rmSync(fixtureHome, { recursive: true, force: true });
 });
 
-test("list keeps hidden built-ins off the extensions page without writing any enable/disable state", async () => {
-	const fixtureHome = mkdtempSync(join(tmpdir(), "pideck-hidden-builtin-list-"));
-	mkdirSync(join(fixtureHome, ".pi", "agent", "extensions"), { recursive: true });
-	// 历史 opt-in 残留：两个已隐藏的内置扩展都在 enabledBuiltInExtensions 里
-	const enabledBuiltInExtensions = ["pi-deck-gui-bridge.ts", "pi-deck-ext-points.ts"];
-	let settings = { removedBuiltInExtensions: [], enabledBuiltInExtensions };
-	const { ExtensionManager } = loadExtensionManager({ homeDir: fixtureHome, runPiOutput: "User packages:\n" });
-	const manager = new ExtensionManager(
-		{
-			check: async () => ({ installed: true, version: "0.80.0" }),
-			createInvocation: (cmd, args) => ({ command: cmd, args, shell: false }),
-			createProcessEnv: () => process.env,
-			resolveCommand: () => "pi",
-		},
-		() => ({}),
-		() => settings,
-		async (patch) => {
-			settings = { ...settings, ...patch };
-			return settings;
-		},
-	);
-
-	const result = await manager.list(false);
-	const sources = result.extensions.map((extension) => extension.source);
-	assert.equal(sources.includes("pi-deck-gui-bridge.ts"), false);
-	assert.equal(sources.includes("pi-deck-ext-points.ts"), false);
-	// 对照组：非隐藏的内置扩展照旧补齐（否则上面两条可能是「补齐循环整个没跑」造成的假绿）
-	assert.equal(sources.includes("pi-deck-todo.ts"), true);
-	// 本需求刻意不走禁用/启用写入：历史 opt-in 残留原样不动
-	assert.equal(settings.enabledBuiltInExtensions?.length, 2);
-	assert.equal(settings.enabledBuiltInExtensions?.[0], "pi-deck-gui-bridge.ts");
-	assert.equal(settings.enabledBuiltInExtensions?.[1], "pi-deck-ext-points.ts");
-	assert.equal(settings.removedBuiltInExtensions?.length, 0);
-
-	rmSync(fixtureHome, { recursive: true, force: true });
-});
-
-test("toggleBuiltIn opt-in writes enabledBuiltInExtensions and never touches removed", async () => {
-	const fixtureHome = mkdtempSync(join(tmpdir(), "pideck-optin-toggle-"));
-	let settings = { removedBuiltInExtensions: [], enabledBuiltInExtensions: [] };
-	const { ExtensionManager } = loadExtensionManager({ homeDir: fixtureHome });
-	const locator = {
-		check: async () => ({ installed: true, version: "0.80.0" }),
-		createInvocation: (cmd, args) => ({ command: cmd, args, shell: false }),
-		createProcessEnv: () => process.env,
-		resolveCommand: () => "pi",
-	};
-	const manager = new ExtensionManager(
-		locator,
-		() => ({}),
-		() => settings,
-		async (patch) => {
-			settings = { ...settings, ...patch };
-			return settings;
-		},
-	);
-
-	// 开启：写 opt-in 列表，不动 removed（两套机制互斥）
-	await manager.toggleBuiltIn("pi-deck-gui-bridge.ts", true);
-	assert.equal(settings.enabledBuiltInExtensions?.length, 1);
-	assert.equal(settings.enabledBuiltInExtensions?.[0], "pi-deck-gui-bridge.ts");
-	assert.equal(settings.removedBuiltInExtensions?.length, 0);
-	// 幂等：重复开启不重复写入
-	await manager.toggleBuiltIn("pi-deck-gui-bridge.ts", true);
-	assert.equal(settings.enabledBuiltInExtensions?.length, 1);
-	// 关闭：移出 opt-in 列表
-	await manager.toggleBuiltIn("pi-deck-gui-bridge.ts", false);
-	assert.equal(settings.enabledBuiltInExtensions?.length, 0);
-	// 非默认关的内置扩展必须走 removed 机制，拒绝用这个开关
-	await assert.rejects(() => manager.toggleBuiltIn("pi-deck-todo.ts", true), /默认关闭/);
-	// 自愈：曾被「移除」的 opt-in 扩展重新打开开关时，同步清除 removed 标记
-	settings = { removedBuiltInExtensions: ["pi-deck-gui-bridge.ts"], enabledBuiltInExtensions: [] };
-	await manager.toggleBuiltIn("pi-deck-gui-bridge.ts", true);
-	assert.equal(settings.removedBuiltInExtensions?.length, 0);
-	assert.equal(settings.enabledBuiltInExtensions?.[0], "pi-deck-gui-bridge.ts");
-
-	rmSync(fixtureHome, { recursive: true, force: true });
-});
-
 test("toggleFromUi 内置扩展走 PiDeck 设置路由，绝不写原生过滤规则", async () => {
 	const fixtureHome = mkdtempSync(join(tmpdir(), "pideck-toggle-from-ui-builtin-"));
-	let settings = { removedBuiltInExtensions: ["pi-deck-todo.ts"], enabledBuiltInExtensions: [] };
+	let settings = { removedBuiltInExtensions: ["pi-deck-todo.ts"] };
 	const { ExtensionManager } = loadExtensionManager({ homeDir: fixtureHome });
 	const manager = new ExtensionManager(
 		{
@@ -268,11 +189,6 @@ test("toggleFromUi 内置扩展走 PiDeck 设置路由，绝不写原生过滤�
 	await manager.toggleFromUi("pi-deck-todo.ts", true);
 	assert.equal(settings.removedBuiltInExtensions?.length, 0);
 	assert.equal(nativeCalls.length, 0, "内置扩展不得写原生过滤规则");
-
-	// 默认关闭的内置扩展（opt-in）：开关走 enabledBuiltInExtensions，同样不碰原生规则
-	await manager.toggleFromUi("pi-deck-gui-bridge.ts", true);
-	assert.equal(settings.enabledBuiltInExtensions?.length, 1);
-	assert.equal(nativeCalls.length, 0);
 
 	rmSync(fixtureHome, { recursive: true, force: true });
 });

@@ -353,6 +353,10 @@ export function SettingsTab(props: {
 				<span className="font-mono text-xs tabular-nums text-muted-foreground">{t("config.count.configItems", { count: entries.length })}</span>
 			</div>
 
+			{/* pi 的 settingsManager 只在会话启动与 /reload 时重读 settings.json，保存不会推给活进程。
+			    不写这句提示，用户改完默认工具/ codemode 会以为保存失败（改完没反应）。 */}
+			<div className="mb-3 rounded-md border border-dashed border-border bg-muted/30 px-3.5 py-2.5 text-micro leading-relaxed text-muted-foreground">{t("config.settings.applyNote")}</div>
+
 			{/* ── 模型切换列表（enabledModels）：单行分区，行标题即一级标题（同「常用设置」语言分区） ── */}
 			<SettingBox>
 				<SettingRow level={1} title={<span>{configLabel("enabledModels")}</span>} description={t("config.settings.enabledModelsHint")} stacked>
