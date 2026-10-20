@@ -362,7 +362,7 @@ export function ResourceRow(props: {
 	const letter = props.compareStatus ? compareStatusLetter(props.compareStatus) : props.letter;
 	const rowPadding = { paddingLeft: FILE_ROW_BASE_PADDING + (props.indent ?? 0) };
 	const row = (
-		<div className={`group git-resource-row flex h-[26px] items-center pr-[7px] text-sm leading-[26px] hover:bg-[var(--git-panel-hover)] focus-within:bg-[var(--git-panel-hover)] ${tone}`} title={props.path}>
+		<div className={`group git-resource-row flex h-[26px] items-center pr-[7px] text-body leading-[26px] hover:bg-[var(--git-panel-hover)] focus-within:bg-[var(--git-panel-hover)] ${tone}`} title={props.path}>
 			{props.onOpen ? (
 				<button
 					type="button"

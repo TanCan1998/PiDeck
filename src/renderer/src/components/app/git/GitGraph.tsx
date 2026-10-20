@@ -709,7 +709,7 @@ export function SourceControlGraph(props: GitGraphProps) {
 									<div key={commit.hash} className="" role="listitem">
 										<button
 											type="button"
-											className={`git-history-row grid h-7 w-full cursor-pointer appearance-none grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 border-0 bg-transparent p-0 pr-2.5 pl-0.5 text-sm leading-7 text-left text-inherit focus-visible:shadow-[inset_var(--focus-ring)] focus-visible:outline-none${isCurrent ? " current" : ""}${expanded ? " expanded" : ""}`}
+											className={`git-history-row grid h-7 w-full cursor-pointer appearance-none grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 border-0 bg-transparent p-0 pr-2.5 pl-0.5 text-body leading-7 text-left text-inherit focus-visible:shadow-[inset_var(--focus-ring)] focus-visible:outline-none${isCurrent ? " current" : ""}${expanded ? " expanded" : ""}`}
 											aria-expanded={expanded}
 											aria-describedby={hover?.commit.hash === commit.hash ? "git-commit-hover" : undefined}
 											onClick={() => {
